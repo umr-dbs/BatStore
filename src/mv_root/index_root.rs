@@ -9,6 +9,7 @@ use parking_lot::{ArcMutexGuard, Mutex, RawMutex};
 use crate::mv_block::block::Block;
 use crate::mv_block::block_handle::BlockAllocManager;
 use crate::mv_page_model::{BlockRef, Height};
+use crate::mv_query::SnapShot;
 use crate::mv_root::frugal_root::{AtomicFrugalList, FrugalRootList};
 use crate::mv_root::root::Root;
 use crate::mv_root::sk_root::RootSkipList;
@@ -17,7 +18,6 @@ use crate::mv_root::vanilla_root::VanillaRootSt;
 use crate::mv_sync::smart_cell::{OptCell, SmartCell, SmartGuard};
 use crate::mv_sync::version_handle;
 use crate::mv_tree::smo::BlockUnsafeDegree;
-use crate::mv_tx_model::transaction_result::SnapShot;
 
 pub(crate) fn make_start_value_root_inner<
     const F: usize,

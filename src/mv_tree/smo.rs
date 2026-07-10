@@ -234,7 +234,6 @@ impl<const FAN_OUT: usize,
 
                 internal_page.commit_delta(1, 1);
                 internal_page.mark_version_obsolete(child_index);
-                self.end_tx_commit(version);
             }
             BlockSplit::ByVersion(fresh) => {
                 let version
@@ -248,7 +247,6 @@ impl<const FAN_OUT: usize,
 
                 internal_page.commit_delta(0, 1);
                 internal_page.mark_version_obsolete(child_index);
-                self.end_tx_commit(version);
             }
         }
 
@@ -520,7 +518,7 @@ impl<const FAN_OUT: usize,
                                           .iter()
                                           .filter(|r| !r.version().is_deleted()),
                                       |f, s|
-                                          f.version().insert_version <= s.version().insert_version)
+                                          f.version().insertion_stamp().ts_start <= s.version().insertion_stamp().ts_start)
                             .collect_vec());
 
                     combined_block
@@ -558,10 +556,10 @@ impl<const FAN_OUT: usize,
                         candidate_fence.upper.max(simba_fence.upper));
 
                     first.sort_by_key(|r|
-                        r.version().insert_version);
+                        r.version().insertion_stamp().ts_start);
 
                     second.sort_by_key(|r|
-                        r.version().insert_version);
+                        r.version().insertion_stamp().ts_start);
 
                     let combined_block_0 = self.block_manager
                         .new_empty_leaf();
@@ -700,7 +698,7 @@ impl<const FAN_OUT: usize,
                         (self.dec_key)(second.get_unchecked(0).key));
 
                     if let PageType::LeafMut(leaf_page) = left.unsafe_borrow_mut().as_page_mut() {
-                        first.sort_by_key(|r| r.version().insertion_version());
+                        first.sort_by_key(|r| r.version().insertion_stamp().ts_start);
                         leaf_page.bulk_push_from_slice_ref(first);
                     }
 
@@ -709,7 +707,7 @@ impl<const FAN_OUT: usize,
                         fence.upper);
 
                     if let PageType::LeafMut(leaf_page) = right.unsafe_borrow_mut().as_page_mut() {
-                        second.sort_by_key(|r| r.version().insertion_version());
+                        second.sort_by_key(|r| r.version().insertion_stamp().ts_start);
                         leaf_page.bulk_push_from_slice_ref(second)
                     }
 
@@ -928,8 +926,6 @@ impl<const FAN_OUT: usize,
                 self.root.append_root(
                     Root::new(new_root_block.clone(), version, height + 1));
 
-                self.end_tx_commit(version);
-
                 self.block_manager.register_dead(
                     old_v, root_guard.inner_cell());
 
@@ -945,8 +941,6 @@ impl<const FAN_OUT: usize,
                 let old_v = _master_guard.version();
                 self.root.append_root(
                     Root::new(new_root_block.clone(), version, height));
-
-                self.end_tx_commit(version);
 
                 self.block_manager.register_dead(
                     old_v, root_guard.inner_cell());

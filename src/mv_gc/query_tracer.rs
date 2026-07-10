@@ -1,25 +1,13 @@
-use std::fmt::Display;
-use std::hash::Hash;
 use std::ops::Deref;
 use crossbeam_skiplist::SkipSet;
-use crate::mv_sync::clock::{__tid, Tid};
-use crate::mv_tree::mvbt::MVBTSt;
-use crate::mv_tx_model::transaction_result::SnapShot;
+use crate::mv_query::SnapShot;
 
-#[derive(Ord, Eq, PartialEq, PartialOrd, Clone)]
-pub(crate) struct ReaderQuery(SnapShot, Tid);
-
-// impl PartialOrd for ReaderQuery {
-//     fn partial_cmp(&self, other: &ReaderQuery) -> Option<Ordering> {
-//         Some(self.0.cmp(&other.0))
-//     }
-// }
-//
-// impl Ord for ReaderQuery {
-//     fn cmp(&self, other: &Self) -> Ordering {
-//         self.0.cmp(&other.0)
-//     }
-// }
+/// Every transaction on a tree draws its `ts_start` from that tree's single
+/// `GlobalClock` via a unique `fetch_add`, so two entries can never collide
+/// — no secondary per-thread tie-breaker (the old `Tid`) is needed to keep
+/// this set's entries distinct.
+#[derive(Ord, Eq, PartialEq, PartialOrd, Clone, Copy)]
+pub(crate) struct ReaderQuery(SnapShot);
 
 impl Into<ReaderQuery> for SnapShot {
     fn into(self) -> ReaderQuery {
@@ -29,8 +17,8 @@ impl Into<ReaderQuery> for SnapShot {
 
 impl ReaderQuery {
     #[inline]
-    fn new(version: SnapShot) -> ReaderQuery {
-        Self(version, __tid())
+    const fn new(version: SnapShot) -> ReaderQuery {
+        Self(version)
     }
 
     #[inline]
@@ -76,10 +64,18 @@ impl TransactionTrace {
             .map(|entry| entry.snapshot())
     }
 
+    /// Enumerates every currently active `ts_start`, for `CommitLog`
+    /// pruning: an entry is only ever safe to drop if it isn't the LCB of
+    /// any snapshot this yields (see `MVBTSt::commit_tx`).
+    #[inline(always)]
+    pub(crate) fn active_snapshots(&self) -> impl Iterator<Item = SnapShot> + '_ {
+        self.iter().map(|entry| entry.snapshot())
+    }
+
     #[inline(always)]
     pub(crate) fn on_tx_start(&self, snapshot: SnapShot) {
         let reader_query: ReaderQuery = snapshot.into();
-        let res = self.insert(reader_query.clone());
+        let _res = self.insert(reader_query.clone());
         // println!("[{:?}] - Inserted ReaderQuery: (v: {}, tid: {})",
         //          thread::current().id(),
         //          res.0, res.1);
@@ -100,33 +96,5 @@ impl TransactionTrace {
             //          reader_query.0,
             //          reader_query.1);
         }
-    }
-}
-
-impl<'a,
-    const FAN_OUT: usize,
-    const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
-> MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
-{
-    #[inline]
-    pub(crate) fn on_acquire_reader_snapshot(&self, snapshot: SnapShot) {
-        // if let Some(snapshot) = snapshot {
-        // println!("[{:?}] - Enter", thread::current().id());
-        self.tracker()
-            .inspect(|tracker|
-                tracker.on_tx_start(snapshot));
-        // }
-    }
-
-    #[inline]
-    pub(crate) fn on_release_reader_snapshot(&self, snapshot: SnapShot) {
-        // if let Some(snapshot) = snapshot {
-        // println!("[{:?}] - Exit", thread::current().id());
-        self.tracker()
-            .inspect(|tracker|
-                tracker.on_tx_completed(snapshot));
-        // }
     }
 }

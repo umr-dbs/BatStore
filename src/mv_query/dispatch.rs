@@ -1,15 +1,16 @@
 use std::hash::Hash;
 use std::fmt::Display;
 use std::mem;
-use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use itertools::Itertools;
-use crate::mv_crud_model::crud_api::CRUDDispatcher;
+use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationInnerReason::{KeyAlreadyDeleted, KeyAlreadyExists, KeyDoesNotExist};
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::mv_page_model::leaf_page::LeafPage;
 use crate::mv_query::rand_query::RAND_ATTEMPTS_MAX;
 use crate::mv_query::iter_query::RangeQueryIter;
 use crate::mv_record_model::record_point::RecordPoint;
+use crate::mv_record_model::tx_stamp::TxStamp;
 use crate::mv_record_model::version_info::VersionInfo;
 use crate::mv_test::VERBOSE;
 use crate::mv_tree::mvbt::MVBTSt;
@@ -17,12 +18,55 @@ use crate::mv_sync::smart_cell::sched_yield;
 
 pub const RANGE_DISPATCH_LAZY: bool = true;
 
-impl<'a,
+impl<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
     Payload: Display + Clone + Default + Sync + 'static
-> CRUDDispatcher<'a, FAN_OUT, NUM_RECORDS, Key, Payload> for MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
+> MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+    /// Decides whether `Update`/`UpdateRand` should take the "update in
+    /// place" fast path (mutate an existing record's payload without
+    /// minting a new version) rather than the normal versioned
+    /// insert-then-supersede path. Only decides — callers apply the
+    /// mutation themselves, since `Update` and `UpdateRand` differ slightly
+    /// in how they do so.
+    ///
+    /// `*Rand` operations (`UpdateRand` here) are used purely for
+    /// benchmark/data-generation workloads, never logged to the WAL, and so
+    /// are free to take this fast path whenever the heuristic says so. The
+    /// WAL-relevant `Update` arm additionally gates this off entirely
+    /// whenever a WAL is attached — see the call site.
+    pub(crate) fn decide_update_in_place(
+        &self,
+        leaf_page: &LeafPage<NUM_RECORDS, Key, Payload>,
+        key: Key,
+    ) -> bool {
+        match self.tracker() {
+            Some(db_tracker) if self.has_update_in_place() => match db_tracker.newest_live_si() {
+                Some(newest_si) => leaf_page
+                    .as_records()
+                    .iter()
+                    .rfind(|r| r.key() == key)
+                    .map(|record| record.version.insert_stamp.ts_start > newest_si)
+                    .unwrap_or(false),
+                None => leaf_page // empty live index: No readers; e.g., only updates!
+                    .as_records()
+                    .iter()
+                    .rfind(|r| r.key() == key)
+                    .is_some(),
+            },
+            _ => false,
+        }
+    }
+}
+
+impl<'a,
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload
+> AtomicTxDispatcher<'a, FAN_OUT, NUM_RECORDS, Key, Payload> for MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     #[inline]
     fn dispatch_crud(&'a self, crud: CRUDOperation<Key, Payload>) -> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
@@ -49,18 +93,25 @@ impl<'a,
                 let current_len
                     = leaf_page.len();
 
-                let version
-                    = self.start_tx_commit();
+                let (stamp, wal_ticket)
+                    = self.wal_start_commit(|_| CRUDOperation::Insert(key, payload.clone()));
 
                 leaf_page.push_uncommitted(
-                    RecordPoint::new(key, VersionInfo::new(version), payload),
+                    RecordPoint::new(key, VersionInfo::new(stamp), payload),
                     current_len);
 
                 leaf_page.commit_delta(1, 0);
 
-                self.end_tx_commit(version);
+                drop(leaf_guard);
+                // Early Lock Release (paper §3.4): commit (visibility) before
+                // waiting for the flush, then confirm durability + this
+                // write's own dependencies before signaling success.
+                let _ts_commit = self.commit_tx_elr(stamp.worker_id, &wal_ticket);
+                let logged = wal_ticket.is_some();
+                self.wal_wait_flush(wal_ticket);
+                self.finish_elr_commit(stamp.worker_id, stamp.ts_start, logged);
 
-                CRUDOperationResult::Inserted(version)
+                CRUDOperationResult::Inserted(stamp.ts_start)
             }
             CRUDOperation::Update(key, payload) => {
                 let leaf_guard =
@@ -75,70 +126,62 @@ impl<'a,
                 let current_len
                     = leaf_page.len();
 
-                match self.tracker() {
-                    Some(db_tracker) if self.has_update_in_place() => match db_tracker.newest_live_si() {
-                        Some(newest_si) => match leaf_page
-                            .as_records_mut()
-                            .iter_mut()
-                            .rfind(|r| r.key() == key)
-                        {
-                            Some(record)
-                            if record.version.insert_version > newest_si => {
-                                *record.payload_mut() = payload;
-                                if record.version.is_deleted() {
-                                    record.version_mut().undelete();
+                // The in-place fast path never mints a version, which can't be
+                // represented in the WAL (one CRUDOperation = one version = one log
+                // record), so it's skipped entirely whenever a WAL is attached —
+                // every logged Update always takes the normal versioned path below.
+                if self.wal.load().as_ref().is_none() && self.decide_update_in_place(leaf_page, key) {
+                    if let Some(record) = leaf_page
+                        .as_records_mut()
+                        .iter_mut()
+                        .rfind(|r| r.key() == key)
+                    {
+                        *record.payload_mut() = payload;
+                        if record.version.is_deleted() {
+                            record.version_mut().undelete();
 
-                                    leaf_page.commit_delta(1, -1);
-                                }
-
-                                return CRUDOperationResult::Updated(self.current_version())
-                            },
-                            _ => { }
+                            leaf_page.commit_delta(1, -1);
                         }
-                        None => match leaf_page // empty live index: No readers; e.g., only updates!
-                            .as_records_mut()
-                            .iter_mut()
-                            .rfind(|r| r.key() == key)
-                        {
-                            Some(record) => {
-                                *record.payload_mut() = payload;
-                                if record.version.is_deleted() {
-                                    record.version_mut().undelete();
 
-                                    leaf_page.commit_delta(1, -1);
-                                }
-
-                                return CRUDOperationResult::Updated(self.current_version())
-                            },
-                            _ => { }
-                        }
+                        return CRUDOperationResult::Updated(self.current_version())
                     }
-                    _ => { }
                 }
 
-                let version
-                    = self.start_tx_commit();
+                let (stamp, wal_ticket)
+                    = self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
 
                 leaf_page.push_uncommitted(
-                    RecordPoint::new(key, VersionInfo::new(version), payload),
+                    RecordPoint::new(key, VersionInfo::new(stamp), payload),
                     current_len);
 
                 // soft commit for atomic visibility of new published record
                 leaf_page.commit_delta(1, 0);
 
-                match leaf_page.delete_after_update(key, version) {
+                match leaf_page.delete_after_update(key, stamp) {
                     Ok(Some(..)) => {
                         // Apply second soft atomic commit for lifetime end
                         leaf_page.commit_delta(-1, 1);
-                        self.end_tx_commit(version);
 
-                        CRUDOperationResult::Updated(version)
+                        drop(leaf_guard);
+                        // Early Lock Release, see the Insert arm above.
+                        let _ts_commit = self.commit_tx_elr(stamp.worker_id, &wal_ticket);
+                        let logged = wal_ticket.is_some();
+                        self.wal_wait_flush(wal_ticket);
+                        self.finish_elr_commit(stamp.worker_id, stamp.ts_start, logged);
+
+                        CRUDOperationResult::Updated(stamp.ts_start)
                     }
                     Ok(None) => {
+                        // Reverse the soft commit above: the pushed record never
+                        // became a real, superseding update, so it must not stay
+                        // counted as active or `unsafe_degree()`'s fill-ratio reads
+                        // drift out of sync with the leaf's true content.
+                        leaf_page.commit_delta(-1, 0);
                         leaf_page.undo_uncommitted(current_len);
                         CRUDOperationResult::ZeroAffected(KeyDoesNotExist)
                     }
                     Err(()) => {
+                        leaf_page.commit_delta(-1, 0);
                         leaf_page.undo_uncommitted(current_len);
                         CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
                     }
@@ -161,7 +204,7 @@ impl<'a,
 
                 let leaf_page
                     = leaf_deref_mut.as_leaf_page();
-                
+
                 if VERBOSE {
                     println!("[key={key}] - Begin_commit()");
                 }
@@ -169,22 +212,27 @@ impl<'a,
                     println!("[key={key}] - Loop start");
                 }
 
-                let version
-                    = self.start_tx_commit();
+                let (stamp, wal_ticket)
+                    = self.wal_start_commit(|_| CRUDOperation::Delete(key));
 
                 if VERBOSE {
-                    println!("[key={key}] - Commit succeeded: {version}, Attempts: 0");
+                    println!("[key={key}] - Commit succeeded: {}, Attempts: 0", stamp.ts_start);
                 }
 
-                match leaf_page.delete(key, version) {
+                match leaf_page.delete(key, stamp) {
                     Ok(Some(..)) => {
                         leaf_page.commit_delta(-1, 1);
                         if VERBOSE {
                             println!("After delete Leaf-records:\n{}", leaf_page.as_records().iter().join("\n"));
                         }
 
-                        self.end_tx_commit(version);
-                        CRUDOperationResult::Deleted(version)
+                        drop(leaf_guard);
+                        // Early Lock Release, see the Insert arm above.
+                        let _ts_commit = self.commit_tx_elr(stamp.worker_id, &wal_ticket);
+                        let logged = wal_ticket.is_some();
+                        self.wal_wait_flush(wal_ticket);
+                        self.finish_elr_commit(stamp.worker_id, stamp.ts_start, logged);
+                        CRUDOperationResult::Deleted(stamp.ts_start)
                     },
                     Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
                     Err(()) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
@@ -198,19 +246,23 @@ impl<'a,
                 other => other
             },
             CRUDOperation::Range(range, version) => {
+                let reader_worker = self.worker_id();
                 self.on_acquire_reader_snapshot(version);
-                let res = Self::key_range_read_from_root(
+                let res = self.key_range_read_from_root(
                     self.retrieve_root_for(version),
                     range,
+                    reader_worker,
                     version);
                 self.on_release_reader_snapshot(version);
                 res
             },
             CRUDOperation::Point(key, version) => {
+                let reader_worker = self.worker_id();
                 self.on_acquire_reader_snapshot(version);
-                let res = Self::key_point_read_from_root(
+                let res = self.key_point_read_from_root(
                     self.retrieve_root_for(version),
                     key,
+                    reader_worker,
                     version);
                 self.on_release_reader_snapshot(version);
                 res
@@ -219,7 +271,12 @@ impl<'a,
                 CRUDOperationResult::MatchedRecordIter(RangeQueryIter::new(
                     self,
                     version,
-                    key)),
+                    key,
+                    true,
+                    self.worker_id())),
+            // `*Rand` operations are used purely for benchmark/data-generation
+            // workloads (see mv_test.rs) — irrelevant to the actual running
+            // system, so they're never routed through the WAL at all.
             CRUDOperation::UpdateRand => {
                 let (_fence, leaf_guard) =
                     self.traversal_write_rand_query();
@@ -252,63 +309,46 @@ impl<'a,
                     }
                 };
 
-                match self.tracker() {
-                    Some(db_tracker) if self.has_update_in_place() => match db_tracker.newest_live_si() {
-                        Some(newest_si) => match leaf_page
-                            .as_records_mut()
-                            .iter_mut()
-                            .rfind(|r| r.key() == key)
-                        {
-                            Some(record)
-                            if record.version.insert_version > newest_si => {
-                                record.version_mut().undelete();
-                                *record.payload_mut() = payload;
-                                leaf_page.commit_delta(1, -1);
+                if self.decide_update_in_place(leaf_page, key) {
+                    if let Some(record) = leaf_page
+                        .as_records_mut()
+                        .iter_mut()
+                        .rfind(|r| r.key() == key)
+                    {
+                        record.version_mut().undelete();
+                        *record.payload_mut() = payload;
+                        leaf_page.commit_delta(1, -1);
 
-                                return CRUDOperationResult::UpdatedRand(key, self.current_version_for_reader())
-                            },
-                            _ => { }
-                        }
-                        None => match leaf_page // empty live index: No readers; e.g., only updates!
-                            .as_records_mut()
-                            .iter_mut()
-                            .rfind(|r| r.key() == key)
-                        {
-                            Some(record) => {
-                                record.version_mut().undelete();
-                                *record.payload_mut() = payload;
-                                leaf_page.commit_delta(1, -1);
-
-                                return CRUDOperationResult::UpdatedRand(key, self.current_version_for_reader())
-                            },
-                            _ => { }
-                        }
+                        return CRUDOperationResult::UpdatedRand(key, self.current_version())
                     }
-                    _ => { }
                 }
 
-                let version
-                    = self.start_tx_commit();
+                let stamp
+                    = TxStamp::new(self.worker_id(), self.start_tx_commit());
 
                 leaf_page.push_uncommitted(
-                    RecordPoint::new(key, VersionInfo::new(version), payload),
+                    RecordPoint::new(key, VersionInfo::new(stamp), payload),
                     current_len);
 
                 // two steps soft commit: Mark new record visible
                 leaf_page.commit_delta(1, 0);
-                match leaf_page.delete_after_update(key, version) {
+                match leaf_page.delete_after_update(key, stamp) {
                     Ok(Some(..)) => {
                         // second step soft commit: Correct counters
                         leaf_page.commit_delta(-1, 1);
-                        self.end_tx_commit(version);
+                        self.commit_tx(stamp.worker_id);
 
-                        CRUDOperationResult::UpdatedRand(key, version)
+                        CRUDOperationResult::UpdatedRand(key, stamp.ts_start)
                     }
                     Ok(None) => {
+                        // Same counter reversal as the Update arm: the pushed
+                        // record never became a real, superseding update.
+                        leaf_page.commit_delta(-1, 0);
                         leaf_page.undo_uncommitted(current_len);
                         CRUDOperationResult::ZeroAffected(KeyDoesNotExist)
                     }
                     Err(()) => {
+                        leaf_page.commit_delta(-1, 0);
                         leaf_page.undo_uncommitted(current_len);
                         CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
                     }
@@ -343,21 +383,21 @@ impl<'a,
                     }
                 };
 
-                let version
-                    = self.start_tx_commit();
+                let stamp
+                    = TxStamp::new(self.worker_id(), self.start_tx_commit());
 
                 if VERBOSE {
-                    println!("[key={key}] - Commit succeeded: {version}, Attempts: 0");
+                    println!("[key={key}] - Commit succeeded: {}, Attempts: 0", stamp.ts_start);
                 }
-                match leaf_page.delete(key, version) {
+                match leaf_page.delete(key, stamp) {
                     Ok(Some(..)) => {
                         leaf_page.commit_delta(-1, 1);
                         if VERBOSE {
                             println!("After delete Leaf-records:\n{}", leaf_page.as_records().iter().join("\n"));
                         }
 
-                        self.end_tx_commit(version);
-                        CRUDOperationResult::DeletedRand(key, version)
+                        self.commit_tx(stamp.worker_id);
+                        CRUDOperationResult::DeletedRand(key, stamp.ts_start)
                     },
                     Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
                     Err(()) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
@@ -419,19 +459,146 @@ impl<'a,
                 let current_len
                     = leaf_page.len();
 
-                let version
-                    = self.start_tx_commit();
+                let stamp
+                    = TxStamp::new(self.worker_id(), self.start_tx_commit());
 
                 leaf_page.push_uncommitted(
-                    RecordPoint::new(key, VersionInfo::new(version), payload),
+                    RecordPoint::new(key, VersionInfo::new(stamp), payload),
                     current_len);
 
                 leaf_page.commit_delta(1, 0);
-                self.end_tx_commit(version);
-                
-                CRUDOperationResult::InsertedRand(key, version)
+                self.commit_tx(stamp.worker_id);
+
+                CRUDOperationResult::InsertedRand(key, stamp.ts_start)
             }
             _ => CRUDOperationResult::Error,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mv_page_model::node::{Active, Dead};
+    use crate::mv_root::index_root::RootIndexType;
+
+    const FAN: usize = 8;
+    type TestTree = MVBTSt<FAN, FAN, u64, u64>;
+
+    fn leaf_counts(tree: &TestTree, key: u64) -> (Active, Dead) {
+        let leaf_guard = tree.traversal_write_olc(key);
+        let leaf_deref_mut = leaf_guard.deref_mut();
+        leaf_deref_mut.as_leaf_page().active_dead_count()
+    }
+
+    /// Regression test for a bug found while building the WAL: `Update`'s
+    /// `Ok(None)` (KeyDoesNotExist) and `Err(())` (KeyAlreadyDeleted)
+    /// failure branches called `undo_uncommitted` without reversing the
+    /// `commit_delta(1, 0)` applied just before, permanently inflating the
+    /// leaf's tracked active count even though nothing was actually
+    /// inserted. A failed op mutates nothing, so the leaf's tracked
+    /// (active, dead) counts must be *exactly* the same before and after —
+    /// checked directly, not via a rescan through `as_records()`, which is
+    /// itself bounded by the same (possibly-corrupted) length and so can't
+    /// independently catch this.
+    #[test]
+    fn failed_update_leaves_counts_unchanged() {
+        let tree = TestTree::make_standard(RootIndexType::default());
+
+        assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(1, 100)), CRUDOperationResult::Inserted(_)));
+
+        // Update on a key that was never inserted: delete_after_update finds
+        // no prior record for it at all -> Ok(None).
+        let before = leaf_counts(&tree, 1);
+        assert!(matches!(
+            tree.dispatch_crud(CRUDOperation::Update(999, 1)),
+            CRUDOperationResult::ZeroAffected(_)
+        ));
+        assert_eq!(leaf_counts(&tree, 1), before, "counts changed after an Ok(None) (KeyDoesNotExist) failure");
+
+        // Insert key=2, delete it, then Update it again: delete_after_update
+        // finds the prior record but it's already deleted -> Err(()).
+        assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(2, 200)), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(tree.dispatch_crud(CRUDOperation::Delete(2)), CRUDOperationResult::Deleted(_)));
+
+        let before2 = leaf_counts(&tree, 2);
+        assert!(matches!(
+            tree.dispatch_crud(CRUDOperation::Update(2, 201)),
+            CRUDOperationResult::ZeroAffected(_)
+        ));
+        assert_eq!(leaf_counts(&tree, 2), before2, "counts changed after an Err(()) (KeyAlreadyDeleted) failure");
+    }
+
+    /// Same bug, repeated many times on a small-fanout tree, then verified
+    /// two independent ways: the tracked counts must still match their
+    /// pre-batch value, and driving enough real inserts afterwards to force
+    /// real splits must both (a) not panic inside smo.rs on a bad fill-ratio
+    /// read and (b) leave the exact expected key set behind — not one key
+    /// short, and not with a phantom extra key.
+    #[test]
+    fn repeated_failed_updates_do_not_corrupt_later_state() {
+        let tree = TestTree::make_standard(RootIndexType::default());
+
+        assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(1, 100)), CRUDOperationResult::Inserted(_)));
+
+        let before = leaf_counts(&tree, 1);
+        for k in 1000..1000 + (FAN as u64) * 4 {
+            assert!(matches!(
+                tree.dispatch_crud(CRUDOperation::Update(k, 999)),
+                CRUDOperationResult::ZeroAffected(_)
+            ));
+        }
+        assert_eq!(leaf_counts(&tree, 1), before, "counts drifted after a batch of failed updates");
+
+        for k in 2..=(FAN as u64) * 3 {
+            assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(k, k * 10)), CRUDOperationResult::Inserted(_)));
+        }
+
+        // Point queries, not Range: Range has a separate, pre-existing bug
+        // with ascending sequential-key splits (some leaves become
+        // unreachable from the root's fence intervals) that's unrelated to
+        // the counter-drift fix under test here. Also: `current_version()`,
+        // not `current_version_for_reader()` — the latter aggregates across
+        // a process-global thread registry (see clock.rs), so under `cargo
+        // test`'s parallel test threads it can be dragged down by a
+        // completely unrelated test's tree/thread.
+        let version = tree.current_version();
+        for k in 1..=(FAN as u64) * 3 {
+            let expected_payload = if k == 1 { 100 } else { k * 10 };
+            match tree.dispatch_crud(CRUDOperation::Point(k, version)) {
+                CRUDOperationResult::MatchedRecords(records) if records.len() == 1 && records[0].payload == expected_payload => {}
+                other => panic!("key {k} missing or wrong after failed updates + real inserts: {other}"),
+            }
+        }
+    }
+
+    /// New invariant from simplifying the WAL to log `CRUDOperation`
+    /// directly: since one logged record must equal one minted version,
+    /// `Update`'s in-place fast path (which mints none) must never fire
+    /// while a WAL is attached — every Update must go through the normal
+    /// versioned path and get a fresh version instead.
+    #[test]
+    fn update_in_place_disabled_while_wal_attached() {
+        let path = std::env::temp_dir().join(format!("cmvbt_dispatch_wal_test_{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let tree = TestTree::make_standard(RootIndexType::default());
+        tree.enable_gc(true);
+        tree.enable_wal(&path, std::time::Duration::from_millis(2)).unwrap();
+
+        let CRUDOperationResult::Inserted(insert_version) = tree.dispatch_crud(CRUDOperation::Insert(1, 100)) else {
+            panic!("expected Inserted");
+        };
+
+        // No live readers registered, and GC+update-in-place is on: with no
+        // WAL this would take the in-place fast path (see
+        // wal_disabled_path_unaffected in integration_tests.rs) and reuse
+        // the current version. With a WAL attached it must mint a fresh one.
+        let CRUDOperationResult::Updated(update_version) = tree.dispatch_crud(CRUDOperation::Update(1, 200)) else {
+            panic!("expected Updated");
+        };
+        assert!(update_version > insert_version, "Update must mint a fresh version while a WAL is attached");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

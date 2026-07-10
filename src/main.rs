@@ -4,7 +4,7 @@ use chrono::{DateTime, Local};
 use itertools::Itertools;
 use std::{env, fs};
 
-use crate::mv_crud_model::crud_api::CRUDDispatcher;
+use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::mv_tree::mvbt::Key;
@@ -12,6 +12,7 @@ use crate::mv_tree::mvbt::NUM_RECORDS;
 use crate::mv_tree::mvbt::Payload;
 use crate::mv_tree::mvbt::{FAN_OUT, MVBT};
 
+mod mv_bench;
 mod mv_block;
 mod mv_crud_model;
 mod mv_gc;
@@ -21,11 +22,10 @@ mod mv_record_model;
 mod mv_test;
 mod mv_tree;
 mod mv_root;
-mod mv_tx_model;
-mod mv_tx_query;
 mod mv_sync;
 mod mv_utils;
 mod mv_buffer;
+mod mv_wal;
 
 use crate::mv_sync::smart_cell::OptCell;
 use jemallocator::Jemalloc;
@@ -46,6 +46,7 @@ fn main() {
             "append" => main_append(parms),
             "load" => main_load(parms),
             "load2" => main_load_ycsb(parms),
+            "tpcc" => mv_bench::tpcc_driver::main_tpcc(parms),
             // "load_cc_new" => main_load_cc_new(parms),
             // "sorted_insert" => main_sorted_insert(parms),
             s => println!("Unknown Command '{s}'")

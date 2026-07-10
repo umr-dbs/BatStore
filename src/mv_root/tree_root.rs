@@ -7,11 +7,11 @@ use CCBPlusTree::locking::locking_strategy::LockingStrategy;
 use CCBPlusTree::tree::bplus_tree::BPlusTree;
 
 use crate::mv_page_model::{BlockRef, Height};
+use crate::mv_query::SnapShot;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_root::root::Root;
 use crate::mv_tree::mvbt::INIT_TREE_HEIGHT;
 use crate::mv_sync::version_handle;
-use crate::mv_tx_model::transaction_result::SnapShot;
 // pub(crate) fn make_start_value_root_inner_tree<
 //     const F: usize,
 //     const N: usize,

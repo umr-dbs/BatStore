@@ -4,7 +4,7 @@ use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 
 pub type NodeVisits = usize;
-pub trait CRUDDispatcher<
+pub trait AtomicTxDispatcher<
     'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,

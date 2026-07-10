@@ -3,3 +3,6 @@ pub mod safe_cell;
 pub mod clock;
 pub mod version_handle;
 pub mod block_sync;
+pub mod worker;
+pub mod commit_log;
+pub mod visibility;

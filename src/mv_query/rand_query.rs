@@ -98,10 +98,10 @@ impl<const FAN_OUT: usize,
 
                         match r {
                             BlockUnsafeDegree::Overflow => unsafe {
-                                mv_test::SPLITS_COUNTER.lock().push(self.current_version_for_reader())
+                                mv_test::SPLITS_COUNTER.lock().push(self.current_version())
                             }
                             BlockUnsafeDegree::ActiveUnderflow => unsafe {
-                                mv_test::MERGES_COUNTER.lock().push(self.current_version_for_reader())
+                                mv_test::MERGES_COUNTER.lock().push(self.current_version())
                             }
                             _ => {}
                         }

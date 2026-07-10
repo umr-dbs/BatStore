@@ -2,9 +2,9 @@ use std::fmt::Display;
 use std::hash::Hash;
 use crossbeam_skiplist::SkipMap;
 use crate::mv_page_model::Height;
+use crate::mv_query::SnapShot;
 use crate::mv_root::root::Root;
 use crate::mv_root::tree_root::ValueRootInner;
-use crate::mv_tx_model::transaction_result::SnapShot;
 
 #[derive(Default)]
 pub struct RootSkipList<

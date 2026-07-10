@@ -6,8 +6,8 @@ use crate::mv_gc::block_tracer::{DeadPageValue, BlockTrace};
 use crate::mv_gc::query_tracer::TransactionTrace;
 use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::time_matcher::TimeMatcher;
+use crate::mv_query::SnapShot;
 use crate::mv_record_model::version_info::Version;
-use crate::mv_tx_model::transaction_result::SnapShot;
 
 pub type TrackerHandle<
     const P_F: usize,
@@ -71,6 +71,13 @@ impl<const P_F: usize,
     #[inline]
     pub fn newest_live_si(&self) -> Option<SnapShot> {
         self.live_tx.peek_max()
+    }
+
+    /// All currently active `ts_start`s — used to safely prune per-worker
+    /// `CommitLog`s (see `MVBTSt::commit_tx`).
+    #[inline]
+    pub fn active_snapshots(&self) -> impl Iterator<Item = SnapShot> + '_ {
+        self.live_tx.active_snapshots()
     }
 
     #[inline]

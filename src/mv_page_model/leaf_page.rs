@@ -1,6 +1,7 @@
 use crate::mv_page_model::node::{Active, Dead, PageLenField, PageLenPrimitive, active_len, dead_len, from_active_dead, from_len, from_len_sum};
 use crate::mv_record_model::record_point::RecordPoint;
-use crate::mv_record_model::version_info::{Version, VersionInfo};
+use crate::mv_record_model::tx_stamp::TxStamp;
+use crate::mv_record_model::version_info::VersionInfo;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -247,7 +248,7 @@ impl<const NUM_RECORDS: usize,
     // }
 
     #[inline]
-    pub(crate) fn delete(&mut self, key: Key, del: Version) -> Result<Option<VersionInfo>, ()>  {
+    pub(crate) fn delete(&mut self, key: Key, del: TxStamp) -> Result<Option<VersionInfo>, ()>  {
         match self.as_records_mut()
             .iter_mut()
             .rfind(|record| record.key == key)
@@ -267,7 +268,7 @@ impl<const NUM_RECORDS: usize,
     }
 
     #[inline]
-    pub(crate) fn delete_after_update(&mut self, key: Key, del: Version) -> Result<Option<VersionInfo>, ()>  {
+    pub(crate) fn delete_after_update(&mut self, key: Key, del: TxStamp) -> Result<Option<VersionInfo>, ()>  {
         match self.as_records_mut()
             .iter_mut()
             .rev()

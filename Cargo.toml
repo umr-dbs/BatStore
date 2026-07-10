@@ -1,6 +1,6 @@
 [package]
 name = "cMVBT"
-version = "0.0.110"
+version = "0.0.111"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
 description = "cMVBT Research Implementation"
@@ -10,15 +10,15 @@ repository = "https://github.com/umr-dbs/cMVBT"
 overflow-checks = false
 
 [profile.release]
-debug = "line-tables-only"
-overflow-checks = false
-#opt-level = 3            # maximum LLVM optimizations
-#lto = "fat"              # full link-time optimization (cross-crate)
-#codegen-units = 1        # better optimization, slower compile
-#panic = "abort"          # removes unwinding overhead
-#strip = true             # smaller binary (optional)
-#debug = 0                # no debug info
-#incremental = false      # better optimization consistency
+#debug = "line-tables-only"
+#overflow-checks = false
+opt-level = 3            # maximum LLVM optimizations
+lto = "fat"              # full link-time optimization (cross-crate)
+codegen-units = 1        # better optimization, slower compile
+panic = "abort"          # removes unwinding overhead
+strip = true             # smaller binary (optional)
+debug = 0                # no debug info
+incremental = false      # better optimization consistency
 
 [build]
 rustflags = ["-C", "target-cpu=native"]
@@ -26,24 +26,22 @@ rustflags = ["-C", "target-cpu=native"]
 [features]
 hardware-lock-elision = []
 
-[lib]
-name = "cmvbt"
-path = "src/lib.rs"
-crate-type = ["cdylib"]
+#[lib]
+#name = "cmvbt"
+#path = "src/lib.rs"
+#crate-type = ["cdylib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 CCBPlusTree = { git = "https://github.com/umr-dbs/CC-BPlusTree.git", version = "0.0.122" }
-crossbeam-channel = "0.5.15"
+crossbeam-channel = "0.5.16"
 crossbeam-skiplist = "0.1.3"
-threadpool = "1.8.1"
 chrono = "0.4.44"
 rand_distr = "0.6.0"
 rand = "0.10.1"
 itertools = "0.15.0"
 parking_lot = { version = "0.12.5", features = ["hardware-lock-elision", "arc_lock"] }
-arc-swap = "1.9.1"
-dashmap = "6.2.1"
+arc-swap = "1.9.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.186"
 num_cpus = "1.17"

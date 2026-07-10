@@ -11,18 +11,19 @@ use std::{fs, mem, thread};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::Path;
 use std::thread::{spawn, ThreadId};
 use std::time::{Duration, Instant, SystemTime};
 use parking_lot::Mutex;
 use rand::distr::{Alphanumeric, Distribution};
 use rand::prelude::SliceRandom;
 use rand_distr::Zipf;
-use crate::mv_crud_model::crud_api::CRUDDispatcher;
+use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::mv_query::dispatch::RANGE_DISPATCH_LAZY;
+use crate::mv_query::SnapShot;
 use crate::mv_root::index_root::RootIndexType;
 use crate::mv_sync::version_handle;
-use crate::mv_tx_model::transaction_result::SnapShot;
 use crate::mv_tree::mvbt::FAN_OUT;
 use crate::mv_tree::mvbt::NUM_RECORDS;
 
@@ -116,6 +117,10 @@ fn olap_tests(index: Arc<MVBT>,
         println!("> Scan key-range is dynamic to 0..=LastKey")
     }
 
+    if num_olaps == 0 {
+        return (0, 0);
+    }
+
     let v_index = format!("mv_{}",
                           match index.root_star_index() {
                               RootIndexType::FrugalList => "fg",
@@ -177,7 +182,7 @@ fn olap_tests(index: Arc<MVBT>,
                 let key_min = 0;
                 let key_max = Key::MAX;
 
-                let current_si = index.current_version_for_reader();
+                let current_si = index.current_version();
                 let si = if fixed_si {
                     current_si
                 } else {
@@ -661,8 +666,26 @@ pub(crate) fn main_load(parms: Vec<String>) {
 
     let init_keys = parms[11].parse::<usize>().unwrap_or(100_000);
 
+    let wal
+        = parms[12].parse::<bool>().unwrap_or(false);
+
+    let wal_dir
+        = parms[13].parse::<String>().unwrap_or("wal".to_string());
+
+    let _ = fs::remove_file(wal_dir.as_str());
+
+    let wal_epoch
+        = parms[14].parse::<u64>().unwrap_or(1000);
+
     let index
         = Arc::new(MVBTSt::make_standard(root_star_index));
+
+    if wal {
+        index.enable_wal(
+            Path::new(wal_dir.as_str()),
+            Duration::from_millis(wal_epoch)
+        ).expect("Error creating WAL");
+    }
 
     let mut gc_str = "Off".to_string();
     if gc {

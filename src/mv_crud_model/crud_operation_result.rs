@@ -33,6 +33,13 @@ pub enum CRUDOperationResult<
 
     ZeroAffected(CRUDOperationInnerReason),
 
+    /// First-writer-wins conflict (OSIC §3.1 "Preliminaries"): a
+    /// `mv_tx::Transaction` tried to write a key whose current version is
+    /// not visible to its snapshot — i.e. a concurrent, not-yet-visible
+    /// transaction wrote it first. No writes already applied earlier in the
+    /// same transaction are rolled back (see `mv_tx::Transaction` docs).
+    Conflict,
+
     #[default]
     Error, // flatten no good
 }
@@ -52,7 +59,7 @@ impl<'a,
     #[inline(always)]
     pub const fn is_err(&self) -> bool {
         match self {
-            CRUDOperationResult::Error => true,
+            CRUDOperationResult::Error | CRUDOperationResult::Conflict => true,
             _ => false
         }
     }
@@ -96,8 +103,10 @@ impl<'a,
                 write!(f, "ZeroAffected(KeyAlreadyDeleted)"),
             CRUDOperationResult::ZeroAffected(CRUDOperationInnerReason::KeyDoesNotExist) =>
                 write!(f, "ZeroAffected(KeyDoesNotExist)"),
-            CRUDOperationResult::ZeroAffected(CRUDOperationInnerReason::KeyAlreadyExists) => 
+            CRUDOperationResult::ZeroAffected(CRUDOperationInnerReason::KeyAlreadyExists) =>
                 write!(f, "ZeroAffected(KeyAlreadyExists)"),
+            CRUDOperationResult::Conflict =>
+                write!(f, "Conflict"),
             CRUDOperationResult::InsertedRand(key, version) =>
                 write!(f, "InsertedRand(key: {key}, version: {version})"),
             CRUDOperationResult::UpdatedRand(key, version) =>

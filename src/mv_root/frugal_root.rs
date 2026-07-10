@@ -2,10 +2,9 @@ use std::cell::Cell;
 use std::fmt::Display;
 use std::sync::Arc;
 use arc_swap::ArcSwap;
-
+use crate::mv_query::SnapShot;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_root::tree_root::ValueRootInner;
-use crate::mv_tx_model::transaction_result::SnapShot;
 
 pub(crate) type FrugalRootList<
     const FAN_OUT: usize,

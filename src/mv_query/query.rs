@@ -9,11 +9,10 @@ use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::node::PageType;
 use crate::mv_page_model::time_matcher::TimeMatcher;
 use crate::mv_record_model::record_point::RecordPointResult;
+use crate::mv_record_model::tx_stamp::WorkerId;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_root::index_root::RootIndex;
-use crate::mv_root::root::Root;
 use crate::mv_tree::mvbt::{MVBTSt};
-use crate::mv_tree::smo::BlockUnsafeDegree;
 use crate::mv_utils::interval::Interval;
 
 impl<const FAN_OUT: usize,
@@ -138,18 +137,23 @@ impl<const FAN_OUT: usize,
 
     #[inline]
     pub(crate) fn key_point_read_from_root<'a>(
+        &self,
         root: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
         key: Key,
-        lookup_version: Version)
+        reader_worker: WorkerId,
+        reader_ts_start: Version)
         -> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
     {
-        match Self::traverse_read_key(root, key, lookup_version)
+        let mut is_visible
+            = |stamp| self.is_visible_stamp(reader_worker, reader_ts_start, stamp);
+
+        match Self::traverse_read_key(root, key, reader_ts_start)
             .as_records()
             .iter()
             .rev()
-            .skip_while(|r| r.version.insert_version > lookup_version)
+            .skip_while(|r| r.version.insert_stamp.ts_start > reader_ts_start)
             .find(|r|
-                r.key() == key && r.version().matches(lookup_version))
+                r.key() == key && r.version().matches(&mut is_visible))
         {
             None => CRUDOperationResult::MatchedRecords(Vec::with_capacity(0)),
             Some(result) =>
@@ -158,15 +162,17 @@ impl<const FAN_OUT: usize,
     }
 
     pub(crate) fn key_range_read_from_root<'a>(
+        &self,
         root: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
         lookup_range: Interval<Key>,
-        lookup_version: Version)
+        reader_worker: WorkerId,
+        reader_ts_start: Version)
         -> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
     {
         let blocks = Self::traverse_read_key_range(
             root,
             &lookup_range,
-            lookup_version);
+            reader_ts_start);
 
         CRUDOperationResult::MatchedRecords(blocks
             .into_iter()
@@ -177,15 +183,18 @@ impl<const FAN_OUT: usize,
 
                 let start_pos_si = records.len() -
                     records.binary_search_by(|r|
-                        r.version.insert_version.cmp(&lookup_version)
+                        r.version.insert_stamp.ts_start.cmp(&reader_ts_start)
                     ).unwrap_or_else(|pos| pos);
+
+               let mut is_visible
+                   = |stamp| self.is_visible_stamp(reader_worker, reader_ts_start, stamp);
 
                records
                    .iter()
                    .rev()
                    .skip(start_pos_si)
                    .filter(|r|
-                       r.version().matches(lookup_version) &&
+                       r.version().matches(&mut is_visible) &&
                            lookup_range.contains(r.key()))
                    // .sorted_by_key(|r| r.key())
                    .map(RecordPointResult::from)
