@@ -9,6 +9,11 @@
 //! matching how the referenced benchmarks (TPC-C + OLAP scans, e.g. Alhomssi
 //! & Leis, VLDB'23) treat a business transaction as one unit.
 //!
+//! Also carries CH-benCHmark's (Cole et al., "The Mixed Workload CH-benCHmark",
+//! DBTest 2011) three TPC-H-derived dimension tables — SUPPLIER, NATION,
+//! REGION — in the same shared tree, feeding the analytical queries in
+//! `mv_bench::tpch_queries`.
+//!
 //! Key layout: the top 4 bits select the table, the low 60 bits pack that
 //! table's primary-key columns MSB-first (so a range scan of a byte-ordered
 //! key range matches the natural column order, e.g. scanning all districts
@@ -32,8 +37,11 @@ pub type TpccKey = u64;
 /// constants for consistency with the rest of the codebase, even though
 /// `TpccRow` is larger than the default `u64` payload the constants were
 /// tuned for.
-pub type TpccTree = MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>;
-pub type TpccTxn<'a> = Transaction<'a, FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>;
+pub const TPCC_FAN_OUT: usize       = FAN_OUT;
+pub const TPCC_NUM_RECORDS: usize   = 71;
+
+pub type TpccTree = MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccTxn<'a> = Transaction<'a, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 
 /// Database scale/shape — the TPC-C spec's standard cardinalities, with
 /// warehouse count and a few sizes made configurable for quicker benchmark
@@ -48,6 +56,11 @@ pub struct TpccConfig {
     /// The highest-`o_id` slice of `initial_orders_per_district` that gets a
     /// NEW_ORDER row at load time (spec: last 900 of 3,000).
     pub initial_new_orders: u32,
+    /// CH-benCHmark's SUPPLIER table size (see `mv_bench::tpch_queries`
+    /// module docs): fixed independent of warehouse count, matching
+    /// CH-benCHmark's own choice of a TPC-H SF1-sized (10,000-row) supplier
+    /// pool regardless of scale factor.
+    pub num_suppliers: u32,
 }
 
 impl Default for TpccConfig {
@@ -59,11 +72,12 @@ impl Default for TpccConfig {
             num_items: 100_000,
             initial_orders_per_district: 3_000,
             initial_new_orders: 900,
+            num_suppliers: 10_000,
         }
     }
 }
 
-/// Table tags occupy the top 4 bits of the 64-bit key (16 slots, 10 used).
+/// Table tags occupy the top 4 bits of the 64-bit key (16 slots, 14 used).
 mod tag {
     pub const WAREHOUSE: u64 = 0;
     pub const DISTRICT: u64 = 1;
@@ -80,6 +94,12 @@ mod tag {
     /// (o_w_id,o_d_id,o_c_id,o_id), so OrderStatus can find "the customer's
     /// most recent order" in O(1) instead of a descending scan.
     pub const CUST_LAST_ORDER: u64 = 10;
+    /// CH-benCHmark's TPC-H-derived dimension tables (`mv_bench::tpch_queries`
+    /// module docs): SUPPLIER links to STOCK via `Stock::s_su_suppkey`,
+    /// NATION/REGION are the standard fixed TPC-H reference tables.
+    pub const SUPPLIER: u64 = 11;
+    pub const NATION: u64 = 12;
+    pub const REGION: u64 = 13;
 }
 
 const TAG_SHIFT: u32 = 60;
@@ -124,6 +144,26 @@ pub fn order_line_table_range() -> crate::mv_utils::interval::Interval<TpccKey> 
 
 pub fn stock_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
     let (lo, hi) = table_bounds(tag::STOCK);
+    crate::mv_utils::interval::Interval::new(lo, hi)
+}
+
+pub fn orders_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
+    let (lo, hi) = table_bounds(tag::ORDERS);
+    crate::mv_utils::interval::Interval::new(lo, hi)
+}
+
+pub fn supplier_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
+    let (lo, hi) = table_bounds(tag::SUPPLIER);
+    crate::mv_utils::interval::Interval::new(lo, hi)
+}
+
+pub fn nation_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
+    let (lo, hi) = table_bounds(tag::NATION);
+    crate::mv_utils::interval::Interval::new(lo, hi)
+}
+
+pub fn region_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
+    let (lo, hi) = table_bounds(tag::REGION);
     crate::mv_utils::interval::Interval::new(lo, hi)
 }
 
@@ -203,6 +243,18 @@ pub const fn k_order(w_id: u32, d_id: u8, o_id: u32) -> TpccKey {
             | o_id as u64)
 }
 
+/// Decodes an ORDERS-table key back into `(w_id, d_id, o_id)` — the inverse
+/// of `k_order`, used by `tpch_queries` after a full-table scan to recover
+/// each order's identity for its follow-up `order_line` range scan.
+#[inline(always)]
+pub const fn decode_order_key(key: TpccKey) -> (u32, u8, u32) {
+    let bits = key & FIELD_MASK;
+    let o_id = (bits & ((1u64 << O_ID_BITS) - 1)) as u32;
+    let d_id = ((bits >> O_ID_BITS) & ((1u64 << D_ID_BITS) - 1)) as u8;
+    let w_id = (bits >> (O_ID_BITS + D_ID_BITS)) as u32;
+    (w_id, d_id, o_id)
+}
+
 #[inline(always)]
 pub const fn k_new_order(w_id: u32, d_id: u8, o_id: u32) -> TpccKey {
     with_tag(tag::NEW_ORDER,
@@ -231,6 +283,14 @@ pub const fn k_order_line_bounds(w_id: u32, d_id: u8, o_id: u32) -> (TpccKey, Tp
     (k_order_line(w_id, d_id, o_id, 0), k_order_line(w_id, d_id, o_id, u8::MAX))
 }
 
+/// Extracts `ol_number` (the low `OL_NO_BITS` bits) back out of an
+/// ORDER_LINE key — `tpch_queries::q1` groups by this without going through
+/// `k_order_line`'s inputs first (it scans the whole table directly).
+#[inline(always)]
+pub const fn decode_order_line_number(key: TpccKey) -> u8 {
+    (key & ((1u64 << OL_NO_BITS) - 1)) as u8
+}
+
 #[inline(always)]
 pub const fn k_cust_last_order(w_id: u32, d_id: u8, c_id: u32) -> TpccKey {
     with_tag(tag::CUST_LAST_ORDER,
@@ -242,6 +302,36 @@ pub const fn k_cust_last_order(w_id: u32, d_id: u8, c_id: u32) -> TpccKey {
 #[inline(always)]
 pub fn k_history(seq: u64) -> TpccKey {
     with_tag(tag::HISTORY, seq)
+}
+
+#[inline(always)]
+pub const fn k_supplier(su_id: u32) -> TpccKey {
+    with_tag(tag::SUPPLIER, su_id as u64)
+}
+
+#[inline(always)]
+pub const fn decode_supplier_id(key: TpccKey) -> u32 {
+    (key & FIELD_MASK) as u32
+}
+
+#[inline(always)]
+pub const fn k_nation(n_id: u8) -> TpccKey {
+    with_tag(tag::NATION, n_id as u64)
+}
+
+#[inline(always)]
+pub const fn decode_nation_id(key: TpccKey) -> u8 {
+    (key & FIELD_MASK) as u8
+}
+
+#[inline(always)]
+pub const fn k_region(r_id: u8) -> TpccKey {
+    with_tag(tag::REGION, r_id as u64)
+}
+
+#[inline(always)]
+pub const fn decode_region_id(key: TpccKey) -> u8 {
+    (key & FIELD_MASK) as u8
 }
 
 // ---------------------------------------------------------------------
@@ -347,6 +437,39 @@ pub struct Stock {
     pub s_order_cnt: u32,
     pub s_remote_cnt: u32,
     pub s_data: String,
+    /// CH-benCHmark's addition linking STOCK to SUPPLIER (see
+    /// `mv_bench::tpch_queries` module docs): which of the fixed supplier
+    /// pool fulfills this `(w_id, i_id)`'s stock, assigned deterministically
+    /// at load time (`tpcc_load::su_suppkey_for`).
+    pub s_su_suppkey: u32,
+}
+
+/// CH-benCHmark's TPC-H-derived SUPPLIER table (standard TPC-H `supplier`
+/// columns, minus the unused `s_suppkey`/`s_nationkey` foreign-key
+/// decoration this port doesn't need beyond `s_nationkey` itself).
+#[derive(Clone, Debug)]
+pub struct Supplier {
+    pub s_name: String,
+    pub s_address: String,
+    pub s_nationkey: u8,
+    pub s_phone: String,
+    pub s_acctbal: f64,
+    pub s_comment: String,
+}
+
+/// Standard (fixed, 25-row) TPC-H NATION reference table.
+#[derive(Clone, Debug)]
+pub struct Nation {
+    pub n_name: String,
+    pub n_regionkey: u8,
+    pub n_comment: String,
+}
+
+/// Standard (fixed, 5-row) TPC-H REGION reference table.
+#[derive(Clone, Debug)]
+pub struct Region {
+    pub r_name: String,
+    pub r_comment: String,
 }
 
 /// Payload for the single shared TPC-C tree. The larger row kinds
@@ -372,6 +495,9 @@ pub enum TpccRow {
     Stock(Box<Stock>),
     /// (w_id,d_id,c_id) -> most recent o_id, see `tag::CUST_LAST_ORDER`.
     CustLastOrder(u32),
+    Supplier(Box<Supplier>),
+    Nation(Box<Nation>),
+    Region(Box<Region>),
 }
 
 impl Display for TpccRow {
@@ -389,6 +515,9 @@ impl Display for TpccRow {
             TpccRow::Item(i) => write!(f, "Item({})", i.i_name),
             TpccRow::Stock(s) => write!(f, "Stock(qty={})", s.s_quantity),
             TpccRow::CustLastOrder(o_id) => write!(f, "CustLastOrder(o_id={o_id})"),
+            TpccRow::Supplier(s) => write!(f, "Supplier({})", s.s_name),
+            TpccRow::Nation(n) => write!(f, "Nation({})", n.n_name),
+            TpccRow::Region(r) => write!(f, "Region({})", r.r_name),
         }
     }
 }
@@ -419,5 +548,14 @@ impl TpccRow {
     }
     pub fn as_cust_last_order(&self) -> u32 {
         match self { TpccRow::CustLastOrder(o_id) => *o_id, _ => panic!("expected CustLastOrder row") }
+    }
+    pub fn as_supplier(&self) -> &Supplier {
+        match self { TpccRow::Supplier(s) => s, _ => panic!("expected Supplier row") }
+    }
+    pub fn as_nation(&self) -> &Nation {
+        match self { TpccRow::Nation(n) => n, _ => panic!("expected Nation row") }
+    }
+    pub fn as_region(&self) -> &Region {
+        match self { TpccRow::Region(r) => r, _ => panic!("expected Region row") }
     }
 }

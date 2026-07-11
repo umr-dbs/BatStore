@@ -25,7 +25,7 @@ use crossbeam_channel::unbounded;
 use rand::prelude::*;
 
 use crate::mv_bench::olap_scan::{run_olap_worker, OlapMode, ScanResult};
-use crate::mv_bench::tpcc_load::{populate_items, populate_warehouse};
+use crate::mv_bench::tpcc_load::{populate_items, populate_regions_and_nations, populate_suppliers, populate_warehouse};
 use crate::mv_bench::tpcc_schema::TpccConfig;
 use crate::mv_bench::tpcc_schema::TpccTree;
 use crate::mv_bench::tpcc_txn::{self, TxnOutcome};
@@ -186,7 +186,8 @@ pub fn run_tpcc(cfg: DriverConfig) {
          - GC                    = {} (update_in_place={})\n\
          - WAL                   = {}\n\
          - root*                 = {}\n\
-         - items/customers/orders per district = {}/{}/{}",
+         - items/customers/orders per district = {}/{}/{}\n\
+         - CH-benCHmark suppliers = {}",
         cfg.tpcc.num_warehouses,
         num_olap_mode_summary(&cfg.olap_mode),
         if cfg.affinity { "warehouse affinity (0% remote)" } else { "cross warehouse" },
@@ -198,6 +199,7 @@ pub fn run_tpcc(cfg: DriverConfig) {
         },
         cfg.root_star_index,
         cfg.tpcc.num_items, cfg.tpcc.customers_per_district, cfg.tpcc.initial_orders_per_district,
+        cfg.tpcc.num_suppliers,
     );
 
     let mut assigned: Vec<Vec<u32>> = vec![Vec::new(); num_terminals];
@@ -213,6 +215,12 @@ pub fn run_tpcc(cfg: DriverConfig) {
     // the timed OLTP/OLAP phase below, matching how the rest of this
     // project's benchmarks (see `mv_test::main_load`) load their initial
     // data set single-threaded before spawning concurrent workers.
+    println!("Loading CH-benCHmark dimension tables (5 regions, 25 nations, {} suppliers)...", cfg.tpcc.num_suppliers);
+    let ch_load_start = Instant::now();
+    populate_regions_and_nations(&tree);
+    populate_suppliers(&tree, &cfg.tpcc);
+    println!("Loaded CH-benCHmark dimension tables in {:?}.", ch_load_start.elapsed());
+
     println!("Loading item catalog ({} items)...", cfg.tpcc.num_items);
     let load_start = Instant::now();
     populate_items(&tree, &cfg.tpcc);
@@ -282,6 +290,7 @@ fn num_olap_mode_summary(mode: &OlapMode) -> &'static str {
         OlapMode::OpenAndSleep { .. } => "open_and_sleep",
         OlapMode::ScanDelaySweep { .. } => "scan_delay_sweep",
         OlapMode::RepeatedFreshFullScan => "repeated_fresh_full_scan",
+        OlapMode::ChBenchmark { .. } => "ch_benchmark",
     }
 }
 
@@ -312,11 +321,12 @@ fn write_results(
 
     let _ = fs::remove_file("tpcc_scan.csv");
     let mut scan_file = OpenOptions::new().create(true).append(true).open("tpcc_scan.csv").unwrap();
-    scan_file.write_all(b"mode,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec\n").unwrap();
+    scan_file.write_all(b"mode,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary\n").unwrap();
     for r in scan_results {
         scan_file.write_all(format!(
-            "{},{},{},{},{},{:.2}\n",
-            r.mode, r.delay_secs, r.snapshot, r.scanned_tuples, r.latency_ns, r.tuples_per_sec()
+            "{},{},{},{},{},{:.2},{}\n",
+            r.mode, r.delay_secs, r.snapshot, r.scanned_tuples, r.latency_ns, r.tuples_per_sec(),
+            r.summary.map(|s| format!("{s:.2}")).unwrap_or_default()
         ).as_bytes()).unwrap();
     }
 
@@ -362,11 +372,24 @@ pub fn main_tpcc(parms: Vec<String>) {
     let wal_enabled: bool = arg(&parms, 15, false);
     let wal_path: String = parms.get(16).cloned().unwrap_or_else(|| "tpcc_wal.log".to_string());
     let wal_flush_ms: u64 = arg(&parms, 17, 5);
+    let ch_region: String = parms.get(18).cloned().unwrap_or_else(|| "EUROPE".to_string());
+    let num_suppliers: u32 = arg(&parms, 19, 10_000);
 
     let (olap_mode, num_olap_threads) = match olap_mode_str.as_str() {
         "none" => (OlapMode::RepeatedFreshFullScan, 0),
         "sleep" => (OlapMode::OpenAndSleep { hold: Duration::from_secs_f64(olap_param) }, num_olap_threads),
         "fresh" => (OlapMode::RepeatedFreshFullScan, num_olap_threads),
+        // Wide-open by default: every row loaded gets its date fields
+        // (`o_entry_d`, `ol_delivery_d`, ...) stamped with the load's actual
+        // wall-clock time (see `tpcc_random::now_millis`), not spread across
+        // the simulated years a real TPC-H date filter would assume — so an
+        // unrestricted range is what makes these queries see the whole
+        // loaded data set by default. Pass a real i64-millis range here to
+        // exercise actual date selectivity instead.
+        "ch" => (
+            OlapMode::ChBenchmark { region_name: ch_region, date_lo: i64::MIN, date_hi: i64::MAX },
+            num_olap_threads,
+        ),
         _ => (
             OlapMode::ScanDelaySweep { delays: (0..=(olap_param.max(0.0) as u64)).map(Duration::from_secs).collect() },
             num_olap_threads,
@@ -380,6 +403,7 @@ pub fn main_tpcc(parms: Vec<String>) {
         num_items,
         initial_orders_per_district,
         initial_new_orders: (initial_orders_per_district * 3 / 10).max(1),
+        num_suppliers,
     };
 
     run_tpcc(DriverConfig {

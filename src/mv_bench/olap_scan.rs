@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 
 use crate::mv_bench::tpcc_schema::*;
+use crate::mv_bench::tpch_queries;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::mv_record_model::version_info::Version;
 
@@ -29,6 +30,11 @@ pub struct ScanResult {
     pub snapshot: Version,
     pub scanned_tuples: usize,
     pub latency_ns: u128,
+    /// A single characteristic numeric result, for modes where "scanned
+    /// tuples" alone doesn't capture the query's output — e.g. a CH-
+    /// benCHmark query's total revenue, or its output group count for
+    /// `scanned_tuples` doesn't apply. `None` for the plain scan modes.
+    pub summary: Option<f64>,
 }
 
 impl ScanResult {
@@ -51,6 +57,13 @@ pub enum OlapMode {
     /// possible — a throughput-oriented full-database scan, closer to this
     /// project's own base OLAP methodology (see `mv_test::olap_tests`).
     RepeatedFreshFullScan,
+    /// Runs the CH-benCHmark analytical queries (`mv_bench::tpch_queries`)
+    /// in rotation — Q1, Q6, Q4, Q5 in that order (cheapest/no-join queries
+    /// first) — repeating until told to stop. `region_name` is Q5's region
+    /// filter; `date_lo`/`date_hi` bound the entry/delivery-date filters
+    /// every query but Q1 uses (Q1 only takes `date_hi`, as
+    /// `delivered_before`).
+    ChBenchmark { region_name: String, date_lo: i64, date_hi: i64 },
 }
 
 fn sleep_checking_stop(dur: Duration, stop: &AtomicBool) {
@@ -74,7 +87,7 @@ fn open_and_sleep_once(tree: &TpccTree, hold: Duration, stop: &AtomicBool) -> Sc
     sleep_checking_stop(hold, stop);
     tx.commit();
 
-    ScanResult { mode: "open_and_sleep", delay_secs: hold.as_secs_f64(), snapshot, scanned_tuples: 0, latency_ns: hold.as_nanos() }
+    ScanResult { mode: "open_and_sleep", delay_secs: hold.as_secs_f64(), snapshot, scanned_tuples: 0, latency_ns: hold.as_nanos(), summary: None }
 }
 
 /// Fig. 10-style: fixes a snapshot, ages it by `delay`, then scans the
@@ -92,7 +105,7 @@ fn scan_after_delay_once(tree: &TpccTree, delay: Duration) -> ScanResult {
     let latency = start.elapsed();
     tx.commit();
 
-    ScanResult { mode: "scan_after_delay", delay_secs: delay.as_secs_f64(), snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos() }
+    ScanResult { mode: "scan_after_delay", delay_secs: delay.as_secs_f64(), snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None }
 }
 
 /// Freshest-snapshot full-database scan, for throughput-style measurements.
@@ -108,7 +121,65 @@ fn fresh_full_scan_once(tree: &TpccTree) -> ScanResult {
     let latency = start.elapsed();
     tx.commit();
 
-    ScanResult { mode: "fresh_full_scan", delay_secs: 0.0, snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos() }
+    ScanResult { mode: "fresh_full_scan", delay_secs: 0.0, snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None }
+}
+
+/// Runs each of the 4 implemented CH-benCHmark queries once (see
+/// `tpch_queries` module docs), reporting one `ScanResult` per query.
+/// `scanned_tuples` holds each query's *output* cardinality (group count,
+/// or 1 for the scalar Q6) — these queries don't expose their raw input
+/// scan size the way `fresh_full_scan_once` does — and `summary` holds a
+/// characteristic aggregate value (Q1: total revenue across every group;
+/// Q6: the forecasted revenue; Q4: total flagged orders; Q5: top nation's
+/// revenue).
+fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64) -> Vec<ScanResult> {
+    let mut out = Vec::with_capacity(4);
+
+    let start = Instant::now();
+    let q1 = tpch_queries::q1(tree, date_hi);
+    out.push(ScanResult {
+        mode: "ch_q1_pricing_summary",
+        delay_secs: 0.0,
+        snapshot: 0,
+        scanned_tuples: q1.len(),
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q1.iter().map(|g| g.sum_amount).sum()),
+    });
+
+    let start = Instant::now();
+    let q6 = tpch_queries::q6(tree, date_lo, date_hi, 24);
+    out.push(ScanResult {
+        mode: "ch_q6_forecast_revenue",
+        delay_secs: 0.0,
+        snapshot: 0,
+        scanned_tuples: 1,
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q6),
+    });
+
+    let start = Instant::now();
+    let q4 = tpch_queries::q4(tree, date_lo, date_hi, Duration::from_secs(3600 * 24).as_millis() as i64);
+    out.push(ScanResult {
+        mode: "ch_q4_order_priority",
+        delay_secs: 0.0,
+        snapshot: 0,
+        scanned_tuples: q4.len(),
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q4.iter().map(|g| g.order_count as f64).sum()),
+    });
+
+    let start = Instant::now();
+    let q5 = tpch_queries::q5(tree, region_name, date_lo, date_hi);
+    out.push(ScanResult {
+        mode: "ch_q5_revenue_by_nation",
+        delay_secs: 0.0,
+        snapshot: 0,
+        scanned_tuples: q5.len(),
+        latency_ns: start.elapsed().as_nanos(),
+        summary: q5.first().map(|r| r.revenue),
+    });
+
+    out
 }
 
 /// One OLAP worker thread's whole run, streaming each completed scan/hold
@@ -135,6 +206,16 @@ pub fn run_olap_worker(tree: &TpccTree, mode: OlapMode, stop: &AtomicBool, resul
             while !stop.load(Relaxed) {
                 let r = fresh_full_scan_once(tree);
                 let _ = results.send(r);
+            }
+        }
+        OlapMode::ChBenchmark { region_name, date_lo, date_hi } => {
+            while !stop.load(Relaxed) {
+                for r in ch_benchmark_queries_once(tree, &region_name, date_lo, date_hi) {
+                    let _ = results.send(r);
+                    if stop.load(Relaxed) {
+                        break;
+                    }
+                }
             }
         }
     }

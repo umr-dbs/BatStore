@@ -22,6 +22,9 @@ const TAG_ORDER_LINE: u8 = 8;
 const TAG_ITEM: u8 = 9;
 const TAG_STOCK: u8 = 10;
 const TAG_CUST_LAST_ORDER: u8 = 11;
+const TAG_SUPPLIER: u8 = 12;
+const TAG_NATION: u8 = 13;
+const TAG_REGION: u8 = 14;
 
 struct Writer<'a>(&'a mut Vec<u8>);
 
@@ -206,10 +209,31 @@ impl WalPayload for TpccRow {
                 w.u32(x.s_order_cnt);
                 w.u32(x.s_remote_cnt);
                 w.str(&x.s_data);
+                w.u32(x.s_su_suppkey);
             }
             TpccRow::CustLastOrder(o_id) => {
                 w.u8(TAG_CUST_LAST_ORDER);
                 w.u32(*o_id);
+            }
+            TpccRow::Supplier(x) => {
+                w.u8(TAG_SUPPLIER);
+                w.str(&x.s_name);
+                w.str(&x.s_address);
+                w.u8(x.s_nationkey);
+                w.str(&x.s_phone);
+                w.f64(x.s_acctbal);
+                w.str(&x.s_comment);
+            }
+            TpccRow::Nation(x) => {
+                w.u8(TAG_NATION);
+                w.str(&x.n_name);
+                w.u8(x.n_regionkey);
+                w.str(&x.n_comment);
+            }
+            TpccRow::Region(x) => {
+                w.u8(TAG_REGION);
+                w.str(&x.r_name);
+                w.str(&x.r_comment);
             }
         }
     }
@@ -305,9 +329,27 @@ impl WalPayload for TpccRow {
                     s_order_cnt: r.u32()?,
                     s_remote_cnt: r.u32()?,
                     s_data: r.str()?,
+                    s_su_suppkey: r.u32()?,
                 }))
             }
             TAG_CUST_LAST_ORDER => TpccRow::CustLastOrder(r.u32()?),
+            TAG_SUPPLIER => TpccRow::Supplier(Box::new(Supplier {
+                s_name: r.str()?,
+                s_address: r.str()?,
+                s_nationkey: r.u8()?,
+                s_phone: r.str()?,
+                s_acctbal: r.f64()?,
+                s_comment: r.str()?,
+            })),
+            TAG_NATION => TpccRow::Nation(Box::new(Nation {
+                n_name: r.str()?,
+                n_regionkey: r.u8()?,
+                n_comment: r.str()?,
+            })),
+            TAG_REGION => TpccRow::Region(Box::new(Region {
+                r_name: r.str()?,
+                r_comment: r.str()?,
+            })),
             _ => return None,
         })
     }
@@ -378,8 +420,19 @@ mod tests {
         round_trip(TpccRow::Stock(Box::new(Stock {
             s_quantity: -5, s_dist: std::array::from_fn(|i| format!("dist{i}")),
             s_ytd: 1.0, s_order_cnt: 2, s_remote_cnt: 3, s_data: "data".into(),
+            s_su_suppkey: 4321,
         })));
         round_trip(TpccRow::CustLastOrder(42));
+        round_trip(TpccRow::Supplier(Box::new(Supplier {
+            s_name: "Supplier#1".into(), s_address: "addr".into(), s_nationkey: 7,
+            s_phone: "1234567890123456".into(), s_acctbal: 1234.56, s_comment: "comment".into(),
+        })));
+        round_trip(TpccRow::Nation(Box::new(Nation {
+            n_name: "GERMANY".into(), n_regionkey: 3, n_comment: "comment".into(),
+        })));
+        round_trip(TpccRow::Region(Box::new(Region {
+            r_name: "EUROPE".into(), r_comment: "comment".into(),
+        })));
     }
 
     #[test]
@@ -457,6 +510,7 @@ mod tests {
                 tree.dispatch_crud(CRUDOperation::Insert(stock_key, TpccRow::Stock(Box::new(Stock {
                     s_quantity: 42, s_dist: std::array::from_fn(|i| format!("dist{i}")),
                     s_ytd: 1.0, s_order_cnt: 2, s_remote_cnt: 3, s_data: "ORIGINALxyz".into(),
+                    s_su_suppkey: 999,
                 })))),
                 CRUDOperationResult::Inserted(_)
             ));

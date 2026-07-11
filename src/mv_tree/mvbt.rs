@@ -12,7 +12,7 @@ use crate::mv_sync::worker::WorkerRegistry;
 use crate::mv_wal::writer::WalWriter;
 
 pub const FAN_OUT: usize        = 125;
-pub const NUM_RECORDS: usize    = 125;
+pub const NUM_RECORDS: usize    = 83;
 pub type Key                    = u64;
 pub type Payload                = u64;
 // pub type Payload = PayloadIndirection;

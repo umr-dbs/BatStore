@@ -12,3 +12,10 @@ pub mod tpcc_wal_codec;
 pub mod tpcc_txn;
 pub mod olap_scan;
 pub mod tpcc_driver;
+pub mod tpch_queries;
+
+pub mod ycsb_schema;
+pub mod ycsb_random;
+pub mod ycsb_load;
+pub mod ycsb_txn;
+pub mod ycsb_driver;

@@ -3,9 +3,10 @@ use std::fmt::Display;
 use std::hash::Hash;
 
 use crossbeam_channel::Receiver;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
+use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
+use crate::mv_crud_model::crud_operation::{CRUDOperation, TxAtomicOperation};
 use crate::mv_crud_model::crud_operation_result::CRUDOperationInnerReason::{KeyAlreadyDeleted, KeyAlreadyExists, KeyDoesNotExist};
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::mv_crud_model::crud_operation_result::{AtomicTxResult, CRUDOperationResult};
 use crate::mv_page_model::leaf_page::LeafPage;
 use crate::mv_query::iter_query::RangeQueryIter;
 use crate::mv_record_model::record_point::RecordPoint;
@@ -274,6 +275,21 @@ impl<'a,
             self.tree.wal_wait_flush(self.wal_ticket.take());
             self.tree.end_snapshot(self.ts_start);
         }
+    }
+}
+
+impl<'a,
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload
+> MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+    #[inline(always)]
+    pub fn dispatch_atomic_transaction(&self, atomic_tx: TxAtomicOperation<Key, Payload>)
+        -> AtomicTxResult<'_,FAN_OUT, NUM_RECORDS, Key, Payload>
+    {
+        self.dispatch_crud(atomic_tx)
     }
 }
 

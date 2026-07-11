@@ -18,7 +18,7 @@ use crate::mv_record_model::record_point::RecordPointResult;
 use crate::mv_tree::mvbt::{FAN_OUT, NUM_RECORDS};
 use crate::mv_utils::interval::Interval;
 
-type Res<'a> = CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>;
+type Res<'a> = CRUDOperationResult<'a, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxnOutcome {
@@ -31,14 +31,16 @@ pub enum TxnOutcome {
     UserAbort,
 }
 
-fn one<'a>(res: Res<'a>) -> Option<RecordPointResult<TpccKey, TpccRow>> {
+/// `pub(crate)`: also reused by `mv_bench::tpch_queries` (its CH-benCHmark
+/// queries read through the same `TpccTxn` point/range API).
+pub(crate) fn one<'a>(res: Res<'a>) -> Option<RecordPointResult<TpccKey, TpccRow>> {
     match res {
         CRUDOperationResult::MatchedRecords(mut v) => v.pop(),
         other => panic!("tpcc: expected MatchedRecords (point), got {other}"),
     }
 }
 
-fn many<'a>(res: Res<'a>) -> Vec<RecordPointResult<TpccKey, TpccRow>> {
+pub(crate) fn many<'a>(res: Res<'a>) -> Vec<RecordPointResult<TpccKey, TpccRow>> {
     match res {
         CRUDOperationResult::MatchedRecords(v) => v,
         other => panic!("tpcc: expected MatchedRecords (range), got {other}"),

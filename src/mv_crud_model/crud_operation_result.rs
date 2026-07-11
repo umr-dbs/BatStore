@@ -13,6 +13,9 @@ use crate::mv_record_model::version_info::Version;
 /// a potential match is held.
 /// *MatchedRecords*, indicates that the Transaction executed was successful and the result of
 /// matches is held.
+pub type AtomicTxResult<'a, const FAN_OUT: usize, const NUM_RECORDS: usize, Key, Payload>
+= CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>;
+
 #[derive(Default)]
 pub enum CRUDOperationResult<
     'a,

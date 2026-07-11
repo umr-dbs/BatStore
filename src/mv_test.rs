@@ -745,9 +745,8 @@ pub(crate) fn main_load(parms: Vec<String>) {
         let mut oltp = load_query_into_memory(
             query_file_name_clone.as_str());
 
-        // TODO: Explicit for Experiment
         oltp.drain(0..init_keys).for_each(|i| {
-            let _ = index.dispatch_crud(i);
+            let _ = index.dispatch_atomic_transaction(i);
         });
         // index.block_manager.alloc_count.store(0, Ordering::SeqCst);
         // index.block_manager.reuse_count.store(0, Ordering::SeqCst);

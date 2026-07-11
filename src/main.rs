@@ -5,12 +5,14 @@ use itertools::Itertools;
 use std::{env, fs};
 
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::mv_crud_model::crud_operation::{CRUDOperation, TxAtomicOperation};
+use crate::mv_crud_model::crud_operation_result::{AtomicTxResult, CRUDOperationResult};
 use crate::mv_tree::mvbt::Key;
 use crate::mv_tree::mvbt::NUM_RECORDS;
 use crate::mv_tree::mvbt::Payload;
 use crate::mv_tree::mvbt::{FAN_OUT, MVBT};
+use crate::mv_bench::tpcc_schema::TPCC_FAN_OUT;
+use crate::mv_bench::tpcc_schema::TPCC_NUM_RECORDS;
 
 mod mv_bench;
 mod mv_block;
@@ -29,6 +31,7 @@ mod mv_wal;
 
 use crate::mv_sync::smart_cell::OptCell;
 use jemallocator::Jemalloc;
+use crate::mv_bench::tpcc_schema::{TpccKey, TpccRow};
 
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -47,6 +50,7 @@ fn main() {
             "load" => main_load(parms),
             "load2" => main_load_ycsb(parms),
             "tpcc" => mv_bench::tpcc_driver::main_tpcc(parms),
+            "ycsb" => mv_bench::ycsb_driver::main_ycsb(parms),
             // "load_cc_new" => main_load_cc_new(parms),
             // "sorted_insert" => main_sorted_insert(parms),
             s => println!("Unknown Command '{s}'")
@@ -81,25 +85,27 @@ fn main() {
 fn test() {
     let tree = MVBT::default();
 
-    for key in 0..200 {
+    for key in 0..10_000_000 {
         let res
-            = tree.dispatch_crud(CRUDOperation::Insert(key, 0));
+            = tree.dispatch_atomic_transaction(TxAtomicOperation::Insert(key, 0));
+
+        if let AtomicTxResult::Inserted(..) = res {
+        } else { panic!("Error") }
     }
 
-    for v in 1..2000 {
+    for v in (10..20).step_by(2) {
         let range
-            = tree.dispatch_crud(CRUDOperation::Range((0..Key::MAX).into(), v));
+            = tree.dispatch_atomic_transaction(TxAtomicOperation::Range((0..Key::MAX).into(), v));
 
         match range {
             CRUDOperationResult::MatchedRecords(records) =>{
                 let len = records.len();
                 let str_re = records.iter().join("\n");
 
-                println!("Len= {}", len);
+                println!("Len= {}\n{}", len, str_re);
             }
             s => println!("ERROR = {s}")
         }
-
     }
 
 }
@@ -152,8 +158,8 @@ fn make_splash() {
 fn startup() {
     make_splash();
 
-    println!(">>HLE: \t\t\t{}", hle());
-
+    println!(">>HLE: \t\t\t\t{}", hle());
+    println!("++++++++++++++++++++++++++++++++++++++++++++++++++");
     let block_size = size_of::<Block<FAN_OUT, NUM_RECORDS, Key, Payload>>();
     let b_kb = block_size as f32 / 1024f32;
 
@@ -161,16 +167,36 @@ fn startup() {
     let cell_kb = cell_sz as f32 / 1024f32;
     println!(
         "\
-           >>FAN_OUT: \t\t{FAN_OUT}\n\
-           >>NUM_RECORDS: \t\t{NUM_RECORDS}\n\
-           >>size_of(BLOCK): \t{} bytes; {b_kb} kb\n\
-           >>size_of(CELL): \t{} bytes; {cell_kb} kb\n\
-           >>size_of(REF): \t{} bytes; {} kb",
+           >>u64: FAN_OUT: \t\t{FAN_OUT}\n\
+           >>u64: NUM_RECORDS: \t\t{NUM_RECORDS}\n\
+           >>u64: size_of(BLOCK): \t\t{} bytes; {b_kb} kb\n\
+           >>u64: size_of(CELL): \t\t{} bytes; {cell_kb} kb\n\
+           >>u64: size_of(REF): \t\t{} bytes; {} kb",
         block_size,
         cell_sz,
         cell_sz + size_of::<usize>() * 2,
         (cell_sz + size_of::<usize>() * 2) as f32 / 1024f32
     );
+    println!();
+    println!("*****************************************************");
+    let block_size = size_of::<Block<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>>();
+    let b_kb = block_size as f32 / 1024f32;
+
+    let cell_sz = size_of::<OptCell<Block<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>>>();
+    let cell_kb = cell_sz as f32 / 1024f32;
+    println!(
+        "\
+           >>TPC-C: FAN_OUT: \t\t{TPCC_FAN_OUT}\n\
+           >>TPC-C: NUM_RECORDS: \t\t{TPCC_NUM_RECORDS}\n\
+           >>TPC-C: size_of(BLOCK): \t{} bytes; {b_kb} kb\n\
+           >>TPC-C: size_of(CELL): \t{} bytes; {cell_kb} kb\n\
+           >>TPC-C: size_of(REF): \t\t{} bytes; {} kb",
+        block_size,
+        cell_sz,
+        cell_sz + size_of::<usize>() * 2,
+        (cell_sz + size_of::<usize>() * 2) as f32 / 1024f32
+    );
+    println!("*****************************************************");
     println!("*****************************************************");
 }
 

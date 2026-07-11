@@ -24,6 +24,62 @@ fn insert(tree: &TpccTree, key: TpccKey, row: TpccRow) {
     }
 }
 
+/// Standard (fixed) TPC-H `region`/`nation` reference data, reused as-is by
+/// CH-benCHmark (see `mv_bench::tpch_queries` module docs): 5 regions, 25
+/// nations, `(name, regionkey)` pairs indexed by their position (`nationkey`).
+const REGIONS: [&str; 5] = ["AFRICA", "AMERICA", "ASIA", "EUROPE", "MIDDLE EAST"];
+
+const NATIONS: [(&str, u8); 25] = [
+    ("ALGERIA", 0), ("ARGENTINA", 1), ("BRAZIL", 1), ("CANADA", 1), ("EGYPT", 4),
+    ("ETHIOPIA", 0), ("FRANCE", 3), ("GERMANY", 3), ("INDIA", 2), ("INDONESIA", 2),
+    ("IRAN", 4), ("IRAQ", 4), ("JAPAN", 2), ("JORDAN", 4), ("KENYA", 0),
+    ("MOROCCO", 0), ("MOZAMBIQUE", 0), ("PERU", 1), ("CHINA", 2), ("ROMANIA", 3),
+    ("SAUDI ARABIA", 4), ("VIETNAM", 2), ("RUSSIA", 3), ("UNITED KINGDOM", 3), ("UNITED STATES", 1),
+];
+
+/// CH-benCHmark's deterministic STOCK -> SUPPLIER assignment (see
+/// `mv_bench::tpch_queries` module docs): every `(w_id, i_id)` maps to
+/// exactly one of the `num_suppliers` suppliers, spreading suppliers evenly
+/// across stock rows without needing a separate mapping table.
+#[inline]
+pub fn su_suppkey_for(w_id: u32, i_id: u32, num_suppliers: u32) -> u32 {
+    ((w_id as u64 * i_id as u64) % num_suppliers.max(1) as u64) as u32
+}
+
+/// Loads the fixed TPC-H REGION (5 rows) and NATION (25 rows) tables; call
+/// once regardless of scale.
+pub fn populate_regions_and_nations(tree: &TpccTree) {
+    for (r_id, name) in REGIONS.iter().enumerate() {
+        insert(tree, k_region(r_id as u8), TpccRow::Region(Box::new(Region {
+            r_name: name.to_string(),
+            r_comment: rnd_astring(20, 80),
+        })));
+    }
+
+    for (n_id, (name, r_id)) in NATIONS.iter().enumerate() {
+        insert(tree, k_nation(n_id as u8), TpccRow::Nation(Box::new(Nation {
+            n_name: name.to_string(),
+            n_regionkey: *r_id,
+            n_comment: rnd_astring(20, 80),
+        })));
+    }
+}
+
+/// Loads `cfg.num_suppliers` rows (CH-benCHmark's fixed-size SUPPLIER pool,
+/// see `TpccConfig::num_suppliers`), each assigned a uniformly random nation.
+pub fn populate_suppliers(tree: &TpccTree, cfg: &TpccConfig) {
+    for su_id in 0..cfg.num_suppliers {
+        insert(tree, k_supplier(su_id), TpccRow::Supplier(Box::new(Supplier {
+            s_name: format!("Supplier#{:09}", su_id),
+            s_address: rnd_astring(10, 40),
+            s_nationkey: rand::rng().random_range(0..NATIONS.len() as u8),
+            s_phone: rnd_phone(),
+            s_acctbal: rand::rng().random_range(-99999..=999999) as f64 / 100.0,
+            s_comment: rnd_astring(20, 100),
+        })));
+    }
+}
+
 /// Warehouse-independent item catalog; call once regardless of `num_warehouses`.
 pub fn populate_items(tree: &TpccTree, cfg: &TpccConfig) {
     for i_id in 1..=cfg.num_items {
@@ -163,6 +219,7 @@ pub fn populate_warehouse(tree: &TpccTree, cfg: &TpccConfig, w_id: u32, history_
             s_order_cnt: 0,
             s_remote_cnt: 0,
             s_data: rnd_original_data(26, 50),
+            s_su_suppkey: su_suppkey_for(w_id, i_id, cfg.num_suppliers),
         })));
     }
 }
