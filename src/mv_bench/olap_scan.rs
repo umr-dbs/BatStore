@@ -35,6 +35,15 @@ pub struct ScanResult {
     /// benCHmark query's total revenue, or its output group count for
     /// `scanned_tuples` doesn't apply. `None` for the plain scan modes.
     pub summary: Option<f64>,
+    /// HTAP freshness/staleness (`ChBenchmark` mode only): logical-clock
+    /// versions between this query's snapshot (`snapshot`, i.e. `ts_start`)
+    /// and whatever was freshest the instant the query finished
+    /// (`tree.current_version()` read right after) — "how out of date is
+    /// this analytical answer, in versions, the moment I have it." Since
+    /// `GlobalClock` advances on every transaction begin *and* commit, this
+    /// is a logical-tick count, not a raw commit count. `None` for the plain
+    /// scan modes.
+    pub staleness_versions: Option<u64>,
 }
 
 impl ScanResult {
@@ -87,7 +96,7 @@ fn open_and_sleep_once(tree: &TpccTree, hold: Duration, stop: &AtomicBool) -> Sc
     sleep_checking_stop(hold, stop);
     tx.commit();
 
-    ScanResult { mode: "open_and_sleep", delay_secs: hold.as_secs_f64(), snapshot, scanned_tuples: 0, latency_ns: hold.as_nanos(), summary: None }
+    ScanResult { mode: "open_and_sleep", delay_secs: hold.as_secs_f64(), snapshot, scanned_tuples: 0, latency_ns: hold.as_nanos(), summary: None, staleness_versions: None }
 }
 
 /// Fig. 10-style: fixes a snapshot, ages it by `delay`, then scans the
@@ -105,7 +114,7 @@ fn scan_after_delay_once(tree: &TpccTree, delay: Duration) -> ScanResult {
     let latency = start.elapsed();
     tx.commit();
 
-    ScanResult { mode: "scan_after_delay", delay_secs: delay.as_secs_f64(), snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None }
+    ScanResult { mode: "scan_after_delay", delay_secs: delay.as_secs_f64(), snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None, staleness_versions: None }
 }
 
 /// Freshest-snapshot full-database scan, for throughput-style measurements.
@@ -121,7 +130,7 @@ fn fresh_full_scan_once(tree: &TpccTree) -> ScanResult {
     let latency = start.elapsed();
     tx.commit();
 
-    ScanResult { mode: "fresh_full_scan", delay_secs: 0.0, snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None }
+    ScanResult { mode: "fresh_full_scan", delay_secs: 0.0, snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None, staleness_versions: None }
 }
 
 /// Runs each of the 4 implemented CH-benCHmark queries once (see
@@ -131,52 +140,59 @@ fn fresh_full_scan_once(tree: &TpccTree) -> ScanResult {
 /// scan size the way `fresh_full_scan_once` does — and `summary` holds a
 /// characteristic aggregate value (Q1: total revenue across every group;
 /// Q6: the forecasted revenue; Q4: total flagged orders; Q5: top nation's
-/// revenue).
+/// revenue). `staleness_versions` is `tree.current_version()` (read right
+/// after each query returns) minus that query's own snapshot — see
+/// `ScanResult::staleness_versions` and `tpch_queries` module docs.
 fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64) -> Vec<ScanResult> {
     let mut out = Vec::with_capacity(4);
+    let staleness = |ts_start: Version| Some(tree.current_version().saturating_sub(ts_start));
 
     let start = Instant::now();
-    let q1 = tpch_queries::q1(tree, date_hi);
+    let (q1, ts_start) = tpch_queries::q1(tree, date_hi);
     out.push(ScanResult {
         mode: "ch_q1_pricing_summary",
         delay_secs: 0.0,
-        snapshot: 0,
+        snapshot: ts_start,
         scanned_tuples: q1.len(),
         latency_ns: start.elapsed().as_nanos(),
         summary: Some(q1.iter().map(|g| g.sum_amount).sum()),
+        staleness_versions: staleness(ts_start),
     });
 
     let start = Instant::now();
-    let q6 = tpch_queries::q6(tree, date_lo, date_hi, 24);
+    let (q6, ts_start) = tpch_queries::q6(tree, date_lo, date_hi, 24);
     out.push(ScanResult {
         mode: "ch_q6_forecast_revenue",
         delay_secs: 0.0,
-        snapshot: 0,
+        snapshot: ts_start,
         scanned_tuples: 1,
         latency_ns: start.elapsed().as_nanos(),
         summary: Some(q6),
+        staleness_versions: staleness(ts_start),
     });
 
     let start = Instant::now();
-    let q4 = tpch_queries::q4(tree, date_lo, date_hi, Duration::from_secs(3600 * 24).as_millis() as i64);
+    let (q4, ts_start) = tpch_queries::q4(tree, date_lo, date_hi, Duration::from_secs(3600 * 24).as_millis() as i64);
     out.push(ScanResult {
         mode: "ch_q4_order_priority",
         delay_secs: 0.0,
-        snapshot: 0,
+        snapshot: ts_start,
         scanned_tuples: q4.len(),
         latency_ns: start.elapsed().as_nanos(),
         summary: Some(q4.iter().map(|g| g.order_count as f64).sum()),
+        staleness_versions: staleness(ts_start),
     });
 
     let start = Instant::now();
-    let q5 = tpch_queries::q5(tree, region_name, date_lo, date_hi);
+    let (q5, ts_start) = tpch_queries::q5(tree, region_name, date_lo, date_hi);
     out.push(ScanResult {
         mode: "ch_q5_revenue_by_nation",
         delay_secs: 0.0,
-        snapshot: 0,
+        snapshot: ts_start,
         scanned_tuples: q5.len(),
         latency_ns: start.elapsed().as_nanos(),
         summary: q5.first().map(|r| r.revenue),
+        staleness_versions: staleness(ts_start),
     });
 
     out

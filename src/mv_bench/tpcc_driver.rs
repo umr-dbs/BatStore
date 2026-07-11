@@ -53,6 +53,13 @@ pub struct DriverConfig {
     /// measured phase. `None` disables WAL entirely (population and OLTP
     /// writes take the plain, unlogged path).
     pub wal: Option<(std::path::PathBuf, Duration)>,
+    /// HTAP interference measurement: if set, runs a short OLTP-only
+    /// sub-phase of this duration (same terminals, zero OLAP threads) right
+    /// after loading and *before* the real timed phase, so the real phase's
+    /// tpmC (measured with OLAP running) can be compared against an
+    /// OLAP-free baseline from the *same* loaded data set. `None` skips it
+    /// entirely (no extra threads, no extra wall-clock cost) — the default.
+    pub htap_baseline: Option<Duration>,
 }
 
 // Counter layout: 3 outcomes (Committed, Conflict, UserAbort) per read/write
@@ -157,13 +164,22 @@ pub fn run_tpcc(cfg: DriverConfig) {
     }
     let mut num_olap = cfg.num_olap_threads;
 
+    // The HTAP baseline sub-phase (if enabled) spawns its own `num_terminals`
+    // OS threads before the real phase's — a *different* set of threads from
+    // the real phase's terminals, each still permanently claiming its own
+    // WorkerId (see module docs), so it doubles the terminal thread budget.
+    let terminal_cost = if cfg.htap_baseline.is_some() { 2 } else { 1 };
+
     // +1: the main thread itself acquires a WorkerId too, since it does the
     // (sequential) data-set population directly via `dispatch_crud` before
     // any terminal/OLAP thread is spawned.
-    if 1 + num_terminals + num_olap > max_threads {
-        println!("!! 1 loader + {num_terminals} terminals + {num_olap} OLAP threads > max_workers ({max_threads} = num_cpus); clamping.");
-        num_terminals = num_terminals.min(max_threads.saturating_sub(2).max(1));
-        num_olap = max_threads.saturating_sub(1 + num_terminals);
+    if 1 + num_terminals * terminal_cost + num_olap > max_threads {
+        println!(
+            "!! 1 loader + {num_terminals} terminals{} + {num_olap} OLAP threads > max_workers ({max_threads} = num_cpus); clamping.",
+            if terminal_cost == 2 { " (x2: HTAP baseline sub-phase)" } else { "" }
+        );
+        num_terminals = (max_threads.saturating_sub(2) / terminal_cost).max(1);
+        num_olap = max_threads.saturating_sub(1 + num_terminals * terminal_cost);
     }
 
     let tree = Arc::new(TpccTree::make_standard(cfg.root_star_index));
@@ -187,7 +203,8 @@ pub fn run_tpcc(cfg: DriverConfig) {
          - WAL                   = {}\n\
          - root*                 = {}\n\
          - items/customers/orders per district = {}/{}/{}\n\
-         - CH-benCHmark suppliers = {}",
+         - CH-benCHmark suppliers = {}\n\
+         - HTAP baseline         = {}",
         cfg.tpcc.num_warehouses,
         num_olap_mode_summary(&cfg.olap_mode),
         if cfg.affinity { "warehouse affinity (0% remote)" } else { "cross warehouse" },
@@ -200,6 +217,10 @@ pub fn run_tpcc(cfg: DriverConfig) {
         cfg.root_star_index,
         cfg.tpcc.num_items, cfg.tpcc.customers_per_district, cfg.tpcc.initial_orders_per_district,
         cfg.tpcc.num_suppliers,
+        match cfg.htap_baseline {
+            Some(d) => format!("On ({d:?} OLTP-only sub-phase)"),
+            None => "Off".to_string(),
+        },
     );
 
     let mut assigned: Vec<Vec<u32>> = vec![Vec::new(); num_terminals];
@@ -231,6 +252,43 @@ pub fn run_tpcc(cfg: DriverConfig) {
         populate_warehouse(&tree, &cfg.tpcc, w, &history_seq);
     }
     println!("Loaded {} warehouse(s) in {:?}.", cfg.tpcc.num_warehouses, wh_load_start.elapsed());
+
+    // HTAP interference baseline (see `DriverConfig::htap_baseline` docs): a
+    // short OLTP-only sub-phase, using the *same* loaded data set, same
+    // `num_terminals`/affinity assignment, and same `history_seq` counter as
+    // the real timed phase below — so its tpmC is a fair OLAP-free
+    // comparison point for the real phase's tpmC (measured with OLAP
+    // running), not a separate/differently-configured run.
+    let baseline_tpm_c = cfg.htap_baseline.map(|baseline_duration| {
+        println!("Running HTAP baseline (OLTP-only, no OLAP) for {baseline_duration:?}...");
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(num_terminals + 1));
+
+        let handles: Vec<_> = (0..num_terminals).map(|t| {
+            let tree = tree.clone();
+            let tpcc_cfg = cfg.tpcc;
+            let my_ws = assigned[t].clone();
+            let affinity = cfg.affinity;
+            let stop = stop.clone();
+            let barrier = barrier.clone();
+            let history_seq = history_seq.clone();
+            thread::spawn(move || terminal_thread(tree, tpcc_cfg, my_ws, affinity, baseline_duration, stop, barrier, history_seq))
+        }).collect();
+
+        barrier.wait();
+        let start = Instant::now();
+        thread::sleep(baseline_duration);
+        stop.store(true, Relaxed);
+
+        let stats: Vec<TerminalStats> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let wall = start.elapsed();
+
+        let new_order_total: u64 = stats.iter().map(|s| s.totals[NO]).sum();
+        let tpm_c = new_order_total as f64 / (wall.as_secs_f64() / 60.0);
+        println!("HTAP baseline done: {new_order_total} New-Order commits in {wall:?} ({tpm_c:.2} tpmC, no OLAP).");
+        tpm_c
+    });
+
     let stop = Arc::new(AtomicBool::new(false));
     let barrier = Arc::new(Barrier::new(num_terminals + num_olap + 1));
     let (scan_tx, scan_rx) = unbounded::<ScanResult>();
@@ -282,7 +340,7 @@ pub fn run_tpcc(cfg: DriverConfig) {
         scan_results.push(r);
     }
 
-    write_results(&terminal_stats, &scan_results, duration, actual_wall);
+    write_results(&terminal_stats, &scan_results, duration, actual_wall, baseline_tpm_c);
 }
 
 fn num_olap_mode_summary(mode: &OlapMode) -> &'static str {
@@ -299,6 +357,7 @@ fn write_results(
     scan_results: &[ScanResult],
     requested_duration: Duration,
     actual_wall: Duration,
+    baseline_tpm_c: Option<f64>,
 ) {
     let series_len = requested_duration.as_secs() as usize + 2;
     let mut per_sec = vec![0u64; series_len];
@@ -321,12 +380,13 @@ fn write_results(
 
     let _ = fs::remove_file("tpcc_scan.csv");
     let mut scan_file = OpenOptions::new().create(true).append(true).open("tpcc_scan.csv").unwrap();
-    scan_file.write_all(b"mode,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary\n").unwrap();
+    scan_file.write_all(b"mode,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary,staleness_versions\n").unwrap();
     for r in scan_results {
         scan_file.write_all(format!(
-            "{},{},{},{},{},{:.2},{}\n",
+            "{},{},{},{},{},{:.2},{},{}\n",
             r.mode, r.delay_secs, r.snapshot, r.scanned_tuples, r.latency_ns, r.tuples_per_sec(),
-            r.summary.map(|s| format!("{s:.2}")).unwrap_or_default()
+            r.summary.map(|s| format!("{s:.2}")).unwrap_or_default(),
+            r.staleness_versions.map(|s| s.to_string()).unwrap_or_default(),
         ).as_bytes()).unwrap();
     }
 
@@ -338,10 +398,21 @@ fn write_results(
         println!("{:<32} {}", COUNTER_NAMES[i], totals[i]);
     }
     println!("{:<32} {:.2}", "tpmC (New-Order/min)", tpm_c);
+    if let Some(baseline) = baseline_tpm_c {
+        let interference_pct = if baseline > 0.0 { (baseline - tpm_c) / baseline * 100.0 } else { 0.0 };
+        println!("{:<32} {:.2}", "tpmC (HTAP baseline, no OLAP)", baseline);
+        println!("{:<32} {:.1}%", "OLTP interference from OLAP", interference_pct);
+    }
     println!("{:<32} {}", "OLAP scans/holds completed", scan_results.len());
     if !scan_results.is_empty() {
         let avg_tps = scan_results.iter().map(|r| r.tuples_per_sec()).sum::<f64>() / scan_results.len() as f64;
         println!("{:<32} {:.1}", "OLAP avg tuples/sec", avg_tps);
+    }
+    let staleness: Vec<u64> = scan_results.iter().filter_map(|r| r.staleness_versions).collect();
+    if !staleness.is_empty() {
+        let avg = staleness.iter().sum::<u64>() as f64 / staleness.len() as f64;
+        let max = staleness.iter().max().unwrap();
+        println!("{:<32} {:.1} (max {max})", "HTAP staleness (versions, avg)", avg);
     }
     println!("Wrote tpcc_oltp_timeseries.csv and tpcc_scan.csv");
 }
@@ -374,6 +445,7 @@ pub fn main_tpcc(parms: Vec<String>) {
     let wal_flush_ms: u64 = arg(&parms, 17, 5);
     let ch_region: String = parms.get(18).cloned().unwrap_or_else(|| "EUROPE".to_string());
     let num_suppliers: u32 = arg(&parms, 19, 10_000);
+    let htap_baseline_secs: u64 = arg(&parms, 20, 0);
 
     let (olap_mode, num_olap_threads) = match olap_mode_str.as_str() {
         "none" => (OlapMode::RepeatedFreshFullScan, 0),
@@ -417,5 +489,6 @@ pub fn main_tpcc(parms: Vec<String>) {
         olap_mode,
         num_olap_threads,
         wal: wal_enabled.then(|| (std::path::PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
+        htap_baseline: (htap_baseline_secs > 0).then(|| Duration::from_secs(htap_baseline_secs)),
     });
 }

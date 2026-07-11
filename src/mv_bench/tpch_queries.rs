@@ -31,7 +31,17 @@ use std::collections::HashMap;
 
 use crate::mv_bench::tpcc_schema::*;
 use crate::mv_bench::tpcc_txn::{many, one};
+use crate::mv_record_model::version_info::Version;
 use crate::mv_utils::interval::Interval;
+
+// Every query below returns its result alongside the snapshot (`ts_start`)
+// it read under, letting a caller measure HTAP-style staleness: how many
+// logical-clock versions (`GlobalClock` advances on every transaction begin
+// *and* commit, so this counts logical ticks, not a raw commit count)
+// elapsed between this query's snapshot and whatever's freshest by the time
+// it's read the result — i.e. `tree.current_version() - ts_start` right
+// after a query returns is "how stale is this analytical answer, in
+// versions, the moment I have it."
 
 /// Per-`ol_number` group produced by [`q1`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -58,8 +68,9 @@ impl OrderLineSummary {
 /// `l_returnflag`/`l_linestatus`, since `order_line` has no such column),
 /// aggregating count/sum(quantity)/sum(amount). One full `ORDER_LINE`
 /// table scan.
-pub fn q1(tree: &TpccTree, delivered_before: i64) -> Vec<OrderLineSummary> {
+pub fn q1(tree: &TpccTree, delivered_before: i64) -> (Vec<OrderLineSummary>, Version) {
     let tx = TpccTxn::begin(tree);
+    let ts_start = tx.ts_start();
     let lines = many(tx.range(order_line_table_range(), true));
     tx.commit();
 
@@ -80,25 +91,27 @@ pub fn q1(tree: &TpccTree, delivered_before: i64) -> Vec<OrderLineSummary> {
 
     let mut out: Vec<_> = groups.into_iter().filter(|g| g.count > 0).collect();
     out.sort_by_key(|g| g.ol_number);
-    out
+    (out, ts_start)
 }
 
 /// CH-benCHmark Q6 ("Forecasting Revenue Change", adapted from TPC-H Q6):
 /// total revenue (`sum(ol_amount)`) from order-lines delivered within
 /// `[date_lo, date_hi)` whose quantity is below `max_qty`. One full
 /// `ORDER_LINE` table scan.
-pub fn q6(tree: &TpccTree, date_lo: i64, date_hi: i64, max_qty: u8) -> f64 {
+pub fn q6(tree: &TpccTree, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, Version) {
     let tx = TpccTxn::begin(tree);
+    let ts_start = tx.ts_start();
     let lines = many(tx.range(order_line_table_range(), true));
     tx.commit();
 
-    lines.iter()
+    let revenue = lines.iter()
         .filter_map(|r| {
             let ol = r.payload.as_order_line();
             let delivered = ol.ol_delivery_d?;
             (delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty).then_some(ol.ol_amount)
         })
-        .sum()
+        .sum();
+    (revenue, ts_start)
 }
 
 /// Per-`o_ol_cnt` group produced by [`q4`].
@@ -117,8 +130,9 @@ pub struct OrderPriorityCount {
 /// table scan, plus one `ORDER_LINE` range scan per order entered in range
 /// (a correlated semi-join / "exists" check, done as a nested loop since
 /// there's no join operator here — see module docs).
-pub fn q4(tree: &TpccTree, date_lo: i64, date_hi: i64, late_slack_millis: i64) -> Vec<OrderPriorityCount> {
+pub fn q4(tree: &TpccTree, date_lo: i64, date_hi: i64, late_slack_millis: i64) -> (Vec<OrderPriorityCount>, Version) {
     let tx = TpccTxn::begin(tree);
+    let ts_start = tx.ts_start();
     let orders = many(tx.range(orders_table_range(), true));
 
     let mut counts: HashMap<u8, u64> = HashMap::new();
@@ -144,7 +158,7 @@ pub fn q4(tree: &TpccTree, date_lo: i64, date_hi: i64, late_slack_millis: i64) -
         .map(|(o_ol_cnt, order_count)| OrderPriorityCount { o_ol_cnt, order_count })
         .collect();
     out.sort_by_key(|c| c.o_ol_cnt);
-    out
+    (out, ts_start)
 }
 
 /// Per-nation revenue produced by [`q5`].
@@ -169,8 +183,9 @@ pub struct NationRevenue {
 /// still exercises the same join shape and the same region/date filter +
 /// group-by + aggregate as the original, without bolting an obscure
 /// data-model hack onto this schema.
-pub fn q5(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64) -> Vec<NationRevenue> {
+pub fn q5(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64) -> (Vec<NationRevenue>, Version) {
     let tx = TpccTxn::begin(tree);
+    let ts_start = tx.ts_start();
 
     // Small dimension tables loaded once into memory — see module docs.
     let regions = many(tx.range(region_table_range(), true));
@@ -179,7 +194,7 @@ pub fn q5(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64) -> Vec
         .map(|r| decode_region_id(r.key))
     else {
         tx.commit();
-        return Vec::new();
+        return (Vec::new(), ts_start);
     };
 
     let nations = many(tx.range(nation_table_range(), true));
@@ -219,5 +234,5 @@ pub fn q5(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64) -> Vec
         .filter_map(|(nation_id, rev)| nation_names.get(&nation_id).map(|name| NationRevenue { n_name: name.clone(), revenue: rev }))
         .collect();
     out.sort_by(|a, b| b.revenue.partial_cmp(&a.revenue).unwrap());
-    out
+    (out, ts_start)
 }
