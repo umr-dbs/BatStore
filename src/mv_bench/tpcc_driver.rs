@@ -380,11 +380,11 @@ fn write_results(
 
     let _ = fs::remove_file("tpcc_scan.csv");
     let mut scan_file = OpenOptions::new().create(true).append(true).open("tpcc_scan.csv").unwrap();
-    scan_file.write_all(b"mode,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary,staleness_versions\n").unwrap();
+    scan_file.write_all(b"mode,elapsed_secs,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary,staleness_versions\n").unwrap();
     for r in scan_results {
         scan_file.write_all(format!(
-            "{},{},{},{},{},{:.2},{},{}\n",
-            r.mode, r.delay_secs, r.snapshot, r.scanned_tuples, r.latency_ns, r.tuples_per_sec(),
+            "{},{:.3},{},{},{},{},{:.2},{},{}\n",
+            r.mode, r.elapsed_secs, r.delay_secs, r.snapshot, r.scanned_tuples, r.latency_ns, r.tuples_per_sec(),
             r.summary.map(|s| format!("{s:.2}")).unwrap_or_default(),
             r.staleness_versions.map(|s| s.to_string()).unwrap_or_default(),
         ).as_bytes()).unwrap();
@@ -491,4 +491,90 @@ pub fn main_tpcc(parms: Vec<String>) {
         wal: wal_enabled.then(|| (std::path::PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
         htap_baseline: (htap_baseline_secs > 0).then(|| Duration::from_secs(htap_baseline_secs)),
     });
+}
+
+/// Shared defaults for the `tpch`/`htap` one-command presets below:
+/// standard TPC-C/CH-benCHmark scale (`TpccConfig::default()` — 3,000
+/// customers/orders per district, 100,000 items, 10,000 suppliers),
+/// warehouse affinity, GC on, no WAL. Only what actually differs between the
+/// two presets (OLAP mode, OLAP thread count, HTAP baseline) is left as a
+/// parameter — the whole point of these presets is that the caller
+/// shouldn't have to think about anything else.
+fn standard_driver_config(
+    num_warehouses: u32,
+    duration: Duration,
+    olap_mode: OlapMode,
+    num_olap_threads: usize,
+    htap_baseline: Option<Duration>,
+) -> DriverConfig {
+    DriverConfig {
+        tpcc: TpccConfig { num_warehouses, ..TpccConfig::default() },
+        num_terminals: num_warehouses as usize,
+        duration,
+        affinity: true,
+        gc: true,
+        update_in_place: false,
+        root_star_index: RootIndexType::FrugalList,
+        olap_mode,
+        num_olap_threads,
+        wal: None,
+        htap_baseline,
+    }
+}
+
+/// One-command CH-benCHmark preset ("typical TPC-H" run in this harness):
+/// the standard TPC-C OLTP mix running concurrently with the 4 implemented
+/// CH-benCHmark analytical queries (`tpch_queries`) in rotation — see
+/// `OlapMode::ChBenchmark`. There's no standalone "TPC-H alone" mode:
+/// CH-benCHmark's whole premise is TPC-H-style queries layered on the live
+/// TPC-C schema, so this mixed run *is* what "run TPC-H" means here.
+///
+/// Args: `[num_warehouses=4] [duration_secs=60] [num_olap_threads=1]
+/// [region_name=EUROPE]` — for full control over every other TPC-C/CH
+/// parameter, use `tpcc ... 9=ch ...` directly (see `main_tpcc`).
+pub fn main_tpch(parms: Vec<String>) {
+    fn arg<T: std::str::FromStr>(parms: &[String], idx: usize, default: T) -> T {
+        parms.get(idx).and_then(|s| s.parse().ok()).unwrap_or(default)
+    }
+
+    let num_warehouses: u32 = arg(&parms, 2, 4);
+    let duration_secs: u64 = arg(&parms, 3, 60);
+    let num_olap_threads: usize = arg(&parms, 4, 1);
+    let region_name: String = parms.get(5).cloned().unwrap_or_else(|| "EUROPE".to_string());
+
+    run_tpcc(standard_driver_config(
+        num_warehouses,
+        Duration::from_secs(duration_secs),
+        OlapMode::ChBenchmark { region_name, date_lo: i64::MIN, date_hi: i64::MAX },
+        num_olap_threads,
+        None,
+    ));
+}
+
+/// One-command HTAP preset: identical to [`main_tpch`] but additionally
+/// enables the OLTP-only baseline sub-phase (`DriverConfig::htap_baseline`),
+/// so the report includes the HTAP-specific interference (%) and
+/// freshness/staleness (versions) metrics — see `tpcc_driver`/`tpch_queries`
+/// module docs.
+///
+/// Args: `[num_warehouses=4] [duration_secs=60] [num_olap_threads=1]
+/// [baseline_secs=15] [region_name=EUROPE]`.
+pub fn main_htap(parms: Vec<String>) {
+    fn arg<T: std::str::FromStr>(parms: &[String], idx: usize, default: T) -> T {
+        parms.get(idx).and_then(|s| s.parse().ok()).unwrap_or(default)
+    }
+
+    let num_warehouses: u32 = arg(&parms, 2, 4);
+    let duration_secs: u64 = arg(&parms, 3, 60);
+    let num_olap_threads: usize = arg(&parms, 4, 1);
+    let baseline_secs: u64 = arg(&parms, 5, 15);
+    let region_name: String = parms.get(6).cloned().unwrap_or_else(|| "EUROPE".to_string());
+
+    run_tpcc(standard_driver_config(
+        num_warehouses,
+        Duration::from_secs(duration_secs),
+        OlapMode::ChBenchmark { region_name, date_lo: i64::MIN, date_hi: i64::MAX },
+        num_olap_threads,
+        Some(Duration::from_secs(baseline_secs)),
+    ));
 }

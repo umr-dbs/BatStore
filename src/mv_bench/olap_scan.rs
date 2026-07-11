@@ -26,6 +26,10 @@ use crate::mv_record_model::version_info::Version;
 #[derive(Clone, Debug)]
 pub struct ScanResult {
     pub mode: &'static str,
+    /// Wall-clock seconds since this OLAP worker thread started (i.e. since
+    /// the timed phase began) — the x-axis for plotting how a metric moves
+    /// over the run, since CSV row order alone doesn't carry a time value.
+    pub elapsed_secs: f64,
     pub delay_secs: f64,
     pub snapshot: Version,
     pub scanned_tuples: usize,
@@ -90,18 +94,21 @@ fn sleep_checking_stop(dur: Duration, stop: &AtomicBool) {
 
 /// Fig. 1/9-style: open a snapshot, hold it for `hold` (or until `stop`),
 /// then release without ever reading — the worst case for OLTP robustness.
-fn open_and_sleep_once(tree: &TpccTree, hold: Duration, stop: &AtomicBool) -> ScanResult {
+fn open_and_sleep_once(tree: &TpccTree, hold: Duration, stop: &AtomicBool, run_start: Instant) -> ScanResult {
     let tx = TpccTxn::begin(tree);
     let snapshot = tx.ts_start();
     sleep_checking_stop(hold, stop);
     tx.commit();
 
-    ScanResult { mode: "open_and_sleep", delay_secs: hold.as_secs_f64(), snapshot, scanned_tuples: 0, latency_ns: hold.as_nanos(), summary: None, staleness_versions: None }
+    ScanResult {
+        mode: "open_and_sleep", elapsed_secs: run_start.elapsed().as_secs_f64(), delay_secs: hold.as_secs_f64(),
+        snapshot, scanned_tuples: 0, latency_ns: hold.as_nanos(), summary: None, staleness_versions: None,
+    }
 }
 
 /// Fig. 10-style: fixes a snapshot, ages it by `delay`, then scans the
 /// warehouse+district relations under that aged snapshot.
-fn scan_after_delay_once(tree: &TpccTree, delay: Duration) -> ScanResult {
+fn scan_after_delay_once(tree: &TpccTree, delay: Duration, run_start: Instant) -> ScanResult {
     let tx = TpccTxn::begin(tree);
     let snapshot = tx.ts_start();
     std::thread::sleep(delay);
@@ -114,11 +121,14 @@ fn scan_after_delay_once(tree: &TpccTree, delay: Duration) -> ScanResult {
     let latency = start.elapsed();
     tx.commit();
 
-    ScanResult { mode: "scan_after_delay", delay_secs: delay.as_secs_f64(), snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None, staleness_versions: None }
+    ScanResult {
+        mode: "scan_after_delay", elapsed_secs: run_start.elapsed().as_secs_f64(), delay_secs: delay.as_secs_f64(),
+        snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None, staleness_versions: None,
+    }
 }
 
 /// Freshest-snapshot full-database scan, for throughput-style measurements.
-fn fresh_full_scan_once(tree: &TpccTree) -> ScanResult {
+fn fresh_full_scan_once(tree: &TpccTree, run_start: Instant) -> ScanResult {
     let tx = TpccTxn::begin(tree);
     let snapshot = tx.ts_start();
 
@@ -130,7 +140,10 @@ fn fresh_full_scan_once(tree: &TpccTree) -> ScanResult {
     let latency = start.elapsed();
     tx.commit();
 
-    ScanResult { mode: "fresh_full_scan", delay_secs: 0.0, snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None, staleness_versions: None }
+    ScanResult {
+        mode: "fresh_full_scan", elapsed_secs: run_start.elapsed().as_secs_f64(), delay_secs: 0.0,
+        snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None, staleness_versions: None,
+    }
 }
 
 /// Runs each of the 4 implemented CH-benCHmark queries once (see
@@ -143,7 +156,7 @@ fn fresh_full_scan_once(tree: &TpccTree) -> ScanResult {
 /// revenue). `staleness_versions` is `tree.current_version()` (read right
 /// after each query returns) minus that query's own snapshot — see
 /// `ScanResult::staleness_versions` and `tpch_queries` module docs.
-fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64) -> Vec<ScanResult> {
+fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64, run_start: Instant) -> Vec<ScanResult> {
     let mut out = Vec::with_capacity(4);
     let staleness = |ts_start: Version| Some(tree.current_version().saturating_sub(ts_start));
 
@@ -151,6 +164,7 @@ fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, d
     let (q1, ts_start) = tpch_queries::q1(tree, date_hi);
     out.push(ScanResult {
         mode: "ch_q1_pricing_summary",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
         delay_secs: 0.0,
         snapshot: ts_start,
         scanned_tuples: q1.len(),
@@ -163,6 +177,7 @@ fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, d
     let (q6, ts_start) = tpch_queries::q6(tree, date_lo, date_hi, 24);
     out.push(ScanResult {
         mode: "ch_q6_forecast_revenue",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
         delay_secs: 0.0,
         snapshot: ts_start,
         scanned_tuples: 1,
@@ -175,6 +190,7 @@ fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, d
     let (q4, ts_start) = tpch_queries::q4(tree, date_lo, date_hi, Duration::from_secs(3600 * 24).as_millis() as i64);
     out.push(ScanResult {
         mode: "ch_q4_order_priority",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
         delay_secs: 0.0,
         snapshot: ts_start,
         scanned_tuples: q4.len(),
@@ -187,6 +203,7 @@ fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, d
     let (q5, ts_start) = tpch_queries::q5(tree, region_name, date_lo, date_hi);
     out.push(ScanResult {
         mode: "ch_q5_revenue_by_nation",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
         delay_secs: 0.0,
         snapshot: ts_start,
         scanned_tuples: q5.len(),
@@ -202,10 +219,11 @@ fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, d
 /// back to `results` as it finishes. Runs until `stop` is set (checked
 /// between iterations, and — for `OpenAndSleep` — during the hold itself).
 pub fn run_olap_worker(tree: &TpccTree, mode: OlapMode, stop: &AtomicBool, results: &Sender<ScanResult>) {
+    let run_start = Instant::now();
     match mode {
         OlapMode::OpenAndSleep { hold } => {
             while !stop.load(Relaxed) {
-                let r = open_and_sleep_once(tree, hold, stop);
+                let r = open_and_sleep_once(tree, hold, stop, run_start);
                 let _ = results.send(r);
             }
         }
@@ -214,19 +232,19 @@ pub fn run_olap_worker(tree: &TpccTree, mode: OlapMode, stop: &AtomicBool, resul
                 if stop.load(Relaxed) {
                     break;
                 }
-                let r = scan_after_delay_once(tree, delay);
+                let r = scan_after_delay_once(tree, delay, run_start);
                 let _ = results.send(r);
             }
         }
         OlapMode::RepeatedFreshFullScan => {
             while !stop.load(Relaxed) {
-                let r = fresh_full_scan_once(tree);
+                let r = fresh_full_scan_once(tree, run_start);
                 let _ = results.send(r);
             }
         }
         OlapMode::ChBenchmark { region_name, date_lo, date_hi } => {
             while !stop.load(Relaxed) {
-                for r in ch_benchmark_queries_once(tree, &region_name, date_lo, date_hi) {
+                for r in ch_benchmark_queries_once(tree, &region_name, date_lo, date_hi, run_start) {
                     let _ = results.send(r);
                     if stop.load(Relaxed) {
                         break;

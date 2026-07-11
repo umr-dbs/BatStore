@@ -50,6 +50,8 @@ fn main() {
             "load" => main_load(parms),
             "load2" => main_load_ycsb(parms),
             "tpcc" => mv_bench::tpcc_driver::main_tpcc(parms),
+            "tpch" => mv_bench::tpcc_driver::main_tpch(parms),
+            "htap" => mv_bench::tpcc_driver::main_htap(parms),
             "ycsb" => mv_bench::ycsb_driver::main_ycsb(parms),
             // "load_cc_new" => main_load_cc_new(parms),
             // "sorted_insert" => main_sorted_insert(parms),

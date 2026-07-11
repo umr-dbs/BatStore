@@ -211,7 +211,7 @@ impl<const FAN_OUT: usize,
         let current_len
             = internal_page.sum_len();
 
-        match self.split(simba.deref(), &fence) {
+        let version = match self.split(simba.deref(), &fence) {
             BlockSplit::ByKey(left_fence,
                               left,
                               right_fence,
@@ -234,6 +234,7 @@ impl<const FAN_OUT: usize,
 
                 internal_page.commit_delta(1, 1);
                 internal_page.mark_version_obsolete(child_index);
+                version
             }
             BlockSplit::ByVersion(fresh) => {
                 let version
@@ -247,11 +248,23 @@ impl<const FAN_OUT: usize,
 
                 internal_page.commit_delta(0, 1);
                 internal_page.mark_version_obsolete(child_index);
+                version
             }
-        }
+        };
 
+        // Registers the *new* entry's birth version as this old child's
+        // death — not `internal_page.get_version(child_index)` (the old
+        // child's own, much older birth version), which was the bug: an
+        // active reader whose snapshot predates `version` still needs to
+        // route through this now-obsoleted entry (that's exactly what makes
+        // it "obsolete" rather than "gone" — see `TimeMatcher::matched`), so
+        // registering the block as dead using its own birth version made it
+        // eligible for GC reuse immediately, long before every such reader
+        // was done with it — a premature-reclaim bug that could hand this
+        // block to an unrelated concurrent writer while a reader was still
+        // (or about to start) traversing into it.
         self.block_manager.register_dead(
-            internal_page.get_version(child_index),
+            version,
             internal_page.get_pointer(child_index).clone());
 
         mufasa
@@ -313,10 +326,14 @@ impl<const FAN_OUT: usize,
                 mufasa_internal_page
                     .mark_version_obsolete(index_simba);
 
+                // See `on_overflow_node`'s matching comment: the new
+                // `merged_block` entry's birth version (`version`) is the
+                // correct death point for these two now-obsoleted entries,
+                // not their own (older) birth versions.
                 self.block_manager.register_dead_col([
-                    (mufasa_internal_page.get_version(index_simba),
+                    (version,
                      mufasa_internal_page.get_pointer(index_simba).clone()),
-                    (mufasa_internal_page.get_version(index_sibling),
+                    (version,
                      mufasa_internal_page.get_pointer(index_sibling).clone())
                 ])
             }
@@ -373,10 +390,11 @@ impl<const FAN_OUT: usize,
                 mufasa_internal_page
                     .mark_version_obsolete(index_simba);
 
+                // See `on_overflow_node`'s matching comment.
                 self.block_manager.register_dead_col([
-                    (mufasa_internal_page.get_version(index_simba),
+                    (version,
                      mufasa_internal_page.get_pointer(index_simba).clone()),
-                    (mufasa_internal_page.get_version(index_sibling),
+                    (version,
                      mufasa_internal_page.get_pointer(index_sibling).clone())
                 ])
             }
@@ -922,12 +940,18 @@ impl<const FAN_OUT: usize,
                 let new_root_latch
                     = new_root_block.borrow_read();
 
-                let old_v = _master_guard.version();
                 self.root.append_root(
                     Root::new(new_root_block.clone(), version, height + 1));
 
+                // Registers the *new* root's birth version (`version`) as
+                // the old root's death, not `_master_guard.version()` (the
+                // old root's own, much older birth version) — see
+                // `on_overflow_node`'s matching comment; the same
+                // premature-reclaim bug applied here too, since any active
+                // reader whose snapshot predates `version` still needs to
+                // resolve through this now-superseded root.
                 self.block_manager.register_dead(
-                    old_v, root_guard.inner_cell());
+                    version, root_guard.inner_cell());
 
                 new_root_latch
             }
@@ -938,12 +962,11 @@ impl<const FAN_OUT: usize,
                 let new_root_latch
                     = new_root_block.borrow_read();
 
-                let old_v = _master_guard.version();
                 self.root.append_root(
                     Root::new(new_root_block.clone(), version, height));
 
                 self.block_manager.register_dead(
-                    old_v, root_guard.inner_cell());
+                    version, root_guard.inner_cell());
 
                 new_root_latch
             }

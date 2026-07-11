@@ -5,13 +5,14 @@ use std::ops::Deref;
 use itertools::Itertools;
 use crate::mv_block::block::BlockGuard;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_page_model::BlockRef;
+use crate::mv_page_model::{Attempts, BlockRef};
 use crate::mv_page_model::node::PageType;
 use crate::mv_page_model::time_matcher::TimeMatcher;
 use crate::mv_record_model::record_point::RecordPointResult;
 use crate::mv_record_model::tx_stamp::WorkerId;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_root::index_root::RootIndex;
+use crate::mv_sync::smart_cell::sched_yield;
 use crate::mv_tree::mvbt::{MVBTSt};
 use crate::mv_utils::interval::Interval;
 
@@ -63,30 +64,59 @@ impl<const FAN_OUT: usize,
             .block
     }
 
+    /// Descends from `root` to the leaf that should hold `key` at
+    /// `lookup_version`, mirroring `traversal_write_internal_olc`'s
+    /// "no matching child -> restart from the root" recovery
+    /// (`mv_query::olc_query`): unlike that write-side traversal, this plain
+    /// read path takes no lock (`borrow_read` is a non-blocking, unvalidated
+    /// snapshot — see `mv_sync::smart_cell::SmartCell::borrow_read`), so a
+    /// concurrent split/merge can mutate an internal page's entries between
+    /// this loop reading its length and following one of its child
+    /// pointers. Ordinarily that's harmless (the stale-but-still-valid old
+    /// pointer just gets followed one extra time) — but with GC enabled,
+    /// that old child may have *already* been reclaimed and reset for reuse
+    /// by the time it's dereferenced, which surfaces as "no entry in this
+    /// (now-empty) child matches", not as a torn read. Restarting from the
+    /// root (like the write side) is the fix: a fresh read of the actually-
+    /// current tree either finds the right entry immediately, or (if it
+    /// races again) simply retries again — the same recovery already
+    /// trusted for the identical race on the write path.
     #[inline]
     fn traverse_read_key<'a>(
-        curr: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        root: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
         key: Key,
         lookup_version: Version)
         -> BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
     {
-        let mut curr = curr.borrow_read();
-        while let PageType::IndexRef(internal_page) = curr.as_page_ref()
-        {
-            let (keys_page, versions_page) = internal_page
-                .keys_versions();
+        let mut attempts: Attempts = 0;
 
-            curr = versions_page
-                .iter()
-                .zip(keys_page)
-                .enumerate()
-                .rfind(|(_, (v, range))|
-                    v.matched(lookup_version) && range.contains(key))
-                .map(|(pos, _)| internal_page.get_pointer(pos).borrow_read())
-                .unwrap()
+        'restart: loop {
+            let mut curr = root.clone().borrow_read();
+
+            while let PageType::IndexRef(internal_page) = curr.as_page_ref()
+            {
+                let (keys_page, versions_page) = internal_page
+                    .keys_versions();
+
+                curr = match versions_page
+                    .iter()
+                    .zip(keys_page)
+                    .enumerate()
+                    .rfind(|(_, (v, range))|
+                        v.matched(lookup_version) && range.contains(key))
+                    .map(|(pos, _)| internal_page.get_pointer(pos).borrow_read())
+                {
+                    Some(c) => c,
+                    None => {
+                        attempts += 1;
+                        sched_yield(attempts);
+                        continue 'restart;
+                    }
+                }
+            }
+
+            break curr;
         }
-
-        curr
     }
 
     fn traverse_read_key_range(

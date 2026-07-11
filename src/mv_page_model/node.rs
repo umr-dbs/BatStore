@@ -10,6 +10,7 @@ use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering::Relaxed;
 
 pub type PageLenField       = AtomicU32;
 pub type PageLenPrimitive   = u32;
@@ -249,6 +250,27 @@ impl<const FAN_OUT: usize,
         }
     }
 
+    /// Prepares a freed block for reuse, dropping whatever live entries its
+    /// *current* type (`m_type()`) still holds and zeroing that type's
+    /// `len` (active/dead counts) — see `LeafPage::on_reuse`/
+    /// `InternalPage::on_reuse`.
+    ///
+    /// Also zeroes the *other* type's `len` unconditionally. `InnerPage` is
+    /// a `union` of `LeafPage`/`InternalPage`, two structs with unrelated
+    /// (non-`repr(C)`) field layouts — `len` is *not* guaranteed to sit at
+    /// the same byte offset in both (measured: it doesn't; e.g. offset 3408
+    /// vs. 4000 for one instantiation). `BlockAllocManager::alloc_block`
+    /// reuses freed blocks from one untyped pool and may call
+    /// `mark_leaf`/`mark_internal` right after this to flip a block to the
+    /// *other* type than it had before — without this, the new type's `len`
+    /// would read whatever stale bytes happen to sit at its own offset
+    /// (leftover from that block's previous life), corrupting the
+    /// active/dead invariant `bulk_push` et al. rely on (this was a real,
+    /// reproducible bug: `debug_assert_eq!(self.dead_len(), 0)` failing in
+    /// `InternalPage::bulk_push` under GC). Writing to the inactive
+    /// variant's field is sound: a union always reserves space for its
+    /// largest member, so both `len` offsets are within the allocation
+    /// regardless of which variant is logically "active".
     #[inline(always)]
     pub fn on_reuse(&mut self) {
         match self.m_type()  {
@@ -264,6 +286,11 @@ impl<const FAN_OUT: usize,
 
                 derefmut.on_reuse()
             },
+        }
+
+        unsafe {
+            self.page.leaf.len.store(0, Relaxed);
+            self.page.internal.len.store(0, Relaxed);
         }
     }
 
