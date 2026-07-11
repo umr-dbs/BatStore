@@ -9,41 +9,37 @@ pub type Version = u64;
 pub type AtomicVersion = AtomicU64;
 
 /// A `TxStamp` that may or may not be present, distinguished by one leading
-/// marker bit stolen from its `ts_start` — the same trick the original
-/// (pre-OSIC) `DeletedVersion` used for a bare `Version`, just applied to a
-/// full `TxStamp` now so `VersionInfo` doesn't need `Option<TxStamp>` (which,
-/// lacking any niche to exploit, would otherwise cost a whole extra
-/// discriminant + padding on top of `TxStamp`'s own size).
+/// marker bit (bit 63) stolen from its packed representation — the same
+/// trick the original (pre-OSIC) `DeletedVersion` used for a bare `Version`,
+/// just applied to a full `TxStamp` now so `VersionInfo` doesn't need
+/// `Option<TxStamp>` (which, lacking any niche to exploit, would otherwise
+/// cost a whole extra discriminant + padding on top of `TxStamp`'s own size).
+/// `TxStamp` itself only ever packs bits 0..62 (`worker_id`/`ts_start`), so
+/// bit 63 is always clear on a "real" stamp and safe to use as this flag.
 #[derive(Clone, Copy)]
 struct DeletedTxStamp(TxStamp);
 
 impl DeletedTxStamp {
-    /// Mask of a non-null stamp, i.e. where the left outer most bit of
-    /// `ts_start` is set. Otherwise, a null mapping, i.e. does not exist.
-    const NON_NULL_FLAG: Version = 0x80_00000000000000;
-
-    /// Defines the null instance.
-    const NULL_FLAG: Version = 0;
-
-    /// The actual mask for selecting `ts_start`.
-    const EXTRACTOR: Version = 0x7F_FFFFFFFFFFFFFF;
+    /// Mask of a non-null stamp, i.e. where bit 63 of the packed
+    /// representation is set. Otherwise, a null mapping, i.e. does not exist.
+    const NON_NULL_FLAG: u64 = 0x80_00000000000000;
 
     #[inline(always)]
     const fn new_null() -> Self {
-        Self(TxStamp::new(0, Self::NULL_FLAG))
+        Self(TxStamp::from_raw(0))
     }
 
     #[inline(always)]
     const fn new(stamp: TxStamp) -> Self {
-        Self(TxStamp::new(stamp.worker_id, stamp.ts_start | Self::NON_NULL_FLAG))
+        Self(TxStamp::from_raw(stamp.raw() | Self::NON_NULL_FLAG))
     }
 
     /// Retrieves the underlying stamp if present, otherwise None.
     #[inline(always)]
     const fn get(&self) -> Option<TxStamp> {
-        match self.0.ts_start & Self::NON_NULL_FLAG {
+        match self.0.raw() & Self::NON_NULL_FLAG {
             0 => None,
-            _ => Some(TxStamp::new(self.0.worker_id, self.0.ts_start & Self::EXTRACTOR)),
+            _ => Some(TxStamp::from_raw(self.0.raw() & !Self::NON_NULL_FLAG)),
         }
     }
 }
@@ -98,7 +94,7 @@ impl VersionInfo {
     /// actual OSIC LCB-based check) — visible iff the insertion is visible
     /// and, if deleted, the deletion is not (yet) visible to this reader.
     #[inline(always)]
-    pub fn matches(&self, is_visible: &mut impl FnMut(TxStamp) -> bool) -> bool {
+    pub fn matches(&self, is_visible: &mut dyn FnMut(TxStamp) -> bool) -> bool {
         is_visible(self.insert_stamp)
             && !self.delete_stamp.get().map(|del| is_visible(del)).unwrap_or(false)
     }

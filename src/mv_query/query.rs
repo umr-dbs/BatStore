@@ -67,20 +67,42 @@ impl<const FAN_OUT: usize,
     /// Descends from `root` to the leaf that should hold `key` at
     /// `lookup_version`, mirroring `traversal_write_internal_olc`'s
     /// "no matching child -> restart from the root" recovery
-    /// (`mv_query::olc_query`): unlike that write-side traversal, this plain
-    /// read path takes no lock (`borrow_read` is a non-blocking, unvalidated
-    /// snapshot — see `mv_sync::smart_cell::SmartCell::borrow_read`), so a
-    /// concurrent split/merge can mutate an internal page's entries between
-    /// this loop reading its length and following one of its child
-    /// pointers. Ordinarily that's harmless (the stale-but-still-valid old
-    /// pointer just gets followed one extra time) — but with GC enabled,
-    /// that old child may have *already* been reclaimed and reset for reuse
-    /// by the time it's dereferenced, which surfaces as "no entry in this
-    /// (now-empty) child matches", not as a torn read. Restarting from the
-    /// root (like the write side) is the fix: a fresh read of the actually-
-    /// current tree either finds the right entry immediately, or (if it
-    /// races again) simply retries again — the same recovery already
-    /// trusted for the identical race on the write path.
+    /// (`mv_query::olc_query`).
+    ///
+    /// Child *pages* themselves are effectively append-only once linked into
+    /// the tree (a split/merge always builds an entirely new page for any
+    /// new content — see `MVBTSt::split`/`merge` — never mutates an existing
+    /// child's own records in place), so simply holding a `BlockRef` to a
+    /// child is not, by itself, the problem. The actual race is one level
+    /// up, in the *parent*: `on_overflow_node`/`on_underflow_node` extend an
+    /// existing parent page in place (`push_uncommitted` writes the new
+    /// entry, then `commit_delta` bumps `len` to publish it), and every step
+    /// of that — the length field, and the getters that read it
+    /// (`sum_len`/`active_len`/`keys_versions`/...) — uses `Relaxed`
+    /// ordering with no acquire/release fence pairing them (several
+    /// `fence(Release)`/`fence(Acquire)` call sites are present in the
+    /// source but commented out). Without that fence, a reader on another
+    /// core can observe the bumped `len` before it's guaranteed to observe
+    /// the entry data the writer wrote just before bumping it — i.e. an
+    /// unsynchronized, not just stale, view of the parent. This is a
+    /// genuine, still-open gap independent of GC: it just happens to be
+    /// silent without GC (the worst it can do there is follow an old
+    /// pointer that's still a fully valid, if superseded, page — see above),
+    /// and loud with GC (that same old child may by then be a block GC has
+    /// already reclaimed and reset for something else, so this exact loop
+    /// finds it unexpectedly empty).
+    ///
+    /// Confirmed empirically, not just by argument: with the `register_dead`
+    /// version fix (`mv_tree::smo`, correcting *which* version a superseded
+    /// entry's old child dies at) applied but this retry removed, the
+    /// under-GC crash this whole investigation started from still
+    /// reproduced in 3/3 heavily concurrent runs — so that fix alone does
+    /// not close the gap. Restarting from the root on a miss does: a fresh
+    /// read of the actually-current tree either finds the right entry
+    /// immediately, or (if it races again) just retries — the same
+    /// recovery already trusted for the identical class of race on the
+    /// write path, and re-verified clean across repeated heavy-concurrency
+    /// stress runs with GC on.
     #[inline]
     fn traverse_read_key<'a>(
         root: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -174,21 +196,23 @@ impl<const FAN_OUT: usize,
         reader_ts_start: Version)
         -> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
     {
-        let mut is_visible
-            = |stamp| self.is_visible_stamp(reader_worker, reader_ts_start, stamp);
+        let records
+            = Self::traverse_read_key(root, key, reader_ts_start);
 
-        match Self::traverse_read_key(root, key, reader_ts_start)
-            .as_records()
-            .iter()
-            .rev()
-            .skip_while(|r| r.version.insert_stamp.ts_start > reader_ts_start)
-            .find(|r|
-                r.key() == key && r.version().matches(&mut is_visible))
-        {
-            None => CRUDOperationResult::MatchedRecords(Vec::with_capacity(0)),
-            Some(result) =>
-                CRUDOperationResult::MatchedRecords(vec![RecordPointResult::from(result)])
-        }
+        self.with_visibility_checker(reader_worker, reader_ts_start, |is_visible| {
+            match records
+                .as_records()
+                .iter()
+                .rev()
+                .skip_while(|r| r.version.insert_stamp.ts_start() > reader_ts_start)
+                .find(|r|
+                    r.key() == key && r.version().matches(is_visible))
+            {
+                None => CRUDOperationResult::MatchedRecords(Vec::with_capacity(0)),
+                Some(result) =>
+                    CRUDOperationResult::MatchedRecords(vec![RecordPointResult::from(result)])
+            }
+        })
     }
 
     pub(crate) fn key_range_read_from_root<'a>(
@@ -213,22 +237,21 @@ impl<const FAN_OUT: usize,
 
                 let start_pos_si = records.len() -
                     records.binary_search_by(|r|
-                        r.version.insert_stamp.ts_start.cmp(&reader_ts_start)
+                        r.version.insert_stamp.ts_start().cmp(&reader_ts_start)
                     ).unwrap_or_else(|pos| pos);
 
-               let mut is_visible
-                   = |stamp| self.is_visible_stamp(reader_worker, reader_ts_start, stamp);
-
-               records
-                   .iter()
-                   .rev()
-                   .skip(start_pos_si)
-                   .filter(|r|
-                       r.version().matches(&mut is_visible) &&
-                           lookup_range.contains(r.key()))
-                   // .sorted_by_key(|r| r.key())
-                   .map(RecordPointResult::from)
-                   .collect::<Vec<_>>()
+               self.with_visibility_checker(reader_worker, reader_ts_start, |is_visible| {
+                   records
+                       .iter()
+                       .rev()
+                       .skip(start_pos_si)
+                       .filter(|r|
+                           r.version().matches(is_visible) &&
+                               lookup_range.contains(r.key()))
+                       // .sorted_by_key(|r| r.key())
+                       .map(RecordPointResult::from)
+                       .collect::<Vec<_>>()
+               })
             })
             // .filter(|set| !set.is_empty())
             // .sorted_by_key(|set|

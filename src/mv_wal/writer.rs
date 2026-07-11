@@ -142,7 +142,7 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) -> Receiver<()> {
-        let op = build(stamp.ts_start);
+        let op = build(stamp.ts_start());
 
         let mut body = Vec::with_capacity(32);
         record::encode(&WalRecord { stamp, op }, &mut body);
@@ -191,7 +191,7 @@ mod tests {
 
         let (s2, t2)
             = writer.start_commit_logged(&clock, 0, |_v| CRUDOperation::Delete(2));
-        assert!(s2.ts_start > s1.ts_start);
+        assert!(s2.ts_start() > s1.ts_start());
 
         writer.wait_flushed(t1);
         writer.wait_flushed(t2);
@@ -210,8 +210,8 @@ mod tests {
         }
         assert_eq!(offset, bytes.len());
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0].stamp.ts_start, s1.ts_start);
-        assert_eq!(seen[1].stamp.ts_start, s2.ts_start);
+        assert_eq!(seen[0].stamp.ts_start(), s1.ts_start());
+        assert_eq!(seen[1].stamp.ts_start(), s2.ts_start());
 
         let _ = fs::remove_file(&path);
     }

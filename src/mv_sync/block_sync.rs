@@ -1,6 +1,6 @@
 use std::fmt::Display;
 use std::hash::Hash;
-use std::sync::Arc;
+use triomphe::Arc;
 use crate::mv_block::block::Block;
 use crate::mv_page_model::BlockRef;
 use crate::mv_sync::smart_cell::{OptCell, SmartCell};

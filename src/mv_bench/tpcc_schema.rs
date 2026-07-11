@@ -33,12 +33,14 @@ use crate::mv_tree::mvbt::{MVBTSt, FAN_OUT, NUM_RECORDS};
 pub type TpccKey = u64;
 
 /// The single shared tree backing every TPC-C table (see module docs for
-/// why one tree, not one per table). Reuses the base tree's page-capacity
-/// constants for consistency with the rest of the codebase, even though
-/// `TpccRow` is larger than the default `u64` payload the constants were
-/// tuned for.
+/// why one tree, not one per table). Reuses the base tree's `FAN_OUT` for
+/// consistency with the rest of the codebase, but `NUM_RECORDS` is
+/// recomputed separately: `RecordPoint<TpccKey, TpccRow>` is 40B (`TpccRow`
+/// is bigger than the base tree's `u64` payload), so it targets the same
+/// ~4000B leaf record-array budget `FAN_OUT`'s internal-node arrays and the
+/// base tree's `NUM_RECORDS` use, not the base tree's own record count.
 pub const TPCC_FAN_OUT: usize       = FAN_OUT;
-pub const TPCC_NUM_RECORDS: usize   = 71;
+pub const TPCC_NUM_RECORDS: usize   = 100;
 
 pub type TpccTree = MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 pub type TpccTxn<'a> = Transaction<'a, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;

@@ -102,8 +102,8 @@ pub fn encode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
     };
 
     out.push(tag);
-    out.extend_from_slice(&record.stamp.ts_start.to_le_bytes());
-    out.extend_from_slice(&record.stamp.worker_id.to_le_bytes());
+    out.extend_from_slice(&record.stamp.ts_start().to_le_bytes());
+    out.extend_from_slice(&record.stamp.worker_id().to_le_bytes());
     unsafe { write_raw(out, key) };
     if let Some(payload) = payload {
         payload.wal_encode(out);
@@ -234,8 +234,8 @@ mod tests {
             assert_eq!(consumed, framed.len());
 
             let decoded: WalRecord<u64, u64> = decode(read_body).expect("valid record");
-            assert_eq!(decoded.stamp.ts_start, record.stamp.ts_start);
-            assert_eq!(decoded.stamp.worker_id, record.stamp.worker_id);
+            assert_eq!(decoded.stamp.ts_start(), record.stamp.ts_start());
+            assert_eq!(decoded.stamp.worker_id(), record.stamp.worker_id());
             assert_ops_eq(&decoded.op, &record.op);
         }
     }

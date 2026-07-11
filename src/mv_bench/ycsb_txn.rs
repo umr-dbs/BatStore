@@ -8,10 +8,16 @@
 //! for the heavier multi-op `mv_query::transaction::Transaction` that
 //! `tpcc_txn` uses to span several tables atomically in one snapshot.
 //!
-//! Point/range reads pass `tree.current_version()` as of the call, rather
-//! than a snapshot held open across several operations — each op is its own
-//! atomic unit, matching TPC-C's read-only Order-Status/Stock-Level except
-//! without needing multiple reads to share one snapshot.
+//! Point/range reads use `CRUDOperation::PointSi`/`RangeSi` ("read the
+//! current snapshot") rather than a snapshot held open across several
+//! operations — each op is its own atomic unit, matching TPC-C's read-only
+//! Order-Status/Stock-Level except without needing multiple reads to share
+//! one snapshot. `*Si` draws its version internally, gap-free (see
+//! `mv_query::dispatch`'s docs on those variants) — unlike calling
+//! `tree.current_version()` here and passing it to `Point`/`Range`, which
+//! would leave a window between that read and this module's dispatch call
+//! where a concurrent GC decision can't yet see this read and could reclaim
+//! a page it needs.
 
 use crate::mv_bench::ycsb_random::random_row;
 use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbKey, YcsbTree};
@@ -25,8 +31,7 @@ use crate::mv_utils::interval::Interval;
 /// range, e.g. a `Latest`-distribution read racing just ahead of a fresh
 /// `Insert`'s counter bump).
 pub fn read(tree: &YcsbTree, key: YcsbKey) -> bool {
-    let version = tree.current_version();
-    match tree.dispatch_crud(CRUDOperation::Point(key, version)) {
+    match tree.dispatch_crud(CRUDOperation::PointSi(key)) {
         CRUDOperationResult::MatchedRecords(v) => !v.is_empty(),
         other => panic!("ycsb read: unexpected result: {other}"),
     }
@@ -57,9 +62,8 @@ pub fn insert(tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey) {
 /// records"), against the freshest committed version. Returns the number of
 /// rows actually found (can be `< len` near the end of the loaded key range).
 pub fn scan(tree: &YcsbTree, start_key: YcsbKey, len: u64) -> usize {
-    let version = tree.current_version();
     let hi = start_key.saturating_add(len.saturating_sub(1));
-    match tree.dispatch_crud(CRUDOperation::Range(Interval::new(start_key, hi), version)) {
+    match tree.dispatch_crud(CRUDOperation::RangeSi(Interval::new(start_key, hi))) {
         CRUDOperationResult::MatchedRecords(v) => v.len(),
         other => panic!("ycsb scan: unexpected result: {other}"),
     }

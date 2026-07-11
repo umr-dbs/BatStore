@@ -112,7 +112,7 @@ pub fn replay<
         valid_lengths.push((shard_path, offset as u64));
     }
 
-    records.sort_by_key(|r| r.stamp.ts_start);
+    records.sort_by_key(|r| r.stamp.ts_start());
 
     for record in records {
         tree.replay_apply(record.op);
@@ -163,7 +163,7 @@ impl<
             RecordPoint::new(key, VersionInfo::new(stamp), payload),
             current_len);
         leaf_page.commit_delta(1, 0);
-        self.commit_tx(stamp.worker_id);
+        self.commit_tx(stamp.worker_id());
     }
 
     /// Always the normal versioned insert-then-supersede path: the
@@ -187,7 +187,7 @@ impl<
         match leaf_page.delete_after_update(key, stamp) {
             Ok(Some(..)) => {
                 leaf_page.commit_delta(-1, 1);
-                self.commit_tx(stamp.worker_id);
+                self.commit_tx(stamp.worker_id());
             }
             Ok(None) | Err(()) => {
                 // Mirrors the fix in dispatch.rs's Update arm: reverse the
@@ -208,7 +208,7 @@ impl<
 
         if let Ok(Some(..)) = leaf_page.delete(key, stamp) {
             leaf_page.commit_delta(-1, 1);
-            self.commit_tx(stamp.worker_id);
+            self.commit_tx(stamp.worker_id());
         }
     }
 }

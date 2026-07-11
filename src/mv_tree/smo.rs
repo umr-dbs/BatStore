@@ -264,6 +264,7 @@ impl<const FAN_OUT: usize,
         // block to an unrelated concurrent writer while a reader was still
         // (or about to start) traversing into it.
         self.block_manager.register_dead(
+            self.worker_id(),
             version,
             internal_page.get_pointer(child_index).clone());
 
@@ -330,12 +331,14 @@ impl<const FAN_OUT: usize,
                 // `merged_block` entry's birth version (`version`) is the
                 // correct death point for these two now-obsoleted entries,
                 // not their own (older) birth versions.
-                self.block_manager.register_dead_col([
-                    (version,
-                     mufasa_internal_page.get_pointer(index_simba).clone()),
-                    (version,
-                     mufasa_internal_page.get_pointer(index_sibling).clone())
-                ])
+                self.block_manager.register_dead_col(
+                    self.worker_id(),
+                    [
+                        (version,
+                         mufasa_internal_page.get_pointer(index_simba).clone()),
+                        (version,
+                         mufasa_internal_page.get_pointer(index_sibling).clone())
+                    ])
             }
             MergeResult::KeySplit(
                 index_sibling,
@@ -391,12 +394,14 @@ impl<const FAN_OUT: usize,
                     .mark_version_obsolete(index_simba);
 
                 // See `on_overflow_node`'s matching comment.
-                self.block_manager.register_dead_col([
-                    (version,
-                     mufasa_internal_page.get_pointer(index_simba).clone()),
-                    (version,
-                     mufasa_internal_page.get_pointer(index_sibling).clone())
-                ])
+                self.block_manager.register_dead_col(
+                    self.worker_id(),
+                    [
+                        (version,
+                         mufasa_internal_page.get_pointer(index_simba).clone()),
+                        (version,
+                         mufasa_internal_page.get_pointer(index_sibling).clone())
+                    ])
             }
             _ => return Err(()),
         }
@@ -536,7 +541,7 @@ impl<const FAN_OUT: usize,
                                           .iter()
                                           .filter(|r| !r.version().is_deleted()),
                                       |f, s|
-                                          f.version().insertion_stamp().ts_start <= s.version().insertion_stamp().ts_start)
+                                          f.version().insertion_stamp().ts_start() <= s.version().insertion_stamp().ts_start())
                             .collect_vec());
 
                     combined_block
@@ -574,10 +579,10 @@ impl<const FAN_OUT: usize,
                         candidate_fence.upper.max(simba_fence.upper));
 
                     first.sort_by_key(|r|
-                        r.version().insertion_stamp().ts_start);
+                        r.version().insertion_stamp().ts_start());
 
                     second.sort_by_key(|r|
-                        r.version().insertion_stamp().ts_start);
+                        r.version().insertion_stamp().ts_start());
 
                     let combined_block_0 = self.block_manager
                         .new_empty_leaf();
@@ -716,7 +721,7 @@ impl<const FAN_OUT: usize,
                         (self.dec_key)(second.get_unchecked(0).key));
 
                     if let PageType::LeafMut(leaf_page) = left.unsafe_borrow_mut().as_page_mut() {
-                        first.sort_by_key(|r| r.version().insertion_stamp().ts_start);
+                        first.sort_by_key(|r| r.version().insertion_stamp().ts_start());
                         leaf_page.bulk_push_from_slice_ref(first);
                     }
 
@@ -725,7 +730,7 @@ impl<const FAN_OUT: usize,
                         fence.upper);
 
                     if let PageType::LeafMut(leaf_page) = right.unsafe_borrow_mut().as_page_mut() {
-                        second.sort_by_key(|r| r.version().insertion_stamp().ts_start);
+                        second.sort_by_key(|r| r.version().insertion_stamp().ts_start());
                         leaf_page.bulk_push_from_slice_ref(second)
                     }
 
@@ -951,7 +956,7 @@ impl<const FAN_OUT: usize,
                 // reader whose snapshot predates `version` still needs to
                 // resolve through this now-superseded root.
                 self.block_manager.register_dead(
-                    version, root_guard.inner_cell());
+                    self.worker_id(), version, root_guard.inner_cell());
 
                 new_root_latch
             }
@@ -966,7 +971,7 @@ impl<const FAN_OUT: usize,
                     Root::new(new_root_block.clone(), version, height));
 
                 self.block_manager.register_dead(
-                    version, root_guard.inner_cell());
+                    self.worker_id(), version, root_guard.inner_cell());
 
                 new_root_latch
             }

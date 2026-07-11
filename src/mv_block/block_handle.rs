@@ -4,8 +4,8 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::mem;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+use std::sync::atomic::AtomicU64;
+
 use parking_lot::Mutex;
 use crate::mv_block::block::Block;
 use crate::mv_page_model::node::Node;
@@ -13,7 +13,8 @@ use crate::mv_page_model::{BlockID, BlockRef, ObjectCount};
 use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::safe_cell::SafeCell;
 use crate::mv_sync::smart_cell::SmartCell;
-use crate::mv_gc::tracker_handle::TrackerHandle;
+use crate::mv_gc::tracker_handle::{TrackerHandle, TrackerHandleSt};
+use crate::mv_record_model::tx_stamp::WorkerId;
 
 const ENABLE_SMALL_BLOCK: bool = false;
 const MAX_ZEROS_PER_BLOCK: usize = 3964; // = data region in a mv_block // outdated due to omitted mv_block-id
@@ -71,7 +72,11 @@ pub struct BlockAllocManager<
     Key: Default + Ord + Copy + Hash + Display + 'static,
     Payload: Clone + Default + 'static
 > {
-    tracker: SafeCell<Option<TrackerHandle<FAN_OUT, NUM_RECORDS, Key, Payload>>>,
+    /// Always present — see `TrackerHandleSt`'s type doc for why this isn't
+    /// `Option` anymore: active-snapshot tracking (needed for `CommitLog`
+    /// pruning) must not depend on whether block reclaim (`enable_gc`) was
+    /// ever turned on.
+    tracker: TrackerHandle<FAN_OUT, NUM_RECORDS, Key, Payload>,
     update_in_place: Cell<bool>,
     // pub reuse_count: AtomicUsize,
     // pub alloc_count: AtomicUsize,
@@ -86,7 +91,7 @@ impl<const FAN_OUT: usize,
     fn clone(&self) -> Self {
         Self {
             // block_id_counter: AtomicBlockID::new(START_BLOCK_ID),
-            tracker: SafeCell::new(None),
+            tracker: Arc::new(TrackerHandleSt::new()),
             update_in_place: Cell::new(false),
             // reuse_count: AtomicUsize::new(0),
             // alloc_count: AtomicUsize::new(0),
@@ -125,8 +130,8 @@ impl<const FAN_OUT: usize,
     }
     
     #[inline(always)]
-    pub(crate) fn tracker(&self) -> Option<TrackerHandle<FAN_OUT, NUM_RECORDS, Key, Payload>>  {
-        self.tracker.clone()
+    pub(crate) fn tracker(&self) -> &TrackerHandleSt<FAN_OUT, NUM_RECORDS, Key, Payload>  {
+        self.tracker.as_ref()
     }
 
     #[inline(always)]
@@ -179,58 +184,32 @@ impl<const FAN_OUT: usize,
     pub fn new() -> Self {
         Self {
             // block_id_counter: AtomicBlockID::new(START_BLOCK_ID),
-            tracker: SafeCell::new(None),
+            tracker: Arc::new(TrackerHandleSt::new()),
             update_in_place: Cell::new(false),
             // reuse_count: AtomicUsize::new(0),
             // alloc_count: AtomicUsize::new(0),
         }
     }
 
-    // #[inline(always)]
-    // pub fn new_with_gc(db_tracker: TrackerHandle<FAN_OUT, NUM_RECORDS, Key, Payload>) -> Self {
-    //     Self {
-    //         // block_id_counter: AtomicBlockID::new(START_BLOCK_ID),
-    //         tracker: SafeCell::new(Some(db_tracker)),
-    //         reuse_count: AtomicUsize::new(0),
-    //         alloc_count: AtomicUsize::new(0),
-    //     }
-    // }
-
     pub fn set_update_in_place(&self, update_in_place: bool) {
         self.update_in_place.set(update_in_place);
     }
 
-    pub fn pass_aux_tx_tracker(&self, db_tracker: Option<TrackerHandle<FAN_OUT, NUM_RECORDS, Key, Payload>>) {
-        *self.tracker.get_mut() = db_tracker;
-    }
-    
-    pub fn del_aux(&self) {
-        self.tracker.get_mut().take();
+    #[inline(always)]
+    pub fn register_dead_col(&self, worker_id: WorkerId, dead: [(Version, BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>); 2]) {
+        self.tracker.register_died_page_col(worker_id, dead);
     }
 
     #[inline(always)]
-    pub fn register_dead_col(&self, dead: [(Version, BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>); 2]) {
-        self.tracker
-            .as_ref()
-            .as_ref()
-            .map(|tracker|
-                tracker.register_died_page_col(dead));
-    }
-
-    #[inline(always)]
-    pub fn register_dead(&self, dead_v: Version, dead_p: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>) {
-        self.tracker
-            .as_ref()
-            .as_ref()
-            .map(|tracker|
-                tracker.register_died_page(dead_v, dead_p));
+    pub fn register_dead(&self, worker_id: WorkerId, dead_v: Version, dead_p: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>) {
+        self.tracker.register_died_page(worker_id, dead_v, dead_p);
     }
 
     #[inline(always)]
     fn alloc_block(&self, leaf: bool) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
         // NODES_REQUEST.fetch_add(1, Relaxed);
-        match self.tracker.as_ref().as_ref().map(|tracker| tracker.free_block()) {
-            Some(Some(block)) => {
+        match self.tracker.free_block() {
+            Some(block) => {
                 // self.reuse_count.fetch_add(1, Relaxed);
 
                 let m_page
@@ -248,7 +227,7 @@ impl<const FAN_OUT: usize,
                 // fence(Acquire);
                 block
             }
-            _ => {
+            None => {
                 // self.alloc_count.fetch_add(1, Relaxed);
                 // println!("Alloc");
                 Block {

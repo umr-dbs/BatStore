@@ -169,7 +169,7 @@ impl<'a,
 
         leaf_page.commit_delta(1, 0);
 
-        CRUDOperationResult::Inserted(stamp.ts_start)
+        CRUDOperationResult::Inserted(stamp.ts_start())
     }
 
     pub fn update(&self, key: Key, payload: Payload) -> CRUDOperationResult<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
@@ -195,7 +195,7 @@ impl<'a,
         match leaf_page.delete_after_update(key, stamp) {
             Ok(Some(..)) => {
                 leaf_page.commit_delta(-1, 1);
-                CRUDOperationResult::Updated(stamp.ts_start)
+                CRUDOperationResult::Updated(stamp.ts_start())
             }
             Ok(None) => {
                 leaf_page.commit_delta(-1, 0);
@@ -225,7 +225,7 @@ impl<'a,
         match leaf_page.delete(key, stamp) {
             Ok(Some(..)) => {
                 leaf_page.commit_delta(-1, 1);
-                CRUDOperationResult::Deleted(stamp.ts_start)
+                CRUDOperationResult::Deleted(stamp.ts_start())
             }
             Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
             Err(()) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted),

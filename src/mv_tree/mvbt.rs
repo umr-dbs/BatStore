@@ -1,6 +1,7 @@
 use std::fmt::Display;
 use std::hash::Hash;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use arc_swap::ArcSwapOption;
 use crate::mv_block::block_handle::BlockAllocManager;
 use crate::mv_gc::tracker_handle::{TrackerHandle, TrackerHandleSt};
@@ -12,7 +13,11 @@ use crate::mv_sync::worker::WorkerRegistry;
 use crate::mv_wal::writer::WalWriter;
 
 pub const FAN_OUT: usize        = 125;
-pub const NUM_RECORDS: usize    = 83;
+/// `RecordPoint<Key, Payload>` is 32B for `Key = Payload = u64` (`VersionInfo`
+/// packs down to 16B — see `mv_record_model::tx_stamp::TxStamp`'s doc), so
+/// 125 keeps the leaf's record array at the same ~4000B budget `FAN_OUT`'s
+/// internal-node arrays target.
+pub const NUM_RECORDS: usize    = 125;
 pub type Key                    = u64;
 pub type Payload                = u64;
 // pub type Payload = PayloadIndirection;
@@ -23,7 +28,7 @@ pub const INIT_TREE_HEIGHT: Height = 1;
 /// Default size of a tree's fixed OSIC worker pool (§3.1: commit log size =
 /// #workers) — one per physical core, mirroring the paper's one-worker-per-
 /// core deployment model.
-pub fn default_max_workers() -> usize { num_cpus::get() }
+pub fn default_max_workers() -> usize { crate::mv_sync::visibility::MAX_WORKERS_CAP }
 // pub const MAX_TREE_HEIGHT: Height = Height::MAX;
 
 pub struct MVBTSt<
@@ -47,6 +52,16 @@ pub struct MVBTSt<
     /// `Vec` atomically (all shards on/off together); see `wal_shard_path`
     /// for the on-disk naming.
     pub(crate) wal: ArcSwapOption<Vec<WalWriter<Key, Payload>>>,
+    /// Set once, the first time `enable_wal` is ever called — lets the write
+    /// dispatch path (`wal_start_commit`/`wal_log_write`) skip touching `wal`
+    /// at all on a tree that has never had a WAL attached, instead of paying
+    /// `ArcSwapOption::load`'s guard mechanism (measured ~4.5% of write-path
+    /// time in a WAL-off profile) on every single write for a lookup that
+    /// always turns out `None`. Never reset by `disable_wal` — once a tree
+    /// has ever had a WAL, later writes fall back to the real (cheap, no-op)
+    /// `wal.load()` check rather than trying to re-derive "definitely off"
+    /// from one flag, keeping this fast path's correctness trivial to see.
+    pub(crate) wal_ever_enabled: AtomicBool,
     pub(crate) worker_registry: WorkerRegistry,
     pub(crate) commit_logs: Vec<CommitLog>,
 }
@@ -149,13 +164,16 @@ impl<const FAN_OUT: usize,
     Payload: Display + Clone + Default + Sync + 'static
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
+    /// Turns on block reclaim (`TrackerHandleSt::block_reclaim_enabled`) —
+    /// active-snapshot tracking (needed for `CommitLog` pruning) is always
+    /// on regardless, see that type's doc.
     pub fn enable_gc(&self, update_in_place: bool) {
-        self.block_manager.pass_aux_tx_tracker(Some(Arc::new(TrackerHandleSt::new())));
+        self.block_manager.tracker().set_block_reclaim_enabled(true);
         self.block_manager.set_update_in_place(update_in_place);
     }
 
     pub fn disable_gc(&self) {
-        self.block_manager.del_aux()
+        self.block_manager.tracker().set_block_reclaim_enabled(false);
     }
 
     pub fn root_star_index(&self) -> RootIndexType {
@@ -163,7 +181,7 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline(always)]
-    pub(crate) fn tracker(&self) -> Option<TrackerHandle<FAN_OUT, NUM_RECORDS, Key, Payload>> {
+    pub(crate) fn tracker(&self) -> &TrackerHandleSt<FAN_OUT, NUM_RECORDS, Key, Payload> {
         self.block_manager.tracker()
     }
 
@@ -190,6 +208,7 @@ impl<const FAN_OUT: usize,
             min_key,
             max_key,
             wal: ArcSwapOption::empty(),
+            wal_ever_enabled: AtomicBool::new(false),
             worker_registry: WorkerRegistry::new(max_workers),
             commit_logs: (0..max_workers).map(|_| CommitLog::new()).collect(),
         }
@@ -222,6 +241,7 @@ impl<const FAN_OUT: usize,
             shards.push(WalWriter::open(&wal_shard_path(path, worker_id), flush_interval)?);
         }
         self.wal.store(Some(Arc::new(shards)));
+        self.wal_ever_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

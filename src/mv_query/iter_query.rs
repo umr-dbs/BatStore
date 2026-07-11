@@ -119,7 +119,20 @@ impl<'a,
 
         loop {
             if self.path.is_empty() || self.range.lower > self.range.upper {
-                tree.on_release_reader_snapshot(si);
+                // Only release if *this iterator* is the one that registered
+                // the snapshot (`register_reader_si`) — mirrors `Drop`'s own
+                // guard just below. Without it, a `Transaction`-owned range
+                // scan (`Transaction::range`, `register_reader_si: false`,
+                // since the `Transaction` itself registered `ts_start` at
+                // `begin()` and releases it at `commit()`/drop) would have
+                // its *first* fully-drained range scan release the
+                // transaction's snapshot registration early — leaving every
+                // later read in the same transaction (any further
+                // `tx.point`/`tx.range` call) running with no GC protection
+                // at all, since the registration is already gone.
+                if self.register_reader_si {
+                    tree.on_release_reader_snapshot(si);
+                }
 
                 self.is_completed = true;
                 return None
@@ -157,14 +170,13 @@ impl<'a,
                     let records = leaf_page
                         .as_records();
 
-                    let mut is_visible
-                        = |stamp| tree.is_visible_stamp(self.worker_id, si, stamp);
-
-                    self.buff.extend(records
-                        .iter()
-                        .filter(|r|
-                            r.version().matches(&mut is_visible) && self.range.contains(r.key()))
-                        .map(RecordPointResult::from));
+                    tree.with_visibility_checker(self.worker_id, si, |is_visible| {
+                        self.buff.extend(records
+                            .iter()
+                            .filter(|r|
+                                r.version().matches(is_visible) && self.range.contains(r.key()))
+                            .map(RecordPointResult::from));
+                    });
 
                     self.path.pop();
 

@@ -2,6 +2,15 @@ use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::commit_log::CommitLog;
 
+/// Hard cap on the `max_workers` a `SnapshotCache` can serve, chosen
+/// generously above any realistic core count so `entries` can be a
+/// fixed-size, inline array — no heap allocation for something created once
+/// per (tree, thread) and never resized afterward. `SnapshotCache::new`
+/// asserts the tree's actual `max_workers` (typically `num_cpus::get()`)
+/// against this once, at construction, rather than let it surface later as
+/// an out-of-bounds panic on `entries[worker_id]` deep inside `is_visible`.
+pub const MAX_WORKERS_CAP: usize = 256;
+
 /// A worker's memo of the last `LCB` result computed against each foreign
 /// worker, indexed by that foreign worker's id — the paper's "thread-local
 /// snapshot cache" (Listing 1). Each entry is only valid for the reader
@@ -10,17 +19,21 @@ use crate::mv_sync::commit_log::CommitLog;
 ///
 /// Plain fields, no interior mutability: every real caller reaches this
 /// through `mv_sync::worker::with_snapshot_cache`, which already holds a
-/// `&mut SnapshotCache` (via its own thread-local `HashMap::entry`) by the
-/// time it hands one to `is_visible` — an inner `RefCell` here would just be
-/// a second, redundant layer of runtime borrow-checking on top of that.
+/// `&mut SnapshotCache` by the time it hands one to `is_visible` — an inner
+/// `RefCell`/`SafeCell` here would just be a second, redundant layer on top
+/// of that.
 pub struct SnapshotCache {
     // (cached reader ts_start, cached LCB result), indexed by foreign WorkerId.
-    entries: Vec<(Version, Version)>,
+    entries: [(Version, Version); MAX_WORKERS_CAP],
 }
 
 impl SnapshotCache {
     pub fn new(max_workers: usize) -> Self {
-        Self { entries: vec![(0, 0); max_workers] }
+        assert!(
+            max_workers <= MAX_WORKERS_CAP,
+            "SnapshotCache: max_workers ({max_workers}) exceeds MAX_WORKERS_CAP ({MAX_WORKERS_CAP})"
+        );
+        Self { entries: [(0, 0); MAX_WORKERS_CAP] }
     }
 }
 
@@ -36,28 +49,28 @@ pub fn is_visible(
     reader_ts_start: Version,
     stamp: TxStamp,
 ) -> bool {
-    if stamp.worker_id == reader_worker {
+    if stamp.worker_id() == reader_worker {
         // A worker's own transactions are strictly serialized in time, so
         // any write by "me" is visible to "my" current transaction — but
         // not to a deliberately historical/point-in-time snapshot (a
         // smaller `reader_ts_start` than the write's own `ts_start`), which
         // cMVBT supports as a first-class feature distinct from the paper's
         // "current snapshot only" model.
-        return stamp.ts_start <= reader_ts_start;
+        return stamp.ts_start() <= reader_ts_start;
     }
 
-    let slot = &mut cache.entries[stamp.worker_id as usize];
+    let slot = &mut cache.entries[stamp.worker_id() as usize];
 
-    if slot.1 > stamp.ts_start {
+    if slot.1 > stamp.ts_start() {
         return true; // cache hit: already known-visible
     }
 
     if slot.0 < reader_ts_start {
         // Cache is stale for this reader_ts_start (or never queried this
         // worker before) — refresh via a real (locked) LCB query.
-        slot.1 = commit_logs[stamp.worker_id as usize].lcb(reader_ts_start);
+        slot.1 = commit_logs[stamp.worker_id() as usize].lcb(reader_ts_start);
         slot.0 = reader_ts_start;
     }
 
-    slot.1 > stamp.ts_start
+    slot.1 > stamp.ts_start()
 }

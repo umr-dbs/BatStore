@@ -1,6 +1,7 @@
 use std::hash::Hash;
 use std::fmt::Display;
 use std::mem;
+use std::sync::atomic::Ordering::Relaxed;
 use itertools::Itertools;
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
@@ -42,21 +43,22 @@ impl<
         leaf_page: &LeafPage<NUM_RECORDS, Key, Payload>,
         key: Key,
     ) -> bool {
-        match self.tracker() {
-            Some(db_tracker) if self.has_update_in_place() => match db_tracker.newest_live_si() {
-                Some(newest_si) => leaf_page
-                    .as_records()
-                    .iter()
-                    .rfind(|r| r.key() == key)
-                    .map(|record| record.version.insert_stamp.ts_start > newest_si)
-                    .unwrap_or(false),
-                None => leaf_page // empty live index: No readers; e.g., only updates!
-                    .as_records()
-                    .iter()
-                    .rfind(|r| r.key() == key)
-                    .is_some(),
-            },
-            _ => false,
+        if !self.has_update_in_place() {
+            return false;
+        }
+
+        match self.tracker().newest_live_si() {
+            Some(newest_si) => leaf_page
+                .as_records()
+                .iter()
+                .rfind(|r| r.key() == key)
+                .map(|record| record.version.insert_stamp.ts_start() > newest_si)
+                .unwrap_or(false),
+            None => leaf_page // empty live index: No readers; e.g., only updates!
+                .as_records()
+                .iter()
+                .rfind(|r| r.key() == key)
+                .is_some(),
         }
     }
 }
@@ -106,12 +108,12 @@ impl<'a,
                 // Early Lock Release (paper §3.4): commit (visibility) before
                 // waiting for the flush, then confirm durability + this
                 // write's own dependencies before signaling success.
-                let _ts_commit = self.commit_tx_elr(stamp.worker_id, &wal_ticket);
+                let _ts_commit = self.commit_tx_elr(stamp.worker_id(), &wal_ticket);
                 let logged = wal_ticket.is_some();
                 self.wal_wait_flush(wal_ticket);
-                self.finish_elr_commit(stamp.worker_id, stamp.ts_start, logged);
+                self.finish_elr_commit(stamp.worker_id(), stamp.ts_start(), logged);
 
-                CRUDOperationResult::Inserted(stamp.ts_start)
+                CRUDOperationResult::Inserted(stamp.ts_start())
             }
             CRUDOperation::Update(key, payload) => {
                 let leaf_guard =
@@ -130,7 +132,7 @@ impl<'a,
                 // represented in the WAL (one CRUDOperation = one version = one log
                 // record), so it's skipped entirely whenever a WAL is attached —
                 // every logged Update always takes the normal versioned path below.
-                if self.wal.load().as_ref().is_none() && self.decide_update_in_place(leaf_page, key) {
+                if !self.wal_ever_enabled.load(Relaxed) && self.decide_update_in_place(leaf_page, key) {
                     if let Some(record) = leaf_page
                         .as_records_mut()
                         .iter_mut()
@@ -164,12 +166,12 @@ impl<'a,
 
                         drop(leaf_guard);
                         // Early Lock Release, see the Insert arm above.
-                        let _ts_commit = self.commit_tx_elr(stamp.worker_id, &wal_ticket);
+                        let _ts_commit = self.commit_tx_elr(stamp.worker_id(), &wal_ticket);
                         let logged = wal_ticket.is_some();
                         self.wal_wait_flush(wal_ticket);
-                        self.finish_elr_commit(stamp.worker_id, stamp.ts_start, logged);
+                        self.finish_elr_commit(stamp.worker_id(), stamp.ts_start(), logged);
 
-                        CRUDOperationResult::Updated(stamp.ts_start)
+                        CRUDOperationResult::Updated(stamp.ts_start())
                     }
                     Ok(None) => {
                         // Reverse the soft commit above: the pushed record never
@@ -216,7 +218,7 @@ impl<'a,
                     = self.wal_start_commit(|_| CRUDOperation::Delete(key));
 
                 if VERBOSE {
-                    println!("[key={key}] - Commit succeeded: {}, Attempts: 0", stamp.ts_start);
+                    println!("[key={key}] - Commit succeeded: {}, Attempts: 0", stamp.ts_start());
                 }
 
                 match leaf_page.delete(key, stamp) {
@@ -228,11 +230,11 @@ impl<'a,
 
                         drop(leaf_guard);
                         // Early Lock Release, see the Insert arm above.
-                        let _ts_commit = self.commit_tx_elr(stamp.worker_id, &wal_ticket);
+                        let _ts_commit = self.commit_tx_elr(stamp.worker_id(), &wal_ticket);
                         let logged = wal_ticket.is_some();
                         self.wal_wait_flush(wal_ticket);
-                        self.finish_elr_commit(stamp.worker_id, stamp.ts_start, logged);
-                        CRUDOperationResult::Deleted(stamp.ts_start)
+                        self.finish_elr_commit(stamp.worker_id(), stamp.ts_start(), logged);
+                        CRUDOperationResult::Deleted(stamp.ts_start())
                     },
                     Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
                     Err(()) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
@@ -274,6 +276,51 @@ impl<'a,
                     key,
                     true,
                     self.worker_id())),
+            // `*Si` ("read the current snapshot") variants: unlike
+            // `Point`/`Range`/`RangeIter`, which accept a `version` the
+            // caller already drew (typically via `current_version()`,
+            // arbitrarily long before this call — the right choice for a
+            // deliberate, explicit-version read, e.g. a historical query or
+            // one sharing an already-open `Transaction`'s snapshot, but
+            // racy for "just read whatever's freshest right now": there's a
+            // real gap between the caller reading that version and this
+            // function registering it, during which a concurrent GC
+            // decision can't see this reader yet and may reclaim a page it
+            // needs — see `mv_sync::version_handle::begin_snapshot`'s doc,
+            // which this mirrors), these draw their own version via
+            // `begin_snapshot` — gap-free by construction, since drawing
+            // and registering happen as one unit there.
+            CRUDOperation::PointSi(key) => {
+                let reader_worker = self.worker_id();
+                let version = self.begin_snapshot();
+                let res = self.key_point_read_from_root(
+                    self.retrieve_root_for(version),
+                    key,
+                    reader_worker,
+                    version);
+                self.end_snapshot(version);
+                res
+            },
+            CRUDOperation::RangeSi(range) => match self.dispatch_crud(
+                CRUDOperation::RangeIterSi(range)) {
+                CRUDOperationResult::MatchedRecordIter(iter) =>
+                    CRUDOperationResult::MatchedRecords(iter.collect()),
+                other => other
+            },
+            // Uses `draw_snapshot_version_with`, not `begin_snapshot`:
+            // `RangeQueryIter::new`'s own `register_reader_si: true` path is
+            // what actually registers this version (so that *it* — not this
+            // arm — is what releases it later, on completion or drop, since
+            // the iterator outlives this function call). Calling
+            // `begin_snapshot` here too would register twice per read but
+            // only ever release once — a permanent leak that pins
+            // `live_min_snapshot` at this version forever, so `free_block`
+            // could never reclaim anything again for the lifetime of the
+            // tree.
+            CRUDOperation::RangeIterSi(key) =>
+                CRUDOperationResult::MatchedRecordIter(self.draw_snapshot_version_with(|version| {
+                    RangeQueryIter::new(self, version, key, true, self.worker_id())
+                })),
             // `*Rand` operations are used purely for benchmark/data-generation
             // workloads (see mv_test.rs) — irrelevant to the actual running
             // system, so they're never routed through the WAL at all.
@@ -336,9 +383,9 @@ impl<'a,
                     Ok(Some(..)) => {
                         // second step soft commit: Correct counters
                         leaf_page.commit_delta(-1, 1);
-                        self.commit_tx(stamp.worker_id);
+                        self.commit_tx(stamp.worker_id());
 
-                        CRUDOperationResult::UpdatedRand(key, stamp.ts_start)
+                        CRUDOperationResult::UpdatedRand(key, stamp.ts_start())
                     }
                     Ok(None) => {
                         // Same counter reversal as the Update arm: the pushed
@@ -387,7 +434,7 @@ impl<'a,
                     = TxStamp::new(self.worker_id(), self.start_tx_commit());
 
                 if VERBOSE {
-                    println!("[key={key}] - Commit succeeded: {}, Attempts: 0", stamp.ts_start);
+                    println!("[key={key}] - Commit succeeded: {}, Attempts: 0", stamp.ts_start());
                 }
                 match leaf_page.delete(key, stamp) {
                     Ok(Some(..)) => {
@@ -396,8 +443,8 @@ impl<'a,
                             println!("After delete Leaf-records:\n{}", leaf_page.as_records().iter().join("\n"));
                         }
 
-                        self.commit_tx(stamp.worker_id);
-                        CRUDOperationResult::DeletedRand(key, stamp.ts_start)
+                        self.commit_tx(stamp.worker_id());
+                        CRUDOperationResult::DeletedRand(key, stamp.ts_start())
                     },
                     Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
                     Err(()) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
@@ -467,9 +514,9 @@ impl<'a,
                     current_len);
 
                 leaf_page.commit_delta(1, 0);
-                self.commit_tx(stamp.worker_id);
+                self.commit_tx(stamp.worker_id());
 
-                CRUDOperationResult::InsertedRand(key, stamp.ts_start)
+                CRUDOperationResult::InsertedRand(key, stamp.ts_start())
             }
             _ => CRUDOperationResult::Error,
         }
@@ -489,6 +536,53 @@ mod tests {
         let leaf_guard = tree.traversal_write_olc(key);
         let leaf_deref_mut = leaf_guard.deref_mut();
         leaf_deref_mut.as_leaf_page().active_dead_count()
+    }
+
+    /// Regression test: `MVBTSt::commit_tx` must NOT prune a worker's
+    /// `CommitLog` while block-reclaim GC is disabled — pruning assumes any
+    /// record whose `LCB` data gets dropped is itself unreachable, which is
+    /// only true when block reclaim is actually removing dead pages in
+    /// lockstep (see `TrackerHandleSt`'s type doc). Without GC, dead
+    /// records — and an explicit historical read at an old `version` — stay
+    /// reachable forever, so the log must grow unboundedly instead of
+    /// silently losing the `LCB` data such a read would need.
+    #[test]
+    fn commit_log_grows_unbounded_without_gc_enabled() {
+        let tree = TestTree::make_standard(RootIndexType::default());
+
+        for k in 0..10_000u64 {
+            assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(k, k)), CRUDOperationResult::Inserted(_)));
+        }
+
+        let worker_id = tree.worker_id();
+        let max_workers = tree.commit_logs.len();
+        let len = tree.commit_logs[worker_id as usize].len();
+        assert!(
+            len > max_workers,
+            "expected the commit log to grow unbounded with GC off, got only {len} entries (max_workers = {max_workers})"
+        );
+    }
+
+    /// Counterpart to `commit_log_grows_unbounded_without_gc_enabled`: once
+    /// `enable_gc` has actually been called, pruning is sound again (block
+    /// reclaim is now removing dead pages in the same lockstep `LCB` pruning
+    /// assumes), so the log should stay bounded near `max_workers`.
+    #[test]
+    fn commit_log_stays_bounded_with_gc_enabled() {
+        let tree = TestTree::make_standard(RootIndexType::default());
+        tree.enable_gc(false);
+
+        for k in 0..10_000u64 {
+            assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(k, k)), CRUDOperationResult::Inserted(_)));
+        }
+
+        let worker_id = tree.worker_id();
+        let max_workers = tree.commit_logs.len();
+        let len = tree.commit_logs[worker_id as usize].len();
+        assert!(
+            len <= max_workers,
+            "expected the commit log to stay pruned near max_workers ({max_workers}) with GC on, got {len} entries"
+        );
     }
 
     /// Regression test for a bug found while building the WAL: `Update`'s
