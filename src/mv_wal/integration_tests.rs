@@ -212,6 +212,66 @@ fn torn_write_stops_cleanly() {
     let _ = fs::remove_file(&shard_path);
 }
 
+/// `dispatch_crud` never blocks on its own WAL flush anymore (no `.recv()`
+/// on a flush ticket remains anywhere in the write path — see
+/// `MVBTSt::wal_hardened_version`'s doc); this test can't assert on that
+/// directly (a "did this NOT block" check is a wall-clock race, not a
+/// deterministic property — how long the flush thread's linger + fsync
+/// actually takes depends on the machine), so instead it drives the other,
+/// checkable half of the contract: `wait_wal_hardened` genuinely reflects
+/// real on-disk durability, not just an always-true stub. Issues a batch of
+/// writes with nothing waiting on any of them individually, then confirms
+/// that once `wait_wal_hardened` returns for the *last* one, every one of
+/// them — not just the last — is actually present in the shard file on
+/// disk.
+#[test]
+fn wait_wal_hardened_reflects_real_on_disk_durability() {
+    let path = temp_log_path("async_hardened");
+    remove_shards(&path);
+
+    let tree = TestTree::make_standard(RootIndexType::default());
+    tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
+
+    let mut last_ts = 0;
+    for k in 0..500u64 {
+        let CRUDOperationResult::Inserted(ts_start) = tree.dispatch_crud(CRUDOperation::Insert(k, k * 10)) else {
+            panic!("expected Inserted for key {k}");
+        };
+        last_ts = ts_start;
+    }
+
+    tree.wait_wal_hardened(last_ts);
+    assert!(tree.wal_hardened_version() >= last_ts, "wait_wal_hardened must not return early");
+
+    // Read the shard file directly (worker 0 — single test thread) instead
+    // of going through the tree, to check durability independently of the
+    // in-memory structure `wait_wal_hardened` itself doesn't touch.
+    let shard_path = crate::mv_tree::mvbt::wal_shard_path(&path, 0);
+    let bytes = fs::read(&shard_path).unwrap();
+    let mut offset = 0;
+    let mut count = 0;
+    while let Some((_, consumed)) = crate::mv_wal::record::read_frame(&bytes[offset..]) {
+        count += 1;
+        offset += consumed;
+    }
+    assert_eq!(count, 500, "every insert must be on disk once wait_wal_hardened returns, not just the last");
+
+    drop(tree);
+    remove_shards(&path);
+}
+
+/// `wal_hardened_version` reports `0` ("nothing guaranteed durable") for a
+/// tree with no WAL attached at all, rather than some value that could be
+/// mistaken for a real watermark.
+#[test]
+fn wal_hardened_version_zero_when_wal_disabled() {
+    let tree = TestTree::make_standard(RootIndexType::default());
+    assert_eq!(tree.wal_hardened_version(), 0);
+
+    assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(1, 100)), CRUDOperationResult::Inserted(_)));
+    assert_eq!(tree.wal_hardened_version(), 0);
+}
+
 /// Confirms the WAL-disabled path (never calling `enable_wal`) behaves
 /// exactly as before the WAL work: plain inserts/updates/deletes, including
 /// the update-in-place fast path (GC + update-in-place enabled, no

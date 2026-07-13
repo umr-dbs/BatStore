@@ -5,12 +5,14 @@ use std::hash::Hash;
 use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::path::Path;
+use std::sync::atomic::Ordering::Relaxed;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
+use triomphe::Arc;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
-use crate::mv_record_model::version_info::Version;
+use crate::mv_record_model::version_info::{AtomicVersion, Version};
 use crate::mv_sync::clock::GlobalClock;
 use crate::mv_wal::record::{self, WalRecord};
 
@@ -18,6 +20,10 @@ const GROUP_COMMIT_LINGER: Duration = Duration::from_micros(200);
 
 struct LogMessage {
     bytes: Vec<u8>,
+    /// This record's `ts_start` — folded into `WalWriter::hardened` once the
+    /// batch it's part of has actually fsynced (see `flush_loop`), so the
+    /// hardened watermark advances per *batch*, not per operation.
+    ts_start: Version,
     /// Fired once `bytes` has been durably fsynced.
     ack: Sender<()>,
 }
@@ -34,6 +40,27 @@ struct LogMessage {
 pub struct WalWriter<Key, Payload> {
     sender: Option<Sender<LogMessage>>,
     thread: Option<JoinHandle<()>>,
+    /// Three-state watermark, encoded in one atomic:
+    /// - `Version::MAX` ("never used") — this shard has never had a write
+    ///   enqueued. Must not drag down a multi-shard aggregate's `min` just
+    ///   because some worker slot happens to be idle.
+    /// - `0` ("used, nothing confirmed yet") — at least one write has been
+    ///   enqueued (`log_with_stamp` downgrades from `Version::MAX` to this
+    ///   the moment that happens) but this shard's background thread hasn't
+    ///   completed its first flush yet. Deliberately *not* left at
+    ///   `Version::MAX` in this state — that would let a query for "is
+    ///   version V durable" answer yes for a shard with real, unflushed,
+    ///   pending writes.
+    /// - any other value — the highest `ts_start` this shard's background
+    ///   thread has confirmed durably fsynced so far.
+    ///
+    /// Shared with `flush_loop` via `Arc` so the background thread can
+    /// publish it without a lock; once past the initial downgrade, safe to
+    /// update with a plain `store` rather than a compare-and-max because
+    /// this shard has exactly one producer (its owning worker — see this
+    /// type's doc) submitting strictly in `ts_start` order, so batches are
+    /// drained and flushed in that same non-decreasing order.
+    hardened: Arc<AtomicVersion>,
     _marker: PhantomData<(Key, Payload)>,
 }
 
@@ -50,17 +77,22 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> WalWriter<Key, Payload> {
             .open(path)?;
 
         let (sender, receiver) = unbounded::<LogMessage>();
+        let hardened = Arc::new(AtomicVersion::new(Version::MAX));
 
-        let thread = thread::spawn(move || Self::flush_loop(file, receiver, flush_interval));
+        let thread = {
+            let hardened = hardened.clone();
+            thread::spawn(move || Self::flush_loop(file, receiver, flush_interval, hardened))
+        };
 
         Ok(Self {
             sender: Some(sender),
             thread: Some(thread),
+            hardened,
             _marker: PhantomData,
         })
     }
 
-    fn flush_loop(mut file: File, receiver: Receiver<LogMessage>, flush_interval: Duration) {
+    fn flush_loop(mut file: File, receiver: Receiver<LogMessage>, flush_interval: Duration, hardened: Arc<AtomicVersion>) {
         loop {
             let first = match receiver.recv_timeout(flush_interval) {
                 Ok(msg) => msg,
@@ -96,6 +128,12 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> WalWriter<Key, Payload> {
                 thread::sleep(Duration::from_millis(50));
             }
 
+            // The whole batch just became durable at once — publish the
+            // highest `ts_start` in it as this shard's new hardened
+            // watermark, rather than resolving each record individually.
+            let max_ts = batch.iter().map(|msg| msg.ts_start).max().unwrap();
+            hardened.store(max_ts, Relaxed);
+
             for msg in batch {
                 let _ = msg.ack.send(());
             }
@@ -103,9 +141,21 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> WalWriter<Key, Payload> {
     }
 
     /// Blocks until the record this `ticket` (from `start_commit_logged`)
-    /// belongs to has been durably fsynced.
+    /// belongs to has been durably fsynced. No production dispatch path
+    /// calls this anymore (writes are fire-and-forget — see
+    /// `MVBTSt::wal_hardened_version`'s doc for why); kept for callers that
+    /// genuinely want to wait on one specific record, and exercised by this
+    /// module's own test below.
     pub fn wait_flushed(&self, ticket: Receiver<()>) {
         let _ = ticket.recv();
+    }
+
+    /// This shard's durability watermark — see the `hardened` field doc for
+    /// its three possible states. When it's a real value (neither `0` nor
+    /// `Version::MAX`), every record submitted to this shard with
+    /// `ts_start <= this value` is confirmed durably fsynced.
+    pub fn hardened_version(&self) -> Version {
+        self.hardened.load(Relaxed)
     }
 }
 
@@ -148,18 +198,28 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
     ) -> Receiver<()> {
         let op = build(stamp.ts_start());
 
-        let mut body = Vec::with_capacity(32);
-        record::encode(&WalRecord { stamp, op }, &mut body);
+        // Encodes straight into one buffer (length prefix + body + crc)
+        // instead of encoding the body into its own buffer and then
+        // copying it into a second, framed one — see `record::encode_framed`.
+        let mut framed = Vec::with_capacity(40);
+        record::encode_framed(&WalRecord { stamp, op }, &mut framed);
 
-        let mut framed = Vec::with_capacity(body.len() + 8);
-        record::frame(&body, &mut framed);
+        // The moment this write is enqueued, this shard has real
+        // outstanding work: if `hardened` is still at the "never used"
+        // sentinel (`Version::MAX`), downgrade it to `0` ("used, nothing
+        // confirmed yet") so a concurrent `hardened_version()` query can no
+        // longer mistake a shard with a real pending write for
+        // unconstrained. A harmless no-op once this shard has flushed at
+        // least one batch — `hardened` then holds a real, already-
+        // confirmed value that must never regress.
+        let _ = self.hardened.compare_exchange(Version::MAX, 0, Relaxed, Relaxed);
 
         let (ack_tx, ack_rx) = bounded(1);
         // Safe to unwrap: the sender is only ever taken (and the channel
         // closed) from `Drop`, which can't run concurrently with this call
         // — `self` is reached through an `Arc`, so `Drop` only runs once no
         // other reference (and thus no other call to this method) exists.
-        let _ = self.sender.as_ref().unwrap().send(LogMessage { bytes: framed, ack: ack_tx });
+        let _ = self.sender.as_ref().unwrap().send(LogMessage { bytes: framed, ts_start: stamp.ts_start(), ack: ack_tx });
         ack_rx
     }
 }

@@ -423,9 +423,9 @@ pub fn main_tpcc(parms: Vec<String>) {
     }
 
     let num_warehouses: u32 = arg(&parms, 2, 4);
-    let num_terminals: usize = arg(&parms, 3, num_warehouses as usize);
+    let num_terminals: usize = arg(&parms, 3, num_warehouses as usize * 10);
     let duration_secs: u64 = arg(&parms, 4, 30);
-    let affinity: bool = arg(&parms, 5, true);
+    let affinity: bool = arg(&parms, 5, false);
     let gc: bool = arg(&parms, 6, true);
     let update_in_place: bool = arg(&parms, 7, false);
     let root_star_index = match parms.get(8).map(|s| s.as_str()).unwrap_or("fg") {

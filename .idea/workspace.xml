@@ -16,34 +16,15 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Refine all">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Add group commit linger to collect and fsync logs more frequently&#10;and fix ycsb parms order">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_schema.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_schema.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_bench/ycsb_txn.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/ycsb_txn.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_block/block_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_block/block_handle.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_gc/query_tracer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/query_tracer.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_driver.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_driver.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/iter_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/iter_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/query.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/transaction.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/transaction.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_record_model/tx_stamp.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_record_model/tx_stamp.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_record_model/version_info.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_record_model/version_info.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_root/frugal_root.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_root/frugal_root.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_root/index_root.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_root/index_root.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/block_sync.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/block_sync.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_sync/commit_log.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/commit_log.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_sync/version_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/version_handle.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/visibility.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/visibility.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/worker.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/worker.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_tree/mvbt.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/mvbt.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_wal/integration_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_wal/integration_tests.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_wal/record.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_wal/record.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_wal/recovery.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_wal/recovery.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_wal/writer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_wal/writer.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -55,7 +36,7 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="92" />
+    <option name="cachedIndexableFilesCount" value="94" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
@@ -69,7 +50,7 @@
   <component name="Git.Settings">
     <option name="RECENT_BRANCH_BY_REPOSITORY">
       <map>
-        <entry key="$PROJECT_DIR$" value="compact-meta" />
+        <entry key="$PROJECT_DIR$" value="buffer-pool" />
       </map>
     </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
@@ -99,60 +80,60 @@
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
       <entry key="MS100" value="1.0" />
-      <entry key="MS500" value="1.000002390384614" />
-      <entry key="S2" value="1.1245257136072628" />
-      <entry key="S5" value="2.3180700947851243" />
-      <entry key="S10" value="4.0019394842521345" />
-      <entry key="S30" value="6.29531207721286" />
-      <entry key="S60" value="7.245054466492267" />
-      <entry key="M2" value="7.937509428760108" />
-      <entry key="M5" value="8.50971239583433" />
-      <entry key="M10" value="8.747132828786434" />
-      <entry key="M15" value="8.864584154248952" />
-      <entry key="M30" value="9.224705041920657" />
-      <entry key="H1" value="11.455672351508019" />
-      <entry key="H2" value="36.84634462302519" />
-      <entry key="H4" value="192.0425709563495" />
-      <entry key="D1" value="3823.7911778702314" />
-      <entry key="W1" value="9156.147401065384" />
+      <entry key="MS500" value="1.0" />
+      <entry key="S2" value="1.000000486013593" />
+      <entry key="S5" value="1.0029830419882044" />
+      <entry key="S10" value="1.0546172316050941" />
+      <entry key="S30" value="1.3794109870546083" />
+      <entry key="S60" value="1.616215488599159" />
+      <entry key="M2" value="1.8316490991566798" />
+      <entry key="M5" value="2.999572056822247" />
+      <entry key="M10" value="5.086036088582477" />
+      <entry key="M15" value="6.439362764636071" />
+      <entry key="M30" value="8.535360294991186" />
+      <entry key="H1" value="11.646034934510746" />
+      <entry key="H2" value="35.821104538264635" />
+      <entry key="H4" value="185.99893601362066" />
+      <entry key="D1" value="3798.6266207508656" />
+      <entry key="W1" value="9148.826752840878" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
       <entry key="MS500" value="0.0" />
       <entry key="S2" value="0.0" />
-      <entry key="S5" value="6.136113337228524E-307" />
-      <entry key="S10" value="7.833334754259211E-154" />
-      <entry key="S30" value="9.218258774308515E-52" />
-      <entry key="S60" value="3.0361585555284344E-26" />
-      <entry key="M2" value="1.742457619435387E-13" />
-      <entry key="M5" value="7.878887778028732E-6" />
-      <entry key="M10" value="0.002807611168244075" />
-      <entry key="M15" value="0.019975557347231124" />
-      <entry key="M30" value="0.1501493138902773" />
-      <entry key="H1" value="0.5597954529486048" />
-      <entry key="H2" value="2.750029764518543" />
-      <entry key="H4" value="14.284571040001888" />
-      <entry key="D1" value="366.81395355255" />
-      <entry key="W1" value="925.3482634664173" />
+      <entry key="S5" value="0.0" />
+      <entry key="S10" value="1.3881438510139998E-180" />
+      <entry key="S30" value="1.1155220466260336E-60" />
+      <entry key="S60" value="1.0561827714112895E-30" />
+      <entry key="M2" value="1.0277075320397775E-15" />
+      <entry key="M5" value="1.0109922838257866E-6" />
+      <entry key="M10" value="0.0010057230978355277" />
+      <entry key="M15" value="0.010075343952302192" />
+      <entry key="M30" value="0.10663599846453917" />
+      <entry key="H1" value="0.47175836580449737" />
+      <entry key="H2" value="2.5245415116568823" />
+      <entry key="H4" value="13.686416879289858" />
+      <entry key="D1" value="364.208106445352" />
+      <entry key="W1" value="924.4062951047589" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.9794202975869268" />
-      <entry key="MS500" value="0.9958516988683852" />
-      <entry key="S2" value="1.1192232297412805" />
-      <entry key="S5" value="2.3027172693687423" />
-      <entry key="S10" value="3.9862306470580005" />
-      <entry key="S30" value="6.286444153916614" />
-      <entry key="S60" value="7.2391999062249885" />
-      <entry key="M2" value="7.933701243703025" />
-      <entry key="M5" value="8.507815071518953" />
-      <entry key="M10" value="8.74888910275693" />
-      <entry key="M15" value="8.883788605781216" />
-      <entry key="M30" value="9.37427724357157" />
-      <entry key="H1" value="12.014907619652565" />
-      <entry key="H2" value="39.595399227396406" />
-      <entry key="H4" value="206.32473834827698" />
-      <entry key="D1" value="4190.595225221732" />
-      <entry key="W1" value="10081.492058094913" />
+      <entry key="MS100" value="0.04903650611854692" />
+      <entry key="MS500" value="0.5471468506303697" />
+      <entry key="S2" value="0.8600549880953475" />
+      <entry key="S5" value="0.9444499499251142" />
+      <entry key="S10" value="1.024809464401888" />
+      <entry key="S30" value="1.3691653160012567" />
+      <entry key="S60" value="1.6110033609920487" />
+      <entry key="M2" value="1.828990209655745" />
+      <entry key="M5" value="2.998265323698549" />
+      <entry key="M10" value="5.0861319871508766" />
+      <entry key="M15" value="6.448693331568372" />
+      <entry key="M30" value="8.641408322500949" />
+      <entry key="H1" value="12.117232114287187" />
+      <entry key="H2" value="38.34470628640417" />
+      <entry key="H4" value="199.68302761186902" />
+      <entry key="D1" value="4162.8248876544885" />
+      <entry key="W1" value="10073.229444649327" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -166,58 +147,58 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "Cargo.Build --release.executor": "Run",
-    "Cargo.Build `Generate`.executor": "Run",
-    "Cargo.Check.executor": "Run",
-    "Cargo.Generate.executor": "Run",
-    "Cargo.Run MV-BPlusTree.executor": "Run",
-    "Cargo.Run cMVBT.executor": "Run",
-    "Cargo.Run.executor": "Run",
-    "Cargo.Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others.executor": "Run",
-    "Cargo.Test mv_wal::integration_tests::crash_recovery_round_trip.executor": "Valgrind",
-    "Cargo.Test mv_wal::record::tests::detects_corrupted_body.executor": "Run",
-    "Cargo.Test mv_wal::record::tests::detects_truncated_frame.executor": "Run",
-    "Cargo.Test mv_wal::record::tests::round_trips_all_variants.executor": "Run",
-    "Cargo.Test mv_wal::writer::tests::group_commit_flushes_and_wait_unblocks.executor": "Run",
-    "Cargo.Test writer::tests.executor": "Run",
-    "Cargo.build.executor": "Run",
-    "Cargo.check.executor": "Run",
-    "Cargo.clean.executor": "Run",
-    "CidrDebugProfileConversion": "true",
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "RunOnceActivity.MCP Project settings loaded": "true",
-    "RunOnceActivity.OpenProjectViewOnStart": "true",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.cidr.known.project.marker": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.readMode.enableVisualFormatting": "true",
-    "RunOnceActivity.rust.reset.selective.auto.import": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "cf.first.check.clang-format": "false",
-    "cidr.known.project.marker": "true",
-    "codeWithMe.voiceChat.enabledByDefault": "false",
-    "git-widget-placeholder": "main",
-    "junie.onboarding.icon.badge.shown": "true",
-    "last_opened_file_path": "/home/amir/RustroverProjects/cMVBT/src/mv_page_model",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.jshint": "true",
-    "node.js.detected.package.tslint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.jshint": "",
-    "node.js.selected.package.tslint": "(autodetect)",
-    "nodejs_package_manager_path": "npm",
-    "org.rust.cargo.project.model.PROJECT_DISCOVERY": "true",
-    "org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon": "",
-    "org.rust.first.attach.projects": "true",
-    "org.rust.first.attach.projects.stats": "true",
-    "run.code.analysis.last.selected.profile": "pProject Default",
-    "settings.editor.selected.configurable": "reference.settingsdialog.project.grazie",
-    "to.speed.mode.migration.done": "true",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Cargo.Build --release.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Build `Generate`.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Check.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Generate.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Run MV-BPlusTree.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Run cMVBT.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Run.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_wal::integration_tests::crash_recovery_round_trip.executor&quot;: &quot;Valgrind&quot;,
+    &quot;Cargo.Test mv_wal::record::tests::detects_corrupted_body.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_wal::record::tests::detects_truncated_frame.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_wal::record::tests::round_trips_all_variants.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_wal::writer::tests::group_commit_flushes_and_wait_unblocks.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test writer::tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.build.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.check.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.clean.executor&quot;: &quot;Run&quot;,
+    &quot;CidrDebugProfileConversion&quot;: &quot;true&quot;,
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.MCP Project settings loaded&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.OpenProjectViewOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.cidr.known.project.marker&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.readMode.enableVisualFormatting&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.rust.reset.selective.auto.import&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;cf.first.check.clang-format&quot;: &quot;false&quot;,
+    &quot;cidr.known.project.marker&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
+    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/home/amir/RustroverProjects/cMVBT/src/mv_page_model&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.jshint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.jshint&quot;: &quot;&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;org.rust.cargo.project.model.PROJECT_DISCOVERY&quot;: &quot;true&quot;,
+    &quot;org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon&quot;: &quot;&quot;,
+    &quot;org.rust.first.attach.projects&quot;: &quot;true&quot;,
+    &quot;org.rust.first.attach.projects.stats&quot;: &quot;true&quot;,
+    &quot;run.code.analysis.last.selected.profile&quot;: &quot;pProject Default&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;reference.settingsdialog.project.grazie&quot;,
+    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/src/mv_page_model" />
@@ -1337,6 +1318,7 @@
       <workItem from="1783685431343" duration="20040000" />
       <workItem from="1783761527485" duration="8932000" />
       <workItem from="1783779437074" duration="20693000" />
+      <workItem from="1783971470318" duration="2840000" />
     </task>
     <task id="LOCAL-00134" summary="Cleaned BT Root* Index. Moved to SK for GC AUX Indexes.">
       <option name="closed" value="true" />

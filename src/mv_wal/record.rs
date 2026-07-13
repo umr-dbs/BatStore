@@ -176,6 +176,28 @@ pub fn frame(body: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(&crc32(body).to_le_bytes());
 }
 
+/// Same wire format as `encode` followed by `frame`
+/// (`[u32 len][body][u32 crc32(body)]`), but encodes the body straight into
+/// `out` instead of into a separate buffer first — one allocation instead
+/// of two, and no copy of the body into a second buffer. The length prefix
+/// is written as a placeholder, then patched once the body's actual length
+/// is known. Used by `WalWriter::log_with_stamp`, which frames exactly one
+/// record per call and has no other reason to keep the body separate.
+pub fn encode_framed<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
+    record: &WalRecord<Key, Payload>,
+    out: &mut Vec<u8>,
+) {
+    let start = out.len();
+    out.extend_from_slice(&0u32.to_le_bytes());
+    encode(record, out);
+
+    let body_len = (out.len() - start - 4) as u32;
+    out[start..start + 4].copy_from_slice(&body_len.to_le_bytes());
+
+    let crc = crc32(&out[start + 4..]);
+    out.extend_from_slice(&crc.to_le_bytes());
+}
+
 /// Attempts to read one framed record starting at `bytes[0]`. Returns the
 /// body slice and the total number of bytes consumed (frame overhead + body),
 /// or `None` if the frame is incomplete or fails its checksum — both cases
@@ -251,6 +273,53 @@ mod tests {
         for cut in 1..framed.len() {
             assert!(read_frame(&framed[..cut]).is_none(), "cut at {cut} should be incomplete");
         }
+    }
+
+    /// `encode_framed`'s single-buffer path must produce byte-for-byte the
+    /// same frame as the two-step `encode` + `frame` it replaces in
+    /// `WalWriter::log_with_stamp` — otherwise recovery (which only knows
+    /// the two-step format's invariants) could silently start reading a
+    /// different wire format.
+    #[test]
+    fn encode_framed_matches_two_step_encode_and_frame() {
+        let record = WalRecord { stamp: TxStamp::new(3, 99), op: CRUDOperation::Update(5u64, 6u64) };
+
+        let mut body = Vec::new();
+        encode(&record, &mut body);
+        let mut expected = Vec::new();
+        frame(&body, &mut expected);
+
+        let mut actual = Vec::new();
+        encode_framed(&record, &mut actual);
+
+        assert_eq!(actual, expected);
+
+        let (read_body, consumed) = read_frame(&actual).expect("valid frame");
+        assert_eq!(consumed, actual.len());
+        let decoded: WalRecord<u64, u64> = decode(read_body).expect("valid record");
+        assert_eq!(decoded.stamp.ts_start(), record.stamp.ts_start());
+        assert_ops_eq(&decoded.op, &record.op);
+    }
+
+    /// Same byte-for-byte equivalence, but writing into a buffer that
+    /// already has unrelated bytes at the front — guards against the
+    /// placeholder-patch math in `encode_framed` assuming `out` starts
+    /// empty (it only ever gets called that way today, but the offset
+    /// arithmetic must stay correct if that changes).
+    #[test]
+    fn encode_framed_patches_length_correctly_with_a_nonempty_prefix() {
+        let record: WalRecord<u64, u64> = WalRecord { stamp: TxStamp::new(1, 1), op: CRUDOperation::Delete(7u64) };
+
+        let mut body = Vec::new();
+        encode(&record, &mut body);
+        let mut expected_frame = Vec::new();
+        frame(&body, &mut expected_frame);
+
+        let mut actual = vec![0xAAu8; 5];
+        encode_framed(&record, &mut actual);
+
+        assert_eq!(&actual[5..], &expected_frame[..]);
+        assert_eq!(&actual[..5], &[0xAA; 5]);
     }
 
     #[test]

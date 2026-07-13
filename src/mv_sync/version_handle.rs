@@ -1,7 +1,6 @@
 use std::fmt::Display;
 use std::hash::Hash;
 use std::sync::atomic::Ordering::Relaxed;
-use crossbeam_channel::Receiver;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_query::SnapShot;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
@@ -180,71 +179,53 @@ impl<'a,
         }
     }
 
-    /// Blocks until the WAL record this `ticket` (from `wal_start_commit`)
-    /// belongs to has been durably fsynced. No-op when `ticket` is `None`
-    /// (WAL disabled).
+    /// Every write's WAL record (if any) is handed to its shard and *never
+    /// waited on* by the write itself — `dispatch_crud`/`Transaction::commit`
+    /// return as soon as `commit_tx` makes the write visible, regardless of
+    /// whether (or when) it's actually fsynced. There is deliberately no
+    /// per-op durability wait anymore (previously: Early Lock Release,
+    /// paper §3.4 — commit visibility, then block for this op's own flush
+    /// plus every dependency's flush before returning). That gave every
+    /// single-op caller a crash-durability guarantee at the cost of paying a
+    /// flush round-trip on every op; callers who actually need a durability
+    /// point-in-time now ask for one explicitly via `wal_hardened_version`/
+    /// `wait_wal_hardened` below instead of every op paying for it.
+    ///
+    /// The minimum hardened watermark across every WAL shard (see
+    /// `WalWriter::hardened_version`): every write with `ts_start` at or
+    /// below this value, on every worker, is confirmed durably fsynced.
+    /// Advances in batches as each shard's background thread completes a
+    /// flush, not per operation. `0` when no WAL is attached (or one is
+    /// attached but nothing has flushed yet) — nothing is guaranteed
+    /// durable, so callers polling this get an honest "not yet" instead of
+    /// a stale/optimistic value.
     #[inline(always)]
-    pub(crate) fn wal_wait_flush(&self, ticket: Option<Receiver<()>>) {
-        if let Some(ticket) = ticket {
-            let _ = ticket.recv();
+    pub fn wal_hardened_version(&self) -> Version {
+        match self.wal.load().as_ref() {
+            Some(shards) => shards.iter().map(|w| w.hardened_version()).min().unwrap_or(0),
+            None => 0,
         }
     }
 
-    /// Early Lock Release, step 1 (paper §3.4): commits `worker_id`'s write
-    /// — making it visible via the CommitLog — *before* its WAL entry (if
-    /// any) is confirmed flushed, removing the flush latency from the
-    /// critical path of visibility. If this write was logged (`ticket` is
-    /// `Some`), immediately caps that worker's hardened watermark just
-    /// below the new `ts_commit` (`CommitLog::mark_pending`), so no
-    /// concurrent transaction can mistake this still-in-flight write for
-    /// already-durable before `finish_elr_commit` raises it back. Call
-    /// *before* waiting on `ticket`; returns `ts_commit`.
-    #[inline(always)]
-    pub(crate) fn commit_tx_elr(&self, worker_id: WorkerId, ticket: &Option<Receiver<()>>) -> Version {
-        let ts_commit = self.commit_tx(worker_id);
-        if ticket.is_some() {
-            self.commit_logs[worker_id as usize].mark_pending(ts_commit);
+    /// Blocks until `wal_hardened_version()` reaches `target` — i.e. until
+    /// every write up to that point is confirmed durable. For an explicit,
+    /// caller-chosen checkpoint only (e.g. "durability-sync before reporting
+    /// a batch job done"); never called automatically by the write path
+    /// itself (see `wal_hardened_version`'s doc). Polls on a short sleep
+    /// rather than busy-spinning: unlike the old per-op ELR wait (usually
+    /// zero-iteration), this can legitimately span multiple flush intervals,
+    /// so spinning would just burn CPU for no benefit.
+    pub fn wait_wal_hardened(&self, target: Version) {
+        while self.wal_hardened_version() < target {
+            std::thread::sleep(std::time::Duration::from_micros(100));
         }
-        ts_commit
-    }
-
-    /// Early Lock Release, step 2: call after waiting on the same `ticket`
-    /// passed to `commit_tx_elr` (i.e. once this write's WAL entry, if any,
-    /// is confirmed flushed). Resolves `worker_id`'s pending marker (see
-    /// `CommitLog::mark_resolved`), then blocks until the *global* durability
-    /// watermark has caught up to `reader_ts` — this write's own
-    /// snapshot/stamp — i.e. until everything this write could have read
-    /// is itself confirmed durable too (dependency tracking, paper §3.4:
-    /// "we have to make sure that all transactions we read from are durable
-    /// when we signal the commit"). No-op when this write was never logged
-    /// (`logged = false`) — a write with no WAL attached has no durability
-    /// contract to keep, so nothing to wait for.
-    #[inline(always)]
-    pub(crate) fn finish_elr_commit(&self, worker_id: WorkerId, reader_ts: Version, logged: bool) {
-        if !logged {
-            return;
-        }
-        self.commit_logs[worker_id as usize].mark_resolved();
-        while self.durability_watermark() < reader_ts {
-            std::thread::yield_now();
-        }
-    }
-
-    /// The minimum hardened watermark across every worker (see
-    /// `CommitLog`'s field doc) — the global point below which every
-    /// commit, on every worker, is confirmed WAL-durable. `Version::MAX`
-    /// (unconstrained) when no worker has ever logged a write, e.g. no WAL
-    /// attached at all.
-    #[inline(always)]
-    pub(crate) fn durability_watermark(&self) -> Version {
-        self.commit_logs.iter().map(|cl| cl.hardened()).min().unwrap_or(Version::MAX)
     }
 }
 
 /// Split from the block above: these two methods are the only ones that
 /// actually encode a record onto the `WalWriter`, so only they need
 /// `Payload: WalPayload` — every other method here (snapshots, commit log,
-/// visibility, `wal_wait_flush`, ...) stays usable for any `Payload`.
+/// visibility, ...) stays usable for any `Payload`.
 impl<'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
@@ -258,32 +239,29 @@ impl<'a,
     /// `build(ts_start)` to it for logging. Concurrent commits can land in
     /// the log in either order regardless of which timestamp is numerically
     /// smaller; `replay` (see `mv_wal::recovery`) accounts for this by
-    /// sorting records by `ts_start` before applying them. Returns the
-    /// stamp and a flush ticket to pass to `wal_wait_flush` — `None` when no
-    /// WAL is attached. `build` is only ever called with
+    /// sorting records by `ts_start` before applying them. Fire-and-forget:
+    /// the caller never waits on this write's flush (see
+    /// `MVBTSt::wal_hardened_version`'s doc), so there's no ticket to return
+    /// here — just the stamp. `build` is only ever called with
     /// `CRUDOperation::Insert`/`Update`/`Delete`.
     #[inline(always)]
     pub(crate) fn wal_start_commit(
         &self,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
-    ) -> (TxStamp, Option<Receiver<()>>) {
+    ) -> TxStamp {
         let worker_id = self.worker_id();
 
         // `wal_ever_enabled` lets a tree that has never had a WAL skip
         // `ArcSwapOption::load` entirely instead of paying its guard
         // mechanism on every write just to find `None` — see the field doc.
         if !self.wal_ever_enabled.load(Relaxed) {
-            return (TxStamp::new(worker_id, self.global_clock.next_timestamp()), None);
+            return TxStamp::new(worker_id, self.global_clock.next_timestamp());
         }
 
         match self.wal.load().as_ref() {
-            Some(shards) => {
-                let (stamp, ticket)
-                    = shards[worker_id as usize].start_commit_logged(&self.global_clock, worker_id, build);
-
-                (stamp, Some(ticket))
-            }
-            None => (TxStamp::new(worker_id, self.global_clock.next_timestamp()), None),
+            Some(shards) => shards[worker_id as usize]
+                .start_commit_logged(&self.global_clock, worker_id, build).0,
+            None => TxStamp::new(worker_id, self.global_clock.next_timestamp()),
         }
     }
 
@@ -291,17 +269,20 @@ impl<'a,
     /// under `stamp` — the transaction's *own* `(worker_id, ts_start)`, not
     /// a freshly-minted one, since every write in the same transaction must
     /// share its one `ts_start` (see `WalWriter::log_with_stamp`). No-op
-    /// (returns `None`) when no WAL is attached.
+    /// when no WAL is attached; fire-and-forget otherwise, same as
+    /// `wal_start_commit`.
     #[inline(always)]
     pub(crate) fn wal_log_write(
         &self,
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
-    ) -> Option<Receiver<()>> {
+    ) {
         if !self.wal_ever_enabled.load(Relaxed) {
-            return None;
+            return;
         }
 
-        self.wal.load().as_ref().map(|shards| shards[stamp.worker_id() as usize].log_with_stamp(stamp, build))
+        if let Some(shards) = self.wal.load().as_ref() {
+            shards[stamp.worker_id() as usize].log_with_stamp(stamp, build);
+        }
     }
 }

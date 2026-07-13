@@ -1,8 +1,6 @@
-use std::cell::Cell;
 use std::fmt::Display;
 use std::hash::Hash;
 
-use crossbeam_channel::Receiver;
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::{CRUDOperation, TxAtomicOperation};
 use crate::mv_crud_model::crud_operation_result::CRUDOperationInnerReason::{KeyAlreadyDeleted, KeyAlreadyExists, KeyDoesNotExist};
@@ -23,13 +21,12 @@ use crate::mv_utils::interval::Interval;
 /// worker's `CommitLog`, i.e. OSIC's "instant commit".
 ///
 /// Each write is also logged to the WAL (if attached) as it happens, under
-/// that same fixed stamp — but durability is only *waited for* once, at
-/// `commit`/drop, not after every individual write. This is safe because a
-/// transaction's writes are all sent to the WAL's channel by the same
-/// thread in program order, and the channel preserves per-sender order, so
-/// waiting on the *last* write's flush ticket is enough to guarantee every
-/// earlier one in the same transaction is durable too (see
-/// `mv_wal::writer::WalWriter::log_with_stamp`).
+/// that same fixed stamp — fire-and-forget, same as single-op
+/// `dispatch_crud` (see `MVBTSt::wal_hardened_version`'s doc): `commit`
+/// never waits for any of this transaction's writes to actually flush.
+/// Callers that need a durability point-in-time for this transaction should
+/// call `wal_hardened_version`/`wait_wal_hardened` themselves after
+/// `commit` returns.
 ///
 /// **Limitation (confirmed out of scope for this pass):** there is no
 /// rollback/undo on abort. `insert`/`update`/`delete` enforce first-writer-
@@ -51,10 +48,6 @@ pub struct Transaction<'a,
     worker_id: WorkerId,
     ts_start: Version,
     committed: bool,
-    /// Flush ticket for the most recently logged write, if a WAL is
-    /// attached — waited on (once) at `commit`/drop; see the type doc for
-    /// why waiting on only the latest one still covers every earlier write.
-    wal_ticket: Cell<Option<Receiver<()>>>,
 }
 
 impl<'a,
@@ -74,7 +67,7 @@ impl<'a,
         let worker_id = tree.worker_id();
         let ts_start = tree.begin_snapshot();
 
-        Self { tree, worker_id, ts_start, committed: false, wal_ticket: Cell::new(None) }
+        Self { tree, worker_id, ts_start, committed: false }
     }
 
     #[inline(always)]
@@ -131,13 +124,11 @@ impl<'a,
             .unwrap_or(true)
     }
 
-    /// Logs `build`'s write under this transaction's fixed `stamp`, storing
-    /// the flush ticket (overwriting any earlier one — see the type doc for
-    /// why that's safe) for `commit`/drop to wait on. No-op when no WAL is
-    /// attached.
+    /// Logs `build`'s write under this transaction's fixed `stamp`,
+    /// fire-and-forget (see the type doc). No-op when no WAL is attached.
     #[inline(always)]
     fn log_write(&self, stamp: TxStamp, build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>) {
-        self.wal_ticket.set(self.tree.wal_log_write(stamp, build));
+        self.tree.wal_log_write(stamp, build);
     }
 
     pub fn insert(&self, key: Key, payload: Payload) -> CRUDOperationResult<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
@@ -232,27 +223,15 @@ impl<'a,
         }
     }
 
-    /// Instant commit, Early Lock Release ordering (paper §3.4): appends
-    /// `ts_commit` to this worker's `CommitLog` — making every write this
-    /// transaction made visible — *before* waiting for them to be durably
-    /// flushed to the WAL (if attached; see the type doc for why waiting on
-    /// just the last ticket suffices for every earlier write in the same
-    /// transaction). Once flushed, blocks until the global durability
-    /// watermark has caught up to this transaction's own `ts_start` — i.e.
-    /// until everything this transaction could have read is itself
-    /// confirmed durable too (dependency tracking) — before returning
-    /// `ts_commit` to the caller. No write-set revisit needed, since every
-    /// write was already stamped and installed the moment it was applied.
-    /// Skips the wait entirely for a transaction that never wrote anything
-    /// (no WAL ticket): a read-only transaction has no durability contract
-    /// to keep.
+    /// Instant commit: appends `ts_commit` to this worker's `CommitLog` —
+    /// making every write this transaction made visible — and returns
+    /// immediately. No write-set revisit needed, since every write was
+    /// already stamped, logged (fire-and-forget), and installed the moment
+    /// it was applied; see the type doc for the durability contract this
+    /// doesn't wait for.
     pub fn commit(mut self) -> Version {
         self.committed = true;
-        let ticket = self.wal_ticket.take();
-        let logged = ticket.is_some();
-        let ts_commit = self.tree.commit_tx_elr(self.worker_id, &ticket);
-        self.tree.wal_wait_flush(ticket);
-        self.tree.finish_elr_commit(self.worker_id, self.ts_start, logged);
+        let ts_commit = self.tree.commit_tx(self.worker_id);
         self.tree.end_snapshot(self.ts_start);
         ts_commit
     }
@@ -266,13 +245,11 @@ impl<'a,
 > Drop for Transaction<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
     fn drop(&mut self) {
         // Dropped without calling `commit` (e.g. the caller gave up after a
-        // `Conflict`) — still wait for any logged-but-unflushed write and
-        // release the registered snapshot, so neither durability nor
-        // GC/commit-log pruning are left hanging. Writes already applied
-        // (in the tree *and* the WAL) are *not* rolled back (see this
-        // type's doc comment).
+        // `Conflict`) — still release the registered snapshot, so GC/
+        // commit-log pruning isn't left hanging. Any write already applied
+        // (in the tree *and*, fire-and-forget, the WAL) is *not* rolled back
+        // (see this type's doc comment).
         if !self.committed {
-            self.tree.wal_wait_flush(self.wal_ticket.take());
             self.tree.end_snapshot(self.ts_start);
         }
     }

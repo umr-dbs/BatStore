@@ -95,7 +95,7 @@ impl<'a,
                 let current_len
                     = leaf_page.len();
 
-                let (stamp, wal_ticket)
+                let stamp
                     = self.wal_start_commit(|_| CRUDOperation::Insert(key, payload.clone()));
 
                 leaf_page.push_uncommitted(
@@ -105,13 +105,12 @@ impl<'a,
                 leaf_page.commit_delta(1, 0);
 
                 drop(leaf_guard);
-                // Early Lock Release (paper §3.4): commit (visibility) before
-                // waiting for the flush, then confirm durability + this
-                // write's own dependencies before signaling success.
-                let _ts_commit = self.commit_tx_elr(stamp.worker_id(), &wal_ticket);
-                let logged = wal_ticket.is_some();
-                self.wal_wait_flush(wal_ticket);
-                self.finish_elr_commit(stamp.worker_id(), stamp.ts_start(), logged);
+                // Commit (visibility) and return immediately — the WAL
+                // record (if any) is flushed asynchronously in a batch by
+                // its shard's background thread, not waited on here. See
+                // `MVBTSt::wal_hardened_version`'s doc for how to check/wait
+                // for durability explicitly instead.
+                let _ts_commit = self.commit_tx(stamp.worker_id());
 
                 CRUDOperationResult::Inserted(stamp.ts_start())
             }
@@ -149,7 +148,7 @@ impl<'a,
                     }
                 }
 
-                let (stamp, wal_ticket)
+                let stamp
                     = self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
 
                 leaf_page.push_uncommitted(
@@ -165,11 +164,8 @@ impl<'a,
                         leaf_page.commit_delta(-1, 1);
 
                         drop(leaf_guard);
-                        // Early Lock Release, see the Insert arm above.
-                        let _ts_commit = self.commit_tx_elr(stamp.worker_id(), &wal_ticket);
-                        let logged = wal_ticket.is_some();
-                        self.wal_wait_flush(wal_ticket);
-                        self.finish_elr_commit(stamp.worker_id(), stamp.ts_start(), logged);
+                        // Fire-and-forget WAL, see the Insert arm above.
+                        let _ts_commit = self.commit_tx(stamp.worker_id());
 
                         CRUDOperationResult::Updated(stamp.ts_start())
                     }
@@ -214,7 +210,7 @@ impl<'a,
                     println!("[key={key}] - Loop start");
                 }
 
-                let (stamp, wal_ticket)
+                let stamp
                     = self.wal_start_commit(|_| CRUDOperation::Delete(key));
 
                 if VERBOSE {
@@ -229,11 +225,8 @@ impl<'a,
                         }
 
                         drop(leaf_guard);
-                        // Early Lock Release, see the Insert arm above.
-                        let _ts_commit = self.commit_tx_elr(stamp.worker_id(), &wal_ticket);
-                        let logged = wal_ticket.is_some();
-                        self.wal_wait_flush(wal_ticket);
-                        self.finish_elr_commit(stamp.worker_id(), stamp.ts_start(), logged);
+                        // Fire-and-forget WAL, see the Insert arm above.
+                        let _ts_commit = self.commit_tx(stamp.worker_id());
                         CRUDOperationResult::Deleted(stamp.ts_start())
                     },
                     Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
