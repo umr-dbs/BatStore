@@ -14,6 +14,8 @@ use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::clock::GlobalClock;
 use crate::mv_wal::record::{self, WalRecord};
 
+const GROUP_COMMIT_LINGER: Duration = Duration::from_micros(200);
+
 struct LogMessage {
     bytes: Vec<u8>,
     /// Fired once `bytes` has been durably fsynced.
@@ -69,6 +71,8 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> WalWriter<Key, Payload> {
                 // here there's nothing left to flush.
                 Err(RecvTimeoutError::Disconnected) => return,
             };
+
+            thread::sleep(GROUP_COMMIT_LINGER);
 
             // Drain whatever else has arrived without blocking, so this
             // flush batches every commit that piled up during the last
