@@ -1,6 +1,6 @@
 [package]
 name = "cMVBT"
-version = "0.0.113"
+version = "0.0.114"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
 description = "cMVBT Research Implementation"
@@ -41,9 +41,9 @@ hardware-lock-elision = []
 CCBPlusTree = { git = "https://github.com/umr-dbs/CC-BPlusTree.git", version = "0.0.122" }
 crossbeam-channel = "0.5.16"
 crossbeam-skiplist = "0.1.3"
-chrono = "0.4.44"
+chrono = "0.4.45"
 rand_distr = "0.6.0"
-rand = "0.10.1"
+rand = "0.10.2"
 itertools = "0.15.0"
 parking_lot = { version = "0.12.5", features = ["hardware-lock-elision", "arc_lock"] }
 arc-swap = "1.9.2"

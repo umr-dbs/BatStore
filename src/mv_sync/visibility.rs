@@ -42,6 +42,14 @@ impl SnapshotCache {
 /// `reader_worker` with snapshot `reader_ts_start` iff it's the reader's own
 /// write (from this-or-an-earlier transaction on the same worker) or
 /// `LCB(stamp.worker_id, reader_ts_start) > stamp.ts_start`.
+///
+/// Checked *before* either of those: a stamp marked invalid (its writing
+/// transaction aborted — see `TxStamp::is_invalid`'s doc) is never visible,
+/// to anyone, including the writer's own later transactions on the same
+/// worker — deliberately ahead of the same-worker fast path below, since
+/// that fast path is exactly what would otherwise keep an aborted write
+/// visible to its own writer forever (it doesn't consult the commit log at
+/// all, so an uncommitted write's absence from it never mattered there).
 pub fn is_visible(
     commit_logs: &[CommitLog],
     cache: &mut SnapshotCache,
@@ -49,6 +57,10 @@ pub fn is_visible(
     reader_ts_start: Version,
     stamp: TxStamp,
 ) -> bool {
+    if stamp.is_invalid() {
+        return false;
+    }
+
     if stamp.worker_id() == reader_worker {
         // A worker's own transactions are strictly serialized in time, so
         // any write by "me" is visible to "my" current transaction — but

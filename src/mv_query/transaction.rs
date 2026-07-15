@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fmt::Display;
 use std::hash::Hash;
 
@@ -28,26 +29,34 @@ use crate::mv_utils::interval::Interval;
 /// call `wal_hardened_version`/`wait_wal_hardened` themselves after
 /// `commit` returns.
 ///
-/// **Limitation (confirmed out of scope for this pass):** there is no
-/// rollback/undo on abort. `insert`/`update`/`delete` enforce first-writer-
-/// wins and report a conflict via `CRUDOperationResult::Conflict` instead of
-/// applying the write, but any writes already applied earlier in the same
-/// transaction are **not** reverted — nor are they un-logged: the WAL has no
-/// concept of transaction boundaries, so an abandoned write is replayed on
-/// recovery exactly as if it had committed. A real abort would additionally
-/// need to physically undo those prior writes (in the tree *and* the WAL)
-/// and recycle `ts_start` for a retry (see the paper's "Transaction Abort"),
-/// which this transaction doesn't do.
+/// **Abort**: dropping this transaction without calling `commit()` (e.g.
+/// after a `Conflict`, or a business-logic rollback) reverts every write it
+/// already applied, automatically, in `Drop` — see `MVBTSt::abort_write`.
+/// Each write's *key* is remembered (not a full undo log: replaying it back
+/// to its live-tree state is enough, since every current caller writes a
+/// given key at most once per transaction — a transaction that wrote the
+/// same key more than once would still abort safely, just without
+/// replaying its intermediate states one at a time). Reversal marks the
+/// record invalid (or undeletes it, for a plain `Delete`) rather than
+/// physically removing it — see `TxStamp::is_invalid`'s doc — and is itself
+/// logged to the WAL (fire-and-forget, like every other write here), so a
+/// crash between an abort and the next checkpoint replays correctly instead
+/// of resurrecting the aborted write.
 pub struct Transaction<'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload
 > {
     tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     ts_start: Version,
     committed: bool,
+    /// Keys this transaction has actually written (on a successful
+    /// `Inserted`/`Updated`/`Deleted` outcome only — never on `Conflict`/
+    /// `ZeroAffected`, since nothing was written there to revert). Walked by
+    /// `Drop` to abort every one of them if `commit()` was never called.
+    written: RefCell<Vec<Key>>,
 }
 
 impl<'a,
@@ -67,7 +76,7 @@ impl<'a,
         let worker_id = tree.worker_id();
         let ts_start = tree.begin_snapshot();
 
-        Self { tree, worker_id, ts_start, committed: false }
+        Self { tree, worker_id, ts_start, committed: false, written: RefCell::new(Vec::new()) }
     }
 
     #[inline(always)]
@@ -113,13 +122,21 @@ impl<'a,
     /// newest version at `key`, if any, must be visible to this
     /// transaction's snapshot — otherwise a concurrent transaction this one
     /// can't see got there first.
+    ///
+    /// Skips over an invalid entry (its writing transaction aborted — see
+    /// `TxStamp::is_invalid`'s doc) rather than checking its visibility:
+    /// `mv_sync::visibility::is_visible` always reports an invalid stamp as
+    /// not visible, to *anyone*, forever — so treating it as "the newest
+    /// entry" here would make every future write to this key see a
+    /// permanent, unrecoverable false conflict instead of correctly writing
+    /// over a write that never really happened.
     fn newest_visible_to_me(&self, leaf_page: &LeafPage<NUM_RECORDS, Key, Payload>, key: Key) -> bool {
         let mut is_visible
             = |stamp| self.tree.is_visible_stamp(self.worker_id, self.ts_start, stamp);
 
         leaf_page.as_records()
             .iter()
-            .rfind(|r| r.key() == key)
+            .rfind(|r| r.key() == key && !r.version().insertion_stamp().is_invalid())
             .map(|record| is_visible(record.version().insertion_stamp()))
             .unwrap_or(true)
     }
@@ -143,7 +160,7 @@ impl<'a,
         if leaf_page.as_records()
             .iter()
             .rfind(|r| r.key == key)
-            .map(|r| !r.version.is_deleted())
+            .map(|r| r.version.is_live())
             .unwrap_or(false)
         {
             return CRUDOperationResult::ZeroAffected(KeyAlreadyExists);
@@ -160,6 +177,7 @@ impl<'a,
 
         leaf_page.commit_delta(1, 0);
 
+        self.written.borrow_mut().push(key);
         CRUDOperationResult::Inserted(stamp.ts_start())
     }
 
@@ -186,6 +204,7 @@ impl<'a,
         match leaf_page.delete_after_update(key, stamp) {
             Ok(Some(..)) => {
                 leaf_page.commit_delta(-1, 1);
+                self.written.borrow_mut().push(key);
                 CRUDOperationResult::Updated(stamp.ts_start())
             }
             Ok(None) => {
@@ -216,6 +235,7 @@ impl<'a,
         match leaf_page.delete(key, stamp) {
             Ok(Some(..)) => {
                 leaf_page.commit_delta(-1, 1);
+                self.written.borrow_mut().push(key);
                 CRUDOperationResult::Deleted(stamp.ts_start())
             }
             Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
@@ -241,15 +261,18 @@ impl<'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload
 > Drop for Transaction<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
     fn drop(&mut self) {
         // Dropped without calling `commit` (e.g. the caller gave up after a
-        // `Conflict`) — still release the registered snapshot, so GC/
-        // commit-log pruning isn't left hanging. Any write already applied
-        // (in the tree *and*, fire-and-forget, the WAL) is *not* rolled back
-        // (see this type's doc comment).
+        // `Conflict`, or a business-logic rollback) — abort every write
+        // this transaction made (see the type doc and `MVBTSt::abort_write`)
+        // before releasing the registered snapshot, so a concurrent GC pass
+        // can't reclaim anything an in-progress abort still needs.
         if !self.committed {
+            for key in self.written.borrow().iter() {
+                self.tree.abort_write(*key, TxStamp::new(self.worker_id, self.ts_start));
+            }
             self.tree.end_snapshot(self.ts_start);
         }
     }
@@ -422,6 +445,95 @@ mod tests {
         match recovered.dispatch_crud(CRUDOperation::Point(2, recovered_version)) {
             CRUDOperationResult::MatchedRecords(r) if r.is_empty() => {}
             other => panic!("key 2 should stay deleted after recovery, got {other}"),
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The motivating gap from the type doc: before this feature,
+    /// `mv_sync::visibility::is_visible`'s same-worker fast path treated a
+    /// transaction's own writes as visible forever, regardless of whether it
+    /// ever committed. A transaction that writes a key, then hits a
+    /// `Conflict` on a later op in the *same* transaction and drops without
+    /// `commit()`, must have its earlier write actually reverted — not just
+    /// leave its snapshot released while the write sits in the tree as if
+    /// committed.
+    #[test]
+    fn dropped_transaction_reverts_its_earlier_writes_on_conflict() {
+        let tree = TestTree::make_standard(RootIndexType::default());
+
+        let tx1 = Transaction::begin(&tree);
+        assert!(matches!(tx1.insert(1, 100), CRUDOperationResult::Inserted(_)));
+
+        // A concurrent transaction on another worker inserts and commits
+        // key 2 *after* tx1's snapshot was already taken.
+        let tree_ref = &tree;
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let tx2 = Transaction::begin(tree_ref);
+                assert!(matches!(tx2.insert(2, 999), CRUDOperationResult::Inserted(_)));
+                tx2.commit();
+            }).join().unwrap();
+        });
+
+        // tx1's snapshot predates tx2's insert of key 2, so tx1's own
+        // attempt to write key 2 must lose the race.
+        assert!(matches!(tx1.insert(2, 111), CRUDOperationResult::Conflict));
+
+        // tx1 is dropped here without commit — its earlier write (key 1)
+        // must be reverted, not left stuck as if committed.
+        drop(tx1);
+
+        // A later transaction on the *same* worker (same thread) must not
+        // see the aborted insert — before this feature, the same-worker
+        // visibility fast path would have shown it forever.
+        let tx3 = Transaction::begin(&tree);
+        match tx3.point(1) {
+            CRUDOperationResult::MatchedRecords(r) if r.is_empty() => {}
+            other => panic!("key 1 (written by since-aborted tx1) must not be visible, got {other}"),
+        }
+        tx3.commit();
+    }
+
+    /// An aborted write must not resurface after a crash + recovery:
+    /// `Drop`'s abort path WAL-logs the reversal (`Invalidate`/`Undelete`)
+    /// fire-and-forget, same as any other write (see `MVBTSt::abort_write`'s
+    /// doc), so replay must apply it and end up at the same "never really
+    /// happened" result the live abort produced.
+    #[test]
+    fn aborted_transaction_write_does_not_resurface_after_recovery() {
+        let path = std::env::temp_dir().join(format!("cmvbt_tx_abort_wal_test_{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let tree = TestTree::make_standard(RootIndexType::default());
+            tree.enable_wal(&path, std::time::Duration::from_millis(2)).unwrap();
+
+            // Pre-existing, committed key that the aborting transaction
+            // will delete — its abort must undelete it.
+            assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(2, 200)), CRUDOperationResult::Inserted(_)));
+
+            let tx = Transaction::begin(&tree);
+            assert!(matches!(tx.insert(1, 100), CRUDOperationResult::Inserted(_)));
+            assert!(matches!(tx.delete(2), CRUDOperationResult::Deleted(_)));
+            // Dropped without commit(): both writes must be reverted, and
+            // both reversals WAL-logged.
+            drop(tx);
+
+            // tree drops here, simulating a crash.
+        }
+
+        let recovered = TestTree::open_recovered(
+            RootIndexType::default(), &path, std::time::Duration::from_millis(2)).unwrap();
+        let recovered_version = recovered.current_version();
+
+        match recovered.dispatch_crud(CRUDOperation::Point(1, recovered_version)) {
+            CRUDOperationResult::MatchedRecords(r) if r.is_empty() => {}
+            other => panic!("key 1's aborted insert must not resurface after recovery, got {other}"),
+        }
+        match recovered.dispatch_crud(CRUDOperation::Point(2, recovered_version)) {
+            CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 200 => {}
+            other => panic!("key 2's aborted delete must be undone (restored) after recovery, got {other}"),
         }
 
         let _ = std::fs::remove_file(&path);

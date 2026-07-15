@@ -9,6 +9,8 @@ use crate::mv_record_model::version_info::Version;
 const TAG_INSERT: u8 = 0;
 const TAG_UPDATE: u8 = 1;
 const TAG_DELETE: u8 = 2;
+const TAG_INVALIDATE: u8 = 3;
+// const TAG_UNDELETE: u8 = 4;
 
 /// How a `Payload` is (de)serialized to/from the WAL. `Key` is not covered by
 /// this trait — every real instantiation in this project uses `Key = u64`,
@@ -87,9 +89,12 @@ unsafe fn read_raw<T>(bytes: &[u8]) -> T {
 /// may be fixed-size raw bytes (POD payloads like `u64`) or a real
 /// variable-length encoding (payloads with owned heap data, like `TpccRow`).
 ///
-/// Panics if `record.op` isn't `Insert`/`Update`/`Delete` — nothing else is
-/// ever handed to this function; the dispatch layer only calls `wal_start_commit`
-/// for those three, and read/`*Rand` operations are never logged at all.
+/// Panics if `record.op` isn't `Insert`/`Update`/`Delete`/`Invalidate`/
+/// `Undelete` — nothing else is ever handed to this function: the dispatch
+/// layer only calls `wal_start_commit` for `Insert`/`Update`/`Delete`,
+/// `MVBTSt::abort_write` only calls `wal_log_write` for `Invalidate`/
+/// `Undelete` (see `mv_page_model::leaf_page::AbortOutcome`), and read/
+/// `*Rand` operations are never logged at all.
 pub fn encode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
     record: &WalRecord<Key, Payload>,
     out: &mut Vec<u8>,
@@ -98,7 +103,9 @@ pub fn encode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
         CRUDOperation::Insert(key, payload) => (TAG_INSERT, key, Some(payload)),
         CRUDOperation::Update(key, payload) => (TAG_UPDATE, key, Some(payload)),
         CRUDOperation::Delete(key) => (TAG_DELETE, key, None),
-        other => unreachable!("WAL only ever logs Insert/Update/Delete, got: {other}"),
+        CRUDOperation::Invalidate(key) => (TAG_INVALIDATE, key, None),
+        // CRUDOperation::Undelete(key) => (TAG_UNDELETE, key, None),
+        other => unreachable!("WAL only ever logs Insert/Update/Delete/Invalidate/Undelete, got: {other}"),
     };
 
     out.push(tag);
@@ -146,6 +153,8 @@ pub fn decode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
             }
         }
         TAG_DELETE => CRUDOperation::Delete(key),
+        TAG_INVALIDATE => CRUDOperation::Invalidate(key),
+        // TAG_UNDELETE => CRUDOperation::Undelete(key),
         _ => return None,
     };
 
@@ -231,7 +240,10 @@ mod tests {
                 assert_eq!(k1, k2);
                 assert_eq!(p1, p2);
             }
-            (CRUDOperation::Delete(k1), CRUDOperation::Delete(k2)) => assert_eq!(k1, k2),
+            (CRUDOperation::Delete(k1), CRUDOperation::Delete(k2))
+            | (CRUDOperation::Invalidate(k1), CRUDOperation::Invalidate(k2))
+            // | (CRUDOperation::Undelete(k1), CRUDOperation::Undelete(k2))
+            => assert_eq!(k1, k2),
             _ => panic!("operation kind mismatch: {a} vs {b}"),
         }
     }
@@ -242,6 +254,8 @@ mod tests {
             CRUDOperation::Insert(1, 100),
             CRUDOperation::Update(2, 200),
             CRUDOperation::Delete(3),
+            CRUDOperation::Invalidate(4),
+            // CRUDOperation:: Undelete(5),
         ];
 
         for (i, op) in ops.into_iter().enumerate() {

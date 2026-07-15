@@ -117,10 +117,35 @@ impl VersionInfo {
         self.delete_stamp.get().is_some()
     }
 
-    /// Actively deletes this version by setting deletion to supplied delete stamp.
+    /// "Does this look like a normal, present record" — false for a
+    /// properly deleted version (as `is_deleted` already covers) *and* for
+    /// one whose `insert_stamp` has been marked invalid (its writing
+    /// transaction aborted — see `TxStamp::is_invalid`'s doc). Every
+    /// `!is_deleted()`-as-existence-check call site (SMO's "keep only live
+    /// records" filters, `Insert`'s `KeyAlreadyExists` check, the
+    /// update-in-place fast path, ...) uses this instead, so an invalidated
+    /// record stops blocking a fresh insert and stops being carried into a
+    /// new page version by split/merge, exactly like a deleted one already
+    /// does.
+    #[inline(always)]
+    pub fn is_live(&self) -> bool {
+        !self.is_deleted() && !self.insert_stamp.is_invalid()
+    }
+
+    /// Marks this version's `insert_stamp` invalid — called when the
+    /// transaction that wrote it aborts (see `TxStamp::is_invalid`'s doc).
+    #[inline(always)]
+    pub fn invalidate(&mut self) {
+        self.insert_stamp = self.insert_stamp.mark_invalid();
+    }
+
+    /// Actively deletes this version by setting deletion to supplied delete
+    /// stamp. Fails the same way for an already-deleted *or* already-invalid
+    /// version (see `is_live`) — either way there's nothing left here to
+    /// delete.
     #[inline(always)]
     pub fn delete(&mut self, delete_stamp: TxStamp) -> bool {
-        if self.is_deleted() {
+        if !self.is_live() {
             false
         } else {
             self.delete_stamp = DeletedTxStamp::new(delete_stamp);

@@ -21,14 +21,31 @@ pub type WorkerId = u16;
 /// `size_of::<u64>` (8 bytes), restoring `VersionInfo`/leaf fan-out to their
 /// pre-OSIC footprint. Bit 63 is deliberately left unused here — it's
 /// `DeletedTxStamp`'s own presence flag (see `version_info::DeletedTxStamp`).
-#[derive(Copy, Clone, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Default, Eq)]
 pub struct TxStamp(u64);
+
+impl PartialEq for TxStamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.ts_start() == other.ts_start()
+    }
+}
 
 impl TxStamp {
     const WORKER_ID_BITS: u32 = 16;
     const TS_START_BITS: u32 = 63 - Self::WORKER_ID_BITS;
     const TS_START_MASK: u64 = (1u64 << Self::TS_START_BITS) - 1;
     const WORKER_ID_MASK: u64 = ((1u64 << Self::WORKER_ID_BITS) - 1) << Self::TS_START_BITS;
+    /// Bit 63 — the one bit `worker_id`/`ts_start` never touch (see this
+    /// type's doc). Set on a record's `insert_stamp` when the transaction
+    /// that wrote it aborts (dropped without `commit()`) instead of
+    /// physically undoing the write: an invalidated stamp is unconditionally
+    /// invisible to every reader (`mv_sync::visibility::is_visible`) and
+    /// treated as dead by SMO (`VersionInfo::is_live`), so the record is
+    /// dropped at the next split/merge exactly like a properly-superseded
+    /// one. Same "steal the top bit" idiom as
+    /// `mv_page_model::time_matcher::OBSOLETE_VERSION_MARK` (a different
+    /// field, internal-page child versions, not leaf record stamps).
+    const INVALID_FLAG: u64 = 0x80_00000000000000;
 
     #[inline(always)]
     pub const fn new(worker_id: WorkerId, ts_start: Version) -> Self {
@@ -48,6 +65,25 @@ impl TxStamp {
     #[inline(always)]
     pub const fn ts_start(&self) -> Version {
         self.0 & Self::TS_START_MASK
+    }
+
+    /// True once this stamp's transaction has aborted — see `INVALID_FLAG`'s
+    /// doc. Orthogonal to `worker_id()`/`ts_start()`/`Ord` (none of them read
+    /// bit 63), so marking a stamp invalid never changes what those report.
+    #[inline(always)]
+    pub const fn is_invalid(&self) -> bool {
+        self.0 & Self::INVALID_FLAG != 0
+    }
+
+    /// Returns a copy of this stamp with the invalid flag set. Note this
+    /// changes the stamp's raw bits, so `TxStamp`'s derived `PartialEq`/`Eq`
+    /// (which compare those raw bits) treat an invalidated stamp as no
+    /// longer equal to its pre-invalidation self — relied on by
+    /// `LeafPage::abort_write` to make re-processing the same key's abort a
+    /// safe no-op.
+    #[inline(always)]
+    pub const fn mark_invalid(&self) -> Self {
+        Self(self.0 | Self::INVALID_FLAG)
     }
 
     /// Raw packed bits, including whatever `DeletedTxStamp` has stashed in

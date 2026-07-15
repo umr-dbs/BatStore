@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 
 use crate::mv_bench::tpcc_schema::*;
-use crate::mv_bench::tpcc_txn::{many, one};
+use crate::mv_bench::tpcc_txn::{many, one, TpccTxn};
 use crate::mv_record_model::version_info::Version;
 use crate::mv_utils::interval::Interval;
 
@@ -68,10 +68,10 @@ impl OrderLineSummary {
 /// `l_returnflag`/`l_linestatus`, since `order_line` has no such column),
 /// aggregating count/sum(quantity)/sum(amount). One full `ORDER_LINE`
 /// table scan.
-pub fn q1(tree: &TpccTree, delivered_before: i64) -> (Vec<OrderLineSummary>, Version) {
-    let tx = TpccTxn::begin(tree);
+pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, Version) {
+    let tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
-    let lines = many(tx.range(order_line_table_range(), true));
+    let lines = many(tx.range(Table::OrderLine, order_line_table_range(), true));
     tx.commit();
 
     let mut groups: [OrderLineSummary; 16] =
@@ -98,10 +98,10 @@ pub fn q1(tree: &TpccTree, delivered_before: i64) -> (Vec<OrderLineSummary>, Ver
 /// total revenue (`sum(ol_amount)`) from order-lines delivered within
 /// `[date_lo, date_hi)` whose quantity is below `max_qty`. One full
 /// `ORDER_LINE` table scan.
-pub fn q6(tree: &TpccTree, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, Version) {
-    let tx = TpccTxn::begin(tree);
+pub fn q6(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, Version) {
+    let tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
-    let lines = many(tx.range(order_line_table_range(), true));
+    let lines = many(tx.range(Table::OrderLine, order_line_table_range(), true));
     tx.commit();
 
     let revenue = lines.iter()
@@ -130,10 +130,10 @@ pub struct OrderPriorityCount {
 /// table scan, plus one `ORDER_LINE` range scan per order entered in range
 /// (a correlated semi-join / "exists" check, done as a nested loop since
 /// there's no join operator here — see module docs).
-pub fn q4(tree: &TpccTree, date_lo: i64, date_hi: i64, late_slack_millis: i64) -> (Vec<OrderPriorityCount>, Version) {
-    let tx = TpccTxn::begin(tree);
+pub fn q4(db: &TpccDatabase, date_lo: i64, date_hi: i64, late_slack_millis: i64) -> (Vec<OrderPriorityCount>, Version) {
+    let tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
-    let orders = many(tx.range(orders_table_range(), true));
+    let orders = many(tx.range(Table::Orders, orders_table_range(), true));
 
     let mut counts: HashMap<u8, u64> = HashMap::new();
     for order_rec in &orders {
@@ -143,7 +143,7 @@ pub fn q4(tree: &TpccTree, date_lo: i64, date_hi: i64, late_slack_millis: i64) -
         }
         let (w_id, d_id, o_id) = decode_order_key(order_rec.key);
         let (lo, hi) = k_order_line_bounds(w_id, d_id, o_id);
-        let lines = many(tx.range(Interval::new(lo, hi), true));
+        let lines = many(tx.range(Table::OrderLine, Interval::new(lo, hi), true));
         let late = lines.iter().any(|l| match l.payload.as_order_line().ol_delivery_d {
             Some(d) => d > order.o_entry_d + late_slack_millis,
             None => true,
@@ -183,12 +183,12 @@ pub struct NationRevenue {
 /// still exercises the same join shape and the same region/date filter +
 /// group-by + aggregate as the original, without bolting an obscure
 /// data-model hack onto this schema.
-pub fn q5(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64) -> (Vec<NationRevenue>, Version) {
-    let tx = TpccTxn::begin(tree);
+pub fn q5(db: &TpccDatabase, region_name: &str, date_lo: i64, date_hi: i64) -> (Vec<NationRevenue>, Version) {
+    let tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
 
     // Small dimension tables loaded once into memory — see module docs.
-    let regions = many(tx.range(region_table_range(), true));
+    let regions = many(tx.range(Table::Region, region_table_range(), true));
     let Some(region_id) = regions.iter()
         .find(|r| r.payload.as_region().r_name == region_name)
         .map(|r| decode_region_id(r.key))
@@ -197,18 +197,18 @@ pub fn q5(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64) -> (Ve
         return (Vec::new(), ts_start);
     };
 
-    let nations = many(tx.range(nation_table_range(), true));
+    let nations = many(tx.range(Table::Nation, nation_table_range(), true));
     let nation_names: HashMap<u8, String> = nations.iter()
         .filter(|n| n.payload.as_nation().n_regionkey == region_id)
         .map(|n| (decode_nation_id(n.key), n.payload.as_nation().n_name.clone()))
         .collect();
 
-    let suppliers = many(tx.range(supplier_table_range(), true));
+    let suppliers = many(tx.range(Table::Supplier, supplier_table_range(), true));
     let supplier_nation: HashMap<u32, u8> = suppliers.iter()
         .map(|s| (decode_supplier_id(s.key), s.payload.as_supplier().s_nationkey))
         .collect();
 
-    let orders = many(tx.range(orders_table_range(), true));
+    let orders = many(tx.range(Table::Orders, orders_table_range(), true));
     let mut revenue: HashMap<u8, f64> = HashMap::new();
     for order_rec in &orders {
         let order = order_rec.payload.as_order();
@@ -217,9 +217,9 @@ pub fn q5(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64) -> (Ve
         }
         let (w_id, d_id, o_id) = decode_order_key(order_rec.key);
         let (lo, hi) = k_order_line_bounds(w_id, d_id, o_id);
-        for line in many(tx.range(Interval::new(lo, hi), true)) {
+        for line in many(tx.range(Table::OrderLine, Interval::new(lo, hi), true)) {
             let ol = line.payload.as_order_line();
-            let Some(stock) = one(tx.point(k_stock(ol.ol_supply_w_id, ol.ol_i_id))) else { continue };
+            let Some(stock) = one(tx.point(Table::Stock, k_stock(ol.ol_supply_w_id, ol.ol_i_id))) else { continue };
             let su_id = stock.payload.as_stock().s_su_suppkey;
             let Some(&nation_id) = supplier_nation.get(&su_id) else { continue };
             if !nation_names.contains_key(&nation_id) {

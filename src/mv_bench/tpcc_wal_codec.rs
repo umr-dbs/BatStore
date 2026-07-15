@@ -550,4 +550,80 @@ mod tests {
 
         let _ = std::fs::remove_file(&shard_path);
     }
+
+    /// `TpccDatabase` counterpart to `crash_recovery_round_trip_for_boxed_rows`:
+    /// each table is now its own tree with its own WAL shard files (see
+    /// `tpcc_schema::table_wal_path`), sharing one `TxContext` — this
+    /// confirms `TpccDatabase::open_recovered` correctly replays every
+    /// table's own shard independently and that a write to one table
+    /// (Warehouse) survives recovery alongside a write to a different table
+    /// (Customer), even though they're now physically separate trees.
+    #[test]
+    fn tpcc_database_crash_recovery_round_trip_across_tables() {
+        use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
+        use crate::mv_crud_model::crud_operation::CRUDOperation;
+        use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
+        use crate::mv_root::index_root::RootIndexType;
+        use crate::mv_bench::tpcc_schema::{table_wal_path, Table, TpccDatabase};
+
+        let base_path = std::env::temp_dir().join(format!("cmvbt_tpcc_db_wal_test_{}.log", std::process::id()));
+        for t in Table::ALL {
+            let _ = std::fs::remove_file(crate::mv_tree::mvbt::wal_shard_path(&table_wal_path(&base_path, t), 0));
+        }
+
+        let warehouse_key = k_warehouse(1);
+        let customer_key = k_customer(1, 1, 42);
+
+        {
+            let db = TpccDatabase::new(RootIndexType::default());
+            db.enable_wal(&base_path, std::time::Duration::from_millis(2)).unwrap();
+
+            assert!(matches!(
+                db.warehouse.dispatch_crud(CRUDOperation::Insert(warehouse_key, TpccRow::Warehouse(Box::new(Warehouse {
+                    w_name: "Marburg".into(), w_street_1: "Uniplatz".into(), w_street_2: "".into(),
+                    w_city: "Marburg".into(), w_state: "HE".into(), w_zip: "350321111".into(),
+                    w_tax: 0.07, w_ytd: 300_000.0,
+                })))),
+                CRUDOperationResult::Inserted(_)
+            ));
+
+            assert!(matches!(
+                db.customer.dispatch_crud(CRUDOperation::Insert(customer_key, TpccRow::Customer(Box::new(Customer {
+                    c_first: "Amir".into(), c_middle: "OE".into(), c_last: "BARBAR".into(),
+                    c_street_1: "s1".into(), c_street_2: "s2".into(), c_city: "city".into(),
+                    c_state: "HE".into(), c_zip: "350321111".into(), c_phone: "1234567890123456".into(),
+                    c_since: 1234567890, c_credit_bad: true, c_credit_lim: 50_000.0,
+                    c_discount: 0.15, c_balance: -10.0, c_ytd_payment: 10.0,
+                    c_payment_cnt: 1, c_delivery_cnt: 0, c_data: "x".repeat(450),
+                })))),
+                CRUDOperationResult::Inserted(_)
+            ));
+        } // db drops here: every table's Box'd rows are deallocated normally.
+
+        let recovered = TpccDatabase::open_recovered(RootIndexType::default(), &base_path, std::time::Duration::from_millis(2)).unwrap();
+        let version = recovered.current_version();
+
+        match recovered.warehouse.dispatch_crud(CRUDOperation::Point(warehouse_key, version)) {
+            CRUDOperationResult::MatchedRecords(r) if r.len() == 1 => {
+                let w = r[0].payload.as_warehouse();
+                assert_eq!(w.w_name, "Marburg");
+                assert_eq!(w.w_tax, 0.07);
+            }
+            other => panic!("warehouse missing or wrong after recovery: {other}"),
+        }
+
+        match recovered.customer.dispatch_crud(CRUDOperation::Point(customer_key, version)) {
+            CRUDOperationResult::MatchedRecords(r) if r.len() == 1 => {
+                let c = r[0].payload.as_customer();
+                assert_eq!(c.c_last, "BARBAR");
+                assert_eq!(c.c_data.len(), 450);
+                assert!(c.c_credit_bad);
+            }
+            other => panic!("customer missing or wrong after recovery: {other}"),
+        }
+
+        for t in Table::ALL {
+            let _ = std::fs::remove_file(crate::mv_tree::mvbt::wal_shard_path(&table_wal_path(&base_path, t), 0));
+        }
+    }
 }

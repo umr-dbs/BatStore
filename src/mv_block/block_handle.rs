@@ -4,7 +4,7 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::mem;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{fence, AtomicU64, Ordering::Acquire};
 
 use parking_lot::Mutex;
 use crate::mv_block::block::Block;
@@ -15,6 +15,7 @@ use crate::mv_sync::safe_cell::SafeCell;
 use crate::mv_sync::smart_cell::SmartCell;
 use crate::mv_gc::tracker_handle::{TrackerHandle, TrackerHandleSt};
 use crate::mv_record_model::tx_stamp::WorkerId;
+use crate::mv_sync::tx_context::TxContext;
 
 const ENABLE_SMALL_BLOCK: bool = false;
 const MAX_ZEROS_PER_BLOCK: usize = 3964; // = data region in a mv_block // outdated due to omitted mv_block-id
@@ -206,9 +207,9 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline(always)]
-    fn alloc_block(&self, leaf: bool) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
+    fn alloc_block(&self, ctx: &TxContext, leaf: bool) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
         // NODES_REQUEST.fetch_add(1, Relaxed);
-        match self.tracker.free_block() {
+        match self.tracker.free_block(ctx) {
             Some(block) => {
                 // self.reuse_count.fetch_add(1, Relaxed);
 
@@ -224,7 +225,12 @@ impl<const FAN_OUT: usize,
                     m_page.mark_internal()
                 }
 
-                // fence(Acquire);
+                // Synchronizes with whatever `fence(Release)` last published
+                // this block's *previous* life's content (see
+                // `leaf_page::LeafPage::len`'s doc) before we reset and
+                // repurpose it — belt-and-suspenders alongside the
+                // release/acquire pairs around each page type's own `len`.
+                fence(Acquire);
                 block
             }
             None => {
@@ -345,13 +351,13 @@ impl<const FAN_OUT: usize,
     // }
 
     #[inline]
-    pub(crate) fn new_empty_leaf(&self) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
-        self.alloc_block(true)
+    pub(crate) fn new_empty_leaf(&self, ctx: &TxContext) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
+        self.alloc_block(ctx, true)
     }
 
     /// Crafts a new aligned Index-Block.
     #[inline]
-    pub(crate) fn new_empty_index_block(&self) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
-        self.alloc_block(false)
+    pub(crate) fn new_empty_index_block(&self, ctx: &TxContext) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
+        self.alloc_block(ctx, false)
     }
 }

@@ -495,7 +495,7 @@ impl<const FAN_OUT: usize,
             let combined_block = match is_simba_leaf {
                 false => {
                     let combined_block = self.block_manager
-                        .new_empty_index_block();
+                        .new_empty_index_block(&self.ctx);
 
                     let (keys, versions, pointers)
                         = simba.as_internal_page_ref().keys_versions_pointers();
@@ -526,7 +526,7 @@ impl<const FAN_OUT: usize,
                 }
                 true => {
                     let combined_block = self.block_manager
-                        .new_empty_leaf();
+                        .new_empty_leaf(&self.ctx);
 
                     combined_block
                         .unsafe_borrow_mut()
@@ -534,12 +534,12 @@ impl<const FAN_OUT: usize,
                         .bulk_push(simba
                             .as_records()
                             .iter()
-                            .filter(|r| !r.version().is_deleted())
+                            .filter(|r| r.version().is_live())
                             .merge_by(candidate_guard
                                           .deref()
                                           .as_records()
                                           .iter()
-                                          .filter(|r| !r.version().is_deleted()),
+                                          .filter(|r| r.version().is_live()),
                                       |f, s|
                                           f.version().insertion_stamp().ts_start() <= s.version().insertion_stamp().ts_start())
                             .collect_vec());
@@ -556,11 +556,11 @@ impl<const FAN_OUT: usize,
                         .deref()
                         .as_records()
                         .iter()
-                        .filter(|r| !r.version().is_deleted())
+                        .filter(|r| r.version().is_live())
                         .sorted_by_key(|r| r.key)
                         .merge_by(simba.as_records()
                                       .iter()
-                                      .filter(|r| !r.version().is_deleted())
+                                      .filter(|r| r.version().is_live())
                                       .sorted_by_key(|r| r.key),
                                   |f, s|
                                       f.key() <= s.key())
@@ -585,10 +585,10 @@ impl<const FAN_OUT: usize,
                         r.version().insertion_stamp().ts_start());
 
                     let combined_block_0 = self.block_manager
-                        .new_empty_leaf();
+                        .new_empty_leaf(&self.ctx);
 
                     let combined_block_1 = self.block_manager
-                        .new_empty_leaf();
+                        .new_empty_leaf(&self.ctx);
 
                     combined_block_0
                         .unsafe_borrow_mut()
@@ -651,10 +651,10 @@ impl<const FAN_OUT: usize,
                     second.sort_by_key(|((.., v), ..)| **v);
 
                     let combined_block_0 = self.block_manager
-                        .new_empty_index_block();
+                        .new_empty_index_block(&self.ctx);
 
                     let combined_block_1 = self.block_manager
-                        .new_empty_index_block();
+                        .new_empty_index_block(&self.ctx);
 
                     combined_block_0
                         .unsafe_borrow_mut()
@@ -701,14 +701,14 @@ impl<const FAN_OUT: usize,
                     }
                     let (left, right) =
                         (self.block_manager
-                             .new_empty_leaf(),
+                             .new_empty_leaf(&self.ctx),
                          self.block_manager
-                             .new_empty_leaf());
+                             .new_empty_leaf(&self.ctx));
 
                     let mut sorted_block = block
                         .as_records()
                         .iter()
-                        .filter(|r| !r.version().is_deleted())
+                        .filter(|r| r.version().is_live())
                         .sorted_by_key(|r| r.key())
                         .collect_vec();
 
@@ -742,9 +742,9 @@ impl<const FAN_OUT: usize,
                     }
                     let (left, right) =
                         (self.block_manager
-                             .new_empty_index_block(),
+                             .new_empty_index_block(&self.ctx),
                          self.block_manager
-                             .new_empty_index_block());
+                             .new_empty_index_block(&self.ctx));
 
                     let (key_intervals, versions, pointers) = block
                         .keys_versions_pointers();
@@ -792,12 +792,12 @@ impl<const FAN_OUT: usize,
                         println!("Version Split: Leaf");
                     }
                     let new_leaf = self.block_manager
-                        .new_empty_leaf();
+                        .new_empty_leaf(&self.ctx);
 
                     let active_records = block
                         .as_records()
                         .iter()
-                        .filter(|record| !record.version().is_deleted())
+                        .filter(|record| record.version().is_live())
                         .collect_vec();
 
                     debug_assert!(active_records.len() >= block.filling_40_percent(),
@@ -825,7 +825,7 @@ impl<const FAN_OUT: usize,
                         println!("Version Split: Internal");
                     }
                     let new_internal_page = self.block_manager
-                        .new_empty_index_block();
+                        .new_empty_index_block(&self.ctx);
 
                     let (key_intervals, versions, pointers) = block
                         .keys_versions_pointers();
@@ -924,7 +924,7 @@ impl<const FAN_OUT: usize,
             ) => {
                 let new_root_block = self
                     .block_manager
-                    .new_empty_index_block();
+                    .new_empty_index_block(&self.ctx);
 
                 let root_internal_page = new_root_block
                     .unsafe_borrow_mut()

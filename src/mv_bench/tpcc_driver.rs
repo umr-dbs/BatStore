@@ -27,7 +27,7 @@ use rand::prelude::*;
 use crate::mv_bench::olap_scan::{run_olap_worker, OlapMode, ScanResult};
 use crate::mv_bench::tpcc_load::{populate_items, populate_regions_and_nations, populate_suppliers, populate_warehouse};
 use crate::mv_bench::tpcc_schema::TpccConfig;
-use crate::mv_bench::tpcc_schema::TpccTree;
+use crate::mv_bench::tpcc_schema::TpccDatabase;
 use crate::mv_bench::tpcc_txn::{self, TxnOutcome};
 use crate::mv_root::index_root::RootIndexType;
 
@@ -97,7 +97,7 @@ struct TerminalStats {
 
 #[allow(clippy::too_many_arguments)]
 fn terminal_thread(
-    tree: Arc<TpccTree>,
+    db: Arc<TpccDatabase>,
     cfg: TpccConfig,
     my_warehouses: Vec<u32>,
     affinity: bool,
@@ -122,7 +122,7 @@ fn terminal_thread(
 
         match rand::rng().random_range(1..=100u32) {
             1..=45 => {
-                let outcome = tpcc_txn::new_order(&tree, &cfg, home_w, allow_remote);
+                let outcome = tpcc_txn::new_order(&db, &cfg, home_w, allow_remote);
                 record(&mut totals, NO, outcome);
                 if outcome == TxnOutcome::Committed {
                     let idx = (start.elapsed().as_secs() as usize).min(new_order_committed_per_sec.len() - 1);
@@ -130,20 +130,20 @@ fn terminal_thread(
                 }
             }
             46..=88 => {
-                let outcome = tpcc_txn::payment(&tree, &cfg, home_w, allow_remote, &history_seq);
+                let outcome = tpcc_txn::payment(&db, &cfg, home_w, allow_remote, &history_seq);
                 record(&mut totals, PAY, outcome);
             }
             89..=92 => {
-                let outcome = tpcc_txn::order_status(&tree, &cfg, home_w);
+                let outcome = tpcc_txn::order_status(&db, &cfg, home_w);
                 record(&mut totals, OS, outcome);
             }
             93..=96 => {
-                let d = tpcc_txn::delivery(&tree, &cfg, home_w);
+                let d = tpcc_txn::delivery(&db, &cfg, home_w);
                 totals[DELIV_DISTRICTS] += d.delivered_districts as u64;
                 totals[DELIV_CONFLICTS] += d.conflicts as u64;
             }
             _ => {
-                let outcome = tpcc_txn::stock_level(&tree, &cfg, home_w, 15);
+                let outcome = tpcc_txn::stock_level(&db, &cfg, home_w, 15);
                 record(&mut totals, SL, outcome);
             }
         }
@@ -182,14 +182,14 @@ pub fn run_tpcc(cfg: DriverConfig) {
         num_olap = max_threads.saturating_sub(1 + num_terminals * terminal_cost);
     }
 
-    let tree = Arc::new(TpccTree::make_standard(cfg.root_star_index));
+    let db = Arc::new(TpccDatabase::new(cfg.root_star_index));
     if cfg.gc {
-        tree.enable_gc(cfg.update_in_place);
+        db.enable_gc(cfg.update_in_place);
     }
 
     if let Some((wal_path, flush_interval)) = &cfg.wal {
         let _ = fs::remove_file(wal_path);
-        tree.enable_wal(wal_path, *flush_interval).expect("failed to attach WAL");
+        db.enable_wal(wal_path, *flush_interval).expect("failed to attach WAL");
     }
 
     println!(
@@ -238,18 +238,18 @@ pub fn run_tpcc(cfg: DriverConfig) {
     // data set single-threaded before spawning concurrent workers.
     println!("Loading CH-benCHmark dimension tables (5 regions, 25 nations, {} suppliers)...", cfg.tpcc.num_suppliers);
     let ch_load_start = Instant::now();
-    populate_regions_and_nations(&tree);
-    populate_suppliers(&tree, &cfg.tpcc);
+    populate_regions_and_nations(&db);
+    populate_suppliers(&db, &cfg.tpcc);
     println!("Loaded CH-benCHmark dimension tables in {:?}.", ch_load_start.elapsed());
 
     println!("Loading item catalog ({} items)...", cfg.tpcc.num_items);
     let load_start = Instant::now();
-    populate_items(&tree, &cfg.tpcc);
+    populate_items(&db, &cfg.tpcc);
     println!("Loaded item catalog in {:?}. Loading {} warehouse(s)...", load_start.elapsed(), cfg.tpcc.num_warehouses);
 
     let wh_load_start = Instant::now();
     for w in 1..=cfg.tpcc.num_warehouses {
-        populate_warehouse(&tree, &cfg.tpcc, w, &history_seq);
+        populate_warehouse(&db, &cfg.tpcc, w, &history_seq);
     }
     println!("Loaded {} warehouse(s) in {:?}.", cfg.tpcc.num_warehouses, wh_load_start.elapsed());
 
@@ -265,14 +265,14 @@ pub fn run_tpcc(cfg: DriverConfig) {
         let barrier = Arc::new(Barrier::new(num_terminals + 1));
 
         let handles: Vec<_> = (0..num_terminals).map(|t| {
-            let tree = tree.clone();
+            let db = db.clone();
             let tpcc_cfg = cfg.tpcc;
             let my_ws = assigned[t].clone();
             let affinity = cfg.affinity;
             let stop = stop.clone();
             let barrier = barrier.clone();
             let history_seq = history_seq.clone();
-            thread::spawn(move || terminal_thread(tree, tpcc_cfg, my_ws, affinity, baseline_duration, stop, barrier, history_seq))
+            thread::spawn(move || terminal_thread(db, tpcc_cfg, my_ws, affinity, baseline_duration, stop, barrier, history_seq))
         }).collect();
 
         barrier.wait();
@@ -298,24 +298,24 @@ pub fn run_tpcc(cfg: DriverConfig) {
     let tpcc_cfg = cfg.tpcc;
 
     let terminal_handles: Vec<_> = (0..num_terminals).map(|t| {
-        let tree = tree.clone();
+        let db = db.clone();
         let cfg = tpcc_cfg;
         let my_ws = assigned[t].clone();
         let stop = stop.clone();
         let barrier = barrier.clone();
         let history_seq = history_seq.clone();
-        thread::spawn(move || terminal_thread(tree, cfg, my_ws, affinity, duration, stop, barrier, history_seq))
+        thread::spawn(move || terminal_thread(db, cfg, my_ws, affinity, duration, stop, barrier, history_seq))
     }).collect();
 
     let olap_handles: Vec<_> = (0..num_olap).map(|_| {
-        let tree = tree.clone();
+        let db = db.clone();
         let stop = stop.clone();
         let barrier = barrier.clone();
         let mode = cfg.olap_mode.clone();
         let scan_tx = scan_tx.clone();
         thread::spawn(move || {
             barrier.wait();
-            run_olap_worker(&tree, mode, &stop, &scan_tx);
+            run_olap_worker(&db, mode, &stop, &scan_tx);
         })
     }).collect();
     drop(scan_tx);
@@ -422,8 +422,8 @@ pub fn main_tpcc(parms: Vec<String>) {
         parms.get(idx).and_then(|s| s.parse().ok()).unwrap_or(default)
     }
 
-    let num_warehouses: u32 = arg(&parms, 2, 4);
-    let num_terminals: usize = arg(&parms, 3, num_warehouses as usize * 10);
+    let num_warehouses: u32 = arg(&parms, 2, num_cpus::get_physical() as u32);
+    let num_terminals: usize = arg(&parms, 3, num_cpus::get());
     let duration_secs: u64 = arg(&parms, 4, 30);
     let affinity: bool = arg(&parms, 5, false);
     let gc: bool = arg(&parms, 6, true);

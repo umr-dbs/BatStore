@@ -47,18 +47,20 @@ impl<
             return false;
         }
 
-        match self.tracker().newest_live_si() {
+        match self.ctx.newest_live_si() {
             Some(newest_si) => leaf_page
                 .as_records()
                 .iter()
                 .rfind(|r| r.key() == key)
-                .map(|record| record.version.insert_stamp.ts_start() > newest_si)
+                .map(|record| record.version.insert_stamp.ts_start() > newest_si
+                    && !record.version.insert_stamp.is_invalid())
                 .unwrap_or(false),
             None => leaf_page // empty live index: No readers; e.g., only updates!
                 .as_records()
                 .iter()
                 .rfind(|r| r.key() == key)
-                .is_some(),
+                .map(|record| !record.version.insert_stamp.is_invalid())
+                .unwrap_or(false),
         }
     }
 }
@@ -86,7 +88,7 @@ impl<'a,
                 if leaf_page.as_records()
                     .iter()
                     .rfind(|r| r.key == key)
-                    .map(|r| !r.version.is_deleted())
+                    .map(|r| r.version.is_live())
                     .unwrap_or(false)
                 {
                     return CRUDOperationResult::ZeroAffected(KeyAlreadyExists);
@@ -312,7 +314,7 @@ impl<'a,
             // tree.
             CRUDOperation::RangeIterSi(key) =>
                 CRUDOperationResult::MatchedRecordIter(self.draw_snapshot_version_with(|version| {
-                    RangeQueryIter::new(self, version, key, true, self.worker_id())
+                    RangeQueryIter::new(self, version, key, false, self.worker_id())
                 })),
             // `*Rand` operations are used purely for benchmark/data-generation
             // workloads (see mv_test.rs) — irrelevant to the actual running
@@ -340,7 +342,7 @@ impl<'a,
                 let payload = Payload::default();
 
                 for r in leaf_page.as_records() {
-                    if !r.version().is_deleted() {
+                    if r.version().is_live() {
                         if find_i == 0 {
                             key = r.key;
                             break
@@ -414,7 +416,7 @@ impl<'a,
                     = Key::default();
 
                 for r in leaf_page.as_records() {
-                    if !r.version().is_deleted() {
+                    if r.version().is_live() {
                         if find_i == 0 {
                             key = r.key;
                             break
@@ -471,7 +473,7 @@ impl<'a,
                         .rfind(|r| r.key == gen_key)
                     {
                         None => break Some(gen_key),
-                        Some(record) if record.version().is_deleted() =>
+                        Some(record) if !record.version().is_live() =>
                             break Some(gen_key),
                         _ if rand_attempts >= RAND_ATTEMPTS_MAX => break None,
                         _ => {
@@ -548,8 +550,8 @@ mod tests {
         }
 
         let worker_id = tree.worker_id();
-        let max_workers = tree.commit_logs.len();
-        let len = tree.commit_logs[worker_id as usize].len();
+        let max_workers = tree.ctx.max_workers();
+        let len = tree.ctx.commit_log_len(worker_id);
         assert!(
             len > max_workers,
             "expected the commit log to grow unbounded with GC off, got only {len} entries (max_workers = {max_workers})"
@@ -570,8 +572,8 @@ mod tests {
         }
 
         let worker_id = tree.worker_id();
-        let max_workers = tree.commit_logs.len();
-        let len = tree.commit_logs[worker_id as usize].len();
+        let max_workers = tree.ctx.max_workers();
+        let len = tree.ctx.commit_log_len(worker_id);
         assert!(
             len <= max_workers,
             "expected the commit log to stay pruned near max_workers ({max_workers}) with GC on, got {len} entries"

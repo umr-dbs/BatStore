@@ -9,8 +9,8 @@ use itertools::Itertools;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::mem::ManuallyDrop;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{fence, AtomicU32};
+use std::sync::atomic::Ordering::{Acquire, Relaxed};
 
 pub type PageLenField       = AtomicU32;
 pub type PageLenPrimitive   = u32;
@@ -59,11 +59,17 @@ impl<const FAN_OUT: usize,
     fn drop(&mut self) {
         match self.m_type() {
             PAGE_TYPE_INTERNAL => unsafe {
-                // fence(Acquire);
+                // This block may last have been mutated (its content
+                // populated, its `len` bumped) by a *different* thread (an
+                // SMO worker) than whichever thread's Arc-drop reaches zero
+                // and runs this — an acquire fence here ensures that
+                // thread's writes are visible before we drop the contents
+                // they describe.
+                fence(Acquire);
                 ManuallyDrop::drop(&mut self.page.internal)
             },
             PAGE_TYPE_LEAF => unsafe {
-                // fence(Acquire);
+                fence(Acquire);
                 ManuallyDrop::drop(&mut self.page.leaf)
             },
             _ => {}

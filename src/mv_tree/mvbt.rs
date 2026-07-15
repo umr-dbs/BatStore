@@ -7,9 +7,7 @@ use crate::mv_block::block_handle::BlockAllocManager;
 use crate::mv_gc::tracker_handle::{TrackerHandle, TrackerHandleSt};
 use crate::mv_page_model::Height;
 use crate::mv_root::index_root::{RootIndex, RootIndexType};
-use crate::mv_sync::clock::GlobalClock;
-use crate::mv_sync::commit_log::CommitLog;
-use crate::mv_sync::worker::WorkerRegistry;
+use crate::mv_sync::tx_context::TxContext;
 use crate::mv_wal::writer::WalWriter;
 
 pub const FAN_OUT: usize        = 125;
@@ -39,7 +37,14 @@ pub struct MVBTSt<
 > {
     pub(crate) root: RootIndex<FAN_OUT, NUM_RECORDS, Key, Payload>,
     pub block_manager: BlockAllocManager<FAN_OUT, NUM_RECORDS, Key, Payload>,
-    pub(crate) global_clock: GlobalClock,
+    /// The transactional core (clock, commit logs, worker registry,
+    /// active-snapshot tracking) — see `TxContext`'s type doc. Private and
+    /// unshared for every tree built via `make_standard`/`Default::default`/
+    /// `open_recovered`; shared (via `Arc::clone`) across several per-table
+    /// trees only when built through `make_with_shared_ctx`, so a
+    /// transaction spanning those tables stays atomic/snapshot-isolated as
+    /// one unit (see `mv_bench::tpcc_schema::TpccDatabase`).
+    pub(crate) ctx: Arc<TxContext>,
     pub(crate) inc_key: fn(Key) -> Key,
     pub(crate) dec_key: fn(Key) -> Key,
     pub(crate) min_key: Key,
@@ -62,8 +67,6 @@ pub struct MVBTSt<
     /// `wal.load()` check rather than trying to re-derive "definitely off"
     /// from one flag, keeping this fast path's correctness trivial to see.
     pub(crate) wal_ever_enabled: AtomicBool,
-    pub(crate) worker_registry: WorkerRegistry,
-    pub(crate) commit_logs: Vec<CommitLog>,
 }
 
 unsafe impl<const FAN_OUT: usize,
@@ -164,16 +167,28 @@ impl<const FAN_OUT: usize,
     Payload: Display + Clone + Default + Sync + 'static
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
-    /// Turns on block reclaim (`TrackerHandleSt::block_reclaim_enabled`) —
-    /// active-snapshot tracking (needed for `CommitLog` pruning) is always
-    /// on regardless, see that type's doc.
+    /// Turns on this table's own block reclaim
+    /// (`TrackerHandleSt::block_reclaim_enabled`, gates dead-page reuse for
+    /// this tree specifically) *and* this tree's `ctx`'s copy of the same
+    /// flag (gates whether `commit_tx` prunes `ctx`'s shared `CommitLog`s
+    /// and whether active-snapshot tracking runs at all — see `TxContext`'s
+    /// doc). When `ctx` is shared by several tables (see
+    /// `make_with_shared_ctx`), calling this on just one of them still only
+    /// flips *that table's* dead-page reclaim, but flips the *shared*
+    /// pruning flag for every table sharing `ctx` — callers responsible for
+    /// a whole multi-table database must toggle GC uniformly across all of
+    /// its tables (see `mv_bench::tpcc_schema::TpccDatabase::enable_gc`), not
+    /// call this per table, or pruning becomes unsound for tables whose own
+    /// reclaim never got turned on.
     pub fn enable_gc(&self, update_in_place: bool) {
         self.block_manager.tracker().set_block_reclaim_enabled(true);
         self.block_manager.set_update_in_place(update_in_place);
+        self.ctx.set_block_reclaim_enabled(true);
     }
 
     pub fn disable_gc(&self) {
         self.block_manager.tracker().set_block_reclaim_enabled(false);
+        self.ctx.set_block_reclaim_enabled(false);
     }
 
     pub fn root_star_index(&self) -> RootIndexType {
@@ -197,20 +212,41 @@ impl<const FAN_OUT: usize,
             min_key: Key,
             max_key: Key,
     ) -> Self {
-        let bm = BlockAllocManager::new();
         let max_workers = default_max_workers().max(1);
+        Self::make_with_shared_ctx(
+            root_index_type, inc_key, dec_key, min_key, max_key,
+            Arc::new(TxContext::new(max_workers)))
+    }
+
+    /// Same as `make`, but takes a pre-built `ctx` instead of creating a
+    /// private one — the entry point for several per-table trees that must
+    /// share one transactional core (see `TxContext`'s doc and
+    /// `mv_bench::tpcc_schema::TpccDatabase`). Every single-tree constructor
+    /// (`make_standard`, `Default::default`, `open_recovered`) still funnels
+    /// through plain `make` above, so they're unaffected by this existing.
+    /// `pub(crate)`: callers outside `mv_tree` construct trees through
+    /// benchmark-specific wrappers (e.g. `TpccDatabase::new`) that build the
+    /// shared `ctx` once and pass it to every table.
+    #[inline]
+    pub(crate) fn make_with_shared_ctx(
+        root_index_type: RootIndexType,
+        inc_key: fn(Key) -> Key,
+        dec_key: fn(Key) -> Key,
+        min_key: Key,
+        max_key: Key,
+        ctx: Arc<TxContext>,
+    ) -> Self {
+        let bm = BlockAllocManager::new();
         Self {
-            root: RootIndex::new(root_index_type, &bm),
+            root: RootIndex::new(root_index_type, &bm, &ctx),
             block_manager: bm,
-            global_clock: GlobalClock::new(),
+            ctx,
             inc_key,
             dec_key,
             min_key,
             max_key,
             wal: ArcSwapOption::empty(),
             wal_ever_enabled: AtomicBool::new(false),
-            worker_registry: WorkerRegistry::new(max_workers),
-            commit_logs: (0..max_workers).map(|_| CommitLog::new()).collect(),
         }
     }
 }
@@ -235,7 +271,7 @@ impl<const FAN_OUT: usize,
     /// when never called: the dispatch write path only touches the WAL when
     /// this returns `Some`.
     pub fn enable_wal(&self, path: &std::path::Path, flush_interval: std::time::Duration) -> std::io::Result<()> {
-        let max_workers = self.worker_registry.max_workers();
+        let max_workers = self.ctx.max_workers();
         let mut shards = Vec::with_capacity(max_workers);
         for worker_id in 0..max_workers {
             shards.push(WalWriter::open(&wal_shard_path(path, worker_id), flush_interval)?);

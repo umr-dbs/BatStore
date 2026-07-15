@@ -103,9 +103,31 @@ impl<const FAN_OUT: usize,
     /// recovery already trusted for the identical class of race on the
     /// write path, and re-verified clean across repeated heavy-concurrency
     /// stress runs with GC on.
+    /// Takes `root` by reference, not by value: `SmartCell::borrow_read`
+    /// hands back a `SmartGuard::Reader(&'a SmartCell<E>, ..)` — a raw
+    /// reference to wherever the `SmartCell` it was called on physically
+    /// lives, `mem::transmute`d to claim a `'static` lifetime, not an
+    /// owned Arc clone. That's sound when called on `internal_page
+    /// .get_pointer(pos)` below (a reference into the *parent* page's own
+    /// long-lived, tree-owned array), but calling it on `root.clone()` — a
+    /// bare temporary — would return a guard referencing this function's
+    /// *own* stack frame, which is gone the moment it returns. That's
+    /// invisible whenever the tree has real internal pages (this loop
+    /// runs at least once, so `curr` ends up referencing the last visited
+    /// page's array instead), but a tree that never grows past
+    /// height 1 — the *root itself* is the leaf, e.g. any table whose live
+    /// key cardinality never exceeds one leaf's capacity, such as TPC-C's
+    /// per-table `Warehouse`/`District` trees at standard scale — takes
+    /// zero loop iterations, so `curr` is exactly that dangling
+    /// caller-frame reference: a real, silent, single-threaded UB bug
+    /// (confirmed via gdb: a null-pointer dereference reading stack bytes
+    /// the caller's own subsequent calls had since overwritten), not a
+    /// concurrency race. Borrowing `root` from the *caller's* frame
+    /// instead — which outlives this whole call and everything the
+    /// returned guard is used for — fixes it for that case too.
     #[inline]
     fn traverse_read_key<'a>(
-        root: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        root: &'a BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
         key: Key,
         lookup_version: Version)
         -> BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
@@ -113,7 +135,7 @@ impl<const FAN_OUT: usize,
         let mut attempts: Attempts = 0;
 
         'restart: loop {
-            let mut curr = root.clone().borrow_read();
+            let mut curr = root.borrow_read();
 
             while let PageType::IndexRef(internal_page) = curr.as_page_ref()
             {
@@ -197,7 +219,7 @@ impl<const FAN_OUT: usize,
         -> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
     {
         let records
-            = Self::traverse_read_key(root, key, reader_ts_start);
+            = Self::traverse_read_key(&root, key, reader_ts_start);
 
         self.with_visibility_checker(reader_worker, reader_ts_start, |is_visible| {
             match records

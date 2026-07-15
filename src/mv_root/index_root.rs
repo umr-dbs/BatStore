@@ -12,6 +12,7 @@ use crate::mv_root::sk_root::RootSkipList;
 use crate::mv_root::tree_root::{RootTree, ValueRootInner};
 use crate::mv_root::vanilla_root::VanillaRootSt;
 use crate::mv_sync::smart_cell::{OptCell, SmartCell, SmartGuard};
+use crate::mv_sync::tx_context::TxContext;
 use crate::mv_sync::version_handle;
 use crate::mv_tree::smo::BlockUnsafeDegree;
 
@@ -19,10 +20,10 @@ pub(crate) fn make_start_value_root_inner<
     const F: usize,
     const N: usize,
     Key: Display + Default + Ord + Copy + Hash,
-    Payload: Default + Clone>(bk: &BlockAllocManager<F, N, Key, Payload>
+    Payload: Default + Clone>(bk: &BlockAllocManager<F, N, Key, Payload>, ctx: &TxContext,
 ) -> (ValueRootInner<F, N, Key, Payload>, SnapShot)
 {
-    (ValueRootInner::initial(bk.new_empty_leaf()), version_handle::START_VERSION)
+    (ValueRootInner::initial(bk.new_empty_leaf(ctx)), version_handle::START_VERSION)
 }
 
 #[derive(Copy, Clone)]
@@ -207,13 +208,13 @@ impl<const FAN_OUT: usize,
             RootIndex::LinkedList(..) => RootIndexType::LinkedList,
         }
     }
-    pub fn new(variant: RootIndexType, block_manager: &BlockAllocManager<FAN_OUT, NUM_RECORDS, Key, Payload>) -> Self {
+    pub fn new(variant: RootIndexType, block_manager: &BlockAllocManager<FAN_OUT, NUM_RECORDS, Key, Payload>, ctx: &TxContext) -> Self {
         match variant {
             RootIndexType::BTree => {
                 let rt = RootTree::new();
 
                 let (root_inner, version)
-                    = make_start_value_root_inner(block_manager);
+                    = make_start_value_root_inner(block_manager, ctx);
 
                 rt.append_root(
                     Root::new(root_inner.0, version, root_inner.1));
@@ -223,7 +224,7 @@ impl<const FAN_OUT: usize,
             RootIndexType::SkipList => {
                 let sk = RootSkipList::new();
                 let (root_inner, version)
-                    = make_start_value_root_inner(block_manager,);
+                    = make_start_value_root_inner(block_manager, ctx);
 
                 sk.0.insert(version, root_inner);
                 Self::SkipList(SmartCell(Arc::new(OptCell::new(sk))))
@@ -231,14 +232,14 @@ impl<const FAN_OUT: usize,
             RootIndexType::LinkedList => {
                 let mut ll = LinkedList::new();
                 let (root_inner, version)
-                    = make_start_value_root_inner(block_manager);
+                    = make_start_value_root_inner(block_manager, ctx);
 
                 ll.push_back(Root::new(root_inner.0, version, root_inner.1));
                 Self::LinkedList(SmartCell(Arc::new(OptCell::new(ll))))
             }
             RootIndexType::FrugalList => {
                 let (root_inner, version)
-                    = make_start_value_root_inner(block_manager);
+                    = make_start_value_root_inner(block_manager, ctx);
 
                 Self::FrugalList(SmartCell(Arc::new(OptCell::new(FrugalRootList::new(root_inner, version)))))
             }

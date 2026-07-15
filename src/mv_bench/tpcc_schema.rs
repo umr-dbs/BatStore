@@ -1,23 +1,31 @@
 //! TPC-C schema for the cMVBT benchmark harness.
 //!
-//! All nine TPC-C tables (plus two maintained secondary indexes) live in a
-//! *single* `MVBTSt` tree, keyed by a composite `u64` and valued by the
-//! [`TpccRow`] enum. Sharing one tree (one `GlobalClock`, one set of
-//! `CommitLog`s) is what makes a `mv_query::transaction::Transaction` spanning
+//! Each of the nine TPC-C tables (plus two maintained secondary indexes) gets
+//! its own [`MVBTSt`] tree/index — a [`TpccDatabase`] bundles all 14 such
+//! trees together with the *shared* transactional core
+//! (`crate::mv_sync::tx_context::TxContext`: one `GlobalClock`, one set of
+//! `CommitLog`s, one `WorkerRegistry`, one active-snapshot registry) they all
+//! reference via `Arc`. Sharing that core — not sharing one physical tree —
+//! is what still lets a [`crate::mv_bench::tpcc_txn::TpccTxn`] spanning
 //! several "tables" (e.g. NewOrder touching Warehouse/District/Customer/
-//! Order/NewOrder/OrderLine/Stock) atomic and snapshot-isolated as a whole,
-//! matching how the referenced benchmarks (TPC-C + OLAP scans, e.g. Alhomssi
-//! & Leis, VLDB'23) treat a business transaction as one unit.
+//! Order/NewOrder/OrderLine/Stock) commit atomically and stay
+//! snapshot-isolated as a whole, matching how the referenced benchmarks
+//! (TPC-C + OLAP scans, e.g. Alhomssi & Leis, VLDB'23) treat a business
+//! transaction as one unit — while giving each table an independently-sized,
+//! independently-scanned index, closer to how a real storage engine
+//! physically separates relations.
 //!
 //! Also carries CH-benCHmark's (Cole et al., "The Mixed Workload CH-benCHmark",
 //! DBTest 2011) three TPC-H-derived dimension tables — SUPPLIER, NATION,
-//! REGION — in the same shared tree, feeding the analytical queries in
-//! `mv_bench::tpch_queries`.
+//! REGION — as three more trees on the same `TpccDatabase`, feeding the
+//! analytical queries in `mv_bench::tpch_queries`.
 //!
-//! Key layout: the top 4 bits select the table, the low 60 bits pack that
-//! table's primary-key columns MSB-first (so a range scan of a byte-ordered
-//! key range matches the natural column order, e.g. scanning all districts
-//! of a warehouse or all order-lines of an order).
+//! Key layout: since table selection is now "which tree" (a [`Table`] value
+//! picking one of `TpccDatabase`'s fields), not "which key range", every key
+//! is just that table's primary-key columns packed MSB-first (so a
+//! byte-ordered range scan matches the natural column order, e.g. scanning
+//! all districts of a warehouse or all order-lines of an order) — no table
+//! tag bits needed.
 //!
 //! Several row fields (addresses, `i_data`, `s_dist`, ...) are never read by
 //! the 5 transaction profiles, same as in the real spec — they exist for
@@ -26,24 +34,25 @@
 #![allow(dead_code)]
 
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
-use crate::mv_query::transaction::Transaction;
-use crate::mv_tree::mvbt::{MVBTSt, FAN_OUT, NUM_RECORDS};
+use crate::mv_root::index_root::RootIndexType;
+use crate::mv_sync::tx_context::TxContext;
+use crate::mv_tree::mvbt::{default_max_workers, FAN_OUT, NUM_RECORDS};
+use crate::mv_utils::interval::Interval;
 
 pub type TpccKey = u64;
 
-/// The single shared tree backing every TPC-C table (see module docs for
-/// why one tree, not one per table). Reuses the base tree's `FAN_OUT` for
-/// consistency with the rest of the codebase, but `NUM_RECORDS` is
-/// recomputed separately: `RecordPoint<TpccKey, TpccRow>` is 40B (`TpccRow`
-/// is bigger than the base tree's `u64` payload), so it targets the same
-/// ~4000B leaf record-array budget `FAN_OUT`'s internal-node arrays and the
-/// base tree's `NUM_RECORDS` use, not the base tree's own record count.
+/// A single table's tree. Reuses the base tree's `FAN_OUT` for consistency
+/// with the rest of the codebase, but `NUM_RECORDS` is recomputed
+/// separately: `RecordPoint<TpccKey, TpccRow>` is 40B (`TpccRow` is bigger
+/// than the base tree's `u64` payload), so it targets the same ~4000B leaf
+/// record-array budget `FAN_OUT`'s internal-node arrays and the base tree's
+/// `NUM_RECORDS` use, not the base tree's own record count.
 pub const TPCC_FAN_OUT: usize       = FAN_OUT;
 pub const TPCC_NUM_RECORDS: usize   = 100;
 
-pub type TpccTree = MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
-pub type TpccTxn<'a> = Transaction<'a, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccTree = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 
 /// Database scale/shape — the TPC-C spec's standard cardinalities, with
 /// warehouse count and a few sizes made configurable for quicker benchmark
@@ -79,33 +88,249 @@ impl Default for TpccConfig {
     }
 }
 
-/// Table tags occupy the top 4 bits of the 64-bit key (16 slots, 14 used).
-mod tag {
-    pub const WAREHOUSE: u64 = 0;
-    pub const DISTRICT: u64 = 1;
-    pub const CUSTOMER: u64 = 2;
-    pub const CUSTOMER_NAME_IDX: u64 = 3;
-    pub const HISTORY: u64 = 4;
-    pub const NEW_ORDER: u64 = 5;
-    pub const ORDERS: u64 = 6;
-    pub const ORDER_LINE: u64 = 7;
-    pub const ITEM: u64 = 8;
-    pub const STOCK: u64 = 9;
-    /// (w_id, d_id, c_id) -> most recent o_id; a maintained secondary index
-    /// standing in for the ORDER table's real secondary index on
-    /// (o_w_id,o_d_id,o_c_id,o_id), so OrderStatus can find "the customer's
-    /// most recent order" in O(1) instead of a descending scan.
-    pub const CUST_LAST_ORDER: u64 = 10;
+/// Selects one of `TpccDatabase`'s 14 tables/trees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Table {
+    Warehouse,
+    District,
+    Customer,
+    /// A maintained secondary index standing in for the ORDER table's real
+    /// secondary index on (o_w_id,o_d_id,o_c_id,o_id), so OrderStatus can
+    /// find "the customer's most recent order" in O(1) instead of a
+    /// descending scan.
+    CustLastOrder,
+    /// (w_id, d_id, last_code, first_code, c_id) -> presence marker; the
+    /// "by last name" customer lookup Payment/OrderStatus need.
+    CustomerNameIdx,
+    History,
+    NewOrder,
+    Orders,
+    OrderLine,
+    Item,
+    Stock,
     /// CH-benCHmark's TPC-H-derived dimension tables (`mv_bench::tpch_queries`
     /// module docs): SUPPLIER links to STOCK via `Stock::s_su_suppkey`,
     /// NATION/REGION are the standard fixed TPC-H reference tables.
-    pub const SUPPLIER: u64 = 11;
-    pub const NATION: u64 = 12;
-    pub const REGION: u64 = 13;
+    Supplier,
+    Nation,
+    Region,
 }
 
-const TAG_SHIFT: u32 = 60;
-const FIELD_MASK: u64 = (1u64 << TAG_SHIFT) - 1;
+impl Table {
+    pub const ALL: [Table; 14] = [
+        Table::Warehouse, Table::District, Table::Customer, Table::CustLastOrder,
+        Table::CustomerNameIdx, Table::History, Table::NewOrder, Table::Orders,
+        Table::OrderLine, Table::Item, Table::Stock, Table::Supplier, Table::Nation,
+        Table::Region,
+    ];
+
+    /// Lowercase name, used for per-table WAL shard paths (see
+    /// `table_wal_path`) and diagnostics.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Table::Warehouse => "warehouse",
+            Table::District => "district",
+            Table::Customer => "customer",
+            Table::CustLastOrder => "cust_last_order",
+            Table::CustomerNameIdx => "customer_name_idx",
+            Table::History => "history",
+            Table::NewOrder => "new_order",
+            Table::Orders => "orders",
+            Table::OrderLine => "order_line",
+            Table::Item => "item",
+            Table::Stock => "stock",
+            Table::Supplier => "supplier",
+            Table::Nation => "nation",
+            Table::Region => "region",
+        }
+    }
+}
+
+/// All 14 TPC-C/CH-benCHmark tables, each its own tree, sharing one
+/// transactional core (`ctx`) — see this module's doc.
+pub struct TpccDatabase {
+    pub(crate) ctx: Arc<TxContext>,
+    pub warehouse: TpccTree,
+    pub district: TpccTree,
+    pub customer: TpccTree,
+    pub cust_last_order: TpccTree,
+    pub customer_name_idx: TpccTree,
+    pub history: TpccTree,
+    pub new_order: TpccTree,
+    pub orders: TpccTree,
+    pub order_line: TpccTree,
+    pub item: TpccTree,
+    pub stock: TpccTree,
+    pub supplier: TpccTree,
+    pub nation: TpccTree,
+    pub region: TpccTree,
+}
+
+fn inc_key(k: TpccKey) -> TpccKey { k.checked_add(1).unwrap_or(TpccKey::MAX) }
+fn dec_key(k: TpccKey) -> TpccKey { k.checked_sub(1).unwrap_or(TpccKey::MIN) }
+
+impl TpccDatabase {
+    pub fn new(root_index_type: RootIndexType) -> Self {
+        let max_workers = default_max_workers().max(1);
+        let ctx = Arc::new(TxContext::new(max_workers));
+        Self::with_ctx(root_index_type, ctx)
+    }
+
+    fn with_ctx(root_index_type: RootIndexType, ctx: Arc<TxContext>) -> Self {
+        let new_tree = |ctx: &Arc<TxContext>| TpccTree::make_with_shared_ctx(
+            root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX, ctx.clone());
+
+        Self {
+            warehouse: new_tree(&ctx),
+            district: new_tree(&ctx),
+            customer: new_tree(&ctx),
+            cust_last_order: new_tree(&ctx),
+            customer_name_idx: new_tree(&ctx),
+            history: new_tree(&ctx),
+            new_order: new_tree(&ctx),
+            orders: new_tree(&ctx),
+            order_line: new_tree(&ctx),
+            item: new_tree(&ctx),
+            stock: new_tree(&ctx),
+            supplier: new_tree(&ctx),
+            nation: new_tree(&ctx),
+            region: new_tree(&ctx),
+            ctx,
+        }
+    }
+
+    #[inline(always)]
+    pub fn tree_for(&self, table: Table) -> &TpccTree {
+        match table {
+            Table::Warehouse => &self.warehouse,
+            Table::District => &self.district,
+            Table::Customer => &self.customer,
+            Table::CustLastOrder => &self.cust_last_order,
+            Table::CustomerNameIdx => &self.customer_name_idx,
+            Table::History => &self.history,
+            Table::NewOrder => &self.new_order,
+            Table::Orders => &self.orders,
+            Table::OrderLine => &self.order_line,
+            Table::Item => &self.item,
+            Table::Stock => &self.stock,
+            Table::Supplier => &self.supplier,
+            Table::Nation => &self.nation,
+            Table::Region => &self.region,
+        }
+    }
+
+    /// Reads off the shared clock — same value regardless of which table's
+    /// tree it's read through, since `ctx` (and therefore the clock) is
+    /// shared by every table on this database.
+    pub fn current_version(&self) -> crate::mv_record_model::version_info::Version {
+        self.ctx.current_version()
+    }
+
+    /// Toggles block reclaim uniformly across every table on this database
+    /// — see `MVBTSt::enable_gc`'s doc for why partial/per-table toggling
+    /// would make pruning the shared commit logs unsound.
+    pub fn enable_gc(&self, update_in_place: bool) {
+        for t in Table::ALL {
+            self.tree_for(t).enable_gc(update_in_place);
+        }
+    }
+
+    pub fn disable_gc(&self) {
+        for t in Table::ALL {
+            self.tree_for(t).disable_gc();
+        }
+    }
+
+    pub fn root_star_index(&self) -> RootIndexType {
+        self.warehouse.root_star_index()
+    }
+}
+
+/// On-disk WAL base path for one table, derived from a caller-supplied base
+/// path by appending the table's name (`Table::as_str`) — e.g.
+/// `tpcc_wal.log` -> `tpcc_wal.log.warehouse`. Per-worker sharding
+/// (`mv_tree::mvbt::wal_shard_path`) then appends on top of *this*, e.g.
+/// `tpcc_wal.log.warehouse.0000`.
+pub fn table_wal_path(base: &std::path::Path, table: Table) -> std::path::PathBuf {
+    let mut s = base.as_os_str().to_owned();
+    s.push(format!(".{}", table.as_str()));
+    std::path::PathBuf::from(s)
+}
+
+impl TpccDatabase {
+    /// Builds a fresh database, replays any existing per-table/per-worker
+    /// WAL shards found under `wal_base_path` (see `table_wal_path`) into
+    /// each table in turn, truncates each shard to its own valid prefix,
+    /// then attaches live per-table WAL writers — the `TpccDatabase`
+    /// counterpart to `MVBTSt::open_recovered`, just looped once per table.
+    /// Order across tables doesn't matter: there's no cross-table
+    /// transactional replay guarantee (the WAL has no concept of
+    /// transaction boundaries — see `TpccTxn`'s doc), and each table's
+    /// replay only reconstructs that table's own row states in its own
+    /// relative `ts_start` order.
+    pub fn open_recovered(
+        root_index_type: RootIndexType,
+        wal_base_path: &std::path::Path,
+        flush_interval: std::time::Duration,
+    ) -> std::io::Result<Self> {
+        let db = Self::new(root_index_type);
+
+        for t in Table::ALL {
+            let path = table_wal_path(wal_base_path, t);
+            let tree = db.tree_for(t);
+
+            let valid_lengths = crate::mv_wal::recovery::replay(tree, &path)?;
+            for (shard_path, valid_len) in &valid_lengths {
+                if let Ok(file) = std::fs::OpenOptions::new().write(true).open(shard_path) {
+                    file.set_len(*valid_len)?;
+                }
+            }
+
+            tree.enable_wal(&path, flush_interval)?;
+        }
+
+        Ok(db)
+    }
+
+    /// Attaches a live WAL to every table, each at its own path under
+    /// `wal_base_path` (see `table_wal_path`) — for a fresh (not recovered)
+    /// database; use `open_recovered` instead when the log might already
+    /// contain data from a prior run.
+    pub fn enable_wal(&self, wal_base_path: &std::path::Path, flush_interval: std::time::Duration) -> std::io::Result<()> {
+        for t in Table::ALL {
+            self.tree_for(t).enable_wal(&table_wal_path(wal_base_path, t), flush_interval)?;
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------
+// Table range helpers
+// ---------------------------------------------------------------------
+//
+// Table selection is now "which tree" (see `Table`/`TpccDatabase::tree_for`),
+// not "which key range", so every one of these is just the trivial
+// full-range scan of that table's own tree. Kept as thin named wrappers so
+// `olap_scan.rs`/`tpch_queries.rs` call sites don't change shape, just their
+// target tree.
+
+#[inline(always)]
+fn full_range() -> Interval<TpccKey> {
+    Interval::new(TpccKey::MIN, TpccKey::MAX)
+}
+
+pub fn warehouse_table_range() -> Interval<TpccKey> { full_range() }
+pub fn district_table_range() -> Interval<TpccKey> { full_range() }
+pub fn order_line_table_range() -> Interval<TpccKey> { full_range() }
+pub fn stock_table_range() -> Interval<TpccKey> { full_range() }
+pub fn orders_table_range() -> Interval<TpccKey> { full_range() }
+pub fn supplier_table_range() -> Interval<TpccKey> { full_range() }
+pub fn nation_table_range() -> Interval<TpccKey> { full_range() }
+pub fn region_table_range() -> Interval<TpccKey> { full_range() }
+
+// ---------------------------------------------------------------------
+// Key builders
+// ---------------------------------------------------------------------
 
 // Bit widths for primary-key columns, generous but not maximal: sized for
 // benchmark-scale runs (hundreds of warehouses, tens of millions of orders),
@@ -119,96 +344,29 @@ const LAST_CODE_BITS: u32 = 10; // C_LAST syllable code, exactly 0..=999
 const FIRST_CODE_BITS: u32 = 16; // ordinal surrogate for c_first, tie-break only
 
 #[inline(always)]
-const fn with_tag(t: u64, bits: u64) -> TpccKey {
-    debug_assert!(bits <= FIELD_MASK);
-    (t << TAG_SHIFT) | (bits & FIELD_MASK)
-}
-
-#[inline(always)]
-const fn table_bounds(t: u64) -> (TpccKey, TpccKey) {
-    (with_tag(t, 0), with_tag(t, FIELD_MASK))
-}
-
-pub fn warehouse_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
-    let (lo, hi) = table_bounds(tag::WAREHOUSE);
-    crate::mv_utils::interval::Interval::new(lo, hi)
-}
-
-pub fn district_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
-    let (lo, hi) = table_bounds(tag::DISTRICT);
-    crate::mv_utils::interval::Interval::new(lo, hi)
-}
-
-pub fn order_line_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
-    let (lo, hi) = table_bounds(tag::ORDER_LINE);
-    crate::mv_utils::interval::Interval::new(lo, hi)
-}
-
-pub fn stock_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
-    let (lo, hi) = table_bounds(tag::STOCK);
-    crate::mv_utils::interval::Interval::new(lo, hi)
-}
-
-pub fn orders_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
-    let (lo, hi) = table_bounds(tag::ORDERS);
-    crate::mv_utils::interval::Interval::new(lo, hi)
-}
-
-pub fn supplier_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
-    let (lo, hi) = table_bounds(tag::SUPPLIER);
-    crate::mv_utils::interval::Interval::new(lo, hi)
-}
-
-pub fn nation_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
-    let (lo, hi) = table_bounds(tag::NATION);
-    crate::mv_utils::interval::Interval::new(lo, hi)
-}
-
-pub fn region_table_range() -> crate::mv_utils::interval::Interval<TpccKey> {
-    let (lo, hi) = table_bounds(tag::REGION);
-    crate::mv_utils::interval::Interval::new(lo, hi)
-}
-
-/// Combined "hot tables" range used by the Fig.10-style OLAP scan (scans
-/// warehouse+district, the two smallest, most frequently updated tables).
-/// Since WAREHOUSE (tag 0) and DISTRICT (tag 1) are adjacent tags, one
-/// contiguous range covers exactly both and nothing else.
-pub fn warehouse_and_district_range() -> crate::mv_utils::interval::Interval<TpccKey> {
-    let (lo, _) = table_bounds(tag::WAREHOUSE);
-    let (_, hi) = table_bounds(tag::DISTRICT);
-    crate::mv_utils::interval::Interval::new(lo, hi)
-}
-
-// ---------------------------------------------------------------------
-// Key builders
-// ---------------------------------------------------------------------
-
-#[inline(always)]
 pub const fn k_warehouse(w_id: u32) -> TpccKey {
-    with_tag(tag::WAREHOUSE, w_id as u64)
+    w_id as u64
 }
 
 #[inline(always)]
 pub const fn k_district(w_id: u32, d_id: u8) -> TpccKey {
-    with_tag(tag::DISTRICT, ((w_id as u64) << D_ID_BITS) | d_id as u64)
+    ((w_id as u64) << D_ID_BITS) | d_id as u64
 }
 
 #[inline(always)]
 pub const fn k_customer(w_id: u32, d_id: u8, c_id: u32) -> TpccKey {
-    with_tag(tag::CUSTOMER,
-        ((w_id as u64) << (D_ID_BITS + C_ID_BITS))
-            | ((d_id as u64) << C_ID_BITS)
-            | c_id as u64)
+    ((w_id as u64) << (D_ID_BITS + C_ID_BITS))
+        | ((d_id as u64) << C_ID_BITS)
+        | c_id as u64
 }
 
 #[inline(always)]
 pub const fn k_customer_name_idx(w_id: u32, d_id: u8, last_code: u16, first_code: u16, c_id: u32) -> TpccKey {
-    with_tag(tag::CUSTOMER_NAME_IDX,
-        ((w_id as u64) << (D_ID_BITS + LAST_CODE_BITS + FIRST_CODE_BITS + C_ID_BITS))
-            | ((d_id as u64) << (LAST_CODE_BITS + FIRST_CODE_BITS + C_ID_BITS))
-            | ((last_code as u64) << (FIRST_CODE_BITS + C_ID_BITS))
-            | ((first_code as u64) << C_ID_BITS)
-            | c_id as u64)
+    ((w_id as u64) << (D_ID_BITS + LAST_CODE_BITS + FIRST_CODE_BITS + C_ID_BITS))
+        | ((d_id as u64) << (LAST_CODE_BITS + FIRST_CODE_BITS + C_ID_BITS))
+        | ((last_code as u64) << (FIRST_CODE_BITS + C_ID_BITS))
+        | ((first_code as u64) << C_ID_BITS)
+        | c_id as u64
 }
 
 /// `[lower, upper]` bounds covering every `(first_code, c_id)` for a fixed
@@ -229,20 +387,19 @@ pub const fn decode_customer_name_idx_c_id(key: TpccKey) -> u32 {
 
 #[inline(always)]
 pub const fn k_item(i_id: u32) -> TpccKey {
-    with_tag(tag::ITEM, i_id as u64)
+    i_id as u64
 }
 
 #[inline(always)]
 pub const fn k_stock(w_id: u32, i_id: u32) -> TpccKey {
-    with_tag(tag::STOCK, ((w_id as u64) << I_ID_BITS) | i_id as u64)
+    ((w_id as u64) << I_ID_BITS) | i_id as u64
 }
 
 #[inline(always)]
 pub const fn k_order(w_id: u32, d_id: u8, o_id: u32) -> TpccKey {
-    with_tag(tag::ORDERS,
-        ((w_id as u64) << (D_ID_BITS + O_ID_BITS))
-            | ((d_id as u64) << O_ID_BITS)
-            | o_id as u64)
+    ((w_id as u64) << (D_ID_BITS + O_ID_BITS))
+        | ((d_id as u64) << O_ID_BITS)
+        | o_id as u64
 }
 
 /// Decodes an ORDERS-table key back into `(w_id, d_id, o_id)` — the inverse
@@ -250,19 +407,17 @@ pub const fn k_order(w_id: u32, d_id: u8, o_id: u32) -> TpccKey {
 /// each order's identity for its follow-up `order_line` range scan.
 #[inline(always)]
 pub const fn decode_order_key(key: TpccKey) -> (u32, u8, u32) {
-    let bits = key & FIELD_MASK;
-    let o_id = (bits & ((1u64 << O_ID_BITS) - 1)) as u32;
-    let d_id = ((bits >> O_ID_BITS) & ((1u64 << D_ID_BITS) - 1)) as u8;
-    let w_id = (bits >> (O_ID_BITS + D_ID_BITS)) as u32;
+    let o_id = (key & ((1u64 << O_ID_BITS) - 1)) as u32;
+    let d_id = ((key >> O_ID_BITS) & ((1u64 << D_ID_BITS) - 1)) as u8;
+    let w_id = (key >> (O_ID_BITS + D_ID_BITS)) as u32;
     (w_id, d_id, o_id)
 }
 
 #[inline(always)]
 pub const fn k_new_order(w_id: u32, d_id: u8, o_id: u32) -> TpccKey {
-    with_tag(tag::NEW_ORDER,
-        ((w_id as u64) << (D_ID_BITS + O_ID_BITS))
-            | ((d_id as u64) << O_ID_BITS)
-            | o_id as u64)
+    ((w_id as u64) << (D_ID_BITS + O_ID_BITS))
+        | ((d_id as u64) << O_ID_BITS)
+        | o_id as u64
 }
 
 /// `[lower, upper]` bounds covering every `o_id` for a fixed `(w_id, d_id)` —
@@ -273,11 +428,10 @@ pub const fn k_new_order_district_bounds(w_id: u32, d_id: u8) -> (TpccKey, TpccK
 
 #[inline(always)]
 pub const fn k_order_line(w_id: u32, d_id: u8, o_id: u32, ol_number: u8) -> TpccKey {
-    with_tag(tag::ORDER_LINE,
-        ((w_id as u64) << (D_ID_BITS + O_ID_BITS + OL_NO_BITS))
-            | ((d_id as u64) << (O_ID_BITS + OL_NO_BITS))
-            | ((o_id as u64) << OL_NO_BITS)
-            | ol_number as u64)
+    ((w_id as u64) << (D_ID_BITS + O_ID_BITS + OL_NO_BITS))
+        | ((d_id as u64) << (O_ID_BITS + OL_NO_BITS))
+        | ((o_id as u64) << OL_NO_BITS)
+        | ol_number as u64
 }
 
 /// `[lower, upper]` bounds covering every `ol_number` (1..=15) of one order.
@@ -295,45 +449,44 @@ pub const fn decode_order_line_number(key: TpccKey) -> u8 {
 
 #[inline(always)]
 pub const fn k_cust_last_order(w_id: u32, d_id: u8, c_id: u32) -> TpccKey {
-    with_tag(tag::CUST_LAST_ORDER,
-        ((w_id as u64) << (D_ID_BITS + C_ID_BITS))
-            | ((d_id as u64) << C_ID_BITS)
-            | c_id as u64)
+    ((w_id as u64) << (D_ID_BITS + C_ID_BITS))
+        | ((d_id as u64) << C_ID_BITS)
+        | c_id as u64
 }
 
 #[inline(always)]
 pub fn k_history(seq: u64) -> TpccKey {
-    with_tag(tag::HISTORY, seq)
+    seq
 }
 
 #[inline(always)]
 pub const fn k_supplier(su_id: u32) -> TpccKey {
-    with_tag(tag::SUPPLIER, su_id as u64)
+    su_id as u64
 }
 
 #[inline(always)]
 pub const fn decode_supplier_id(key: TpccKey) -> u32 {
-    (key & FIELD_MASK) as u32
+    key as u32
 }
 
 #[inline(always)]
 pub const fn k_nation(n_id: u8) -> TpccKey {
-    with_tag(tag::NATION, n_id as u64)
+    n_id as u64
 }
 
 #[inline(always)]
 pub const fn decode_nation_id(key: TpccKey) -> u8 {
-    (key & FIELD_MASK) as u8
+    key as u8
 }
 
 #[inline(always)]
 pub const fn k_region(r_id: u8) -> TpccKey {
-    with_tag(tag::REGION, r_id as u64)
+    r_id as u64
 }
 
 #[inline(always)]
 pub const fn decode_region_id(key: TpccKey) -> u8 {
-    (key & FIELD_MASK) as u8
+    key as u8
 }
 
 // ---------------------------------------------------------------------
@@ -474,11 +627,16 @@ pub struct Region {
     pub r_comment: String,
 }
 
-/// Payload for the single shared TPC-C tree. The larger row kinds
-/// (`Customer`, `Stock`) are boxed so the enum itself — and thus every leaf
-/// record, including the small ones (`Warehouse`, `NewOrderMarker`, ...) —
-/// stays compact; the same pattern the base tree already uses for large
-/// generic payloads (see `mv_test::PayloadIndirection`).
+/// Payload shared by every one of `TpccDatabase`'s 14 tables — the larger row
+/// kinds (`Customer`, `Stock`) are boxed so the enum itself — and thus every
+/// leaf record, including the small ones (`Warehouse`, `NewOrderMarker`, ...)
+/// — stays compact; the same pattern the base tree already uses for large
+/// generic payloads (see `mv_test::PayloadIndirection`). Keeping one shared
+/// enum (rather than a distinct native Rust struct payload per table) is
+/// what lets every table be the same monomorphized `TpccTree`, so
+/// `TpccDatabase` can be a plain struct of same-typed fields and
+/// `mv_bench::tpcc_txn::TpccTxn` a single uniform transaction type reused for
+/// every table.
 #[derive(Clone, Debug, Default)]
 pub enum TpccRow {
     #[default]
@@ -495,7 +653,7 @@ pub enum TpccRow {
     OrderLine(Box<OrderLine>),
     Item(Box<Item>),
     Stock(Box<Stock>),
-    /// (w_id,d_id,c_id) -> most recent o_id, see `tag::CUST_LAST_ORDER`.
+    /// (w_id,d_id,c_id) -> most recent o_id, see `Table::CustLastOrder`.
     CustLastOrder(u32),
     Supplier(Box<Supplier>),
     Nation(Box<Nation>),

@@ -6,7 +6,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{fence, Ordering::{Acquire, Relaxed, Release}};
 
 pub struct LeafPage<
     const NUM_RECORDS: usize,
@@ -70,11 +70,16 @@ impl<const NUM_RECORDS: usize,
                 );
         }
 
+        // Pairs with `len()`'s `fence(Acquire)`: without this, the compiler
+        // (regardless of CPU memory model) is free to reorder the plain
+        // record_data writes above past this Relaxed store, so a reader
+        // that observes the new `len` isn't guaranteed to observe the
+        // record data it describes.
         // fence(Release);
         let (active, dead)
             = leaf_page.active_dead_count();
 
-        new_page.len.store(from_active_dead(active, dead), Relaxed);
+        new_page.len.store(from_active_dead(active, dead), Release);
 
         new_page
     }
@@ -120,7 +125,13 @@ impl<const NUM_RECORDS: usize,
 
     #[inline(always)]
     pub fn len(&self) -> usize {
-        let len = self.len.load(Relaxed) as _;
+        let len = self.len.load(Acquire) as _;
+        // Pairs with the `fence(Release)` before every `len` store in this
+        // file (`bulk_push`/`bulk_push_from_slice_ref`/`commit_delta`/
+        // `from`) — without it, a reader that observes a bumped `len` isn't
+        // guaranteed to see the record-data writes that preceded it (see
+        // `mv_query::query::traverse_read_key`'s doc for the crash this
+        // gap allowed once page reuse made it frequent enough to hit).
         // fence(Acquire);
 
         from_len_sum(len)
@@ -138,7 +149,7 @@ impl<const NUM_RECORDS: usize,
 
     #[inline(always)]
     pub fn active_dead_count(&self) -> (Active, Dead) {
-        from_len(self.len.load(Relaxed))
+        from_len(self.len.load(Acquire))
     }
 
     #[inline]
@@ -157,8 +168,10 @@ impl<const NUM_RECORDS: usize,
         let active = active_len(len) as i32 + active_delta;
         let dead = (dead_len(len) as i32 + dead_delta) as u32;
 
+        // See `len()`'s doc — pairs with its `fence(Acquire)`, publishing
+        // whatever `push_uncommitted` wrote just before this call.
         // fence(Release);
-        self.len.store(from_active_dead(active as Active, dead as Dead), Relaxed)
+        self.len.store(from_active_dead(active as Active, dead as Dead), Release)
     }
 
     #[inline]
@@ -202,9 +215,11 @@ impl<const NUM_RECORDS: usize,
             });
         }
 
+        // See `len()`'s doc.
         // fence(Release);
         self.len.store(
-            from_active_dead(len as PageLenPrimitive + n_records_len as PageLenPrimitive, 0), Relaxed)
+            from_active_dead(len as PageLenPrimitive + n_records_len as PageLenPrimitive, 0),
+            Release)
     }
 
     #[inline(always)]
@@ -222,9 +237,11 @@ impl<const NUM_RECORDS: usize,
             });
         }
 
+        // See `len()`'s doc.
         // fence(Release);
         self.len.store(
-            from_active_dead(len as PageLenPrimitive + records.len() as PageLenPrimitive, 0), Relaxed)
+            from_active_dead(len as PageLenPrimitive + records.len() as PageLenPrimitive, 0),
+            Release)
     }
 
     // #[inline(always)]
@@ -247,11 +264,23 @@ impl<const NUM_RECORDS: usize,
     //         Release)
     // }
 
+    /// Skips physically-present but invalid entries (a since-aborted
+    /// insert/update — see `TxStamp::is_invalid`'s doc) when hunting for
+    /// "the" entry for `key`: an invalidated write isn't removed from the
+    /// page until the next SMO, so it can sit between the true live/deleted
+    /// lineage and whatever this call is looking for, and must not be
+    /// mistaken for it (see `delete`/`delete_after_update`/`apply_invalidate`'s
+    /// own doc for the concrete bug this closes).
+    #[inline]
+    fn is_live_lineage(record: &RecordPoint<Key, Payload>, key: Key) -> bool {
+        record.key == key && !record.version().insertion_stamp().is_invalid()
+    }
+
     #[inline]
     pub(crate) fn delete(&mut self, key: Key, del: TxStamp) -> Result<Option<VersionInfo>, ()>  {
         match self.as_records_mut()
             .iter_mut()
-            .rfind(|record| record.key == key)
+            .rfind(|record| Self::is_live_lineage(record, key))
         {
             Some(record) => {
                 let ver_info = record
@@ -267,13 +296,17 @@ impl<const NUM_RECORDS: usize,
         }
     }
 
+    /// Reads back the newest entry for `key` (invalid or not) to locate the
+    /// just-pushed entry this call supersedes, then walks past it (and past
+    /// any invalid entries beyond it — see `is_live_lineage`) to reach the
+    /// true previous live/deleted entry to mark deleted.
     #[inline]
     pub(crate) fn delete_after_update(&mut self, key: Key, del: TxStamp) -> Result<Option<VersionInfo>, ()>  {
         match self.as_records_mut()
             .iter_mut()
             .rev()
             .skip(1)
-            .find(|record| record.key == key)
+            .find(|record| Self::is_live_lineage(record, key))
         {
             Some(record) => {
                 let ver_info = record
@@ -287,5 +320,305 @@ impl<const NUM_RECORDS: usize,
             }
             _ => Ok(None)
         }
+    }
+
+    /// Live path only: decides which of `apply_invalidate`/`apply_undelete`
+    /// this abort needs, by checking whether the *newest* entry for `key`
+    /// was written by `my_stamp` (an `Insert`/`Update` — invalidate it) or
+    /// not (a plain `Delete` of a pre-existing record — just undelete it).
+    /// `NotFound` if there's no entry for `key` at all (defensive — a
+    /// transaction only ever calls this for a key it itself wrote).
+    ///
+    /// Safe to call twice for the same key (e.g. a transaction that wrote it
+    /// more than once, ending up in this same worker's write set twice):
+    /// the second call's stamp-equality check compares raw bits, which no
+    /// longer match once the first call's `apply_invalidate`/`apply_undelete`
+    /// changed the entry (invalidating sets a bit; undeleting on a *plain*
+    /// delete leaves no further `Delete`d entry to find under the same
+    /// stamp), so it correctly falls through to a no-op `NotFound` rather
+    /// than double-applying anything.
+    #[inline]
+    pub(crate) fn abort_write(&mut self, key: Key, my_stamp: TxStamp) -> AbortOutcome {
+        let newest_is_mine = self.as_records()
+            .iter()
+            .rfind(|r| r.key == key)
+            .map(|r| r.version().insertion_stamp() == my_stamp);
+
+        match newest_is_mine {
+            // None => AbortOutcome::NotFound,
+            Some(true) => {
+                self.apply_invalidate(key);
+                AbortOutcome::Invalidated
+            }
+            // // `apply_undelete` reports back whether it actually found a
+            // // deleted entry to undo — needed because "not mine" also
+            // // matches the idempotent-recall case (see this method's doc):
+            // // a key already fully processed by a prior `abort_write` call
+            // // has a newest entry that's now invalid (so no longer "mine"
+            // // by raw-stamp equality) but isn't deleted, and reporting that
+            // // as `Undeleted` would make the caller WAL-log a spurious op.
+            // Some(false) => if self.apply_undelete(key) {
+            //     AbortOutcome::Undeleted
+            // }
+            _ => {
+                AbortOutcome::NotFound
+            }
+        }
+    }
+
+    /// Marks the newest entry for `key` invalid (see `TxStamp::is_invalid`'s
+    /// doc), then undeletes its predecessor *if and only if that predecessor
+    /// was deleted by this exact same insertion stamp* — reversing an
+    /// `Update`'s `delete_after_update`, which always deletes the
+    /// predecessor under the very same stamp it inserts the new version
+    /// with (see `Transaction::update`/`TpccTxn::update`). This is not the
+    /// same thing as "the predecessor happens to be deleted": a plain
+    /// `Insert`'s invalidation has no predecessor relationship at all, and
+    /// if one of those lands right after some unrelated, already-committed
+    /// transaction's genuine delete of the same key, a blind "is it deleted"
+    /// check would wrongly resurrect that unrelated deletion. The
+    /// predecessor search also skips any invalid entries in between (see
+    /// `is_live_lineage`) — an aborted write isn't removed from the page
+    /// until the next SMO, so one can sit between the entry being
+    /// invalidated and its true predecessor.
+    ///
+    /// Adjusts `commit_delta` to match: the invalidated entry moves from
+    /// active to dead (unless it was already deleted — e.g. a transaction
+    /// that inserted then deleted the same key before aborting — in which
+    /// case it's already counted dead and this is a no-op count-wise), and
+    /// an undeleted predecessor moves back from dead to active. Used by
+    /// `abort_write` above (live path) *and* directly by WAL replay of a
+    /// logged `Invalidate` op — replay doesn't need the original stamp
+    /// passed in either, since it's read back off the entry itself right
+    /// before invalidating it (see `mv_wal::recovery`).
+    #[inline]
+    pub(crate) fn apply_invalidate(&mut self, key: Key) {
+        let (stamp, was_live) = match self
+            .as_records_mut()
+            .iter_mut()
+            .rfind(|r| r.key == key)
+        {
+            Some(record) => {
+                let stamp = record.version().insertion_stamp();
+                let was_live = record.version().is_live();
+                record.version_mut().invalidate();
+                (stamp, was_live)
+            }
+            None => return,
+        };
+
+        if was_live {
+            self.commit_delta(-1, 1);
+        }
+
+        if let Some(record) = self
+            .as_records_mut()
+            .iter_mut()
+            .rev()
+            .skip(1)
+            .find(|r| Self::is_live_lineage(r, key))
+        {
+            if record.version().deletion_stamp() == Some(stamp) {
+                record.version_mut().undelete();
+                self.commit_delta(1, -1);
+            }
+        }
+    }
+
+    // /// Clears the newest entry's delete_stamp for `key`, adjusting
+    // /// `commit_delta` back from dead to active, and reports whether there
+    // /// was actually a deleted entry to undo. Used by `abort_write` (live
+    // /// path, reversing a plain `Delete`) and WAL replay of a logged
+    // /// `Undelete` op.
+    // #[inline]
+    // pub(crate) fn apply_undelete(&mut self, key: Key) -> bool {
+    //     if let Some(record) = self
+    //         .as_records_mut()
+    //         .iter_mut()
+    //         .rfind(|r| r.key == key)
+    //     {
+    //         if record.version().is_deleted() {
+    //             record.version_mut().undelete();
+    //             self.commit_delta(1, -1);
+    //             return true;
+    //         }
+    //     }
+    //     false
+    // }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbortOutcome {
+    /// No entry found for the key at all (defensive; shouldn't happen for a
+    /// key this transaction actually wrote).
+    NotFound,
+    /// The newest entry was created by the aborting transaction (an
+    /// `Insert`/`Update`) and has been marked invalid.
+    Invalidated,
+    // /// The newest entry pre-dated the aborting transaction, which only
+    // /// deleted it (a plain `Delete`) — it has been undeleted.
+    // Undeleted,
+}
+
+#[cfg(test)]
+mod abort_tests {
+    use super::*;
+
+    const NUM_RECORDS: usize = 8;
+    type TestLeaf = LeafPage<NUM_RECORDS, u64, u64>;
+
+    fn insert(leaf: &mut TestLeaf, key: u64, stamp: TxStamp, payload: u64) {
+        let len = leaf.len();
+        leaf.push_uncommitted(RecordPoint::new(key, VersionInfo::new(stamp), payload), len);
+        leaf.commit_delta(1, 0);
+    }
+
+    /// Reverting an aborted `Insert`: the record must become invisible
+    /// (`is_live() == false`) and count as dead, and a second `abort_write`
+    /// call for the same key must be a safe no-op (see `abort_write`'s doc).
+    #[test]
+    fn abort_write_reverts_a_plain_insert() {
+        let mut leaf = TestLeaf::new();
+        let stamp = TxStamp::new(1, 100);
+        insert(&mut leaf, 1, stamp, 42);
+        assert_eq!(leaf.active_dead_count(), (1, 0));
+
+        assert_eq!(leaf.abort_write(1, stamp), AbortOutcome::Invalidated);
+        let record = leaf.as_records().iter().rfind(|r| r.key == 1).unwrap();
+        assert!(!record.version().is_live());
+        assert!(record.version().insertion_stamp().is_invalid());
+        assert_eq!(leaf.active_dead_count(), (0, 1));
+
+        // Idempotent: processing the same key's abort twice must not
+        // double-adjust the counts.
+        assert_eq!(leaf.abort_write(1, stamp), AbortOutcome::NotFound);
+        assert_eq!(leaf.active_dead_count(), (0, 1));
+    }
+
+    /// Reverting an aborted `Update`: the newer entry must be invalidated
+    /// *and* the older entry it superseded (via `delete_after_update`) must
+    /// come back to life — net counts must return to exactly what they were
+    /// before the update, since it's as if the update never happened.
+    #[test]
+    fn abort_write_reverts_an_update_and_resurrects_its_predecessor() {
+        let mut leaf = TestLeaf::new();
+        let stamp = TxStamp::new(2, 200);
+
+        insert(&mut leaf, 5, stamp, 1); // the original value
+        assert_eq!(leaf.active_dead_count(), (1, 0));
+
+        // Simulate an in-transaction Update: push the new version, then
+        // delete_after_update marks the original superseded.
+        insert(&mut leaf, 5, stamp, 2);
+        assert!(matches!(leaf.delete_after_update(5, stamp), Ok(Some(_))));
+        leaf.commit_delta(-1, 1);
+        assert_eq!(leaf.active_dead_count(), (1, 1));
+
+        assert_eq!(leaf.abort_write(5, stamp), AbortOutcome::Invalidated);
+
+        let records: Vec<_> = leaf.as_records().iter().filter(|r| r.key == 5).collect();
+        assert_eq!(records.len(), 2);
+        assert!(!records[1].version().is_live(), "the update's own new entry must be invalidated");
+        assert!(records[0].version().is_live(), "the original entry must be resurrected");
+        assert_eq!(records[0].payload, 1, "the resurrected entry is the original value");
+
+        // The invalidated entry is still physically present (SMO drops it
+        // at the next split/version-compaction, see smo.rs's `is_live()`
+        // filters) — one live (the resurrected original) + one dead (the
+        // now-invalidated update), not zero dead.
+        assert_eq!(leaf.active_dead_count(), (1, 1));
+    }
+
+    // /// Reverting an aborted plain `Delete`: the pre-existing entry (whose
+    // /// `insert_stamp` belongs to some earlier, unrelated transaction) must
+    // /// be undeleted, *not* invalidated — its `insert_stamp` is untouched.
+    // #[test]
+    // fn abort_write_reverts_a_plain_delete_without_touching_insert_stamp() {
+    //     let mut leaf = TestLeaf::new();
+    //     let insert_stamp = TxStamp::new(3, 300);
+    //     let delete_stamp = TxStamp::new(3, 350);
+    //
+    //     insert(&mut leaf, 9, insert_stamp, 7);
+    //     assert!(leaf.delete(9, delete_stamp).unwrap().is_some());
+    //     leaf.commit_delta(-1, 1);
+    //     assert_eq!(leaf.active_dead_count(), (0, 1));
+    //
+    //     assert_eq!(leaf.abort_write(9, delete_stamp), AbortOutcome::Undeleted);
+    //
+    //     let record = leaf.as_records().iter().rfind(|r| r.key == 9).unwrap();
+    //     assert!(record.version().is_live());
+    //     assert!(record.version().insertion_stamp() == insert_stamp, "insert_stamp must be untouched by an Undelete reversal");
+    //     assert_eq!(leaf.active_dead_count(), (1, 0));
+    // }
+
+    /// Regression for a bug found via the TPC-C smoke benchmark: after one
+    /// update's abort leaves an invalidated entry sitting physically between
+    /// the true (resurrected) predecessor and wherever the next write lands,
+    /// a *second* update to the same key must still find and mark that true
+    /// predecessor deleted — not the invalidated entry that happens to be
+    /// nearer (which `delete_after_update` used to grab, since it only ever
+    /// looked at the physically-second-to-last entry for the key).
+    #[test]
+    fn delete_after_update_skips_an_invalidated_entry_to_reach_the_true_predecessor() {
+        let mut leaf = TestLeaf::new();
+        let stamp1 = TxStamp::new(1, 100);
+
+        insert(&mut leaf, 1, stamp1, 10); // v0: the original value
+
+        // T1 updates key 1, then aborts: v0 resurrected (live), v1 invalidated.
+        insert(&mut leaf, 1, stamp1, 11); // v1
+        assert!(matches!(leaf.delete_after_update(1, stamp1), Ok(Some(_))));
+        leaf.commit_delta(-1, 1);
+        assert_eq!(leaf.abort_write(1, stamp1), AbortOutcome::Invalidated);
+        assert_eq!(leaf.active_dead_count(), (1, 1)); // v0 live, v1 dead(invalid)
+
+        // T2 (a later transaction on the same key) now updates it: pushes v2
+        // right after the still-present, invalidated v1.
+        let stamp2 = TxStamp::new(1, 200);
+        insert(&mut leaf, 1, stamp2, 12); // v2
+
+        // Before the fix, this landed on v1 (invalid) and failed with
+        // Err(()) instead of reaching v0 (the true, live predecessor).
+        assert!(matches!(leaf.delete_after_update(1, stamp2), Ok(Some(_))),
+            "delete_after_update must skip the invalidated v1 and mark v0 deleted");
+        leaf.commit_delta(-1, 1);
+
+        let records: Vec<_> = leaf.as_records().iter().filter(|r| r.key == 1).collect();
+        assert_eq!(records.len(), 3);
+        assert!(records[0].version().is_deleted(), "v0 must now be marked deleted by T2's update");
+        assert!(!records[1].version().is_live(), "v1 stays invalid");
+        assert!(records[2].version().is_live(), "v2 is the new live value");
+        assert_eq!(records[2].payload, 12);
+    }
+
+    /// Regression for a second bug found alongside the one above:
+    /// invalidating a plain `Insert` must never resurrect an unrelated,
+    /// already-deleted predecessor for the same key — only a predecessor
+    /// deleted *by the very same stamp being invalidated* (i.e. an
+    /// `Update`'s own `delete_after_update`) may be undeleted.
+    #[test]
+    fn apply_invalidate_does_not_resurrect_an_unrelated_deletion() {
+        let mut leaf = TestLeaf::new();
+        let stamp_a = TxStamp::new(1, 100);
+        let stamp_b = TxStamp::new(1, 200);
+
+        // An earlier, unrelated transaction inserts then deletes key 1 —
+        // completely committed history, nothing to do with what follows.
+        insert(&mut leaf, 1, stamp_a, 1);
+        assert!(leaf.delete(1, stamp_a).unwrap().is_some());
+        leaf.commit_delta(-1, 1);
+        assert_eq!(leaf.active_dead_count(), (0, 1));
+
+        // A later transaction inserts key 1 fresh (allowed: the prior entry
+        // is deleted, not live), then aborts.
+        insert(&mut leaf, 1, stamp_b, 2);
+        assert_eq!(leaf.abort_write(1, stamp_b), AbortOutcome::Invalidated);
+
+        // The unrelated, genuinely-deleted original entry must stay
+        // deleted — this abort has nothing to do with it.
+        let records: Vec<_> = leaf.as_records().iter().filter(|r| r.key == 1).collect();
+        assert_eq!(records.len(), 2);
+        assert!(records[0].version().is_deleted(), "the unrelated deletion must not be reverted");
+        assert!(!records[1].version().is_live(), "the aborted fresh insert must be invalid");
     }
 }

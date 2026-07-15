@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use crate::mv_utils::interval::Interval;
-use crate::mv_crud_model::crud_operation::CRUDOperation::{Empty, Delete, Point, Insert, Range, Update, PointSi, RangeSi, RangeIter, RangeIterSi};
+use crate::mv_crud_model::crud_operation::CRUDOperation::{Empty, Delete, Point, Insert, Range, Update, PointSi, RangeSi, RangeIter, RangeIterSi, Invalidate};
 use crate::mv_record_model::version_info::Version;
 
 pub type TxAtomicOperation<Key, Payload> = CRUDOperation<Key, Payload>;
@@ -17,6 +17,18 @@ pub enum CRUDOperation<Key: Ord + Copy + Hash + Display, Payload: Clone> {
     Insert(Key, Payload),
     Update(Key, Payload),
     Delete(Key),
+
+    // Abort reversals — see `mv_page_model::leaf_page::LeafPage::abort_write`'s
+    // doc for the two cases these correspond to. Logged fire-and-forget by
+    // `MVBTSt::abort_write`, same as any other write, so a crash between an
+    // abort and the next checkpoint replays correctly instead of
+    // resurrecting the aborted write (see `mv_wal::recovery`).
+    /// Reverses an `Insert`/`Update`: the newest entry for this key was
+    /// created by the aborting transaction.
+    Invalidate(Key),
+    // /// Reverses a plain `Delete`: the newest entry for this key pre-dated
+    // /// the aborting transaction, which only deleted it.
+    // Undelete(Key),
 
     // Readers
     Point(Key, Version),
@@ -46,6 +58,10 @@ impl<Key: Display + Ord + Copy + Hash, Payload: Clone> Display for CRUDOperation
                 write!(f, "Update(key: {})", key),
             Delete(key) =>
                 write!(f, "Delete(Key: {})", key),
+            Invalidate(key) =>
+                write!(f, "Invalidate(Key: {})", key),
+            // Undelete(key) =>
+            //     write!(f, "Undelete(Key: {})", key),
             Point(key, version) =>
                 write!(f, "Point(Key: {}, version: {})", key, version),
             PointSi(key) =>

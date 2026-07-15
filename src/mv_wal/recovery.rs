@@ -138,7 +138,9 @@ impl<
             CRUDOperation::Insert(key, payload) => self.replay_insert(key, payload),
             CRUDOperation::Update(key, payload) => self.replay_update(key, payload),
             CRUDOperation::Delete(key) => self.replay_delete(key),
-            other => unreachable!("WAL only ever logs Insert/Update/Delete, got: {other}"),
+            CRUDOperation::Invalidate(key) => self.replay_invalidate(key),
+            // CRUDOperation::Undelete(key) => self.replay_undelete(key),
+            other => unreachable!("WAL only ever logs Insert/Update/Delete/Invalidate/Undelete, got: {other}"),
         }
     }
 
@@ -150,7 +152,7 @@ impl<
         if leaf_page.as_records()
             .iter()
             .rfind(|r| r.key == key)
-            .map(|r| !r.version.is_deleted())
+            .map(|r| r.version.is_live())
             .unwrap_or(false)
         {
             return; // KeyAlreadyExists live too: nothing to apply.
@@ -211,4 +213,28 @@ impl<
             self.commit_tx(stamp.worker_id());
         }
     }
+
+    /// Reverses a replayed `Insert`/`Update`, exactly as the live
+    /// `MVBTSt::abort_write` path does — see
+    /// `mv_page_model::leaf_page::LeafPage::apply_invalidate`'s doc. No
+    /// fresh stamp/commit needed: unlike `replay_insert`/`replay_update`/
+    /// `replay_delete`, this doesn't introduce a new user-visible version,
+    /// it corrects the metadata of an entry already replayed (and already
+    /// committed) earlier in this same pass.
+    fn replay_invalidate(&self, key: Key) {
+        let leaf_guard = self.traversal_write_olc(key);
+        let leaf_deref_mut = leaf_guard.deref_mut();
+        let leaf_page = leaf_deref_mut.as_leaf_page();
+        leaf_page.apply_invalidate(key);
+    }
+
+    // /// Reverses a replayed plain `Delete` — see
+    // /// `mv_page_model::leaf_page::LeafPage::apply_undelete`'s doc. Same "no
+    // /// fresh stamp needed" reasoning as `replay_invalidate`.
+    // fn replay_undelete(&self, key: Key) {
+    //     let leaf_guard = self.traversal_write_olc(key);
+    //     let leaf_deref_mut = leaf_guard.deref_mut();
+    //     let leaf_page = leaf_deref_mut.as_leaf_page();
+    //     leaf_page.apply_undelete(key);
+    // }
 }

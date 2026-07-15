@@ -8,7 +8,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{fence, Ordering::{Acquire, Relaxed, Release}};
 
 pub type Fence<Key> = Interval<Key>;
 
@@ -85,13 +85,17 @@ impl<const FAN_OUT: usize,
                     .write(MaybeUninit::new(pointer.clone()));
             });
 
+        // Pairs with `sum_len`/`active_len`/`dead_len`'s `fence(Acquire)` —
+        // see `leaf_page::LeafPage::len`'s doc for why this is needed even
+        // on x86: the CPU's own store-ordering doesn't help if the
+        // compiler reorders these plain writes past the Relaxed store.
         // fence(Release);
 
         let (active, dead)
             = from.active_dead_count();
 
         new_page.len.store(
-            from_active_dead(active, dead), Relaxed);
+            from_active_dead(active, dead), Release);
 
         new_page
     }
@@ -148,8 +152,9 @@ impl<const FAN_OUT: usize,
         let active = active_len(len) as i32 + active_delta;
         let dead = dead_len(len) + dead_delta;
 
+        // See `InternalPage::from`'s doc.
         // fence(Release);
-        self.len.store(from_active_dead(active as Active, dead as Dead), Relaxed)
+        self.len.store(from_active_dead(active as Active, dead as Dead), Release)
     }
 
     // #[inline]
@@ -205,9 +210,10 @@ impl<const FAN_OUT: usize,
                     .write(pointer.clone());
             });
 
+        // See `InternalPage::from`'s doc.
         // fence(Release);
         self.len.store(
-            from_active_dead(len as PageLenPrimitive + add as PageLenPrimitive, 0), Relaxed);
+            from_active_dead(len as PageLenPrimitive + add as PageLenPrimitive, 0), Release);
     }
 
     #[inline]
@@ -241,19 +247,21 @@ impl<const FAN_OUT: usize,
                     .write(MaybeUninit::new((*pointer).clone()));
             });
 
+        // See `InternalPage::from`'s doc.
         // fence(Release);
         self.len.store(
-            from_active_dead(len as PageLenPrimitive + add as PageLenPrimitive, 0), Relaxed)
+            from_active_dead(len as PageLenPrimitive + add as PageLenPrimitive, 0), Release)
     }
 
     #[inline(always)]
     pub fn active_dead_count(&self) -> (Active, Dead) {
-        from_len(self.len.load(Relaxed))
+        from_len(self.len.load(Acquire))
     }
 
     #[inline(always)]
     pub fn active_len(&self) -> usize {
-        let len = self.len.load(Relaxed);
+        let len = self.len.load(Acquire);
+        // See `InternalPage::from`'s doc — pairs with its `fence(Release)`.
         // fence(Acquire);
 
         active_len(len) as _
@@ -261,7 +269,8 @@ impl<const FAN_OUT: usize,
 
     #[inline(always)]
     pub fn dead_len(&self) -> usize {
-        let len = self.len.load(Relaxed);
+        let len = self.len.load(Acquire);
+        // See `InternalPage::from`'s doc.
         // fence(Acquire);
 
         dead_len(len) as _
@@ -269,7 +278,10 @@ impl<const FAN_OUT: usize,
 
     #[inline(always)]
     pub fn sum_len(&self) -> usize {
-        let len = self.len.load(Relaxed) as _;
+        let len = self.len.load(Acquire) as _;
+        // See `InternalPage::from`'s doc — every reader of `key_interval_region`/
+        // `version_region`/`pointer_region` (`keys_versions`/`children`/...)
+        // routes through this, so this one fence protects all of them.
         // fence(Acquire);
 
         from_len_sum(len)

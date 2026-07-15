@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 
 use crate::mv_bench::tpcc_schema::*;
+use crate::mv_bench::tpcc_txn::TpccTxn;
 use crate::mv_bench::tpch_queries;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::mv_record_model::version_info::Version;
@@ -94,8 +95,8 @@ fn sleep_checking_stop(dur: Duration, stop: &AtomicBool) {
 
 /// Fig. 1/9-style: open a snapshot, hold it for `hold` (or until `stop`),
 /// then release without ever reading — the worst case for OLTP robustness.
-fn open_and_sleep_once(tree: &TpccTree, hold: Duration, stop: &AtomicBool, run_start: Instant) -> ScanResult {
-    let tx = TpccTxn::begin(tree);
+fn open_and_sleep_once(db: &TpccDatabase, hold: Duration, stop: &AtomicBool, run_start: Instant) -> ScanResult {
+    let tx = TpccTxn::begin(db);
     let snapshot = tx.ts_start();
     sleep_checking_stop(hold, stop);
     tx.commit();
@@ -108,16 +109,17 @@ fn open_and_sleep_once(tree: &TpccTree, hold: Duration, stop: &AtomicBool, run_s
 
 /// Fig. 10-style: fixes a snapshot, ages it by `delay`, then scans the
 /// warehouse+district relations under that aged snapshot.
-fn scan_after_delay_once(tree: &TpccTree, delay: Duration, run_start: Instant) -> ScanResult {
-    let tx = TpccTxn::begin(tree);
+fn scan_after_delay_once(db: &TpccDatabase, delay: Duration, run_start: Instant) -> ScanResult {
+    let tx = TpccTxn::begin(db);
     let snapshot = tx.ts_start();
     std::thread::sleep(delay);
 
     let start = Instant::now();
-    let scanned = match tx.range(warehouse_and_district_range(), true) {
+    let scanned = |table, range| match tx.range(table, range, true) {
         CRUDOperationResult::MatchedRecords(v) => v.len(),
         other => panic!("tpcc olap scan: unexpected range result: {other}"),
     };
+    let scanned = scanned(Table::Warehouse, warehouse_table_range()) + scanned(Table::District, district_table_range());
     let latency = start.elapsed();
     tx.commit();
 
@@ -128,15 +130,19 @@ fn scan_after_delay_once(tree: &TpccTree, delay: Duration, run_start: Instant) -
 }
 
 /// Freshest-snapshot full-database scan, for throughput-style measurements.
-fn fresh_full_scan_once(tree: &TpccTree, run_start: Instant) -> ScanResult {
-    let tx = TpccTxn::begin(tree);
+/// Since each table is now its own tree (no single "whole shared tree" to
+/// scan in one call — see `mv_bench::tpcc_schema` module docs), this sums a
+/// full-range scan over every table instead.
+fn fresh_full_scan_once(db: &TpccDatabase, run_start: Instant) -> ScanResult {
+    let tx = TpccTxn::begin(db);
     let snapshot = tx.ts_start();
 
     let start = Instant::now();
-    let scanned = match tx.range(crate::mv_utils::interval::Interval::new(TpccKey::MIN, TpccKey::MAX), true) {
+    let full_range = crate::mv_utils::interval::Interval::new(TpccKey::MIN, TpccKey::MAX);
+    let scanned: usize = Table::ALL.iter().map(|&table| match tx.range(table, full_range, true) {
         CRUDOperationResult::MatchedRecords(v) => v.len(),
         other => panic!("tpcc olap scan: unexpected range result: {other}"),
-    };
+    }).sum();
     let latency = start.elapsed();
     tx.commit();
 
@@ -156,12 +162,12 @@ fn fresh_full_scan_once(tree: &TpccTree, run_start: Instant) -> ScanResult {
 /// revenue). `staleness_versions` is `tree.current_version()` (read right
 /// after each query returns) minus that query's own snapshot — see
 /// `ScanResult::staleness_versions` and `tpch_queries` module docs.
-fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, date_hi: i64, run_start: Instant) -> Vec<ScanResult> {
+fn ch_benchmark_queries_once(db: &TpccDatabase, region_name: &str, date_lo: i64, date_hi: i64, run_start: Instant) -> Vec<ScanResult> {
     let mut out = Vec::with_capacity(4);
-    let staleness = |ts_start: Version| Some(tree.current_version().saturating_sub(ts_start));
+    let staleness = |ts_start: Version| Some(db.current_version().saturating_sub(ts_start));
 
     let start = Instant::now();
-    let (q1, ts_start) = tpch_queries::q1(tree, date_hi);
+    let (q1, ts_start) = tpch_queries::q1(db, date_hi);
     out.push(ScanResult {
         mode: "ch_q1_pricing_summary",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
@@ -174,7 +180,7 @@ fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, d
     });
 
     let start = Instant::now();
-    let (q6, ts_start) = tpch_queries::q6(tree, date_lo, date_hi, 24);
+    let (q6, ts_start) = tpch_queries::q6(db, date_lo, date_hi, 24);
     out.push(ScanResult {
         mode: "ch_q6_forecast_revenue",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
@@ -187,7 +193,7 @@ fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, d
     });
 
     let start = Instant::now();
-    let (q4, ts_start) = tpch_queries::q4(tree, date_lo, date_hi, Duration::from_secs(3600 * 24).as_millis() as i64);
+    let (q4, ts_start) = tpch_queries::q4(db, date_lo, date_hi, Duration::from_secs(3600 * 24).as_millis() as i64);
     out.push(ScanResult {
         mode: "ch_q4_order_priority",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
@@ -200,7 +206,7 @@ fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, d
     });
 
     let start = Instant::now();
-    let (q5, ts_start) = tpch_queries::q5(tree, region_name, date_lo, date_hi);
+    let (q5, ts_start) = tpch_queries::q5(db, region_name, date_lo, date_hi);
     out.push(ScanResult {
         mode: "ch_q5_revenue_by_nation",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
@@ -218,12 +224,12 @@ fn ch_benchmark_queries_once(tree: &TpccTree, region_name: &str, date_lo: i64, d
 /// One OLAP worker thread's whole run, streaming each completed scan/hold
 /// back to `results` as it finishes. Runs until `stop` is set (checked
 /// between iterations, and — for `OpenAndSleep` — during the hold itself).
-pub fn run_olap_worker(tree: &TpccTree, mode: OlapMode, stop: &AtomicBool, results: &Sender<ScanResult>) {
+pub fn run_olap_worker(db: &TpccDatabase, mode: OlapMode, stop: &AtomicBool, results: &Sender<ScanResult>) {
     let run_start = Instant::now();
     match mode {
         OlapMode::OpenAndSleep { hold } => {
             while !stop.load(Relaxed) {
-                let r = open_and_sleep_once(tree, hold, stop, run_start);
+                let r = open_and_sleep_once(db, hold, stop, run_start);
                 let _ = results.send(r);
             }
         }
@@ -232,19 +238,19 @@ pub fn run_olap_worker(tree: &TpccTree, mode: OlapMode, stop: &AtomicBool, resul
                 if stop.load(Relaxed) {
                     break;
                 }
-                let r = scan_after_delay_once(tree, delay, run_start);
+                let r = scan_after_delay_once(db, delay, run_start);
                 let _ = results.send(r);
             }
         }
         OlapMode::RepeatedFreshFullScan => {
             while !stop.load(Relaxed) {
-                let r = fresh_full_scan_once(tree, run_start);
+                let r = fresh_full_scan_once(db, run_start);
                 let _ = results.send(r);
             }
         }
         OlapMode::ChBenchmark { region_name, date_lo, date_hi } => {
             while !stop.load(Relaxed) {
-                for r in ch_benchmark_queries_once(tree, &region_name, date_lo, date_hi, run_start) {
+                for r in ch_benchmark_queries_once(db, &region_name, date_lo, date_hi, run_start) {
                     let _ = results.send(r);
                     if stop.load(Relaxed) {
                         break;

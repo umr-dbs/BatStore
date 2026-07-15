@@ -2,10 +2,10 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::sync::atomic::Ordering::Relaxed;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
+use crate::mv_page_model::leaf_page::AbortOutcome;
 use crate::mv_query::SnapShot;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::Version;
-use crate::mv_sync::visibility;
 use crate::mv_tree::mvbt::MVBTSt;
 
 pub(crate) const START_VERSION: Version = 1;
@@ -19,107 +19,60 @@ impl<'a,
 {
     #[inline]
     pub(crate) fn on_acquire_reader_snapshot(&self, snapshot: SnapShot) {
-        self.tracker().on_tx_start(snapshot);
+        self.ctx.on_tx_start(snapshot);
     }
 
     #[inline]
     pub(crate) fn on_release_reader_snapshot(&self, snapshot: SnapShot) {
-        self.tracker().on_tx_completed(snapshot);
+        self.ctx.on_tx_completed(snapshot);
     }
 
-    /// This thread's stable `WorkerId` for this tree instance, lazily
-    /// assigned from the tree's fixed `WorkerRegistry` on first use (see
-    /// `mv_sync::worker`).
+    /// This thread's stable `WorkerId` for this tree's `ctx` (shared or
+    /// private — see `TxContext`'s doc), lazily assigned on first use.
     #[inline(always)]
     pub(crate) fn worker_id(&self) -> WorkerId {
-        crate::mv_sync::worker::worker_id_for(&self.worker_registry)
+        self.ctx.worker_id()
     }
 
     /// Draws a fresh `ts_start` and hands it to `register`, which must be
-    /// whatever actually records it as a protected reader — either directly
-    /// via `on_acquire_reader_snapshot` (as `begin_snapshot` does), or
-    /// indirectly, e.g. `mv_query::dispatch`'s `RangeIterSi` arm, where
-    /// `RangeQueryIter::new`'s own `register_reader_si: true` path does the
-    /// registration instead (so that *iterator* — not `RangeIterSi` itself —
-    /// owns releasing it later, on completion or drop).
-    ///
-    /// Drawing `ts_start` (an immediate side effect other threads can
-    /// observe via `current_version()`) and registering it as protected are
-    /// two separate steps with a real gap between them: a concurrent GC
-    /// decision (`mv_gc::tracker_handle::TrackerHandleSt::free_block`)
-    /// running in that gap can't yet see this reader and may reclaim a page
-    /// it's about to need (this is what caused
-    /// `mv_query::query::traverse_read_key`'s "no matching entry" failures
-    /// under sustained concurrent GC — see that function's doc).
-    /// `registrations_in_flight` closes it: bumped before the draw, dropped
-    /// only after `register` returns (i.e. after the registration it's
-    /// responsible for has actually happened), and `free_block` refuses to
-    /// reclaim anything at all while it's nonzero — so no reclaim decision
-    /// can ever be made in the exact window this draw-then-register
-    /// sequence is unprotected.
-    ///
-    /// (An earlier version of this fix instead pre-registered a
-    /// `current_version()`-based provisional lower bound in `live_tx`
-    /// itself before drawing the real `ts_start`, upgrading afterward.
-    /// That's also correct, but measured 6-9x slower under sustained
-    /// concurrent load: it doubles/triples skip-list insertions at
-    /// `live_tx`'s monotonically-growing, therefore always-contended, tail
-    /// on every single snapshot. This one shared counter is far cheaper —
-    /// no allocation, no per-value skip-list entry — at the cost of making
-    /// `free_block` briefly, harmlessly more conservative than strictly
-    /// necessary while *any* thread is mid-registration, not just when one
-    /// affecting a specific dead block is.)
+    /// whatever actually records it as a protected reader — see
+    /// `TxContext::draw_snapshot_version_with` for why this is gap-free
+    /// against concurrent block reclaim.
     #[inline(always)]
     pub(crate) fn draw_snapshot_version_with<R>(&self, register: impl FnOnce(Version) -> R) -> R {
-        let tracker = self.tracker();
-        tracker.begin_snapshot_registration();
-
-        let ts_start = self.global_clock.next_timestamp();
-        let result = register(ts_start);
-
-        tracker.end_snapshot_registration();
-
-        result
+        self.ctx.draw_snapshot_version_with(register)
     }
 
     /// Draws a fresh OSIC snapshot (`ts_start`) and registers it as an
-    /// active transaction — callers must pair this with `end_snapshot` (or
-    /// `commit_tx`, which does so as part of committing) once the
-    /// transaction is done, so `CommitLog` pruning never drops an entry this
-    /// snapshot's future `LCB` queries still need. See
-    /// `draw_snapshot_version_with` for why this is gap-free.
+    /// active transaction against this tree's `ctx` — callers must pair this
+    /// with `end_snapshot` (or `commit_tx`, which does so as part of
+    /// committing) once the transaction is done, so `CommitLog` pruning
+    /// never drops an entry this snapshot's future `LCB` queries still need.
     #[inline(always)]
     pub(crate) fn begin_snapshot(&self) -> Version {
-        self.draw_snapshot_version_with(|ts_start| {
-            self.on_acquire_reader_snapshot(ts_start);
-            ts_start
-        })
+        self.ctx.begin_snapshot()
     }
 
     #[inline(always)]
     pub(crate) fn end_snapshot(&self, ts_start: Version) {
-        self.on_release_reader_snapshot(ts_start);
+        self.ctx.end_snapshot(ts_start);
     }
 
     /// Plain, worker-agnostic clock reads/ticks — used for structural
     /// root/page versioning (`mv_tree::smo`, `mv_wal::recovery`), which
-    /// stays outside OSIC's per-record `TxStamp` scheme (see
-    /// `GlobalClock::current_version`/`next_timestamp` for why that's safe).
+    /// stays outside OSIC's per-record `TxStamp` scheme.
     #[inline(always)]
     pub(crate) fn current_version(&self) -> Version {
-        self.global_clock.current_version()
+        self.ctx.current_version()
     }
 
     #[inline(always)]
     pub(crate) fn start_tx_commit(&self) -> Version {
-        self.global_clock.next_timestamp()
+        self.ctx.start_tx_commit()
     }
 
     /// OSIC visibility check (Listing 1): is `stamp` visible to a reader on
-    /// `reader_worker` whose snapshot is `reader_ts_start`? The cache used
-    /// is always the *calling* thread's own (see
-    /// `mv_sync::worker::with_snapshot_cache`) — callers are expected to
-    /// pass their own `worker_id()` as `reader_worker`.
+    /// `reader_worker` whose snapshot is `reader_ts_start`?
     #[inline(always)]
     pub(crate) fn is_visible_stamp(
         &self,
@@ -127,20 +80,12 @@ impl<'a,
         reader_ts_start: Version,
         stamp: TxStamp,
     ) -> bool {
-        crate::mv_sync::worker::with_snapshot_cache(&self.worker_registry, |cache| {
-            visibility::is_visible(&self.commit_logs, cache, reader_worker, reader_ts_start, stamp)
-        })
+        self.ctx.is_visible_stamp(reader_worker, reader_ts_start, stamp)
     }
 
     /// Same OSIC check as `is_visible_stamp`, but for a whole batch of
     /// records (a scanned leaf page, a point-query's candidate versions)
-    /// rather than one stamp: fetches this thread's `SnapshotCache` *once*
-    /// (`with_snapshot_cache`'s thread-local `.with()` + `RefCell::
-    /// borrow_mut()` + `HashMap::entry` lookup) and hands `f` a closure that
-    /// reuses it for every record, instead of `is_visible_stamp` paying that
-    /// lookup again per record. Matters most for range/OLAP scans, which
-    /// call this once per visited leaf page but then check visibility for
-    /// every record (up to two checks each, insert + delete stamp) in it.
+    /// rather than one stamp — see `TxContext::with_visibility_checker`.
     #[inline(always)]
     pub(crate) fn with_visibility_checker<R>(
         &self,
@@ -148,35 +93,15 @@ impl<'a,
         reader_ts_start: Version,
         f: impl FnOnce(&mut dyn FnMut(TxStamp) -> bool) -> R,
     ) -> R {
-        crate::mv_sync::worker::with_snapshot_cache(&self.worker_registry, |cache| {
-            f(&mut |stamp| visibility::is_visible(&self.commit_logs, cache, reader_worker, reader_ts_start, stamp))
-        })
+        self.ctx.with_visibility_checker(reader_worker, reader_ts_start, f)
     }
 
-    /// Commits `worker_id`'s in-flight transaction: draws `ts_commit` from
-    /// the GLC and appends it to that worker's `CommitLog` — the entire
-    /// "instant commit" (no write-set revisit). Prunes against every active
-    /// snapshot (`tracker().active_snapshots()`) only while block-reclaim GC
-    /// is enabled — see `TrackerHandleSt`'s type doc for why pruning isn't
-    /// sound otherwise (it can silently corrupt visibility for an explicit
-    /// historical read at an old `version` nobody's held a live snapshot on
-    /// since, once the dead records it needs outlive the pruned `LCB` data
-    /// that would've explained them). With GC off, falls back to the plain,
-    /// never-pruning `CommitLog::commit`, so each worker's log grows
-    /// unboundedly for the run's lifetime — the same tradeoff a GC-off tree
-    /// has always accepted, not a bug to paper over by pruning anyway.
+    /// Commits `worker_id`'s in-flight transaction against this tree's
+    /// `ctx` — see `TxContext::commit_tx` for the prune-vs-plain-commit
+    /// choice.
     #[inline(always)]
     pub(crate) fn commit_tx(&self, worker_id: WorkerId) -> Version {
-        let tracker = self.tracker();
-        if tracker.block_reclaim_enabled() {
-            self.commit_logs[worker_id as usize].commit_pruned(
-                &self.global_clock,
-                self.commit_logs.len(),
-                tracker.active_snapshots(),
-            )
-        } else {
-            self.commit_logs[worker_id as usize].commit(&self.global_clock)
-        }
+        self.ctx.commit_tx(worker_id)
     }
 
     /// Every write's WAL record (if any) is handed to its shard and *never
@@ -255,13 +180,13 @@ impl<'a,
         // `ArcSwapOption::load` entirely instead of paying its guard
         // mechanism on every write just to find `None` — see the field doc.
         if !self.wal_ever_enabled.load(Relaxed) {
-            return TxStamp::new(worker_id, self.global_clock.next_timestamp());
+            return TxStamp::new(worker_id, self.ctx.start_tx_commit());
         }
 
         match self.wal.load().as_ref() {
             Some(shards) => shards[worker_id as usize]
-                .start_commit_logged(&self.global_clock, worker_id, build).0,
-            None => TxStamp::new(worker_id, self.global_clock.next_timestamp()),
+                .start_commit_logged(self.ctx.global_clock(), worker_id, build).0,
+            None => TxStamp::new(worker_id, self.ctx.start_tx_commit()),
         }
     }
 
@@ -283,6 +208,27 @@ impl<'a,
 
         if let Some(shards) = self.wal.load().as_ref() {
             shards[stamp.worker_id() as usize].log_with_stamp(stamp, build);
+        }
+    }
+
+    /// Reverts `key`'s write by the transaction identified by `stamp` — see
+    /// `mv_page_model::leaf_page::LeafPage::abort_write`'s doc for the two
+    /// cases (`Invalidate` an `Insert`/`Update`, or `Undelete` a plain
+    /// `Delete`). Called once per key a `mv_query::transaction::Transaction`/
+    /// `mv_bench::tpcc_txn::TpccTxn` touched, from `Drop` when it's dropped
+    /// without `commit()`. Fire-and-forget WAL logging, same model as every
+    /// other write (`wal_log_write`) — no new `commit_tx`/commit-log entry:
+    /// `stamp`'s transaction never committed, so it never gets one.
+    #[inline]
+    pub(crate) fn abort_write(&self, key: Key, stamp: TxStamp) {
+        let leaf_guard = self.traversal_write_olc(key);
+        let leaf_deref_mut = leaf_guard.deref_mut();
+        let leaf_page = leaf_deref_mut.as_leaf_page();
+
+        match leaf_page.abort_write(key, stamp) {
+            AbortOutcome::Invalidated => self.wal_log_write(stamp, |_| CRUDOperation::Invalidate(key)),
+            // AbortOutcome::Undeleted => self.wal_log_write(stamp, |_| CRUDOperation::Undelete(key)),
+            AbortOutcome::NotFound => {}
         }
     }
 }
