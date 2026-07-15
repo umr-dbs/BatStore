@@ -240,6 +240,12 @@ impl TpccDatabase {
             self.tree_for(t).disable_gc();
         }
     }
+    
+    pub fn truncate_commit_log(&self, enabled: bool) {
+        for t in Table::ALL {
+            self.tree_for(t).truncate_commit_log(enabled);
+        }
+    }
 
     pub fn root_star_index(&self) -> RootIndexType {
         self.warehouse.root_star_index()

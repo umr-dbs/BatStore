@@ -191,6 +191,10 @@ impl<const FAN_OUT: usize,
         self.ctx.set_block_reclaim_enabled(false);
     }
 
+    pub fn truncate_commit_log(&self, enabled: bool) {
+        self.ctx.set_truncate_commit_log(enabled);
+    }
+
     pub fn root_star_index(&self) -> RootIndexType {
         self.root.index_type()
     }

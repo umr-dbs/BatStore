@@ -58,6 +58,7 @@ pub(crate) struct TxContext {
     /// database (see `mv_bench::tpcc_schema::TpccDatabase::enable_gc`)
     /// rather than per table.
     block_reclaim_enabled: AtomicBool,
+    freshest_si_truncate_commit_log: AtomicBool,
 }
 
 impl TxContext {
@@ -69,6 +70,7 @@ impl TxContext {
             live_tx: TransactionTrace::new(),
             registrations_in_flight: AtomicUsize::new(0),
             block_reclaim_enabled: AtomicBool::new(false),
+            freshest_si_truncate_commit_log: AtomicBool::new(true),
         }
     }
 
@@ -87,6 +89,11 @@ impl TxContext {
     #[inline]
     pub(crate) fn set_block_reclaim_enabled(&self, enabled: bool) {
         self.block_reclaim_enabled.store(enabled, Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn set_truncate_commit_log(&self, enabled: bool) {
+        self.freshest_si_truncate_commit_log.store(enabled, Relaxed);
     }
 
     #[inline]
@@ -198,7 +205,9 @@ impl TxContext {
 
     #[inline(always)]
     pub(crate) fn commit_tx(&self, worker_id: WorkerId) -> Version {
-        if self.block_reclaim_enabled.load(Relaxed) {
+        if self.block_reclaim_enabled.load(Relaxed) ||
+           self.freshest_si_truncate_commit_log.load(Relaxed)
+        {
             self.commit_logs[worker_id as usize].commit_pruned(
                 &self.global_clock,
                 self.commit_logs.len(),
