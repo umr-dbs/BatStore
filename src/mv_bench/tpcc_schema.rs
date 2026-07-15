@@ -243,7 +243,7 @@ impl TpccDatabase {
     
     pub fn truncate_commit_log(&self, enabled: bool) {
         for t in Table::ALL {
-            self.tree_for(t).truncate_commit_log(enabled);
+            self.tree_for(t).allow_historic_query(enabled);
         }
     }
 

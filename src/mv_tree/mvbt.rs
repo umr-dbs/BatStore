@@ -2,6 +2,7 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 use arc_swap::ArcSwapOption;
 use crate::mv_block::block_handle::BlockAllocManager;
 use crate::mv_gc::tracker_handle::{TrackerHandle, TrackerHandleSt};
@@ -191,8 +192,9 @@ impl<const FAN_OUT: usize,
         self.ctx.set_block_reclaim_enabled(false);
     }
 
-    pub fn truncate_commit_log(&self, enabled: bool) {
-        self.ctx.set_truncate_commit_log(enabled);
+    pub fn allow_historic_query(&self, enabled: bool) {
+        self.disable_gc();
+        self.ctx.set_truncate_commit_log(!enabled);
     }
 
     pub fn root_star_index(&self) -> RootIndexType {

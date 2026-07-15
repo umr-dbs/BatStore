@@ -57,7 +57,7 @@ pub(crate) struct TxContext {
     /// is why callers must toggle GC uniformly across a whole multi-table
     /// database (see `mv_bench::tpcc_schema::TpccDatabase::enable_gc`)
     /// rather than per table.
-    block_reclaim_enabled: AtomicBool,
+    pub(crate) block_reclaim_enabled: AtomicBool,
     freshest_si_truncate_commit_log: AtomicBool,
 }
 
