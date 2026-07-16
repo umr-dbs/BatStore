@@ -50,14 +50,14 @@ pub fn su_suppkey_for(w_id: u32, i_id: u32, num_suppliers: u32) -> u32 {
 /// once regardless of scale.
 pub fn populate_regions_and_nations(db: &TpccDatabase) {
     for (r_id, name) in REGIONS.iter().enumerate() {
-        insert(&db.region, k_region(r_id as u8), TpccRow::Region(Box::new(Region {
+        insert(&db.tree_for(Table::Region), k_region(r_id as u8), TpccRow::Region(Box::new(Region {
             r_name: name.to_string(),
             r_comment: rnd_astring(20, 80),
         })));
     }
 
     for (n_id, (name, r_id)) in NATIONS.iter().enumerate() {
-        insert(&db.nation, k_nation(n_id as u8), TpccRow::Nation(Box::new(Nation {
+        insert(&db.tree_for(Table::Nation), k_nation(n_id as u8), TpccRow::Nation(Box::new(Nation {
             n_name: name.to_string(),
             n_regionkey: *r_id,
             n_comment: rnd_astring(20, 80),
@@ -69,7 +69,7 @@ pub fn populate_regions_and_nations(db: &TpccDatabase) {
 /// see `TpccConfig::num_suppliers`), each assigned a uniformly random nation.
 pub fn populate_suppliers(db: &TpccDatabase, cfg: &TpccConfig) {
     for su_id in 0..cfg.num_suppliers {
-        insert(&db.supplier, k_supplier(su_id), TpccRow::Supplier(Box::new(Supplier {
+        insert(&db.tree_for(Table::Supplier), k_supplier(su_id), TpccRow::Supplier(Box::new(Supplier {
             s_name: format!("Supplier#{:09}", su_id),
             s_address: rnd_astring(10, 40),
             s_nationkey: rand::rng().random_range(0..NATIONS.len() as u8),
@@ -83,7 +83,7 @@ pub fn populate_suppliers(db: &TpccDatabase, cfg: &TpccConfig) {
 /// Warehouse-independent item catalog; call once regardless of `num_warehouses`.
 pub fn populate_items(db: &TpccDatabase, cfg: &TpccConfig) {
     for i_id in 1..=cfg.num_items {
-        insert(&db.item, k_item(i_id), TpccRow::Item(Box::new(Item {
+        insert(&db.tree_for(Table::Item), k_item(i_id), TpccRow::Item(Box::new(Item {
             i_im_id: rand::rng().random_range(1..=10_000),
             i_name: rnd_astring(14, 24),
             i_price: rand::rng().random_range(100..=10_000) as f64 / 100.0,
@@ -97,7 +97,7 @@ pub fn populate_items(db: &TpccDatabase, cfg: &TpccConfig) {
 /// its per-item stock. `history_seq` is a process-wide counter shared by
 /// every loader thread so History keys never collide across warehouses.
 pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, history_seq: &AtomicU64) {
-    insert(&db.warehouse, k_warehouse(w_id), TpccRow::Warehouse(Box::new(Warehouse {
+    insert(&db.tree_for(Table::Warehouse), k_warehouse(w_id), TpccRow::Warehouse(Box::new(Warehouse {
         w_name: rnd_astring(6, 10),
         w_street_1: rnd_astring(10, 20),
         w_street_2: rnd_astring(10, 20),
@@ -109,7 +109,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
     })));
 
     for d_id in 1..=cfg.districts_per_warehouse {
-        insert(&db.district, k_district(w_id, d_id), TpccRow::District(Box::new(District {
+        insert(&db.tree_for(Table::District), k_district(w_id, d_id), TpccRow::District(Box::new(District {
             d_name: rnd_astring(6, 10),
             d_street_1: rnd_astring(10, 20),
             d_street_2: rnd_astring(10, 20),
@@ -129,7 +129,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
             let first_code_v = first_code(&c_first);
             let c_credit_bad = rand::rng().random_range(0..10) == 0;
 
-            insert(&db.customer, k_customer(w_id, d_id, c_id), TpccRow::Customer(Box::new(Customer {
+            insert(&db.tree_for(Table::Customer), k_customer(w_id, d_id, c_id), TpccRow::Customer(Box::new(Customer {
                 c_first,
                 c_middle: "OE".to_string(),
                 c_last,
@@ -149,10 +149,10 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
                 c_delivery_cnt: 0,
                 c_data: rnd_astring(300, 500),
             })));
-            insert(&db.customer_name_idx, k_customer_name_idx(w_id, d_id, last_code, first_code_v, c_id), TpccRow::CustomerNameIdx);
+            insert(&db.tree_for(Table::CustomerNameIdx), k_customer_name_idx(w_id, d_id, last_code, first_code_v, c_id), TpccRow::CustomerNameIdx);
 
             let h_key = k_history(history_seq.fetch_add(1, Relaxed));
-            insert(&db.history, h_key, TpccRow::History(Box::new(History {
+            insert(&db.tree_for(Table::History), h_key, TpccRow::History(Box::new(History {
                 h_c_id: c_id,
                 h_c_d_id: d_id,
                 h_c_w_id: w_id,
@@ -178,14 +178,14 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
             let is_new = o_id > new_order_floor;
             let o_carrier_id = if is_new { None } else { Some(rand::rng().random_range(1..=10u32)) };
 
-            insert(&db.orders, k_order(w_id, d_id, o_id), TpccRow::Order(Box::new(Order {
+            insert(&db.tree_for(Table::Orders), k_order(w_id, d_id, o_id), TpccRow::Order(Box::new(Order {
                 o_c_id: c_id,
                 o_entry_d: now_millis(),
                 o_carrier_id,
                 o_ol_cnt: ol_cnt,
                 o_all_local: true,
             })));
-            insert(&db.cust_last_order, k_cust_last_order(w_id, d_id, c_id), TpccRow::CustLastOrder(o_id));
+            insert(&db.tree_for(Table::CustLastOrder), k_cust_last_order(w_id, d_id, c_id), TpccRow::CustLastOrder(o_id));
 
             for ol_number in 1..=ol_cnt {
                 let i_id = rand::rng().random_range(1..=cfg.num_items);
@@ -195,7 +195,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
                     (Some(now_millis()), 0.0)
                 };
 
-                insert(&db.order_line, k_order_line(w_id, d_id, o_id, ol_number), TpccRow::OrderLine(Box::new(OrderLine {
+                insert(&db.tree_for(Table::OrderLine), k_order_line(w_id, d_id, o_id, ol_number), TpccRow::OrderLine(Box::new(OrderLine {
                     ol_i_id: i_id,
                     ol_supply_w_id: w_id,
                     ol_delivery_d,
@@ -206,13 +206,13 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
             }
 
             if is_new {
-                insert(&db.new_order, k_new_order(w_id, d_id, o_id), TpccRow::NewOrder(NewOrderMarker { no_o_id: o_id }));
+                insert(&db.tree_for(Table::NewOrder), k_new_order(w_id, d_id, o_id), TpccRow::NewOrder(NewOrderMarker { no_o_id: o_id }));
             }
         }
     }
 
     for i_id in 1..=cfg.num_items {
-        insert(&db.stock, k_stock(w_id, i_id), TpccRow::Stock(Box::new(Stock {
+        insert(&db.tree_for(Table::Stock), k_stock(w_id, i_id), TpccRow::Stock(Box::new(Stock {
             s_quantity: rand::rng().random_range(10..=100),
             s_dist: std::array::from_fn(|_| rnd_astring(24, 24)),
             s_ytd: 0.0,

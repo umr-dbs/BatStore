@@ -2,8 +2,7 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::Arc;
-
+use triomphe::Arc;
 use crate::mv_gc::block_tracer::{DeadPageValue, BlockTrace};
 use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::time_matcher::TimeMatcher;

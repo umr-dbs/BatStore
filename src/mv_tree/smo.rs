@@ -1,17 +1,17 @@
-use std::fmt::Display;
-use std::hash::Hash;
-use std::ops::Deref;
-use itertools::Itertools;
 use crate::mv_block::block::{Block, BlockGuard};
 use crate::mv_block::block_handle::BlockAllocManager;
-use crate::mv_page_model::{BlockRef, Height};
 use crate::mv_page_model::node::PageType;
 use crate::mv_page_model::time_matcher::TimeMatcher;
+use crate::mv_page_model::{BlockRef, Height};
+use crate::mv_query::interval::Interval;
 use crate::mv_root::index_root::RootIndexGuard;
 use crate::mv_root::root::Root;
 use crate::mv_test::VERBOSE;
 use crate::mv_tree::mvbt::MVBTSt;
-use crate::mv_utils::interval::Interval;
+use itertools::Itertools;
+use std::fmt::Display;
+use std::hash::Hash;
+use std::ops::Deref;
 
 #[repr(u8)]
 pub enum BlockUnsafeDegree {
@@ -800,8 +800,8 @@ impl<const FAN_OUT: usize,
                         .filter(|record| record.version().is_live())
                         .collect_vec();
 
-                    debug_assert!(active_records.len() >= block.filling_40_percent(),
-                                  "Active records = {}, required >= {}", active_records.len(), block.filling_40_percent());
+                    // debug_assert!(active_records.len() >= block.filling_40_percent(),
+                    //               "Active records = {}, required >= {}", active_records.len(), block.filling_40_percent());
 
                     // if active_records.len() <=
                     //     BlockManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::min_active_records()

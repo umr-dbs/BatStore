@@ -21,14 +21,8 @@ pub type WorkerId = u16;
 /// `size_of::<u64>` (8 bytes), restoring `VersionInfo`/leaf fan-out to their
 /// pre-OSIC footprint. Bit 63 is deliberately left unused here — it's
 /// `DeletedTxStamp`'s own presence flag (see `version_info::DeletedTxStamp`).
-#[derive(Copy, Clone, Default, Eq)]
+#[derive(Copy, Clone, Default, Eq, PartialEq)]
 pub struct TxStamp(u64);
-
-impl PartialEq for TxStamp {
-    fn eq(&self, other: &Self) -> bool {
-        self.ts_start() == other.ts_start()
-    }
-}
 
 impl TxStamp {
     const WORKER_ID_BITS: u32 = 16;
@@ -102,7 +96,13 @@ impl TxStamp {
 
 /// Orders purely by `ts_start` — every non-visibility use site (SMO
 /// merge/split ordering, "was this inserted after the newest live snapshot"
-/// heuristics) only ever cares about recency, not who wrote it.
+/// heuristics) only ever cares about recency, not who wrote it. Deliberately
+/// coarser than the derived `Eq`/`PartialEq` above (which compare all raw
+/// bits, including the invalidation flag — see `mark_invalid`'s doc): two
+/// stamps can compare `Ordering::Equal` here while still being `!=` (one
+/// invalidated, one not). Nothing relies on `Ord`/`Eq` agreeing (no
+/// sorted/hashed collection keyed by `TxStamp` — see `INVALID_FLAG`'s
+/// history for why that distinction actually matters).
 impl Ord for TxStamp {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.ts_start().cmp(&other.ts_start())

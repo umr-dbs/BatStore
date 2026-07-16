@@ -1,31 +1,38 @@
 //! TPC-C schema for the cMVBT benchmark harness.
 //!
 //! Each of the nine TPC-C tables (plus two maintained secondary indexes) gets
-//! its own [`MVBTSt`] tree/index — a [`TpccDatabase`] bundles all 14 such
-//! trees together with the *shared* transactional core
-//! (`crate::mv_sync::tx_context::TxContext`: one `GlobalClock`, one set of
-//! `CommitLog`s, one `WorkerRegistry`, one active-snapshot registry) they all
-//! reference via `Arc`. Sharing that core — not sharing one physical tree —
-//! is what still lets a [`crate::mv_bench::tpcc_txn::TpccTxn`] spanning
-//! several "tables" (e.g. NewOrder touching Warehouse/District/Customer/
-//! Order/NewOrder/OrderLine/Stock) commit atomically and stay
+//! its own [`MVBTSt`] tree/index — a [`TpccDatabase`] is a thin, domain-named
+//! wrapper around a [`crate::mv_db::Database`] holding all 14 as named
+//! tables, sharing that database's one transactional core (`TxContext`) *and*
+//! its one shared WAL. Sharing the transactional core — not sharing one
+//! physical tree — is what lets a [`crate::mv_bench::tpcc_txn::TpccTxn`]
+//! spanning several "tables" (e.g. NewOrder touching Warehouse/District/
+//! Customer/Order/NewOrder/OrderLine/Stock) commit atomically and stay
 //! snapshot-isolated as a whole, matching how the referenced benchmarks
 //! (TPC-C + OLAP scans, e.g. Alhomssi & Leis, VLDB'23) treat a business
 //! transaction as one unit — while giving each table an independently-sized,
 //! independently-scanned index, closer to how a real storage engine
-//! physically separates relations.
+//! physically separates relations. Sharing the WAL means a `TpccTxn`
+//! spanning several tables now logs exactly *one* Commit marker for the
+//! whole transaction (see `crate::mv_db::DbTransaction::commit`'s doc),
+//! instead of one marker per touched table.
+//!
+//! [`Table`] is a convenience enum over this database's 14 tables — it
+//! carries no data of its own; `TpccDatabase` resolves it to a `TableId`
+//! (the underlying `Database`'s actual, plain sequential per-table index)
+//! once at construction, cached in `TpccDatabase::table_ids` and indexed by
+//! `Table as usize` (safe: `Table`'s declaration order matches `Table::ALL`'s).
 //!
 //! Also carries CH-benCHmark's (Cole et al., "The Mixed Workload CH-benCHmark",
 //! DBTest 2011) three TPC-H-derived dimension tables — SUPPLIER, NATION,
-//! REGION — as three more trees on the same `TpccDatabase`, feeding the
+//! REGION — as three more tables on the same `TpccDatabase`, feeding the
 //! analytical queries in `mv_bench::tpch_queries`.
 //!
-//! Key layout: since table selection is now "which tree" (a [`Table`] value
-//! picking one of `TpccDatabase`'s fields), not "which key range", every key
-//! is just that table's primary-key columns packed MSB-first (so a
-//! byte-ordered range scan matches the natural column order, e.g. scanning
-//! all districts of a warehouse or all order-lines of an order) — no table
-//! tag bits needed.
+//! Key layout: since table selection is now "which table" (a [`Table`] value
+//! resolving to a `TableId`), not "which key range", every key is just that
+//! table's primary-key columns packed MSB-first (so a byte-ordered range scan
+//! matches the natural column order, e.g. scanning all districts of a
+//! warehouse or all order-lines of an order) — no table tag bits needed.
 //!
 //! Several row fields (addresses, `i_data`, `s_dist`, ...) are never read by
 //! the 5 transaction profiles, same as in the real spec — they exist for
@@ -33,13 +40,13 @@
 //! touched by transaction logic, so `dead_code` is silenced module-wide.
 #![allow(dead_code)]
 
-use std::fmt::{Display, Formatter};
-use std::sync::Arc;
-
+use crate::mv_db::Database;
+use crate::mv_query::interval::Interval;
 use crate::mv_root::index_root::RootIndexType;
-use crate::mv_sync::tx_context::TxContext;
-use crate::mv_tree::mvbt::{default_max_workers, FAN_OUT, NUM_RECORDS};
-use crate::mv_utils::interval::Interval;
+use crate::mv_tree::mvbt::FAN_OUT;
+use crate::mv_wal::record::TableId;
+use std::fmt::{Display, Formatter};
+use triomphe::Arc;
 
 pub type TpccKey = u64;
 
@@ -124,8 +131,9 @@ impl Table {
         Table::Region,
     ];
 
-    /// Lowercase name, used for per-table WAL shard paths (see
-    /// `table_wal_path`) and diagnostics.
+    /// Lowercase name — this table's actual identity, used as the
+    /// `mv_db::Database::create_table` argument `TpccDatabase` resolves
+    /// every `Table` variant to a `TableId` through, and for diagnostics.
     pub const fn as_str(&self) -> &'static str {
         match self {
             Table::Warehouse => "warehouse",
@@ -146,24 +154,13 @@ impl Table {
     }
 }
 
-/// All 14 TPC-C/CH-benCHmark tables, each its own tree, sharing one
-/// transactional core (`ctx`) — see this module's doc.
+/// All 14 TPC-C/CH-benCHmark tables — a thin, domain-named wrapper over a
+/// [`crate::mv_db::Database`], see this module's doc.
 pub struct TpccDatabase {
-    pub(crate) ctx: Arc<TxContext>,
-    pub warehouse: TpccTree,
-    pub district: TpccTree,
-    pub customer: TpccTree,
-    pub cust_last_order: TpccTree,
-    pub customer_name_idx: TpccTree,
-    pub history: TpccTree,
-    pub new_order: TpccTree,
-    pub orders: TpccTree,
-    pub order_line: TpccTree,
-    pub item: TpccTree,
-    pub stock: TpccTree,
-    pub supplier: TpccTree,
-    pub nation: TpccTree,
-    pub region: TpccTree,
+    pub(crate) db: Database<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>,
+    /// `Table -> TableId`, resolved once at construction and indexed by
+    /// `Table as usize` — see `Table`'s doc.
+    pub(crate) table_ids: [TableId; 14],
 }
 
 fn inc_key(k: TpccKey) -> TpccKey { k.checked_add(1).unwrap_or(TpccKey::MAX) }
@@ -171,142 +168,92 @@ fn dec_key(k: TpccKey) -> TpccKey { k.checked_sub(1).unwrap_or(TpccKey::MIN) }
 
 impl TpccDatabase {
     pub fn new(root_index_type: RootIndexType) -> Self {
-        let max_workers = default_max_workers().max(1);
-        let ctx = Arc::new(TxContext::new(max_workers));
-        Self::with_ctx(root_index_type, ctx)
+        let db = Database::new(root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX);
+        let table_ids = Self::create_all_tables(&db);
+        Self { db, table_ids }
     }
 
-    fn with_ctx(root_index_type: RootIndexType, ctx: Arc<TxContext>) -> Self {
-        let new_tree = |ctx: &Arc<TxContext>| TpccTree::make_with_shared_ctx(
-            root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX, ctx.clone());
-
-        Self {
-            warehouse: new_tree(&ctx),
-            district: new_tree(&ctx),
-            customer: new_tree(&ctx),
-            cust_last_order: new_tree(&ctx),
-            customer_name_idx: new_tree(&ctx),
-            history: new_tree(&ctx),
-            new_order: new_tree(&ctx),
-            orders: new_tree(&ctx),
-            order_line: new_tree(&ctx),
-            item: new_tree(&ctx),
-            stock: new_tree(&ctx),
-            supplier: new_tree(&ctx),
-            nation: new_tree(&ctx),
-            region: new_tree(&ctx),
-            ctx,
+    /// Creates every one of the 14 tables, in `Table::ALL`'s fixed order —
+    /// or, for a database recovered from an already-populated catalog,
+    /// simply looks each one up (`Database::create_table` is idempotent by
+    /// name, see its doc) — and returns the resulting `Table -> TableId`
+    /// cache. Shared by `new` (always actually creates) and `open_recovered`
+    /// (recreates from the catalog `Database::open_recovered` already read;
+    /// this loop is then a no-op lookup for every name already present, or
+    /// a real create for a genuinely fresh — no prior WAL — database).
+    fn create_all_tables(db: &Database<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>) -> [TableId; 14] {
+        let mut table_ids = [0 as TableId; 14];
+        for t in Table::ALL {
+            table_ids[t as usize] = db.create_table(t.as_str())
+                .table_id()
+                .expect("mv_db::Database::create_table always assigns its new table a TableId");
         }
+        table_ids
     }
 
     #[inline(always)]
-    pub fn tree_for(&self, table: Table) -> &TpccTree {
-        match table {
-            Table::Warehouse => &self.warehouse,
-            Table::District => &self.district,
-            Table::Customer => &self.customer,
-            Table::CustLastOrder => &self.cust_last_order,
-            Table::CustomerNameIdx => &self.customer_name_idx,
-            Table::History => &self.history,
-            Table::NewOrder => &self.new_order,
-            Table::Orders => &self.orders,
-            Table::OrderLine => &self.order_line,
-            Table::Item => &self.item,
-            Table::Stock => &self.stock,
-            Table::Supplier => &self.supplier,
-            Table::Nation => &self.nation,
-            Table::Region => &self.region,
-        }
+    pub fn tree_for(&self, table: Table) -> Arc<TpccTree> {
+        self.db.table(self.table_ids[table as usize])
+            .expect("TpccDatabase creates every Table::ALL entry at construction")
     }
 
     /// Reads off the shared clock — same value regardless of which table's
-    /// tree it's read through, since `ctx` (and therefore the clock) is
-    /// shared by every table on this database.
+    /// tree it's read through, since every table shares this database's one
+    /// `ctx`.
     pub fn current_version(&self) -> crate::mv_record_model::version_info::Version {
-        self.ctx.current_version()
+        self.db.current_version()
     }
 
     /// Toggles block reclaim uniformly across every table on this database
     /// — see `MVBTSt::enable_gc`'s doc for why partial/per-table toggling
     /// would make pruning the shared commit logs unsound.
     pub fn enable_gc(&self, update_in_place: bool) {
-        for t in Table::ALL {
-            self.tree_for(t).enable_gc(update_in_place);
-        }
+        self.db.enable_gc(update_in_place);
     }
 
     pub fn disable_gc(&self) {
-        for t in Table::ALL {
-            self.tree_for(t).disable_gc();
-        }
+        self.db.disable_gc();
     }
-    
+
     pub fn truncate_commit_log(&self, enabled: bool) {
-        for t in Table::ALL {
-            self.tree_for(t).allow_historic_query(enabled);
-        }
+        self.db.allow_historic_query(enabled);
     }
 
     pub fn root_star_index(&self) -> RootIndexType {
-        self.warehouse.root_star_index()
+        self.db.root_star_index()
     }
-}
-
-/// On-disk WAL base path for one table, derived from a caller-supplied base
-/// path by appending the table's name (`Table::as_str`) — e.g.
-/// `tpcc_wal.log` -> `tpcc_wal.log.warehouse`. Per-worker sharding
-/// (`mv_tree::mvbt::wal_shard_path`) then appends on top of *this*, e.g.
-/// `tpcc_wal.log.warehouse.0000`.
-pub fn table_wal_path(base: &std::path::Path, table: Table) -> std::path::PathBuf {
-    let mut s = base.as_os_str().to_owned();
-    s.push(format!(".{}", table.as_str()));
-    std::path::PathBuf::from(s)
 }
 
 impl TpccDatabase {
-    /// Builds a fresh database, replays any existing per-table/per-worker
-    /// WAL shards found under `wal_base_path` (see `table_wal_path`) into
-    /// each table in turn, truncates each shard to its own valid prefix,
-    /// then attaches live per-table WAL writers — the `TpccDatabase`
-    /// counterpart to `MVBTSt::open_recovered`, just looped once per table.
-    /// Order across tables doesn't matter: there's no cross-table
-    /// transactional replay guarantee (the WAL has no concept of
-    /// transaction boundaries — see `TpccTxn`'s doc), and each table's
-    /// replay only reconstructs that table's own row states in its own
-    /// relative `ts_start` order.
+    /// Builds a fresh database, replays the *single* shared WAL file found
+    /// at `wal_path` — via `mv_db::Database::open_recovered`, which reads
+    /// its own table catalog to know which tables to recreate, in their
+    /// original order, with no per-table file/path bookkeeping needed here
+    /// — then attaches a live writer. The `TpccDatabase` counterpart to
+    /// `mv_db::Database::open_recovered`. Unlike the old one-file-per-table
+    /// design, a `TpccTxn` spanning several tables now logs exactly one
+    /// Commit marker for the whole transaction (see
+    /// `mv_db::DbTransaction::commit`'s doc), so recovery no longer has the
+    /// old "a crash between two tables' markers can leave one table's share
+    /// of a transaction replayed and another's not" gap.
     pub fn open_recovered(
         root_index_type: RootIndexType,
-        wal_base_path: &std::path::Path,
+        wal_path: &std::path::Path,
         flush_interval: std::time::Duration,
     ) -> std::io::Result<Self> {
-        let db = Self::new(root_index_type);
-
-        for t in Table::ALL {
-            let path = table_wal_path(wal_base_path, t);
-            let tree = db.tree_for(t);
-
-            let valid_lengths = crate::mv_wal::recovery::replay(tree, &path)?;
-            for (shard_path, valid_len) in &valid_lengths {
-                if let Ok(file) = std::fs::OpenOptions::new().write(true).open(shard_path) {
-                    file.set_len(*valid_len)?;
-                }
-            }
-
-            tree.enable_wal(&path, flush_interval)?;
-        }
-
-        Ok(db)
+        let db = Database::open_recovered(
+            root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
+            wal_path, flush_interval,
+        )?;
+        let table_ids = Self::create_all_tables(&db);
+        Ok(Self { db, table_ids })
     }
 
-    /// Attaches a live WAL to every table, each at its own path under
-    /// `wal_base_path` (see `table_wal_path`) — for a fresh (not recovered)
-    /// database; use `open_recovered` instead when the log might already
-    /// contain data from a prior run.
-    pub fn enable_wal(&self, wal_base_path: &std::path::Path, flush_interval: std::time::Duration) -> std::io::Result<()> {
-        for t in Table::ALL {
-            self.tree_for(t).enable_wal(&table_wal_path(wal_base_path, t), flush_interval)?;
-        }
-        Ok(())
+    /// Attaches one shared live WAL at `wal_path` — for a fresh (not
+    /// recovered) database; use `open_recovered` instead when the log might
+    /// already contain data from a prior run.
+    pub fn enable_wal(&self, wal_path: &std::path::Path, flush_interval: std::time::Duration) -> std::io::Result<()> {
+        self.db.enable_wal(wal_path, flush_interval)
     }
 }
 

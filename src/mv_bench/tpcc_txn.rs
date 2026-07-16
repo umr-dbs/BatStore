@@ -11,255 +11,93 @@
 //! distributions (% remote, % rollback, % by-name), and atomicity are
 //! faithful to the spec.
 
-use std::cell::RefCell;
-use std::fmt::Display;
 use rand::prelude::*;
+use std::fmt::Display;
 
 use crate::mv_bench::tpcc_random::*;
 use crate::mv_bench::tpcc_schema::*;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationInnerReason::{KeyAlreadyDeleted, KeyAlreadyExists, KeyDoesNotExist};
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_page_model::leaf_page::LeafPage;
-use crate::mv_query::iter_query::RangeQueryIter;
-use crate::mv_record_model::record_point::{RecordPoint, RecordPointResult};
-use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
-use crate::mv_record_model::version_info::{Version, VersionInfo};
-use crate::mv_utils::interval::Interval;
+use crate::mv_db::{DbTransaction, TableId};
+use crate::mv_query::interval::Interval;
+use crate::mv_record_model::record_point::RecordPointResult;
+use crate::mv_record_model::tx_stamp::WorkerId;
+use crate::mv_record_model::version_info::Version;
 
 type Res<'a> = CRUDOperationResult<'a, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 
-/// A multi-table OSIC transaction over a [`TpccDatabase`]: one fixed
-/// snapshot (`ts_start`), drawn once from the database's *shared*
-/// `TxContext` at `begin` and reused by every read/write this transaction
-/// issues against any of its 14 tables, committed exactly once at the end —
-/// the direct, multi-table analogue of `mv_query::transaction::Transaction`
-/// (which this mirrors method-for-method, just resolving `self.tree` to
-/// `self.db.tree_for(table)` per call instead of a single fixed tree). See
-/// that type's doc for the shared OSIC/WAL semantics (fire-and-forget
-/// logging) and abort behavior (dropping without `commit()` reverts every
-/// write, across every table touched — see `Drop`) — identical here, just
-/// spanning several trees instead of one.
+/// A multi-table OSIC transaction over a [`TpccDatabase`], one fixed
+/// snapshot shared by every read/write it issues across any of its 14
+/// tables, committed exactly once at the end — a thin, `Table`-addressed
+/// wrapper over [`mv_db::DbTransaction`] (`self.inner`), which does all the
+/// actual work: this type just resolves each `Table` to the `TableId`
+/// `TpccDatabase` cached for it (see `TpccDatabase::table_ids`) and
+/// delegates. See `DbTransaction`'s doc for the shared OSIC/WAL semantics
+/// (fire-and-forget logging, one Commit marker per transaction regardless
+/// of how many tables it touched) and abort behavior (dropping without
+/// `commit()` reverts every write, across every table touched) — inherited
+/// here automatically, since dropping `self.inner` runs `DbTransaction`'s
+/// own `Drop` impl.
 pub struct TpccTxn<'a> {
     db: &'a TpccDatabase,
-    worker_id: WorkerId,
-    ts_start: Version,
-    committed: bool,
-    /// (table, key) pairs this transaction has actually written — see
-    /// `mv_query::transaction::Transaction::written`'s doc, which this
-    /// mirrors.
-    written: RefCell<Vec<(Table, TpccKey)>>,
+    inner: DbTransaction<'a, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>,
 }
 
 impl<'a> TpccTxn<'a> {
-    /// Draws `ts_start` from the database's shared `TxContext` and registers
-    /// it as an active snapshot *once*, covering every table this
-    /// transaction may go on to touch — not just whichever table happens to
-    /// be read/written first (see `mv_gc::tracker_handle::TrackerHandleSt::free_block`'s
-    /// doc for why a per-table registration would be unsound once several
-    /// tables share one commit log / active-snapshot registry).
     pub fn begin(db: &'a TpccDatabase) -> Self {
-        let worker_id = db.ctx.worker_id();
-        let ts_start = db.ctx.begin_snapshot();
+        Self { db, inner: DbTransaction::begin(&db.db) }
+    }
 
-        Self { db, worker_id, ts_start, committed: false, written: RefCell::new(Vec::new()) }
+    #[inline(always)]
+    fn resolve(&self, table: Table) -> TableId {
+        self.db.table_ids[table as usize]
     }
 
     #[inline(always)]
     pub const fn ts_start(&self) -> Version {
-        self.ts_start
+        self.inner.ts_start()
     }
 
     #[inline(always)]
     pub const fn worker_id(&self) -> WorkerId {
-        self.worker_id
+        self.inner.worker_id()
     }
 
     /// Point read against this transaction's fixed snapshot, on `table`.
     pub fn point(&self, table: Table, key: TpccKey) -> Res<'_> {
-        let tree = self.db.tree_for(table);
-        tree.key_point_read_from_root(
-            tree.retrieve_root_for(self.ts_start),
-            key,
-            self.worker_id,
-            self.ts_start)
+        self.inner.point(self.resolve(table), key)
     }
 
     /// Range read against this transaction's fixed snapshot, on `table`.
-    pub fn range(&self, table: Table, range: Interval<TpccKey>, force_read_all: bool) -> Res<'_> {
-        let scan = RangeQueryIter::new(
-            self.db.tree_for(table),
-            self.ts_start,
-            range,
-            false,
-            self.worker_id);
-
-        if force_read_all {
-            CRUDOperationResult::MatchedRecords(scan.collect())
-        } else {
-            CRUDOperationResult::MatchedRecordIter(scan)
-        }
-    }
-
-    /// First-writer-wins check, on `table`: the physically newest version at
-    /// `key`, if any, must be visible to this transaction's snapshot —
-    /// otherwise a concurrent transaction this one can't see got there
-    /// first.
-    ///
-    /// Skips over an invalid entry (its writing transaction aborted) rather
-    /// than checking its visibility — see the identical note on
-    /// `mv_query::transaction::Transaction::newest_visible_to_me`, which
-    /// this mirrors: an invalid stamp is never visible to anyone, so
-    /// treating it as "the newest entry" would make every future write to
-    /// this key see a permanent false conflict.
-    fn newest_visible_to_me(&self, table: Table, leaf_page: &LeafPage<TPCC_NUM_RECORDS, TpccKey, TpccRow>, key: TpccKey) -> bool {
-        let is_visible
-            = |stamp| self.db.tree_for(table).is_visible_stamp(self.worker_id, self.ts_start, stamp);
-
-        leaf_page.as_records()
-            .iter()
-            .rfind(|r| r.key() == key && !r.version().insertion_stamp().is_invalid())
-            .map(|record| is_visible(record.version().insertion_stamp()))
-            .unwrap_or(true)
-    }
-
-    /// Logs `build`'s write under this transaction's fixed `stamp`, against
-    /// `table`'s own WAL (fire-and-forget, see the type doc). No-op when
-    /// `table` has no WAL attached.
-    #[inline(always)]
-    fn log_write(&self, table: Table, stamp: TxStamp, build: impl FnOnce(Version) -> CRUDOperation<TpccKey, TpccRow>) {
-        self.db.tree_for(table).wal_log_write(stamp, build);
+    /// `force_read_all` is kept only for call-site compatibility —
+    /// `DbTransaction::range` is always eager (see its doc); every real
+    /// call site in this crate already passes `true`.
+    pub fn range(&self, table: Table, range: Interval<TpccKey>, _force_read_all: bool) -> Res<'_> {
+        self.inner.range(self.resolve(table), range)
     }
 
     pub fn insert(&self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'_> {
-        let tree = self.db.tree_for(table);
-        let leaf_guard = tree.traversal_write_olc(key);
-        let leaf_deref_mut = leaf_guard.deref_mut();
-        let leaf_page = leaf_deref_mut.as_leaf_page();
-
-        if !self.newest_visible_to_me(table, leaf_page, key) {
-            return CRUDOperationResult::Conflict;
-        }
-
-        if leaf_page.as_records()
-            .iter()
-            .rfind(|r| r.key == key)
-            .map(|r| r.version.is_live())
-            .unwrap_or(false)
-        {
-            return CRUDOperationResult::ZeroAffected(KeyAlreadyExists);
-        }
-
-        let stamp = TxStamp::new(self.worker_id, self.ts_start);
-        self.log_write(table, stamp, |_| CRUDOperation::Insert(key, payload.clone()));
-
-        let current_len = leaf_page.len();
-
-        leaf_page.push_uncommitted(
-            RecordPoint::new(key, VersionInfo::new(stamp), payload),
-            current_len);
-
-        leaf_page.commit_delta(1, 0);
-
-        self.written.borrow_mut().push((table, key));
-        CRUDOperationResult::Inserted(stamp.ts_start())
+        self.inner.insert(self.resolve(table), key, payload)
     }
 
     pub fn update(&self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'_> {
-        let tree = self.db.tree_for(table);
-        let leaf_guard = tree.traversal_write_olc(key);
-        let leaf_deref_mut = leaf_guard.deref_mut();
-        let leaf_page = leaf_deref_mut.as_leaf_page();
-
-        if !self.newest_visible_to_me(table, leaf_page, key) {
-            return CRUDOperationResult::Conflict;
-        }
-
-        let stamp = TxStamp::new(self.worker_id, self.ts_start);
-        self.log_write(table, stamp, |_| CRUDOperation::Update(key, payload.clone()));
-
-        let current_len = leaf_page.len();
-
-        leaf_page.push_uncommitted(
-            RecordPoint::new(key, VersionInfo::new(stamp), payload),
-            current_len);
-
-        leaf_page.commit_delta(1, 0);
-
-        match leaf_page.delete_after_update(key, stamp) {
-            Ok(Some(..)) => {
-                leaf_page.commit_delta(-1, 1);
-                self.written.borrow_mut().push((table, key));
-                CRUDOperationResult::Updated(stamp.ts_start())
-            }
-            Ok(None) => {
-                leaf_page.commit_delta(-1, 0);
-                leaf_page.undo_uncommitted(current_len);
-                CRUDOperationResult::ZeroAffected(KeyDoesNotExist)
-            }
-            Err(()) => {
-                leaf_page.commit_delta(-1, 0);
-                leaf_page.undo_uncommitted(current_len);
-                CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
-            }
-        }
+        self.inner.update(self.resolve(table), key, payload)
     }
 
     pub fn delete(&self, table: Table, key: TpccKey) -> Res<'_> {
-        let tree = self.db.tree_for(table);
-        let leaf_guard = tree.traversal_write_olc(key);
-        let leaf_deref_mut = leaf_guard.deref_mut();
-        let leaf_page = leaf_deref_mut.as_leaf_page();
-
-        if !self.newest_visible_to_me(table, leaf_page, key) {
-            return CRUDOperationResult::Conflict;
-        }
-
-        let stamp = TxStamp::new(self.worker_id, self.ts_start);
-        self.log_write(table, stamp, |_| CRUDOperation::Delete(key));
-
-        match leaf_page.delete(key, stamp) {
-            Ok(Some(..)) => {
-                leaf_page.commit_delta(-1, 1);
-                self.written.borrow_mut().push((table, key));
-                CRUDOperationResult::Deleted(stamp.ts_start())
-            }
-            Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
-            Err(()) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted),
-        }
+        self.inner.delete(self.resolve(table), key)
     }
 
-    /// Instant commit: appends `ts_commit` to this worker's (shared)
-    /// `CommitLog` — making every write this transaction made, across every
-    /// table it touched, visible at once — and returns immediately.
-    pub fn commit(mut self) -> Version {
-        self.committed = true;
-        let ts_commit = self.db.ctx.commit_tx(self.worker_id);
-        self.db.ctx.end_snapshot(self.ts_start);
-        ts_commit
-    }
-}
-
-impl<'a> Drop for TpccTxn<'a> {
-    fn drop(&mut self) {
-        // Dropped without calling `commit` (e.g. the caller gave up after a
-        // `Conflict`, or a business-logic `UserAbort`) — abort every write
-        // this transaction made, on whichever table it made it on, before
-        // releasing the registered snapshot (see the type doc and
-        // `MVBTSt::abort_write`).
-        if !self.committed {
-            let stamp = TxStamp::new(self.worker_id, self.ts_start);
-            for (table, key) in self.written.borrow().iter() {
-                self.db.tree_for(*table).abort_write(*key, stamp);
-            }
-            self.db.ctx.end_snapshot(self.ts_start);
-        }
+    /// Instant commit — see `DbTransaction::commit`'s doc: exactly one WAL
+    /// Commit marker for the whole transaction (every table on this
+    /// database shares one WAL), not one marker per touched table.
+    pub fn commit(self) -> Version {
+        self.inner.commit()
     }
 }
 
 impl Display for TpccTxn<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TpccTxn(worker={}, ts_start={})", self.worker_id, self.ts_start)
+        write!(f, "TpccTxn(worker={}, ts_start={})", self.worker_id(), self.ts_start())
     }
 }
 
@@ -682,146 +520,4 @@ pub fn stock_level(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, threshol
 
     tx.commit();
     TxnOutcome::Committed
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-    use crate::mv_root::index_root::RootIndexType;
-
-    fn sample_warehouse() -> TpccRow {
-        TpccRow::Warehouse(Box::new(Warehouse {
-            w_name: "W1".into(), w_street_1: "s1".into(), w_street_2: "s2".into(),
-            w_city: "city".into(), w_state: "CA".into(), w_zip: "123451111".into(),
-            w_tax: 0.05, w_ytd: 300_000.0,
-        }))
-    }
-
-    fn sample_district() -> TpccRow {
-        TpccRow::District(Box::new(District {
-            d_name: "D1".into(), d_street_1: "s1".into(), d_street_2: "s2".into(),
-            d_city: "city".into(), d_state: "CA".into(), d_zip: "123451111".into(),
-            d_tax: 0.05, d_ytd: 30_000.0, d_next_o_id: 1,
-        }))
-    }
-
-    /// The cross-table analogue of `mv_query::transaction::tests::
-    /// multi_op_transaction_sees_own_writes_and_isolates_others`: one
-    /// `TpccTxn` writes to *two different tables* (Warehouse, District) —
-    /// exactly the shared-snapshot-registration fix the multi-table refactor
-    /// exists for (see `TpccTxn::begin`'s doc) — and both writes must become
-    /// visible to other transactions atomically, as one unit, not one table
-    /// at a time.
-    #[test]
-    fn cross_table_transaction_is_atomic_across_tables() {
-        let db = TpccDatabase::new(RootIndexType::default());
-        let w_key = k_warehouse(1);
-        let d_key = k_district(1, 1);
-
-        let tx1 = TpccTxn::begin(&db);
-        assert!(matches!(tx1.insert(Table::Warehouse, w_key, sample_warehouse()), CRUDOperationResult::Inserted(_)));
-        assert!(matches!(tx1.insert(Table::District, d_key, sample_district()), CRUDOperationResult::Inserted(_)));
-
-        // Own writes, across both tables, are visible within the same
-        // still-open transaction.
-        assert!(matches!(tx1.point(Table::Warehouse, w_key), CRUDOperationResult::MatchedRecords(r) if r.len() == 1));
-        assert!(matches!(tx1.point(Table::District, d_key), CRUDOperationResult::MatchedRecords(r) if r.len() == 1));
-
-        let db_ref = &db;
-
-        // A transaction on a different worker, snapshotting before tx1
-        // commits, must see NEITHER table's write — if the shared snapshot
-        // registration were broken (e.g. only registered against one
-        // table), this could observe a partially-committed transaction.
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                let tx2 = TpccTxn::begin(db_ref);
-                assert!(matches!(tx2.point(Table::Warehouse, w_key), CRUDOperationResult::MatchedRecords(r) if r.is_empty()));
-                assert!(matches!(tx2.point(Table::District, d_key), CRUDOperationResult::MatchedRecords(r) if r.is_empty()));
-                tx2.commit();
-            }).join().unwrap();
-        });
-
-        tx1.commit();
-
-        // A transaction on yet another worker, snapshotting after tx1's
-        // commit, must now see both writes.
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                let tx3 = TpccTxn::begin(db_ref);
-                assert!(matches!(tx3.point(Table::Warehouse, w_key), CRUDOperationResult::MatchedRecords(r) if r.len() == 1));
-                assert!(matches!(tx3.point(Table::District, d_key), CRUDOperationResult::MatchedRecords(r) if r.len() == 1));
-                tx3.commit();
-            }).join().unwrap();
-        });
-    }
-
-    /// First-writer-wins must still hold per-table under the shared `ctx`:
-    /// a concurrent transaction's commit on `Table::District`, after tx1's
-    /// snapshot was drawn, must make tx1 lose the race on that same table.
-    #[test]
-    fn first_writer_wins_conflict_holds_per_table_under_shared_ctx() {
-        let db = TpccDatabase::new(RootIndexType::default());
-        let d_key = k_district(1, 1);
-        assert!(matches!(db.district.dispatch_crud(CRUDOperation::Insert(d_key, sample_district())),
-            CRUDOperationResult::Inserted(_)));
-
-        let tx1 = TpccTxn::begin(&db);
-
-        let db_ref = &db;
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                let tx2 = TpccTxn::begin(db_ref);
-                assert!(matches!(tx2.update(Table::District, d_key, sample_district()), CRUDOperationResult::Updated(_)));
-                tx2.commit();
-            }).join().unwrap();
-        });
-
-        assert!(matches!(tx1.update(Table::District, d_key, sample_district()), CRUDOperationResult::Conflict));
-    }
-
-    /// The cross-table analogue of `mv_query::transaction::tests::
-    /// dropped_transaction_reverts_its_earlier_writes_on_conflict`: one
-    /// `TpccTxn` writes to *two different tables*, then loses a
-    /// first-writer-wins race on a later op and drops without `commit()` —
-    /// both of its earlier writes, across both tables, must be reverted, not
-    /// left stuck as if committed (see `Drop`'s doc).
-    #[test]
-    fn dropped_tpcc_txn_reverts_writes_across_tables_on_conflict() {
-        let db = TpccDatabase::new(RootIndexType::default());
-        let w_key = k_warehouse(1);
-        let d_key = k_district(1, 1);
-
-        let tx1 = TpccTxn::begin(&db);
-        assert!(matches!(tx1.insert(Table::Warehouse, w_key, sample_warehouse()), CRUDOperationResult::Inserted(_)));
-        assert!(matches!(tx1.insert(Table::District, d_key, sample_district()), CRUDOperationResult::Inserted(_)));
-
-        // A concurrent transaction on another worker inserts and commits a
-        // second district key *after* tx1's snapshot was already taken.
-        let d_key2 = k_district(1, 2);
-        let db_ref = &db;
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                let tx2 = TpccTxn::begin(db_ref);
-                assert!(matches!(tx2.insert(Table::District, d_key2, sample_district()), CRUDOperationResult::Inserted(_)));
-                tx2.commit();
-            }).join().unwrap();
-        });
-
-        // tx1's snapshot predates tx2's insert, so tx1's own attempt to
-        // write the same key must lose the race.
-        assert!(matches!(tx1.insert(Table::District, d_key2, sample_district()), CRUDOperationResult::Conflict));
-
-        // tx1 is dropped here without commit — both of its earlier writes
-        // (Warehouse and District tables) must be reverted.
-        drop(tx1);
-
-        let tx3 = TpccTxn::begin(&db);
-        assert!(matches!(tx3.point(Table::Warehouse, w_key), CRUDOperationResult::MatchedRecords(r) if r.is_empty()),
-            "warehouse write by since-aborted tx1 must not be visible");
-        assert!(matches!(tx3.point(Table::District, d_key), CRUDOperationResult::MatchedRecords(r) if r.is_empty()),
-            "district write by since-aborted tx1 must not be visible");
-        tx3.commit();
-    }
 }

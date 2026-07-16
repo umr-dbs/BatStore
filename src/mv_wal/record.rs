@@ -9,8 +9,11 @@ use crate::mv_record_model::version_info::Version;
 const TAG_INSERT: u8 = 0;
 const TAG_UPDATE: u8 = 1;
 const TAG_DELETE: u8 = 2;
-const TAG_INVALIDATE: u8 = 3;
-// const TAG_UNDELETE: u8 = 4;
+/// Marks that the transaction identified by `(worker_id, ts_start)` in the
+/// header actually committed, carrying the `ts_commit` it committed at —
+/// see `WalEntry::Commit`'s doc for why this is a separate entry kind
+/// rather than a field on the original write record.
+const TAG_COMMIT: u8 = 3;
 
 /// How a `Payload` is (de)serialized to/from the WAL. `Key` is not covered by
 /// this trait — every real instantiation in this project uses `Key = u64`,
@@ -89,12 +92,10 @@ unsafe fn read_raw<T>(bytes: &[u8]) -> T {
 /// may be fixed-size raw bytes (POD payloads like `u64`) or a real
 /// variable-length encoding (payloads with owned heap data, like `TpccRow`).
 ///
-/// Panics if `record.op` isn't `Insert`/`Update`/`Delete`/`Invalidate`/
-/// `Undelete` — nothing else is ever handed to this function: the dispatch
-/// layer only calls `wal_start_commit` for `Insert`/`Update`/`Delete`,
-/// `MVBTSt::abort_write` only calls `wal_log_write` for `Invalidate`/
-/// `Undelete` (see `mv_page_model::leaf_page::AbortOutcome`), and read/
-/// `*Rand` operations are never logged at all.
+/// Panics if `record.op` isn't `Insert`/`Update`/`Delete` — nothing else is
+/// ever handed to this function: the dispatch layer only calls
+/// `wal_start_commit`/`wal_log_write` for those three, and read/`*Rand`
+/// operations are never logged at all.
 pub fn encode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
     record: &WalRecord<Key, Payload>,
     out: &mut Vec<u8>,
@@ -103,9 +104,7 @@ pub fn encode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
         CRUDOperation::Insert(key, payload) => (TAG_INSERT, key, Some(payload)),
         CRUDOperation::Update(key, payload) => (TAG_UPDATE, key, Some(payload)),
         CRUDOperation::Delete(key) => (TAG_DELETE, key, None),
-        CRUDOperation::Invalidate(key) => (TAG_INVALIDATE, key, None),
-        // CRUDOperation::Undelete(key) => (TAG_UNDELETE, key, None),
-        other => unreachable!("WAL only ever logs Insert/Update/Delete/Invalidate/Undelete, got: {other}"),
+        other => unreachable!("WAL only ever logs Insert/Update/Delete, got: {other}"),
     };
 
     out.push(tag);
@@ -153,12 +152,133 @@ pub fn decode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
             }
         }
         TAG_DELETE => CRUDOperation::Delete(key),
-        TAG_INVALIDATE => CRUDOperation::Invalidate(key),
-        // TAG_UNDELETE => CRUDOperation::Undelete(key),
         _ => return None,
     };
 
     Some(WalRecord { stamp, op })
+}
+
+/// One physical entry appended to the WAL: either a logged write (`Write`,
+/// today's `WalRecord` unchanged) or a **Commit marker** (`Commit`)
+/// confirming that the transaction identified by `stamp` actually committed
+/// at `ts_commit`.
+///
+/// A write's `Write` entry is appended optimistically, before its
+/// transaction is known to commit (see
+/// `mv_sync::version_handle::wal_start_commit`/`wal_log_write`'s docs) — an
+/// append-only file has no way to retroactively attach `ts_commit` to bytes
+/// already flushed, so a small separate marker is appended instead, once
+/// `commit_tx` actually succeeds. Replay (`mv_wal::recovery::replay`) is
+/// commit-gated: a `Write` is only ever replayed once a matching `Commit`
+/// (same `worker_id`/`ts_start`) is found for it — a transaction that
+/// aborts, or that a crash catches before it commits, simply never gets
+/// one, so its writes are silently skipped. No separate abort/invalidate
+/// record is needed for that at all.
+pub enum WalEntry<Key: Ord + Copy + Hash + Display, Payload: Clone> {
+    Write(WalRecord<Key, Payload>),
+    Commit { stamp: TxStamp, ts_commit: Version },
+}
+
+/// Encodes one [`WalEntry`]'s body (no length prefix, no checksum). A
+/// `Write` entry is exactly `encode`'s layout; a `Commit` entry is
+/// `[u8 tag=TAG_COMMIT][u64 ts_start][u16 worker_id][u64 ts_commit]` — the
+/// same header as a `Write` entry, with `ts_commit` in place of a
+/// key/payload.
+pub fn encode_entry<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
+    entry: &WalEntry<Key, Payload>,
+    out: &mut Vec<u8>,
+) {
+    match entry {
+        WalEntry::Write(record) => encode(record, out),
+        WalEntry::Commit { stamp, ts_commit } => {
+            out.push(TAG_COMMIT);
+            out.extend_from_slice(&stamp.ts_start().to_le_bytes());
+            out.extend_from_slice(&stamp.worker_id().to_le_bytes());
+            out.extend_from_slice(&ts_commit.to_le_bytes());
+        }
+    }
+}
+
+/// Decodes an entry body produced by [`encode_entry`]. `None` on the same
+/// conditions as `decode` (too short / unrecognized tag / bad payload).
+pub fn decode_entry<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
+    bytes: &[u8],
+) -> Option<WalEntry<Key, Payload>> {
+    let header_sz = 1 + 8 + 2;
+
+    if bytes.first().copied() == Some(TAG_COMMIT) {
+        if bytes.len() < header_sz + 8 {
+            return None;
+        }
+        let ts_start = Version::from_le_bytes(bytes[1..9].try_into().ok()?);
+        let worker_id = WorkerId::from_le_bytes(bytes[9..11].try_into().ok()?);
+        let ts_commit = Version::from_le_bytes(bytes[header_sz..header_sz + 8].try_into().ok()?);
+        return Some(WalEntry::Commit { stamp: TxStamp::new(worker_id, ts_start), ts_commit });
+    }
+
+    decode(bytes).map(WalEntry::Write)
+}
+
+/// Identifies which table a WAL entry belongs to in a `Database`'s single
+/// shared log file (see `mv_db::database::table_id`) — a stable hash of the
+/// table's name, not an insertion-order counter, so it's self-describing
+/// across process restarts with no separate persisted catalog needed.
+pub type TableId = u32;
+
+/// Reserved `TableId` carried by a table-tagged `Commit` entry. A commit
+/// marker is transaction-scoped, not table-scoped — one shared file needs
+/// exactly one marker per transaction to gate replay of every table it
+/// touched (see `WalEntry::Commit`'s doc) — but the id slot stays physically
+/// present in the frame so every entry in the file parses with the same
+/// uniform shape; `mv_wal::recovery::replay_database` ignores this value.
+/// `mv_db::database::table_id` guarantees it never returns this sentinel for
+/// a real table name.
+pub const TABLE_ID_COMMIT_SENTINEL: TableId = TableId::MAX;
+
+/// Table-tagged counterpart to `encode_entry`, for a `Database`'s single
+/// shared log file: `[u32 table_id][entry body, same as encode_entry]` — no
+/// length prefix, no checksum (added by `frame`, same as `encode_entry`).
+pub fn encode_entry_for_table<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
+    table_id: TableId,
+    entry: &WalEntry<Key, Payload>,
+    out: &mut Vec<u8>,
+) {
+    out.extend_from_slice(&table_id.to_le_bytes());
+    encode_entry(entry, out);
+}
+
+/// Inverse of `encode_entry_for_table`. `None` on the same conditions as
+/// `decode_entry` (too short / unrecognized tag / bad payload), plus if
+/// fewer than 4 bytes are present for the table id itself.
+pub fn decode_entry_for_table<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
+    bytes: &[u8],
+) -> Option<(TableId, WalEntry<Key, Payload>)> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    let table_id = TableId::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let entry = decode_entry(&bytes[4..])?;
+    Some((table_id, entry))
+}
+
+/// Table-tagged counterpart to `encode_entry_framed`: same single-buffer,
+/// placeholder-patched framing (`[u32 len][table_id][entry body][u32 crc32]`),
+/// just with `table_id` folded into the framed body. Used by
+/// `WalWriter::log_with_stamp_for_table`/`log_commit_for_table`.
+pub fn encode_entry_for_table_framed<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
+    table_id: TableId,
+    entry: &WalEntry<Key, Payload>,
+    out: &mut Vec<u8>,
+) {
+    let start = out.len();
+    out.extend_from_slice(&0u32.to_le_bytes());
+    encode_entry_for_table(table_id, entry, out);
+
+    let body_len = (out.len() - start - 4) as u32;
+    out[start..start + 4].copy_from_slice(&body_len.to_le_bytes());
+
+    let crc = crc32(&out[start + 4..]);
+    out.extend_from_slice(&crc.to_le_bytes());
 }
 
 /// Standard (IEEE) CRC-32, implemented by hand to avoid pulling in a
@@ -185,20 +305,21 @@ pub fn frame(body: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(&crc32(body).to_le_bytes());
 }
 
-/// Same wire format as `encode` followed by `frame`
+/// Same wire format as `encode_entry` followed by `frame`
 /// (`[u32 len][body][u32 crc32(body)]`), but encodes the body straight into
 /// `out` instead of into a separate buffer first — one allocation instead
 /// of two, and no copy of the body into a second buffer. The length prefix
 /// is written as a placeholder, then patched once the body's actual length
-/// is known. Used by `WalWriter::log_with_stamp`, which frames exactly one
-/// record per call and has no other reason to keep the body separate.
-pub fn encode_framed<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
-    record: &WalRecord<Key, Payload>,
+/// is known. Used by `WalWriter::log_with_stamp`/`log_commit`, each of
+/// which frames exactly one entry per call and has no other reason to keep
+/// the body separate.
+pub fn encode_entry_framed<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
+    entry: &WalEntry<Key, Payload>,
     out: &mut Vec<u8>,
 ) {
     let start = out.len();
     out.extend_from_slice(&0u32.to_le_bytes());
-    encode(record, out);
+    encode_entry(entry, out);
 
     let body_len = (out.len() - start - 4) as u32;
     out[start..start + 4].copy_from_slice(&body_len.to_le_bytes());
@@ -229,124 +350,3 @@ pub fn read_frame(bytes: &[u8]) -> Option<(&[u8], usize)> {
     Some((body, total))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn assert_ops_eq(a: &CRUDOperation<u64, u64>, b: &CRUDOperation<u64, u64>) {
-        match (a, b) {
-            (CRUDOperation::Insert(k1, p1), CRUDOperation::Insert(k2, p2))
-            | (CRUDOperation::Update(k1, p1), CRUDOperation::Update(k2, p2)) => {
-                assert_eq!(k1, k2);
-                assert_eq!(p1, p2);
-            }
-            (CRUDOperation::Delete(k1), CRUDOperation::Delete(k2))
-            | (CRUDOperation::Invalidate(k1), CRUDOperation::Invalidate(k2))
-            // | (CRUDOperation::Undelete(k1), CRUDOperation::Undelete(k2))
-            => assert_eq!(k1, k2),
-            _ => panic!("operation kind mismatch: {a} vs {b}"),
-        }
-    }
-
-    #[test]
-    fn round_trips_all_variants() {
-        let ops: Vec<CRUDOperation<u64, u64>> = vec![
-            CRUDOperation::Insert(1, 100),
-            CRUDOperation::Update(2, 200),
-            CRUDOperation::Delete(3),
-            CRUDOperation::Invalidate(4),
-            // CRUDOperation:: Undelete(5),
-        ];
-
-        for (i, op) in ops.into_iter().enumerate() {
-            let record = WalRecord { stamp: TxStamp::new(7, i as Version + 1), op };
-            let mut body = Vec::new();
-            encode(&record, &mut body);
-
-            let mut framed = Vec::new();
-            frame(&body, &mut framed);
-
-            let (read_body, consumed) = read_frame(&framed).expect("valid frame");
-            assert_eq!(consumed, framed.len());
-
-            let decoded: WalRecord<u64, u64> = decode(read_body).expect("valid record");
-            assert_eq!(decoded.stamp.ts_start(), record.stamp.ts_start());
-            assert_eq!(decoded.stamp.worker_id(), record.stamp.worker_id());
-            assert_ops_eq(&decoded.op, &record.op);
-        }
-    }
-
-    #[test]
-    fn detects_truncated_frame() {
-        let record = WalRecord { stamp: TxStamp::new(1, 42), op: CRUDOperation::Insert(1u64, 2u64) };
-        let mut body = Vec::new();
-        encode(&record, &mut body);
-        let mut framed = Vec::new();
-        frame(&body, &mut framed);
-
-        for cut in 1..framed.len() {
-            assert!(read_frame(&framed[..cut]).is_none(), "cut at {cut} should be incomplete");
-        }
-    }
-
-    /// `encode_framed`'s single-buffer path must produce byte-for-byte the
-    /// same frame as the two-step `encode` + `frame` it replaces in
-    /// `WalWriter::log_with_stamp` — otherwise recovery (which only knows
-    /// the two-step format's invariants) could silently start reading a
-    /// different wire format.
-    #[test]
-    fn encode_framed_matches_two_step_encode_and_frame() {
-        let record = WalRecord { stamp: TxStamp::new(3, 99), op: CRUDOperation::Update(5u64, 6u64) };
-
-        let mut body = Vec::new();
-        encode(&record, &mut body);
-        let mut expected = Vec::new();
-        frame(&body, &mut expected);
-
-        let mut actual = Vec::new();
-        encode_framed(&record, &mut actual);
-
-        assert_eq!(actual, expected);
-
-        let (read_body, consumed) = read_frame(&actual).expect("valid frame");
-        assert_eq!(consumed, actual.len());
-        let decoded: WalRecord<u64, u64> = decode(read_body).expect("valid record");
-        assert_eq!(decoded.stamp.ts_start(), record.stamp.ts_start());
-        assert_ops_eq(&decoded.op, &record.op);
-    }
-
-    /// Same byte-for-byte equivalence, but writing into a buffer that
-    /// already has unrelated bytes at the front — guards against the
-    /// placeholder-patch math in `encode_framed` assuming `out` starts
-    /// empty (it only ever gets called that way today, but the offset
-    /// arithmetic must stay correct if that changes).
-    #[test]
-    fn encode_framed_patches_length_correctly_with_a_nonempty_prefix() {
-        let record: WalRecord<u64, u64> = WalRecord { stamp: TxStamp::new(1, 1), op: CRUDOperation::Delete(7u64) };
-
-        let mut body = Vec::new();
-        encode(&record, &mut body);
-        let mut expected_frame = Vec::new();
-        frame(&body, &mut expected_frame);
-
-        let mut actual = vec![0xAAu8; 5];
-        encode_framed(&record, &mut actual);
-
-        assert_eq!(&actual[5..], &expected_frame[..]);
-        assert_eq!(&actual[..5], &[0xAA; 5]);
-    }
-
-    #[test]
-    fn detects_corrupted_body() {
-        let record = WalRecord { stamp: TxStamp::new(1, 42), op: CRUDOperation::Insert(1u64, 2u64) };
-        let mut body = Vec::new();
-        encode(&record, &mut body);
-        let mut framed = Vec::new();
-        frame(&body, &mut framed);
-
-        let corrupt_idx = 4; // first body byte (tag)
-        framed[corrupt_idx] ^= 0xFF;
-
-        assert!(read_frame(&framed).is_none());
-    }
-}

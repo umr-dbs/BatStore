@@ -5,7 +5,7 @@
 //! key (Read-Modify-Write included: real YCSB backends run it as a plain
 //! read call followed by a plain write call, timed together as one logical
 //! operation, not as one multi-statement DB transaction), so there's no need
-//! for the heavier multi-op `mv_query::transaction::Transaction` that
+//! for the heavier multi-op `mv_db::transaction::DbTransaction` that
 //! `tpcc_txn` uses to span several tables atomically in one snapshot.
 //!
 //! Point/range reads use `CRUDOperation::PointSi`/`RangeSi` ("read the
@@ -24,7 +24,7 @@ use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbKey, YcsbTree};
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_utils::interval::Interval;
+use crate::mv_query::interval::Interval;
 
 /// Point read of the freshest committed version. Returns whether the row
 /// was found (a miss can only happen for a key beyond the currently-inserted

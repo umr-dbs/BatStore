@@ -1,9 +1,9 @@
 use std::fmt::Display;
 use std::hash::Hash;
-use std::sync::Arc;
+use std::sync;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::Relaxed;
 use arc_swap::ArcSwapOption;
+use triomphe::Arc;
 use crate::mv_block::block_handle::BlockAllocManager;
 use crate::mv_gc::tracker_handle::{TrackerHandle, TrackerHandleSt};
 use crate::mv_page_model::Height;
@@ -50,14 +50,24 @@ pub struct MVBTSt<
     pub(crate) dec_key: fn(Key) -> Key,
     pub(crate) min_key: Key,
     pub(crate) max_key: Key,
-    /// One `WalWriter` per worker (paper §4: "logging is distributed across
-    /// threads, each having [its own log]") — sized to `worker_registry`'s
-    /// fixed pool, indexed by `WorkerId`, so concurrent workers' commits
-    /// fsync independent files instead of serializing through one shared
-    /// background flush thread. `enable_wal`/`disable_wal` swap the whole
-    /// `Vec` atomically (all shards on/off together); see `wal_shard_path`
-    /// for the on-disk naming.
-    pub(crate) wal: ArcSwapOption<Vec<WalWriter<Key, Payload>>>,
+    /// One unified `WalWriter` for this tree — every worker enqueues into
+    /// its single channel (a lock-free MPSC queue, so concurrent workers
+    /// still enqueue without blocking each other) and its one background
+    /// thread group-commits everyone's pending records together into one
+    /// file. `enable_wal`/`disable_wal` swap this atomically.
+    pub(crate) wal: ArcSwapOption<WalWriter<Key, Payload>>,
+    /// `Some(id)` when this tree is one table of a `mv_db::Database`, whose
+    /// tables all share one `WalWriter` (the *same* `Arc` cloned into every
+    /// table's `wal` field via `attach_wal`) and must tag their WAL entries
+    /// so `mv_wal::recovery::replay_database` can demultiplex the single
+    /// interleaved file back to the right table. `None` for every
+    /// standalone/single-tree caller (`make_standard`, `Default::default`,
+    /// `open_recovered`, and every existing `mv_bench`/`mv_test` tree,
+    /// including `TpccDatabase`'s per-table-file tables, which keep their
+    /// existing one-writer-per-table design) — see
+    /// `mv_sync::version_handle`'s WAL-logging methods for how this branches
+    /// between the plain and table-tagged wire encodings.
+    pub(crate) table_id: Option<crate::mv_wal::record::TableId>,
     /// Set once, the first time `enable_wal` is ever called — lets the write
     /// dispatch path (`wal_start_commit`/`wal_log_write`) skip touching `wal`
     /// at all on a tree that has never had a WAL attached, instead of paying
@@ -131,16 +141,15 @@ impl<const FAN_OUT: usize,
     Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload
 > MVBTSt<FAN_OUT, NUM_RECORDS, u64, Payload>
 {
-    /// Builds a fresh tree, replays any existing per-worker WAL shards found
-    /// at `wal_path` into it (see `mv_wal::recovery::replay`), truncates
-    /// each shard file to its own valid prefix (dropping any torn tail left
-    /// by a crash mid-fsync), then attaches live per-worker writers so
-    /// subsequent mutations keep appending to those same shard files. Call
-    /// this instead of `make_standard` + `enable_wal` whenever the log might
-    /// already contain data from a prior run. No separate clock bump is
-    /// needed: replaying each op already mints it a fresh version through
-    /// the normal path, so the clock is already correctly positioned by the
-    /// time `replay` returns.
+    /// Builds a fresh tree, replays any existing WAL found at `wal_path`
+    /// into it (see `mv_wal::recovery::replay`), truncates the file to its
+    /// own valid prefix (dropping any torn tail left by a crash
+    /// mid-fsync), then attaches a live writer so subsequent mutations keep
+    /// appending to that same file. Call this instead of `make_standard` +
+    /// `enable_wal` whenever the log might already contain data from a
+    /// prior run. No separate clock bump is needed: replaying each op
+    /// already mints it a fresh version through the normal path, so the
+    /// clock is already correctly positioned by the time `replay` returns.
     pub fn open_recovered(
         root_index_type: RootIndexType,
         wal_path: &std::path::Path,
@@ -148,12 +157,10 @@ impl<const FAN_OUT: usize,
     ) -> std::io::Result<Self> {
         let tree = Self::make_standard(root_index_type);
 
-        let valid_lengths = crate::mv_wal::recovery::replay(&tree, wal_path)?;
+        let valid_len = crate::mv_wal::recovery::replay(&tree, wal_path)?;
 
-        for (shard_path, valid_len) in &valid_lengths {
-            if let Ok(file) = std::fs::OpenOptions::new().write(true).open(shard_path) {
-                file.set_len(*valid_len)?;
-            }
+        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(wal_path) {
+            file.set_len(valid_len)?;
         }
 
         tree.enable_wal(wal_path, flush_interval)?;
@@ -201,6 +208,14 @@ impl<const FAN_OUT: usize,
         self.root.index_type()
     }
 
+    /// `Some(id)` if this tree is one table of a `mv_db::Database` — the
+    /// index `Database::create_table` assigned it, i.e. its position in
+    /// that database's table list — `None` for every standalone/single-tree
+    /// caller. See this struct's `table_id` field doc.
+    pub fn table_id(&self) -> Option<crate::mv_wal::record::TableId> {
+        self.table_id
+    }
+
     #[inline(always)]
     pub(crate) fn tracker(&self) -> &TrackerHandleSt<FAN_OUT, NUM_RECORDS, Key, Payload> {
         self.block_manager.tracker()
@@ -221,7 +236,7 @@ impl<const FAN_OUT: usize,
         let max_workers = default_max_workers().max(1);
         Self::make_with_shared_ctx(
             root_index_type, inc_key, dec_key, min_key, max_key,
-            Arc::new(TxContext::new(max_workers)))
+            Arc::new(TxContext::new(max_workers)), None)
     }
 
     /// Same as `make`, but takes a pre-built `ctx` instead of creating a
@@ -230,9 +245,13 @@ impl<const FAN_OUT: usize,
     /// `mv_bench::tpcc_schema::TpccDatabase`). Every single-tree constructor
     /// (`make_standard`, `Default::default`, `open_recovered`) still funnels
     /// through plain `make` above, so they're unaffected by this existing.
-    /// `pub(crate)`: callers outside `mv_tree` construct trees through
-    /// benchmark-specific wrappers (e.g. `TpccDatabase::new`) that build the
-    /// shared `ctx` once and pass it to every table.
+    /// `table_id`: `Some(id)` for a table belonging to a `mv_db::Database`
+    /// (see this struct's `table_id` field doc); `None` for every other
+    /// caller, including `TpccDatabase`, which keeps its own
+    /// one-`WalWriter`-per-table design. `pub(crate)`: callers outside
+    /// `mv_tree` construct trees through wrappers (`TpccDatabase::new`,
+    /// `mv_db::Database::create_table`) that build the shared `ctx` once and
+    /// pass it to every table.
     #[inline]
     pub(crate) fn make_with_shared_ctx(
         root_index_type: RootIndexType,
@@ -241,6 +260,7 @@ impl<const FAN_OUT: usize,
         min_key: Key,
         max_key: Key,
         ctx: Arc<TxContext>,
+        table_id: Option<crate::mv_wal::record::TableId>,
     ) -> Self {
         let bm = BlockAllocManager::new();
         Self {
@@ -253,6 +273,7 @@ impl<const FAN_OUT: usize,
             max_key,
             wal: ArcSwapOption::empty(),
             wal_ever_enabled: AtomicBool::new(false),
+            table_id,
         }
     }
 }
@@ -268,40 +289,31 @@ impl<const FAN_OUT: usize,
     Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
-    /// Attaches one live per-worker WAL writer for every worker in this
-    /// tree's fixed pool, each appending to its own shard file derived from
-    /// `path` (see `wal_shard_path`) — after any bytes already there (a
-    /// fresh file, or the valid prefix a prior `mv_wal::recovery::replay`
-    /// left behind). Each shard's group-commit batches are fsynced every
-    /// `flush_interval`, independently of every other shard. Cheap/no-op
-    /// when never called: the dispatch write path only touches the WAL when
-    /// this returns `Some`.
+    /// Attaches an already-open writer — the shared primitive behind
+    /// `enable_wal` below, and also used directly by `mv_db::Database` to
+    /// hand every one of its tables a *clone of the same* `Arc<WalWriter>`
+    /// (rather than each table opening its own), which is what makes a
+    /// Database's WAL genuinely one shared file/thread instead of one per
+    /// table. Every worker enqueues into this single writer; its
+    /// group-commit batches are fsynced every `flush_interval`.
+    pub(crate) fn attach_wal(&self, writer: sync::Arc<WalWriter<Key, Payload>>) {
+        self.wal.store(Some(writer));
+        self.wal_ever_enabled.store(true, sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Opens and attaches one live WAL writer at `path` — after any bytes
+    /// already there (a fresh file, or the valid prefix a prior
+    /// `mv_wal::recovery::replay` left behind). Cheap/no-op when never
+    /// called: the dispatch write path only touches the WAL when this
+    /// returns `Some`.
     pub fn enable_wal(&self, path: &std::path::Path, flush_interval: std::time::Duration) -> std::io::Result<()> {
-        let max_workers = self.ctx.max_workers();
-        let mut shards = Vec::with_capacity(max_workers);
-        for worker_id in 0..max_workers {
-            shards.push(WalWriter::open(&wal_shard_path(path, worker_id), flush_interval)?);
-        }
-        self.wal.store(Some(Arc::new(shards)));
-        self.wal_ever_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.attach_wal(sync::Arc::new(WalWriter::open(path, flush_interval)?));
         Ok(())
     }
 
-    /// Detaches every per-worker WAL writer, if any, blocking until each
-    /// one's background flush thread drains and fsyncs any remaining
-    /// buffered records.
+    /// Detaches the WAL writer, if any, blocking until its background flush
+    /// thread drains and fsyncs any remaining buffered records.
     pub fn disable_wal(&self) {
         self.wal.store(None);
     }
-}
-
-/// On-disk path for worker `worker_id`'s WAL shard, derived from the base
-/// `path` a caller passes to `enable_wal`/`open_recovered` by appending a
-/// zero-padded worker index — e.g. `wal.log` -> `wal.log.0000`,
-/// `wal.log.0001`, ... A plain string suffix (not an extension swap) so any
-/// base path works regardless of whether it already has an extension.
-pub(crate) fn wal_shard_path(base: &std::path::Path, worker_id: usize) -> std::path::PathBuf {
-    let mut s = base.as_os_str().to_owned();
-    s.push(format!(".{worker_id:04}"));
-    std::path::PathBuf::from(s)
 }

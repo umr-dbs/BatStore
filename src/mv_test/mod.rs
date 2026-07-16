@@ -6,7 +6,6 @@ use rand::RngExt;
 use std::fs::OpenOptions;
 use std::sync::atomic::{ AtomicU64, AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::{Relaxed, SeqCst};
-use std::sync::Arc;
 use std::{fs, mem, thread};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -18,6 +17,7 @@ use parking_lot::Mutex;
 use rand::distr::{Alphanumeric, Distribution};
 use rand::prelude::SliceRandom;
 use rand_distr::Zipf;
+use triomphe::Arc;
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::mv_query::dispatch::RANGE_DISPATCH_LAZY;
@@ -1317,3 +1317,31 @@ pub fn format_insertions(mut i: usize) -> String {
         parts.join(" + ")
     }
 }
+#[cfg(test)]
+mod wal_record_tests;
+#[cfg(test)]
+mod wal_writer_tests;
+#[cfg(test)]
+mod wal_recovery_tests;
+#[cfg(test)]
+mod wal_integration_tests;
+#[cfg(test)]
+mod db_integration_tests;
+#[cfg(test)]
+mod query_dispatch_tests;
+#[cfg(test)]
+mod query_transaction_tests;
+#[cfg(test)]
+mod leaf_page_abort_tests;
+#[cfg(test)]
+mod gc_query_tracer_tests;
+#[cfg(test)]
+mod sync_commit_log_tests;
+#[cfg(test)]
+mod bench_tpcc_txn_tests;
+#[cfg(test)]
+mod bench_tpcc_wal_codec_tests;
+#[cfg(test)]
+mod tree_wal_consistency_tests;
+#[cfg(test)]
+mod smo_race_investigation_tests;

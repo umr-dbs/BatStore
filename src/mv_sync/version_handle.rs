@@ -2,7 +2,6 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::sync::atomic::Ordering::Relaxed;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_page_model::leaf_page::AbortOutcome;
 use crate::mv_query::SnapShot;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::Version;
@@ -104,7 +103,7 @@ impl<'a,
         self.ctx.commit_tx(worker_id)
     }
 
-    /// Every write's WAL record (if any) is handed to its shard and *never
+    /// Every write's WAL record (if any) is handed to the writer and *never
     /// waited on* by the write itself — `dispatch_crud`/`Transaction::commit`
     /// return as soon as `commit_tx` makes the write visible, regardless of
     /// whether (or when) it's actually fsynced. There is deliberately no
@@ -116,18 +115,18 @@ impl<'a,
     /// point-in-time now ask for one explicitly via `wal_hardened_version`/
     /// `wait_wal_hardened` below instead of every op paying for it.
     ///
-    /// The minimum hardened watermark across every WAL shard (see
+    /// This tree's WAL durability watermark (see
     /// `WalWriter::hardened_version`): every write with `ts_start` at or
-    /// below this value, on every worker, is confirmed durably fsynced.
-    /// Advances in batches as each shard's background thread completes a
-    /// flush, not per operation. `0` when no WAL is attached (or one is
-    /// attached but nothing has flushed yet) — nothing is guaranteed
-    /// durable, so callers polling this get an honest "not yet" instead of
-    /// a stale/optimistic value.
+    /// below this value is confirmed durably fsynced. Advances in batches
+    /// as the writer's background thread completes a flush, not per
+    /// operation. `0` when no WAL is attached (or one is attached but
+    /// nothing has flushed yet) — nothing is guaranteed durable, so callers
+    /// polling this get an honest "not yet" instead of a stale/optimistic
+    /// value.
     #[inline(always)]
     pub fn wal_hardened_version(&self) -> Version {
         match self.wal.load().as_ref() {
-            Some(shards) => shards.iter().map(|w| w.hardened_version()).min().unwrap_or(0),
+            Some(writer) => writer.hardened_version(),
             None => 0,
         }
     }
@@ -164,11 +163,16 @@ impl<'a,
     /// `build(ts_start)` to it for logging. Concurrent commits can land in
     /// the log in either order regardless of which timestamp is numerically
     /// smaller; `replay` (see `mv_wal::recovery`) accounts for this by
-    /// sorting records by `ts_start` before applying them. Fire-and-forget:
+    /// sorting records by `ts_commit` before applying them. Fire-and-forget:
     /// the caller never waits on this write's flush (see
     /// `MVBTSt::wal_hardened_version`'s doc), so there's no ticket to return
     /// here — just the stamp. `build` is only ever called with
     /// `CRUDOperation::Insert`/`Update`/`Delete`.
+    ///
+    /// This write is logged optimistically, before its transaction is known
+    /// to commit — callers must follow up with `wal_log_commit` once (and
+    /// only once) they've actually committed it, or replay will correctly
+    /// never see this write at all (see `WalEntry::Commit`'s doc).
     #[inline(always)]
     pub(crate) fn wal_start_commit(
         &self,
@@ -184,18 +188,28 @@ impl<'a,
         }
 
         match self.wal.load().as_ref() {
-            Some(shards) => shards[worker_id as usize]
-                .start_commit_logged(self.ctx.global_clock(), worker_id, build).0,
+            // `self.table_id` is `Some` only for a `mv_db::Database` table
+            // (see `MVBTSt::table_id`'s doc) — its writer is shared with
+            // every other table on that database, so every entry must carry
+            // this table's id for `mv_wal::recovery::replay_database` to
+            // demultiplex the interleaved file. `None` (every other caller,
+            // including `TpccDatabase`'s own per-table files) keeps today's
+            // plain, untagged encoding, byte-for-byte unchanged.
+            Some(writer) => match self.table_id {
+                Some(table_id) => writer.start_commit_logged_for_table(table_id, self.ctx.global_clock(), worker_id, build).0,
+                None => writer.start_commit_logged(self.ctx.global_clock(), worker_id, build).0,
+            },
             None => TxStamp::new(worker_id, self.ctx.start_tx_commit()),
         }
     }
 
-    /// Logs one write for a multi-op `mv_query::transaction::Transaction`
+    /// Logs one write for a multi-op `mv_db::transaction::DbTransaction`
     /// under `stamp` — the transaction's *own* `(worker_id, ts_start)`, not
     /// a freshly-minted one, since every write in the same transaction must
     /// share its one `ts_start` (see `WalWriter::log_with_stamp`). No-op
     /// when no WAL is attached; fire-and-forget otherwise, same as
-    /// `wal_start_commit`.
+    /// `wal_start_commit` — including needing a matching `wal_log_commit`
+    /// once the transaction actually commits.
     #[inline(always)]
     pub(crate) fn wal_log_write(
         &self,
@@ -206,29 +220,51 @@ impl<'a,
             return;
         }
 
-        if let Some(shards) = self.wal.load().as_ref() {
-            shards[stamp.worker_id() as usize].log_with_stamp(stamp, build);
+        if let Some(writer) = self.wal.load().as_ref() {
+            match self.table_id {
+                Some(table_id) => { writer.log_with_stamp_for_table(table_id, stamp, build); }
+                None => { writer.log_with_stamp(stamp, build); }
+            }
+        }
+    }
+
+    /// Logs a **Commit marker** confirming `stamp`'s transaction actually
+    /// committed at `ts_commit` — see `WalEntry::Commit`'s doc. Must be
+    /// called exactly once, after `commit_tx` has actually succeeded, for
+    /// every write previously logged via `wal_start_commit`/`wal_log_write`
+    /// under this `stamp`; replay only ever applies a write once it finds
+    /// this marker. No-op when no WAL is attached; fire-and-forget
+    /// otherwise, same model as every other WAL call here.
+    #[inline(always)]
+    pub(crate) fn wal_log_commit(&self, stamp: TxStamp, ts_commit: Version) {
+        if !self.wal_ever_enabled.load(Relaxed) {
+            return;
+        }
+
+        if let Some(writer) = self.wal.load().as_ref() {
+            match self.table_id {
+                Some(_) => { writer.log_commit_for_table(stamp, ts_commit); }
+                None => { writer.log_commit(stamp, ts_commit); }
+            }
         }
     }
 
     /// Reverts `key`'s write by the transaction identified by `stamp` — see
     /// `mv_page_model::leaf_page::LeafPage::abort_write`'s doc for the two
     /// cases (`Invalidate` an `Insert`/`Update`, or `Undelete` a plain
-    /// `Delete`). Called once per key a `mv_query::transaction::Transaction`/
+    /// `Delete`). Called once per key a `mv_db::transaction::DbTransaction`/
     /// `mv_bench::tpcc_txn::TpccTxn` touched, from `Drop` when it's dropped
-    /// without `commit()`. Fire-and-forget WAL logging, same model as every
-    /// other write (`wal_log_write`) — no new `commit_tx`/commit-log entry:
-    /// `stamp`'s transaction never committed, so it never gets one.
+    /// without `commit()`. Purely an in-memory reversal — `stamp`'s
+    /// transaction never committed, so it never got (and never will get) a
+    /// `wal_log_commit` marker for whatever `wal_start_commit`/
+    /// `wal_log_write` already logged; replay skips it for that reason
+    /// alone, with no separate WAL-side abort record needed here.
     #[inline]
     pub(crate) fn abort_write(&self, key: Key, stamp: TxStamp) {
         let leaf_guard = self.traversal_write_olc(key);
         let leaf_deref_mut = leaf_guard.deref_mut();
         let leaf_page = leaf_deref_mut.as_leaf_page();
 
-        match leaf_page.abort_write(key, stamp) {
-            AbortOutcome::Invalidated => self.wal_log_write(stamp, |_| CRUDOperation::Invalidate(key)),
-            // AbortOutcome::Undeleted => self.wal_log_write(stamp, |_| CRUDOperation::Undelete(key)),
-            AbortOutcome::NotFound => {}
-        }
+        leaf_page.abort_write(key, stamp);
     }
 }

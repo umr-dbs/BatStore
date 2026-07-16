@@ -16,11 +16,51 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Introduce Tables per indexes, not encoded into a single tree">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Add commit log truncate setting turned on now by default (gc = off + truncate_commit_log = on)">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/olap_scan.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/olap_scan.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_load.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_load.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_schema.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_schema.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_txn.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_txn.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_wal_codec.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_wal_codec.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpch_queries.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpch_queries.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/ycsb_schema.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/ycsb_schema.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/ycsb_txn.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/ycsb_txn.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_block/block_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_block/block_handle.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_buffer/block_buffer.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_buffer/mod.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_crud_model/crud_operation.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_crud_model/crud_operation.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_gc/query_tracer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/query_tracer.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/node.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/node.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/iter_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/iter_query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/transaction.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_record_model/tx_stamp.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_record_model/tx_stamp.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/commit_log.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/commit_log.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/version_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/version_handle.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/worker.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/worker.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test.rs" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_tree/mvbt.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/mvbt.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_utils/crud_rate_control.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_utils/interval.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/interval.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_utils/mod.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_utils/outdated.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_utils/shadow_vec.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_utils/un_cell.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_wal/integration_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_wal/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_wal/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_wal/record.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_wal/record.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_wal/recovery.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_wal/recovery.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_wal/writer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_wal/writer.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -31,10 +71,10 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="95" />
+    <option name="cachedIndexableFilesCount" value="100" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
-  <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
+  <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:test" />
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
       <list>
@@ -74,61 +114,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.003208330587777" />
-      <entry key="MS500" value="1.9009597228994812" />
-      <entry key="S2" value="5.612961759532768" />
-      <entry key="S5" value="7.8328550245709865" />
-      <entry key="S10" value="9.109627484548682" />
-      <entry key="S30" value="15.16273233997515" />
-      <entry key="S60" value="24.044909888193132" />
-      <entry key="M2" value="36.54644477307525" />
-      <entry key="M5" value="54.664783204456604" />
-      <entry key="M10" value="66.53821703992654" />
-      <entry key="M15" value="73.95412187997245" />
-      <entry key="M30" value="90.07970340338127" />
-      <entry key="H1" value="109.14176866412541" />
-      <entry key="H2" value="138.00411719663526" />
-      <entry key="H4" value="263.4556722116275" />
-      <entry key="D1" value="3742.409640879217" />
-      <entry key="W1" value="9218.233853633948" />
+      <entry key="MS100" value="1.0" />
+      <entry key="MS500" value="1.0" />
+      <entry key="S2" value="1.0000000000000049" />
+      <entry key="S5" value="1.0000020883628429" />
+      <entry key="S10" value="1.0018316392028854" />
+      <entry key="S30" value="1.197852836077266" />
+      <entry key="S60" value="1.7088686529984716" />
+      <entry key="M2" value="2.4170035770644516" />
+      <entry key="M5" value="3.2092943886393486" />
+      <entry key="M10" value="3.710717082474722" />
+      <entry key="M15" value="4.3239457502713305" />
+      <entry key="M30" value="10.786951235885681" />
+      <entry key="H1" value="38.34683901081109" />
+      <entry key="H2" value="92.05536565081314" />
+      <entry key="H4" value="218.41943151281887" />
+      <entry key="D1" value="3553.0377614960944" />
+      <entry key="W1" value="9189.927607075935" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
       <entry key="MS500" value="0.0" />
       <entry key="S2" value="0.0" />
-      <entry key="S5" value="1.777332985881848E-176" />
-      <entry key="S10" value="1.8825887198519377E-88" />
-      <entry key="S30" value="9.094854401410967E-30" />
-      <entry key="S60" value="4.268782440765291E-15" />
-      <entry key="M2" value="9.458136254651842E-8" />
-      <entry key="M5" value="0.0028761909324740375" />
-      <entry key="M10" value="0.11333425456982135" />
-      <entry key="M15" value="0.4384050854742716" />
-      <entry key="M30" value="2.0188750993020035" />
-      <entry key="H1" value="4.870248499365444" />
-      <entry key="H2" value="8.824979093571109" />
-      <entry key="H4" value="19.4803379006065" />
-      <entry key="D1" value="357.3803136820943" />
-      <entry key="W1" value="929.533832922154" />
+      <entry key="S5" value="1.8664188654944337E-177" />
+      <entry key="S10" value="4.32020701528808E-89" />
+      <entry key="S30" value="3.508877332772628E-30" />
+      <entry key="S60" value="1.873199757840212E-15" />
+      <entry key="M2" value="4.3280477791271026E-8" />
+      <entry key="M5" value="0.0011337720250310023" />
+      <entry key="M10" value="0.03405051223681048" />
+      <entry key="M15" value="0.1143050576306134" />
+      <entry key="M30" value="0.6359726911283495" />
+      <entry key="H1" value="2.7032453765463957" />
+      <entry key="H2" value="7.309168470397678" />
+      <entry key="H4" value="17.790098280273817" />
+      <entry key="D1" value="340.30144586081553" />
+      <entry key="W1" value="927.4195745170308" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.42763597645741325" />
-      <entry key="MS500" value="1.6156839607758442" />
-      <entry key="S2" value="5.341436955557751" />
-      <entry key="S5" value="7.6545808867222" />
-      <entry key="S10" value="9.0003481676278" />
-      <entry key="S30" value="15.10715087794446" />
-      <entry key="S60" value="24.00404790608317" />
-      <entry key="M2" value="36.51478109525785" />
-      <entry key="M5" value="54.64657385382798" />
-      <entry key="M10" value="66.63799209891461" />
-      <entry key="M15" value="74.38219418326827" />
-      <entry key="M30" value="92.09170987145106" />
-      <entry key="H1" value="114.00732024223034" />
-      <entry key="H2" value="146.8258088010479" />
-      <entry key="H4" value="282.93273560371875" />
-      <entry key="D1" value="4099.780318805295" />
-      <entry key="W1" value="10147.764067217908" />
+      <entry key="MS100" value="0.757858283255199" />
+      <entry key="MS500" value="0.9460576467255959" />
+      <entry key="S2" value="0.986232704493364" />
+      <entry key="S5" value="0.994472252722116" />
+      <entry key="S10" value="0.9990608251158678" />
+      <entry key="S30" value="1.1968435124166878" />
+      <entry key="S60" value="1.7082349311361873" />
+      <entry key="M2" value="2.416585486603161" />
+      <entry key="M5" value="3.2102056455455563" />
+      <entry key="M10" value="3.7445472297518" />
+      <entry key="M15" value="4.437892984055578" />
+      <entry key="M30" value="11.421603348828498" />
+      <entry key="H1" value="41.04716195315132" />
+      <entry key="H2" value="99.36100190341665" />
+      <entry key="H4" value="236.2058418236723" />
+      <entry key="D1" value="3893.329862983544" />
+      <entry key="W1" value="10117.343545211077" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -151,12 +191,18 @@
     "Cargo.Run MV-BPlusTree.executor": "Run",
     "Cargo.Run cMVBT.executor": "Run",
     "Cargo.Run.executor": "Run",
+    "Cargo.Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables.executor": "Run",
+    "Cargo.Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables.executor": "Run",
+    "Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict.executor": "Run",
     "Cargo.Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others.executor": "Run",
+    "Cargo.Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip.executor": "Run",
     "Cargo.Test mv_wal::integration_tests::crash_recovery_round_trip.executor": "Valgrind",
+    "Cargo.Test mv_wal::integration_tests::torn_write_stops_cleanly.executor": "Run",
     "Cargo.Test mv_wal::record::tests::detects_corrupted_body.executor": "Run",
     "Cargo.Test mv_wal::record::tests::detects_truncated_frame.executor": "Run",
     "Cargo.Test mv_wal::record::tests::round_trips_all_variants.executor": "Run",
     "Cargo.Test mv_wal::writer::tests::group_commit_flushes_and_wait_unblocks.executor": "Run",
+    "Cargo.Test writer::tests (1).executor": "Run",
     "Cargo.Test writer::tests.executor": "Run",
     "Cargo.build.executor": "Run",
     "Cargo.check.executor": "Run",
@@ -217,27 +263,10 @@
       <command value="cargo clean" />
     </option>
   </component>
-  <component name="RunManager" selected="Cargo.Run cMVBT">
+  <component name="RunManager" selected="Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict">
     <configuration name="Generate" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
       <option name="buildProfileId" value="dev" />
       <option name="command" value="run --package cMVBT --bin cMVBT -- generate 1mio_inserts.dat 10000 1000 1000 0 0 0" />
-      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
-      <envs />
-      <option name="emulateTerminal" value="true" />
-      <option name="channel" value="DEFAULT" />
-      <option name="requiredFeatures" value="true" />
-      <option name="allFeatures" value="false" />
-      <option name="withSudo" value="false" />
-      <option name="buildTarget" value="REMOTE" />
-      <option name="backtrace" value="SHORT" />
-      <option name="isRedirectInput" value="false" />
-      <option name="redirectInputPath" value="" />
-      <method v="2">
-        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
-      </method>
-    </configuration>
-    <configuration name="Run cMVBT" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="command" value="run --package cMVBT --bin cMVBT" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -309,9 +338,8 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="buildProfileId" value="test" />
-      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others --exact" />
+    <configuration name="Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables --exact" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -327,9 +355,8 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Test mv_wal::integration_tests::crash_recovery_round_trip" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="buildProfileId" value="test" />
-      <option name="command" value="test --package cMVBT --lib -- mv_wal::integration_tests::crash_recovery_round_trip --exact" />
+    <configuration name="Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables --exact" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -345,9 +372,8 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Test writer::tests" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="buildProfileId" value="test" />
-      <option name="command" value="test --package cMVBT --lib -- mv_wal::writer::tests" />
+    <configuration name="Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict --exact" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -363,46 +389,56 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="plot_results" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
-      <module name="cMVBT" />
-      <option name="ENV_FILES" value="" />
-      <option name="INTERPRETER_OPTIONS" value="" />
-      <option name="PARENT_ENVS" value="true" />
-      <envs>
-        <env name="PYTHONUNBUFFERED" value="1" />
-      </envs>
-      <option name="SDK_HOME" value="" />
-      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/scripts" />
-      <option name="IS_MODULE_SDK" value="true" />
-      <option name="ADD_CONTENT_ROOTS" value="true" />
-      <option name="ADD_SOURCE_ROOTS" value="true" />
-      <option name="DEBUG_JUST_MY_CODE" value="false" />
-      <option name="RUN_TOOL" value="" />
-      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/scripts/plot_results.py" />
-      <option name="PARAMETERS" value="" />
-      <option name="SHOW_COMMAND_LINE" value="false" />
-      <option name="EMULATE_TERMINAL" value="false" />
-      <option name="MODULE_MODE" value="false" />
-      <option name="REDIRECT_INPUT" value="false" />
-      <option name="INPUT_FILE" value="" />
-      <method v="2" />
+    <configuration name="Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip --exact" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Test mv_wal::integration_tests::torn_write_stops_cleanly" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_wal::integration_tests::torn_write_stops_cleanly --exact" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
     </configuration>
     <list>
       <item itemvalue="Cargo.Generate" />
       <item itemvalue="Cargo.Run" />
-      <item itemvalue="Cargo.Run cMVBT" />
-      <item itemvalue="Cargo.Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others" />
-      <item itemvalue="Cargo.Test mv_wal::integration_tests::crash_recovery_round_trip" />
-      <item itemvalue="Cargo.Test writer::tests" />
-      <item itemvalue="Python.plot_results" />
+      <item itemvalue="Cargo.Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables" />
+      <item itemvalue="Cargo.Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables" />
+      <item itemvalue="Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict" />
+      <item itemvalue="Cargo.Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip" />
+      <item itemvalue="Cargo.Test mv_wal::integration_tests::torn_write_stops_cleanly" />
     </list>
     <recent_temporary>
       <list>
-        <item itemvalue="Cargo.Run cMVBT" />
-        <item itemvalue="Python.plot_results" />
-        <item itemvalue="Cargo.Test writer::tests" />
-        <item itemvalue="Cargo.Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others" />
-        <item itemvalue="Cargo.Test mv_wal::integration_tests::crash_recovery_round_trip" />
+        <item itemvalue="Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict" />
+        <item itemvalue="Cargo.Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables" />
+        <item itemvalue="Cargo.Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables" />
+        <item itemvalue="Cargo.Test mv_wal::integration_tests::torn_write_stops_cleanly" />
+        <item itemvalue="Cargo.Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip" />
       </list>
     </recent_temporary>
   </component>
@@ -1315,23 +1351,9 @@
       <workItem from="1783971470318" duration="2840000" />
       <workItem from="1784029327462" duration="2514000" />
       <workItem from="1784048966069" duration="8351000" />
-      <workItem from="1784122221893" duration="5009000" />
-    </task>
-    <task id="LOCAL-00135" summary="Made rand_query work with empty indexes">
-      <option name="closed" value="true" />
-      <created>1761137880880</created>
-      <option name="number" value="00135" />
-      <option name="presentableId" value="LOCAL-00135" />
-      <option name="project" value="LOCAL" />
-      <updated>1761137880881</updated>
-    </task>
-    <task id="LOCAL-00136" summary="Added crud rate limiter for testing.">
-      <option name="closed" value="true" />
-      <created>1762865169390</created>
-      <option name="number" value="00136" />
-      <option name="presentableId" value="LOCAL-00136" />
-      <option name="project" value="LOCAL" />
-      <updated>1762865169390</updated>
+      <workItem from="1784122221893" duration="6587000" />
+      <workItem from="1784198190846" duration="2733000" />
+      <workItem from="1784211735173" duration="7481000" />
     </task>
     <task id="LOCAL-00137" summary="Added loadcc">
       <option name="closed" value="true" />
@@ -1709,7 +1731,23 @@
       <option name="project" value="LOCAL" />
       <updated>1784125664126</updated>
     </task>
-    <option name="localTasksCounter" value="184" />
+    <task id="LOCAL-00184" summary="Add commit log truncate setting turned on now by default (gc = off + truncate_commit_log = on)">
+      <option name="closed" value="true" />
+      <created>1784128103047</created>
+      <option name="number" value="00184" />
+      <option name="presentableId" value="LOCAL-00184" />
+      <option name="project" value="LOCAL" />
+      <updated>1784128103047</updated>
+    </task>
+    <task id="LOCAL-00185" summary="Add commit log truncate setting turned on now by default (gc = off + truncate_commit_log = on)">
+      <option name="closed" value="true" />
+      <created>1784128279076</created>
+      <option name="number" value="00185" />
+      <option name="presentableId" value="LOCAL-00185" />
+      <option name="project" value="LOCAL" />
+      <updated>1784128279076</updated>
+    </task>
+    <option name="localTasksCounter" value="186" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1727,7 +1765,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Enabled GC setting for loader." />
     <MESSAGE value="Enabled update-in-place setting" />
     <MESSAGE value="Cleaned." />
     <MESSAGE value="Init" />
@@ -1752,7 +1789,8 @@
     <MESSAGE value="Refine experiments and add plot scripts" />
     <MESSAGE value="Refine all" />
     <MESSAGE value="Introduce Tables per indexes, not encoded into a single tree" />
-    <option name="LAST_COMMIT_MESSAGE" value="Introduce Tables per indexes, not encoded into a single tree" />
+    <MESSAGE value="Add commit log truncate setting turned on now by default (gc = off + truncate_commit_log = on)" />
+    <option name="LAST_COMMIT_MESSAGE" value="Add commit log truncate setting turned on now by default (gc = off + truncate_commit_log = on)" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

@@ -30,9 +30,9 @@
 use std::collections::HashMap;
 
 use crate::mv_bench::tpcc_schema::*;
-use crate::mv_bench::tpcc_txn::{many, one, TpccTxn};
+use crate::mv_bench::tpcc_txn::{TpccTxn, many, one};
+use crate::mv_query::interval::Interval;
 use crate::mv_record_model::version_info::Version;
-use crate::mv_utils::interval::Interval;
 
 // Every query below returns its result alongside the snapshot (`ts_start`)
 // it read under, letting a caller measure HTAP-style staleness: how many

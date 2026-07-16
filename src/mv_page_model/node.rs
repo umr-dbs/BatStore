@@ -1,16 +1,16 @@
 use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::internal_page::InternalPage;
 use crate::mv_page_model::leaf_page::LeafPage;
+use crate::mv_query::interval::Interval;
 use crate::mv_record_model::record_point::RecordPoint;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::safe_cell::SafeCell;
-use crate::mv_utils::interval::Interval;
 use itertools::Itertools;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::mem::ManuallyDrop;
-use std::sync::atomic::{fence, AtomicU32};
 use std::sync::atomic::Ordering::{Acquire, Relaxed};
+use std::sync::atomic::{AtomicU32, fence};
 
 pub type PageLenField       = AtomicU32;
 pub type PageLenPrimitive   = u32;

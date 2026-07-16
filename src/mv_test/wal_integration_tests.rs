@@ -15,16 +15,6 @@ fn temp_log_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("cmvbt_wal_{name}_{}.log", std::process::id()))
 }
 
-/// Per-worker WAL sharding (see `mv_tree::mvbt::wal_shard_path`) means the
-/// base `path` itself is never a real file — only `path.0000`, `path.0001`,
-/// ... are. Removes a generous range of shard indices so tests don't leave
-/// stray files behind regardless of how many workers they actually used.
-fn remove_shards(path: &std::path::Path) {
-    for worker_id in 0..32 {
-        let _ = fs::remove_file(crate::mv_tree::mvbt::wal_shard_path(path, worker_id));
-    }
-}
-
 fn point(tree: &TestTree, key: u64, version: Version) -> Option<u64> {
     match tree.dispatch_crud(CRUDOperation::Point(key, version)) {
         CRUDOperationResult::MatchedRecords(records) if !records.is_empty() => Some(records[0].payload),
@@ -49,7 +39,7 @@ fn point(tree: &TestTree, key: u64, version: Version) -> Option<u64> {
 #[test]
 fn crash_recovery_round_trip() {
     let path = temp_log_path("round_trip");
-    remove_shards(&path);
+    let _ = fs::remove_file(&path);
 
     let tree = TestTree::make_standard(RootIndexType::default());
     tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
@@ -107,7 +97,7 @@ fn crash_recovery_round_trip() {
     }
 
     drop(recovered);
-    remove_shards(&path);
+    let _ = fs::remove_file(&path);
 }
 
 /// Drives the WAL from many concurrent threads at once — the scenario the
@@ -115,15 +105,16 @@ fn crash_recovery_round_trip() {
 /// are two independent, uncoordinated steps per thread, so records can (and,
 /// with enough threads/keys, reliably do) land in the log file in a
 /// different order than their version numbers — this specifically exercises
-/// replay's "sort by version before applying" handling of that, not just the
-/// single-threaded, naturally-in-order case `crash_recovery_round_trip`
-/// covers. It also now exercises per-worker WAL sharding for real: each of
-/// the `THREADS` writer threads gets its own `WorkerId` and thus its own
-/// shard file.
+/// replay's "sort by commit order before applying" handling of that, not
+/// just the single-threaded, naturally-in-order case
+/// `crash_recovery_round_trip` covers. It also exercises the unified
+/// single-file writer for real: each of the `THREADS` writer threads gets
+/// its own `WorkerId`, but all of them enqueue into the same `WalWriter`
+/// and land in the same file.
 #[test]
 fn concurrent_writers_crash_recovery_round_trip() {
     let path = temp_log_path("concurrent_round_trip");
-    remove_shards(&path);
+    let _ = fs::remove_file(&path);
 
     let tree = TestTree::make_standard(RootIndexType::default());
     tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
@@ -166,7 +157,7 @@ fn concurrent_writers_crash_recovery_round_trip() {
     }
 
     drop(recovered);
-    remove_shards(&path);
+    let _ = fs::remove_file(&path);
 }
 
 /// Simulates a crash mid-fsync by truncating a few bytes off the tail of an
@@ -177,10 +168,6 @@ fn concurrent_writers_crash_recovery_round_trip() {
 fn torn_write_stops_cleanly() {
     let path = temp_log_path("torn");
     let _ = fs::remove_file(&path);
-    // A single test thread means a single WorkerId (0), so all writes land
-    // in worker 0's shard — the only shard file that actually has content.
-    let shard_path = crate::mv_tree::mvbt::wal_shard_path(&path, 0);
-    let _ = fs::remove_file(&shard_path);
 
     {
         let tree = TestTree::make_standard(RootIndexType::default());
@@ -190,11 +177,11 @@ fn torn_write_stops_cleanly() {
         }
     } // tree drops here, flushing everything cleanly first.
 
-    let full_len = fs::metadata(&shard_path).unwrap().len();
+    let full_len = fs::metadata(&path).unwrap().len();
     assert!(full_len > 0);
 
     let torn_len = full_len - 3;
-    let file = fs::OpenOptions::new().write(true).open(&shard_path).unwrap();
+    let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
     file.set_len(torn_len).unwrap();
     drop(file);
 
@@ -205,11 +192,11 @@ fn torn_write_stops_cleanly() {
         .count();
     assert!(survived >= 19, "expected at least 19/20 keys to survive a 3-byte tail truncation, got {survived}");
 
-    let truncated_file_len = fs::metadata(&shard_path).unwrap().len();
+    let truncated_file_len = fs::metadata(&path).unwrap().len();
     assert!(truncated_file_len < full_len, "recovery must truncate away the torn tail");
 
     drop(recovered);
-    let _ = fs::remove_file(&shard_path);
+    let _ = fs::remove_file(&path);
 }
 
 /// `dispatch_crud` never blocks on its own WAL flush anymore (no `.recv()`
@@ -222,12 +209,11 @@ fn torn_write_stops_cleanly() {
 /// real on-disk durability, not just an always-true stub. Issues a batch of
 /// writes with nothing waiting on any of them individually, then confirms
 /// that once `wait_wal_hardened` returns for the *last* one, every one of
-/// them — not just the last — is actually present in the shard file on
-/// disk.
+/// them — not just the last — is actually present in the file on disk.
 #[test]
 fn wait_wal_hardened_reflects_real_on_disk_durability() {
     let path = temp_log_path("async_hardened");
-    remove_shards(&path);
+    let _ = fs::remove_file(&path);
 
     let tree = TestTree::make_standard(RootIndexType::default());
     tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
@@ -243,21 +229,22 @@ fn wait_wal_hardened_reflects_real_on_disk_durability() {
     tree.wait_wal_hardened(last_ts);
     assert!(tree.wal_hardened_version() >= last_ts, "wait_wal_hardened must not return early");
 
-    // Read the shard file directly (worker 0 — single test thread) instead
-    // of going through the tree, to check durability independently of the
-    // in-memory structure `wait_wal_hardened` itself doesn't touch.
-    let shard_path = crate::mv_tree::mvbt::wal_shard_path(&path, 0);
-    let bytes = fs::read(&shard_path).unwrap();
+    // Read the file directly instead of going through the tree, to check
+    // durability independently of the in-memory structure
+    // `wait_wal_hardened` itself doesn't touch.
+    let bytes = fs::read(&path).unwrap();
     let mut offset = 0;
     let mut count = 0;
     while let Some((_, consumed)) = crate::mv_wal::record::read_frame(&bytes[offset..]) {
         count += 1;
         offset += consumed;
     }
-    assert_eq!(count, 500, "every insert must be on disk once wait_wal_hardened returns, not just the last");
+    // Each insert logs two entries — its Write and, once committed, its
+    // Commit marker (see `WalEntry`'s doc) — so 500 inserts is 1000 frames.
+    assert_eq!(count, 1000, "every insert's write and commit marker must be on disk once wait_wal_hardened returns");
 
     drop(tree);
-    remove_shards(&path);
+    let _ = fs::remove_file(&path);
 }
 
 /// `wal_hardened_version` reports `0` ("nothing guaranteed durable") for a
@@ -292,4 +279,40 @@ fn wal_disabled_path_unaffected() {
     assert_eq!(point(&tree, 1, tree.current_version()), None);
 
     assert!(matches!(tree.dispatch_crud(CRUDOperation::Delete(1)), CRUDOperationResult::ZeroAffected(_)));
+}
+
+/// A write that gets logged optimistically (`wal_start_commit`) but never
+/// actually commits must never resurface after recovery. `dispatch.rs`'s
+/// `Update`/`Delete` arms log their op *before* attempting the mutation, so
+/// an `Update`/`Delete` on a key that turns out not to exist still logs a
+/// `Write` entry — but since `commit_tx` (and so `wal_log_commit`) is never
+/// reached on that failure path, that entry never gets a matching Commit
+/// marker. Replay is commit-gated (see `WalEntry::Commit`'s doc), so it
+/// silently skips any `Write` without one, regardless of why it never
+/// committed.
+#[test]
+fn logged_but_never_committed_write_does_not_resurface_after_recovery() {
+    let path = temp_log_path("never_committed");
+    let _ = fs::remove_file(&path);
+
+    {
+        let tree = TestTree::make_standard(RootIndexType::default());
+        tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
+
+        assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(1, 100)), CRUDOperationResult::Inserted(_)));
+
+        // Both fail after their op is already logged — neither ever reaches
+        // `commit_tx`, so neither ever gets a Commit marker.
+        assert!(matches!(tree.dispatch_crud(CRUDOperation::Update(2, 999)), CRUDOperationResult::ZeroAffected(_)));
+        assert!(matches!(tree.dispatch_crud(CRUDOperation::Delete(2)), CRUDOperationResult::ZeroAffected(_)));
+    } // tree drops here, flushing everything cleanly first.
+
+    let recovered = TestTree::open_recovered(RootIndexType::default(), &path, Duration::from_millis(2)).unwrap();
+    let version = recovered.current_version();
+
+    assert_eq!(point(&recovered, 1, version), Some(100), "the real, committed insert must survive");
+    assert_eq!(point(&recovered, 2, version), None, "the never-committed Update/Delete attempts must not resurface key 2");
+
+    drop(recovered);
+    let _ = fs::remove_file(&path);
 }

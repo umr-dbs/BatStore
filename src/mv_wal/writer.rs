@@ -14,7 +14,7 @@ use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::{AtomicVersion, Version};
 use crate::mv_sync::clock::GlobalClock;
-use crate::mv_wal::record::{self, WalRecord};
+use crate::mv_wal::record::{self, WalEntry, WalRecord};
 
 const GROUP_COMMIT_LINGER: Duration = Duration::from_micros(200);
 
@@ -200,10 +200,88 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
 
         // Encodes straight into one buffer (length prefix + body + crc)
         // instead of encoding the body into its own buffer and then
-        // copying it into a second, framed one — see `record::encode_framed`.
+        // copying it into a second, framed one — see
+        // `record::encode_entry_framed`.
         let mut framed = Vec::with_capacity(40);
-        record::encode_framed(&WalRecord { stamp, op }, &mut framed);
+        record::encode_entry_framed(&WalEntry::Write(WalRecord { stamp, op }), &mut framed);
 
+        self.enqueue(stamp.ts_start(), framed)
+    }
+
+    /// Logs a **Commit marker** confirming that `stamp`'s transaction
+    /// actually committed at `ts_commit` — see `WalEntry::Commit`'s doc for
+    /// why this is a separate entry from the write(s) it confirms, and
+    /// `mv_wal::recovery::replay`'s doc for how it gates replay. Same
+    /// fire-and-forget model as `log_with_stamp`: the caller never waits on
+    /// this, and it flows through the exact same channel/flush-loop/
+    /// `hardened` machinery, just carrying a different entry kind.
+    pub fn log_commit(&self, stamp: TxStamp, ts_commit: Version) -> Receiver<()> {
+        let mut framed = Vec::with_capacity(24);
+        record::encode_entry_framed::<Key, Payload>(
+            &WalEntry::Commit { stamp, ts_commit },
+            &mut framed,
+        );
+
+        self.enqueue(stamp.ts_start(), framed)
+    }
+
+    /// Table-tagged counterpart to `start_commit_logged`, for a `Database`'s
+    /// single shared writer: mints a fresh `ts_start` the same way, but
+    /// encodes/logs the record under `table_id` (see
+    /// `record::encode_entry_for_table_framed`) so `mv_wal::recovery::
+    /// replay_database` can later demux this file's entries back to the
+    /// right table.
+    pub fn start_commit_logged_for_table(
+        &self,
+        table_id: record::TableId,
+        clock: &GlobalClock,
+        worker_id: WorkerId,
+        build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
+    ) -> (TxStamp, Receiver<()>) {
+        let stamp = TxStamp::new(worker_id, clock.next_timestamp());
+        let ticket = self.log_with_stamp_for_table(table_id, stamp, build);
+        (stamp, ticket)
+    }
+
+    /// Table-tagged counterpart to `log_with_stamp` — same "log under an
+    /// already-determined stamp" contract, just tagging the record with
+    /// `table_id` for later demultiplexing by `replay_database`.
+    pub fn log_with_stamp_for_table(
+        &self,
+        table_id: record::TableId,
+        stamp: TxStamp,
+        build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
+    ) -> Receiver<()> {
+        let op = build(stamp.ts_start());
+
+        let mut framed = Vec::with_capacity(44);
+        record::encode_entry_for_table_framed(table_id, &WalEntry::Write(WalRecord { stamp, op }), &mut framed);
+
+        self.enqueue(stamp.ts_start(), framed)
+    }
+
+    /// Table-tagged counterpart to `log_commit`. A Commit marker is
+    /// transaction-scoped, not table-scoped (see `WalEntry::Commit`'s doc
+    /// and `record::TABLE_ID_COMMIT_SENTINEL`'s), so this always tags the
+    /// entry with that reserved sentinel rather than taking a `table_id`
+    /// parameter — `replay_database` ignores it for `Commit` entries
+    /// regardless.
+    pub fn log_commit_for_table(&self, stamp: TxStamp, ts_commit: Version) -> Receiver<()> {
+        let mut framed = Vec::with_capacity(28);
+        record::encode_entry_for_table_framed::<Key, Payload>(
+            record::TABLE_ID_COMMIT_SENTINEL,
+            &WalEntry::Commit { stamp, ts_commit },
+            &mut framed,
+        );
+
+        self.enqueue(stamp.ts_start(), framed)
+    }
+
+    /// Shared enqueue path for `log_with_stamp`/`log_commit`: downgrades
+    /// `hardened` off its "never used" sentinel if needed (see the field
+    /// doc) and hands the already-framed bytes to the background flush
+    /// thread.
+    fn enqueue(&self, ts_start: Version, framed: Vec<u8>) -> Receiver<()> {
         // The moment this write is enqueued, this shard has real
         // outstanding work: if `hardened` is still at the "never used"
         // sentinel (`Version::MAX`), downgrade it to `0` ("used, nothing
@@ -219,7 +297,7 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
         // closed) from `Drop`, which can't run concurrently with this call
         // — `self` is reached through an `Arc`, so `Drop` only runs once no
         // other reference (and thus no other call to this method) exists.
-        let _ = self.sender.as_ref().unwrap().send(LogMessage { bytes: framed, ts_start: stamp.ts_start(), ack: ack_tx });
+        let _ = self.sender.as_ref().unwrap().send(LogMessage { bytes: framed, ts_start, ack: ack_tx });
         ack_rx
     }
 }
@@ -236,47 +314,3 @@ impl<Key, Payload> Drop for WalWriter<Key, Payload> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn group_commit_flushes_and_wait_unblocks() {
-        let path = std::env::temp_dir().join(format!("cmvbt_wal_test_{}.log", std::process::id()));
-        let _ = fs::remove_file(&path);
-
-        let writer: WalWriter<u64, u64> =
-            WalWriter::open(&path, Duration::from_millis(5)).unwrap();
-        let clock = GlobalClock::new();
-
-        let (s1, t1)
-            = writer.start_commit_logged(&clock, 0, |_v| CRUDOperation::Insert(1, 100));
-
-        let (s2, t2)
-            = writer.start_commit_logged(&clock, 0, |_v| CRUDOperation::Delete(2));
-        assert!(s2.ts_start() > s1.ts_start());
-
-        writer.wait_flushed(t1);
-        writer.wait_flushed(t2);
-
-        drop(writer);
-
-        let bytes = fs::read(&path).unwrap();
-        assert!(!bytes.is_empty());
-
-        let mut offset = 0;
-        let mut seen = Vec::new();
-        while let Some((body, consumed)) = record::read_frame(&bytes[offset..]) {
-            let record: WalRecord<u64, u64> = record::decode(body).unwrap();
-            seen.push(record);
-            offset += consumed;
-        }
-        assert_eq!(offset, bytes.len());
-        assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0].stamp.ts_start(), s1.ts_start());
-        assert_eq!(seen[1].stamp.ts_start(), s2.ts_start());
-
-        let _ = fs::remove_file(&path);
-    }
-}

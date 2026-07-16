@@ -14,17 +14,17 @@ pub struct WorkerRegistry {
     /// A process-wide unique id for the tree this registry belongs to — see
     /// `worker_id_for` for why this, and not the tree's address, is what the
     /// per-thread cache must be keyed by.
-    tree_uid: u64,
+    db_uid: u64,
     max_workers: usize,
     next: AtomicUsize,
 }
 
-static NEXT_TREE_UID: AtomicU64 = AtomicU64::new(0);
+static NEXT_DB_UID: AtomicU64 = AtomicU64::new(0);
 
 impl WorkerRegistry {
     pub fn new(max_workers: usize) -> Self {
         Self {
-            tree_uid: NEXT_TREE_UID.fetch_add(1, Relaxed),
+            db_uid: NEXT_DB_UID.fetch_add(1, Relaxed),
             max_workers,
             next: AtomicUsize::new(0),
         }
@@ -96,12 +96,12 @@ thread_local! {
 pub(crate) fn worker_id_for(registry: &WorkerRegistry) -> WorkerId {
     WORKER_CACHE.with(|cache| {
         let (uid, id) = cache.get();
-        if uid == registry.tree_uid {
+        if uid == registry.db_uid {
             return id;
         }
 
         let id = registry.acquire();
-        cache.set((registry.tree_uid, id));
+        cache.set((registry.db_uid, id));
         id
     })
 }
@@ -144,8 +144,8 @@ pub(crate) fn with_snapshot_cache<R>(registry: &WorkerRegistry, f: impl FnOnce(&
     SNAPSHOT_CACHE.with(|cache| {
         let slot = cache.get_mut();
 
-        if slot.0 != registry.tree_uid {
-            *slot = (registry.tree_uid, SnapshotCache::new(registry.max_workers()));
+        if slot.0 != registry.db_uid {
+            *slot = (registry.db_uid, SnapshotCache::new(registry.max_workers()));
         }
 
         f(&mut slot.1)

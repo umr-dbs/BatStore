@@ -1,14 +1,14 @@
 use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::node::{Active, Dead, PageLenField, PageLenPrimitive, active_len, dead_len, from_active_dead, from_len, from_len_sum};
 use crate::mv_page_model::time_matcher::OBSOLETE_VERSION_MARK;
+use crate::mv_query::interval::Interval;
 use crate::mv_record_model::version_info::Version;
-use crate::mv_utils::interval::Interval;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr;
-use std::sync::atomic::{fence, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 pub type Fence<Key> = Interval<Key>;
 

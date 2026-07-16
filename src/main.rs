@@ -25,9 +25,8 @@ mod mv_test;
 mod mv_tree;
 mod mv_root;
 mod mv_sync;
-mod mv_utils;
-mod mv_buffer;
 mod mv_wal;
+mod mv_db;
 
 use crate::mv_sync::smart_cell::OptCell;
 use jemallocator::Jemalloc;

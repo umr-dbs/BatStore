@@ -7,12 +7,12 @@ use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::node::PageType;
 use crate::mv_page_model::time_matcher::TimeMatcher;
 use crate::mv_query::SnapShot;
+use crate::mv_query::interval::Interval;
 use crate::mv_query::snapshot::ReaderIsolatedSnapShot;
 use crate::mv_record_model::record_point::RecordPointResult;
 use crate::mv_record_model::tx_stamp::WorkerId;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_tree::mvbt::MVBTSt;
-use crate::mv_utils::interval::Interval;
 
 pub struct RangeQueryIter<
     'a,

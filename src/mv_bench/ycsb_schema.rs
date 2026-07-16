@@ -6,7 +6,7 @@
 //!
 //! Every op in `ycsb_txn` is a single `CRUDOperation` dispatched straight
 //! through `AtomicTxDispatcher::dispatch_crud` (see that module's docs for
-//! why a multi-op `mv_query::transaction::Transaction`, as used by TPC-C to
+//! why a multi-op `mv_db::transaction::DbTransaction`, as used by TPC-C to
 //! span several tables atomically, isn't needed here).
 
 use std::fmt::{Display, Formatter};

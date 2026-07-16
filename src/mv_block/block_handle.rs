@@ -3,10 +3,10 @@ use std::collections::LinkedList;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::mem;
-use std::sync::Arc;
 use std::sync::atomic::{fence, AtomicU64, Ordering::Acquire};
 
 use parking_lot::Mutex;
+use triomphe::Arc;
 use crate::mv_block::block::Block;
 use crate::mv_page_model::node::Node;
 use crate::mv_page_model::{BlockID, BlockRef, ObjectCount};

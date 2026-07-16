@@ -6,6 +6,6 @@ pub mod olc_query;
 pub mod iter_query;
 pub mod rand_query;
 pub mod snapshot;
-pub mod transaction;
+pub mod interval;
 
 pub type SnapShot = Version;

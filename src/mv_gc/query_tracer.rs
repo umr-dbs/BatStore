@@ -8,7 +8,7 @@ use crate::mv_query::SnapShot;
 /// `dispatch_crud` Point/Range reads (see `ycsb_txn`, `tpch_queries`,
 /// `olap_scan`'s fresh-scan mode) that both captured the same
 /// `tree.current_version()`, since that's a plain clock read, not a unique
-/// draw the way `Transaction::begin`'s `ts_start` is. A plain presence set
+/// draw the way `DbTransaction::begin`'s `ts_start` is. A plain presence set
 /// (the original `SkipSet<ReaderQuery>` this replaced) can't tell those
 /// apart from a single registration: one caller's release would silently
 /// delete the *other's* still-live protection. Counting makes concurrent
@@ -119,31 +119,20 @@ impl TransactionTrace {
             }
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn on_tx_start_then_completed_does_not_leak() {
-        let trace = TransactionTrace::new();
-        for v in 0..100_000u64 {
-            trace.on_tx_start(v);
-            trace.on_tx_completed(v);
-        }
-        assert_eq!(trace.0.len(), 0, "map should be empty after every start is matched by a completed");
+    /// Test-only: current entry count, for tests confirming zero-count
+    /// entries are actually removed rather than left as tombstones — see
+    /// this type's doc for why that matters.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
     }
 
-    #[test]
-    fn concurrent_same_value_registrations_stack_safely() {
-        let trace = TransactionTrace::new();
-        trace.on_tx_start(42);
-        trace.on_tx_start(42);
-        assert_eq!(trace.0.get(&42).unwrap().value().load(Relaxed), 2);
-        trace.on_tx_completed(42);
-        assert_eq!(trace.0.get(&42).unwrap().value().load(Relaxed), 1);
-        trace.on_tx_completed(42);
-        assert!(trace.0.get(&42).is_none());
+    /// Test-only: the current refcount for `snapshot`, or `None` if it has
+    /// no entry at all (either never registered, or removed after its count
+    /// reached zero).
+    #[cfg(test)]
+    pub(crate) fn refcount(&self, snapshot: SnapShot) -> Option<usize> {
+        self.0.get(&snapshot).map(|entry| entry.value().load(Relaxed))
     }
 }
