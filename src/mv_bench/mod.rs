@@ -19,3 +19,6 @@ pub mod ycsb_random;
 pub mod ycsb_load;
 pub mod ycsb_txn;
 pub mod ycsb_driver;
+
+pub mod mem_stats;
+pub mod suite;

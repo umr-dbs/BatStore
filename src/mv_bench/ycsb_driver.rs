@@ -7,11 +7,13 @@
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::mv_bench::mem_stats::{MemSampler, DEFAULT_SAMPLE_INTERVAL};
 use crate::mv_bench::ycsb_load::populate;
 use crate::mv_bench::ycsb_random::{pick_op, random_scan_length, KeySampler, RequestDistribution, YcsbMix, YcsbOpType};
 use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbTree};
@@ -31,6 +33,15 @@ pub struct DriverConfig {
     pub root_star_index: RootIndexType,
     /// See `DriverConfig::wal` in `tpcc_driver` — same semantics here.
     pub wal: Option<(std::path::PathBuf, Duration)>,
+    /// See `DriverConfig::output_dir` in `tpcc_driver` — same semantics here;
+    /// defaults to `.` for the standalone `ycsb` subcommand.
+    pub output_dir: PathBuf,
+}
+
+/// See `tpcc_driver::TpccRunSummary` — same purpose, YCSB's shape.
+pub struct YcsbRunSummary {
+    pub throughput_ops_sec: f64,
+    pub totals: [u64; NUM_COUNTERS],
 }
 
 const READ: usize = 0;
@@ -109,7 +120,7 @@ fn worker_thread(
     WorkerStats { ops_per_sec, totals, scanned_tuples }
 }
 
-pub fn run_ycsb(cfg: DriverConfig) {
+pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     assert!(cfg.ycsb.record_count >= 1, "ycsb: record_count must be >= 1");
 
     let max_threads = crate::mv_tree::mvbt::default_max_workers().max(1);
@@ -120,6 +131,10 @@ pub fn run_ycsb(cfg: DriverConfig) {
         println!("!! 1 loader + {num_threads} workers > max_workers ({max_threads} = num_cpus); clamping.");
         num_threads = max_threads.saturating_sub(1).max(1);
     }
+
+    fs::create_dir_all(&cfg.output_dir)
+        .unwrap_or_else(|e| panic!("ycsb: failed to create output_dir {}: {e}", cfg.output_dir.display()));
+    let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
     let tree = Arc::new(YcsbTree::make_standard(cfg.root_star_index));
     if cfg.gc {
@@ -188,10 +203,12 @@ pub fn run_ycsb(cfg: DriverConfig) {
     let stats: Vec<WorkerStats> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     let actual_wall = run_start.elapsed();
 
-    write_results(&stats, duration, actual_wall);
+    mem_sampler.stop();
+
+    write_results(&stats, duration, actual_wall, &cfg.output_dir)
 }
 
-fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wall: Duration) {
+fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wall: Duration, out_dir: &Path) -> YcsbRunSummary {
     let series_len = requested_duration.as_secs() as usize + 2;
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_COUNTERS];
@@ -206,8 +223,9 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
         scanned_tuples += s.scanned_tuples;
     }
 
-    let _ = fs::remove_file("ycsb_timeseries.csv");
-    let mut ts_file = OpenOptions::new().create(true).append(true).open("ycsb_timeseries.csv").unwrap();
+    let ts_path = out_dir.join("ycsb_timeseries.csv");
+    let _ = fs::remove_file(&ts_path);
+    let mut ts_file = OpenOptions::new().create(true).append(true).open(&ts_path).unwrap();
     ts_file.write_all(b"elapsed_sec,ops_completed\n").unwrap();
     for (sec, count) in per_sec.iter().enumerate() {
         ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
@@ -223,7 +241,9 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
     println!("{:<20} {}", "scanned_tuples", scanned_tuples);
     println!("{:<20} {}", "total_ops", total_ops);
     println!("{:<20} {:.2}", "throughput (ops/sec)", throughput);
-    println!("Wrote ycsb_timeseries.csv");
+    println!("Wrote {}", ts_path.display());
+
+    YcsbRunSummary { throughput_ops_sec: throughput, totals }
 }
 
 pub fn main_ycsb(parms: Vec<String>) {
@@ -274,5 +294,6 @@ pub fn main_ycsb(parms: Vec<String>) {
         update_in_place,
         root_star_index,
         wal: wal_enabled.then(|| (std::path::PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
+        output_dir: PathBuf::from("."),
     });
 }

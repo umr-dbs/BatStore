@@ -16,6 +16,7 @@
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::unbounded;
 use rand::prelude::*;
 
+use crate::mv_bench::mem_stats::{MemSampler, DEFAULT_SAMPLE_INTERVAL};
 use crate::mv_bench::olap_scan::{run_olap_worker, OlapMode, ScanResult};
 use crate::mv_bench::tpcc_load::{populate_items, populate_regions_and_nations, populate_suppliers, populate_warehouse};
 use crate::mv_bench::tpcc_schema::TpccConfig;
@@ -60,6 +62,24 @@ pub struct DriverConfig {
     /// OLAP-free baseline from the *same* loaded data set. `None` skips it
     /// entirely (no extra threads, no extra wall-clock cost) — the default.
     pub htap_baseline: Option<Duration>,
+    /// Directory the 3 result CSVs (`tpcc_oltp_timeseries.csv`,
+    /// `tpcc_scan.csv`, `mem_stats.csv`) are written to. Defaults to `.` for
+    /// the standalone `tpcc`/`tpch`/`htap` subcommands (unchanged cwd
+    /// behavior); `mv_bench::suite` sets this to a dedicated per-experiment
+    /// directory so a multi-run suite doesn't clobber itself.
+    pub output_dir: PathBuf,
+}
+
+/// Everything `mv_bench::suite`'s `benchmark` orchestrator needs to fold one
+/// `run_tpcc` invocation into `manifest.csv`, without having to re-parse
+/// stdout. Standalone callers (`main_tpcc`/`main_tpch`/`main_htap`) simply
+/// ignore this return value, exactly as they ignored `run_tpcc`'s prior `()`.
+pub struct TpccRunSummary {
+    pub tpm_c: f64,
+    pub baseline_tpm_c: Option<f64>,
+    pub totals: [u64; NUM_COUNTERS],
+    pub scan_count: usize,
+    pub avg_scan_tuples_per_sec: f64,
 }
 
 // Counter layout: 3 outcomes (Committed, Conflict, UserAbort) per read/write
@@ -152,7 +172,7 @@ fn terminal_thread(
     TerminalStats { new_order_committed_per_sec, totals }
 }
 
-pub fn run_tpcc(cfg: DriverConfig) {
+pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     assert!(cfg.tpcc.num_warehouses >= 1, "tpcc: num_warehouses must be >= 1");
 
     let max_threads = crate::mv_tree::mvbt::default_max_workers().max(1);
@@ -181,6 +201,10 @@ pub fn run_tpcc(cfg: DriverConfig) {
         num_terminals = (max_threads.saturating_sub(2) / terminal_cost).max(1);
         num_olap = max_threads.saturating_sub(1 + num_terminals * terminal_cost);
     }
+
+    fs::create_dir_all(&cfg.output_dir)
+        .unwrap_or_else(|e| panic!("tpcc: failed to create output_dir {}: {e}", cfg.output_dir.display()));
+    let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
     let db = Arc::new(TpccDatabase::new(cfg.root_star_index));
     if cfg.gc {
@@ -340,7 +364,9 @@ pub fn run_tpcc(cfg: DriverConfig) {
         scan_results.push(r);
     }
 
-    write_results(&terminal_stats, &scan_results, duration, actual_wall, baseline_tpm_c);
+    mem_sampler.stop();
+
+    write_results(&terminal_stats, &scan_results, duration, actual_wall, baseline_tpm_c, &cfg.output_dir)
 }
 
 fn num_olap_mode_summary(mode: &OlapMode) -> &'static str {
@@ -358,7 +384,8 @@ fn write_results(
     requested_duration: Duration,
     actual_wall: Duration,
     baseline_tpm_c: Option<f64>,
-) {
+    out_dir: &Path,
+) -> TpccRunSummary {
     let series_len = requested_duration.as_secs() as usize + 2;
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_COUNTERS];
@@ -371,15 +398,17 @@ fn write_results(
         }
     }
 
-    let _ = fs::remove_file("tpcc_oltp_timeseries.csv");
-    let mut ts_file = OpenOptions::new().create(true).append(true).open("tpcc_oltp_timeseries.csv").unwrap();
+    let oltp_ts_path = out_dir.join("tpcc_oltp_timeseries.csv");
+    let _ = fs::remove_file(&oltp_ts_path);
+    let mut ts_file = OpenOptions::new().create(true).append(true).open(&oltp_ts_path).unwrap();
     ts_file.write_all(b"elapsed_sec,new_order_committed\n").unwrap();
     for (sec, count) in per_sec.iter().enumerate() {
         ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
     }
 
-    let _ = fs::remove_file("tpcc_scan.csv");
-    let mut scan_file = OpenOptions::new().create(true).append(true).open("tpcc_scan.csv").unwrap();
+    let scan_path = out_dir.join("tpcc_scan.csv");
+    let _ = fs::remove_file(&scan_path);
+    let mut scan_file = OpenOptions::new().create(true).append(true).open(&scan_path).unwrap();
     scan_file.write_all(b"mode,elapsed_secs,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary,staleness_versions\n").unwrap();
     for r in scan_results {
         scan_file.write_all(format!(
@@ -414,7 +443,21 @@ fn write_results(
         let max = staleness.iter().max().unwrap();
         println!("{:<32} {:.1} (max {max})", "HTAP staleness (versions, avg)", avg);
     }
-    println!("Wrote tpcc_oltp_timeseries.csv and tpcc_scan.csv");
+    println!("Wrote {} and {}", oltp_ts_path.display(), scan_path.display());
+
+    let avg_scan_tuples_per_sec = if scan_results.is_empty() {
+        0.0
+    } else {
+        scan_results.iter().map(|r| r.tuples_per_sec()).sum::<f64>() / scan_results.len() as f64
+    };
+
+    TpccRunSummary {
+        tpm_c,
+        baseline_tpm_c,
+        totals,
+        scan_count: scan_results.len(),
+        avg_scan_tuples_per_sec,
+    }
 }
 
 pub fn main_tpcc(parms: Vec<String>) {
@@ -490,6 +533,7 @@ pub fn main_tpcc(parms: Vec<String>) {
         num_olap_threads,
         wal: wal_enabled.then(|| (std::path::PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
         htap_baseline: (htap_baseline_secs > 0).then(|| Duration::from_secs(htap_baseline_secs)),
+        output_dir: PathBuf::from("."),
     });
 }
 
@@ -519,6 +563,7 @@ fn standard_driver_config(
         num_olap_threads,
         wal: None,
         htap_baseline,
+        output_dir: PathBuf::from("."),
     }
 }
 

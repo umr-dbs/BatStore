@@ -52,6 +52,8 @@ fn main() {
             "tpch" => mv_bench::tpcc_driver::main_tpch(parms),
             "htap" => mv_bench::tpcc_driver::main_htap(parms),
             "ycsb" => mv_bench::ycsb_driver::main_ycsb(parms),
+            "benchmark" => mv_bench::suite::main_benchmark(parms),
+            "_bench_one" => mv_bench::suite::main_bench_one(parms),
             // "load_cc_new" => main_load_cc_new(parms),
             // "sorted_insert" => main_sorted_insert(parms),
             s => println!("Unknown Command '{s}'")

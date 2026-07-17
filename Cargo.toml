@@ -1,6 +1,6 @@
 [package]
 name = "cMVBT"
-version = "0.0.114"
+version = "0.0.115"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
 description = "cMVBT Research Implementation"
@@ -52,4 +52,5 @@ smallvec = "1.15.2"
 libc = "0.2.186"
 num_cpus = "1.17"
 jemallocator = "0.5.4"
+jemalloc-ctl = "0.5.4"
 triomphe = "0.1.16"
