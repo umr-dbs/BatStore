@@ -111,7 +111,7 @@ pub type BlockGuard<
     const NUM_RECORDS: usize,
     Key,
     Payload
-> = SmartGuard<'a, Block<FAN_OUT, NUM_RECORDS, Key, Payload>>;
+> = SmartGuard<Block<FAN_OUT, NUM_RECORDS, Key, Payload>>;
 
 impl<'a,
     const FAN_OUT: usize,

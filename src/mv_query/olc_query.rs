@@ -1,5 +1,6 @@
 use std::fmt::Display;
 use std::hash::Hash;
+use std::mem;
 use std::ops::Deref;
 
 use crate::mv_block::block::BlockGuard;
@@ -19,11 +20,34 @@ impl<const FAN_OUT: usize,
     Payload: Display + Clone + Default + Sync + 'static
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
+    /// Registers this traversal as a live reader of the tree's *current*
+    /// state for the whole descent, closing a gap `Point`/`Range` reads
+    /// don't have: `get_pointer` reads a child pointer with no
+    /// synchronization of its own (see `InternalPage::pointer_region`'s
+    /// doc), trusting that nothing concurrently reclaims the node out from
+    /// under it. GC's reclaim decision (`live_min_snapshot`, `mv_gc`) was
+    /// previously blind to write-path traversals entirely — only
+    /// `Point`/`Range`/`*Si` reads and `DbTransaction`s registered via
+    /// `on_acquire_reader_snapshot`/`begin_snapshot` — so a plain
+    /// `dispatch_crud` `Insert`/`Update`/`Delete` (or WAL-recovery replay,
+    /// or `DbTransaction::abort_write`, all of which land here) could have
+    /// a node reclaimed and reset (`Node::on_reuse`) while still mid-descent
+    /// through it. Registering here, rather than once per call site in
+    /// `dispatch.rs`, covers all of them for free and scopes the
+    /// registration tightly to just the traversal, not the write that
+    /// follows it. Nesting inside an already-registered `DbTransaction` is
+    /// fine — concurrent registrations for the same value are explicitly
+    /// designed to stack (`TransactionTrace`'s doc). A no-op with zero
+    /// overhead when block reclaim (GC) is disabled — the default here —
+    /// since `TxContext::on_tx_start`/`on_tx_completed` short-circuit on
+    /// that flag.
     #[inline]
     pub(crate) fn traversal_write_olc(&self, key: Key) -> BlockGuard<FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let ts_start = self.begin_snapshot();
+
         let mut attempt = 0;
 
-        loop {
+        let guard = loop {
             match self.traversal_write_internal_olc(key, attempt) {
                 Err(n_attempt) => {
                     attempt = n_attempt;
@@ -37,7 +61,11 @@ impl<const FAN_OUT: usize,
                     break guard
                 },
             }
-        }
+        };
+
+        self.end_snapshot(ts_start);
+
+        guard
     }
 
     #[inline]
@@ -75,7 +103,7 @@ impl<const FAN_OUT: usize,
         let root_block
             = master_guard.block();
 
-        let root_guard
+        let mut root_guard
             = root_block.borrow_read();
 
         if LOG_REORG {
@@ -94,11 +122,13 @@ impl<const FAN_OUT: usize,
         }
         match root_guard.deref().unsafe_degree_root() {
             BlockUnsafeDegree::Overflow
-            if master_guard.upgrade_write_lock()
-            => Ok(self.split_root(master_guard, root_guard, root.height())),
+            if master_guard.upgrade_write_lock() && root_guard.upgrade_write_lock()
+            => self.split_root(master_guard, root_guard, root.height()),
             BlockUnsafeDegree::ActiveUnderflow
-            if master_guard.upgrade_write_lock() =>
-                self.merge_root(master_guard, root_guard, root.height()),
+            if master_guard.upgrade_write_lock() && root_guard.upgrade_write_lock() => {
+                let _ = self.merge_root(master_guard, root_guard, root.height());
+                Err(())
+            },
             BlockUnsafeDegree::Ok
             => Ok(root_guard),
             _ => Err(()),
@@ -121,6 +151,30 @@ impl<const FAN_OUT: usize,
 
             match curr_guard.as_page_ref() {
                 PageType::IndexRef(internal_page) => unsafe {
+                    // `curr_guard` is a bare `Reader` here whenever this
+                    // level itself doesn't need correcting (only a *child*
+                    // might) — nothing excludes a genuinely different
+                    // thread that's concurrently write-locked this same
+                    // block as `mufasa` for one of its *other* children.
+                    // Bracket the read with a lock-free/unchanged check so a
+                    // torn read (this project confirmed one in practice: a
+                    // `keys_versions()` slice observed with a different
+                    // `is_active()` value microseconds apart, on the exact
+                    // same memory) forces a retry instead of silently
+                    // computing a wrong `index` and confidently descending
+                    // into it. Skipped when `curr_guard` is already *our
+                    // own* `Writer` from earlier in this traversal — that
+                    // exclusion already makes its content stable.
+                    let curr_is_reader
+                        = curr_guard.is_reader();
+
+                    if curr_is_reader && curr_guard.is_write_locked() {
+                        return Err(attempts + 1);
+                    }
+
+                    let curr_version_before
+                        = curr_guard.live_version();
+
                     let (keys_page, versions_page) = internal_page
                         .keys_versions();
 
@@ -142,9 +196,21 @@ impl<const FAN_OUT: usize,
                     let index
                         = index.unwrap();
 
-                    let next_curr_guard = internal_page
+                    // `get_pointer` also reads `pointer_region`, written by
+                    // the same `push_uncommitted`/`bulk_push*` calls that
+                    // mutate `key_interval_region`/`version_region` — keep
+                    // it inside the validated window too, not just the
+                    // index lookup above.
+                    let mut next_curr_guard = internal_page
                         .get_pointer(index)
                         .borrow_read();
+
+                    if curr_is_reader && curr_guard.live_version() != curr_version_before {
+                        if VERBOSE {
+                            println!("traversal_write_internal_olc: curr_guard changed during index lookup");
+                        }
+                        return Err(attempts + 1);
+                    }
 
                     if LOG_REORG {
                         let r
@@ -160,10 +226,20 @@ impl<const FAN_OUT: usize,
                     }
                     match next_curr_guard.unsafe_degree() {
                         BlockUnsafeDegree::Overflow // next_curr_guard.upgrade_write_lock() &&
-                        if curr_guard.upgrade_write_lock()
-                            => curr_guard = self.on_overflow_node(curr_guard, next_curr_guard, index),
+                        if curr_guard.upgrade_write_lock() &&
+                            next_curr_guard.upgrade_write_lock()
+                        => match self.on_overflow_node(curr_guard, next_curr_guard, index) {
+                                Ok(guard) => curr_guard = guard,
+                                Err(..) => {
+                                    if VERBOSE {
+                                        println!("traversal_write_internal_olc: on_overflow_node Err()");
+                                    }
+                                    return Err(attempts + 1)
+                                }
+                            },
                         BlockUnsafeDegree::ActiveUnderflow // next_curr_guard.upgrade_write_lock() &&
-                        if  curr_guard.upgrade_write_lock()
+                        if  curr_guard.upgrade_write_lock() &&
+                            next_curr_guard.upgrade_write_lock()
                         => match self.on_underflow_node(curr_guard, next_curr_guard, index) {
                                 Ok(guard) => curr_guard = guard,
                                 Err(..) => {

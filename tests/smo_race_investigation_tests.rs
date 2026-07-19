@@ -137,6 +137,7 @@ fn serialized_concurrent_workload_never_violates_the_split_invariant() {
 /// does not belong in the normal always-green suite. Run explicitly:
 /// `cargo test --bin cMVBT -- --ignored concurrent_unsynchronized_workload_reproduces_the_failure`
 #[test]
+// #[ignore]
 fn concurrent_unsynchronized_workload_reproduces_the_failure() {
     for _ in 0..ITERATIONS {
         let tree = TestTree::make_standard(RootIndexType::default());

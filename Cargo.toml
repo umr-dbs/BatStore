@@ -1,10 +1,18 @@
 [package]
 name = "cMVBT"
-version = "0.0.115"
+version = "0.0.116"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
 description = "cMVBT Research Implementation"
 repository = "https://github.com/umr-dbs/cMVBT"
+# `tests/` holds unit-test files pulled into the bin crate via `#[path]` mods
+# (this crate has no `[lib]` target, so they can't be real integration
+# tests) alongside genuine standalone integration tests. Autodiscovery would
+# try to compile every one of those unit-test files as its own integration-
+# test crate too, which fails (they use `crate::...` internals that don't
+# exist outside the bin). Disabled in favor of explicit `[[test]]` entries
+# below for the files that really are standalone.
+autotests = false
 
 [profile.dev]
 overflow-checks = false
@@ -54,3 +62,14 @@ num_cpus = "1.17"
 jemallocator = "0.5.4"
 jemalloc-ctl = "0.5.4"
 triomphe = "0.1.16"
+
+[dev-dependencies]
+loom = "0.7"
+
+[[test]]
+name = "loom_registration_ordering"
+path = "tests/loom_registration_ordering.rs"
+
+[[test]]
+name = "loom_read_validation"
+path = "tests/loom_read_validation.rs"

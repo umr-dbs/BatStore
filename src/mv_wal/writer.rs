@@ -22,8 +22,28 @@ struct LogMessage {
     bytes: Vec<u8>,
     /// This record's `ts_start` — folded into `WalWriter::hardened` once the
     /// batch it's part of has actually fsynced (see `flush_loop`), so the
-    /// hardened watermark advances per *batch*, not per operation.
+    /// hardened watermark advances per *batch*, not per operation. Only
+    /// consulted when `is_commit` is also true — see that field's doc.
     ts_start: Version,
+    /// Whether this message is a `WalEntry::Commit` marker rather than a
+    /// plain `Write`. `hardened` must only ever advance based on `Commit`
+    /// messages: a `Write` alone is never independently meaningful —
+    /// `mv_wal::recovery::replay` only applies a write once it finds this
+    /// same-`ts_start` marker (see `MVBTSt::wal_log_commit`'s doc) — so a
+    /// caller polling `hardened_version()` needs the *marker*, not just the
+    /// write bytes, to be durable. Every write path in this codebase always
+    /// follows a `Write`/batch of `Write`s with exactly one `Commit` for the
+    /// same `ts_start` (single-op dispatch: back-to-back in one call;
+    /// `mv_db::DbTransaction`: one `wal_log_commit` after all its
+    /// `wal_log_write` calls) — but those can land in *different* flush
+    /// batches under scheduling pressure (the writes enqueued, then the
+    /// enqueueing thread gets preempted before enqueueing the commit, and
+    /// `flush_loop` drains and flushes just the writes in the meantime).
+    /// Since every message for one transaction shares the same `ts_start`,
+    /// letting a `Write`-only batch advance `hardened` to that `ts_start`
+    /// would let `wait_wal_hardened` return before the commit marker —
+    /// the actual, replay-relevant durability point — is on disk.
+    is_commit: bool,
     /// Fired once `bytes` has been durably fsynced.
     ack: Sender<()>,
 }
@@ -129,10 +149,14 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> WalWriter<Key, Payload> {
             }
 
             // The whole batch just became durable at once — publish the
-            // highest `ts_start` in it as this shard's new hardened
-            // watermark, rather than resolving each record individually.
-            let max_ts = batch.iter().map(|msg| msg.ts_start).max().unwrap();
-            hardened.store(max_ts, Relaxed);
+            // highest *Commit* `ts_start` in it as this shard's new hardened
+            // watermark, rather than resolving each record individually. A
+            // batch that (still) contains no Commit message at all leaves
+            // `hardened` untouched — see `LogMessage::is_commit`'s doc for
+            // why a batch of bare writes must never advance it.
+            if let Some(max_ts) = batch.iter().filter(|msg| msg.is_commit).map(|msg| msg.ts_start).max() {
+                hardened.store(max_ts, Relaxed);
+            }
 
             for msg in batch {
                 let _ = msg.ack.send(());
@@ -205,7 +229,7 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
         let mut framed = Vec::with_capacity(40);
         record::encode_entry_framed(&WalEntry::Write(WalRecord { stamp, op }), &mut framed);
 
-        self.enqueue(stamp.ts_start(), framed)
+        self.enqueue(stamp.ts_start(), false, framed)
     }
 
     /// Logs a **Commit marker** confirming that `stamp`'s transaction
@@ -222,7 +246,7 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
             &mut framed,
         );
 
-        self.enqueue(stamp.ts_start(), framed)
+        self.enqueue(stamp.ts_start(), true, framed)
     }
 
     /// Table-tagged counterpart to `start_commit_logged`, for a `Database`'s
@@ -257,7 +281,7 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
         let mut framed = Vec::with_capacity(44);
         record::encode_entry_for_table_framed(table_id, &WalEntry::Write(WalRecord { stamp, op }), &mut framed);
 
-        self.enqueue(stamp.ts_start(), framed)
+        self.enqueue(stamp.ts_start(), false, framed)
     }
 
     /// Table-tagged counterpart to `log_commit`. A Commit marker is
@@ -274,14 +298,15 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
             &mut framed,
         );
 
-        self.enqueue(stamp.ts_start(), framed)
+        self.enqueue(stamp.ts_start(), true, framed)
     }
 
     /// Shared enqueue path for `log_with_stamp`/`log_commit`: downgrades
     /// `hardened` off its "never used" sentinel if needed (see the field
     /// doc) and hands the already-framed bytes to the background flush
-    /// thread.
-    fn enqueue(&self, ts_start: Version, framed: Vec<u8>) -> Receiver<()> {
+    /// thread. `is_commit` — see `LogMessage::is_commit`'s doc — must be
+    /// `true` only for an actual `WalEntry::Commit` marker.
+    fn enqueue(&self, ts_start: Version, is_commit: bool, framed: Vec<u8>) -> Receiver<()> {
         // The moment this write is enqueued, this shard has real
         // outstanding work: if `hardened` is still at the "never used"
         // sentinel (`Version::MAX`), downgrade it to `0` ("used, nothing
@@ -297,7 +322,7 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
         // closed) from `Drop`, which can't run concurrently with this call
         // — `self` is reached through an `Arc`, so `Drop` only runs once no
         // other reference (and thus no other call to this method) exists.
-        let _ = self.sender.as_ref().unwrap().send(LogMessage { bytes: framed, ts_start, ack: ack_tx });
+        let _ = self.sender.as_ref().unwrap().send(LogMessage { bytes: framed, ts_start, is_commit, ack: ack_tx });
         ack_rx
     }
 }

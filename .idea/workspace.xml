@@ -16,8 +16,40 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Cleaned and added tests">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Added benchmark suite for auto-testing and scripts for plot">
+      <change beforePath="$PROJECT_DIR$/.idea/cMVBT.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/cMVBT.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_block/block.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_block/block.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/node.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/node.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/iter_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/iter_query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/rand_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/rand_query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_record_model/record_point.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_record_model/record_point.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_root/index_root.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_root/index_root.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/block_sync.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/block_sync.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/bench_tpcc_txn_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/bench_tpcc_wal_codec_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/db_integration_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/gc_query_tracer_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/leaf_page_abort_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_test/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/query_dispatch_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/query_transaction_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/smo_race_investigation_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/sync_commit_log_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/tree_wal_consistency_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/wal_integration_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/wal_record_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/wal_recovery_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/wal_writer_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_wal/writer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_wal/writer.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -28,7 +60,7 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="102" />
+    <option name="cachedIndexableFilesCount" value="109" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:test" />
@@ -71,61 +103,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.033783034576456" />
-      <entry key="MS500" value="1.919233191445974" />
-      <entry key="S2" value="3.667775514586313" />
-      <entry key="S5" value="6.279813987446188" />
-      <entry key="S10" value="9.017210376969585" />
-      <entry key="S30" value="12.441123286954376" />
-      <entry key="S60" value="13.631028372872795" />
-      <entry key="M2" value="14.291381309527608" />
-      <entry key="M5" value="14.713857744839807" />
-      <entry key="M10" value="14.973899205425637" />
-      <entry key="M15" value="15.340673350111782" />
-      <entry key="M30" value="18.384668810739367" />
-      <entry key="H1" value="36.61011581306821" />
-      <entry key="H2" value="84.13237800395858" />
-      <entry key="H4" value="204.2918157736027" />
-      <entry key="D1" value="3484.302171350567" />
-      <entry key="W1" value="9173.670417697953" />
-    </decayedCancelled>
-    <decayedSelected>
       <entry key="MS100" value="0.0" />
       <entry key="MS500" value="0.0" />
-      <entry key="S2" value="0.0" />
-      <entry key="S5" value="0.0" />
-      <entry key="S10" value="1.3999748305912753E-178" />
-      <entry key="S30" value="5.192462984520225E-60" />
-      <entry key="S60" value="2.278697650966494E-30" />
-      <entry key="M2" value="1.5095355745947478E-15" />
-      <entry key="M5" value="1.1790881080894358E-6" />
-      <entry key="M10" value="0.0010980798209893302" />
-      <entry key="M15" value="0.011580810478820164" />
-      <entry key="M30" value="0.2024301612362832" />
-      <entry key="H1" value="1.5251194009184932" />
-      <entry key="H2" value="5.490060881771881" />
-      <entry key="H4" value="15.418173964353421" />
-      <entry key="D1" value="332.2815492536354" />
-      <entry key="W1" value="924.2652086235593" />
+      <entry key="S2" value="1.287941995941167E-167" />
+      <entry key="S5" value="2.5917376084009312E-67" />
+      <entry key="S10" value="7.284357242361928E-34" />
+      <entry key="S30" value="1.775147892585211E-11" />
+      <entry key="S60" value="8.01355185529114E-6" />
+      <entry key="M2" value="0.006838065799159999" />
+      <entry key="M5" value="1.4158163607995162" />
+      <entry key="M10" value="12.738785559442016" />
+      <entry key="M15" value="27.420274932891648" />
+      <entry key="M30" value="63.09476973491468" />
+      <entry key="H1" value="113.40000559775329" />
+      <entry key="H2" value="178.75213096632262" />
+      <entry key="H4" value="252.01363883301244" />
+      <entry key="D1" value="2397.8407880818863" />
+      <entry key="W1" value="8875.833176427977" />
+    </decayedCancelled>
+    <decayedSelected>
+      <entry key="MS100" value="1.0" />
+      <entry key="MS500" value="1.0" />
+      <entry key="S2" value="1.0" />
+      <entry key="S5" value="1.0" />
+      <entry key="S10" value="1.0" />
+      <entry key="S30" value="1.0000000000193487" />
+      <entry key="S60" value="1.0000081491540318" />
+      <entry key="M2" value="1.005763389100359" />
+      <entry key="M5" value="1.4325032513556053" />
+      <entry key="M10" value="3.5996753309165324" />
+      <entry key="M15" value="6.062897486155877" />
+      <entry key="M30" value="11.618139630464936" />
+      <entry key="H1" value="19.45472544857085" />
+      <entry key="H2" value="31.71029141889398" />
+      <entry key="H4" value="47.25877936189514" />
+      <entry key="D1" value="267.606744045023" />
+      <entry key="W1" value="935.0312310547773" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="1.00573032273665" />
-      <entry key="MS500" value="1.9094961847014553" />
-      <entry key="S2" value="3.6632220799218724" />
-      <entry key="S5" value="6.276598448880102" />
-      <entry key="S10" value="9.014837729533092" />
-      <entry key="S30" value="12.440006548023923" />
-      <entry key="S60" value="13.63041282498724" />
-      <entry key="M2" value="14.29105762229605" />
-      <entry key="M5" value="14.713725171076371" />
-      <entry key="M10" value="14.974922723792947" />
-      <entry key="M15" value="15.352172781897385" />
-      <entry key="M30" value="18.58665599065876" />
-      <entry key="H1" value="38.13357509221088" />
-      <entry key="H2" value="89.61978009211055" />
-      <entry key="H4" value="219.70679064063913" />
-      <entry key="D1" value="3816.574595976731" />
-      <entry key="W1" value="10097.932002240168" />
+      <entry key="MS100" value="0.051832471613402605" />
+      <entry key="MS500" value="0.5532486765461361" />
+      <entry key="S2" value="0.8624423929847446" />
+      <entry key="S5" value="0.9425231767748056" />
+      <entry key="S10" value="0.9708363285203153" />
+      <entry key="S30" value="0.9901827124686859" />
+      <entry key="S60" value="0.9950952878126307" />
+      <entry key="M2" value="1.0100915115580937" />
+      <entry key="M5" value="2.844930931986401" />
+      <entry key="M10" value="16.327435955901564" />
+      <entry key="M15" value="33.46751097749146" />
+      <entry key="M30" value="74.69493144599441" />
+      <entry key="H1" value="132.83869363485275" />
+      <entry key="H2" value="210.4490925997581" />
+      <entry key="H4" value="299.26236117543465" />
+      <entry key="D1" value="2665.4395665324714" />
+      <entry key="W1" value="9810.860643650296" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -148,9 +180,15 @@
     &quot;Cargo.Run MV-BPlusTree.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Run cMVBT.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Run.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test gc_query_tracer_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test leaf_page_abort_tests.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1).executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::smo_race_investigation_tests::sequential_workload_never_violates_the_split_invariant.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::smo_race_investigation_tests::serialized_concurrent_workload_never_violates_the_split_invariant.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Test mv_wal::integration_tests::crash_recovery_round_trip.executor&quot;: &quot;Valgrind&quot;,
@@ -159,8 +197,14 @@
     &quot;Cargo.Test mv_wal::record::tests::detects_truncated_frame.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Test mv_wal::record::tests::round_trips_all_variants.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Test mv_wal::writer::tests::group_commit_flushes_and_wait_unblocks.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test query_dispatch_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test smo_race_investigation_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test wal_record_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test wal_writer_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test wal_writer_tests::group_commit_flushes_and_wait_unblocks.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Test writer::tests (1).executor&quot;: &quot;Run&quot;,
     &quot;Cargo.Test writer::tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Tests in 'tests'.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.build.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.check.executor&quot;: &quot;Run&quot;,
     &quot;Cargo.clean.executor&quot;: &quot;Run&quot;,
@@ -206,11 +250,11 @@
       <recent name="$PROJECT_DIR$/src/mv_query" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/src/mv_test" />
+      <recent name="$PROJECT_DIR$/tests" />
       <recent name="$PROJECT_DIR$/src/mv_query" />
       <recent name="$PROJECT_DIR$/src/mv_tree" />
       <recent name="$PROJECT_DIR$/src/mv_tx_query" />
-      <recent name="$PROJECT_DIR$/src/mv_sync" />
-      <recent name="$PROJECT_DIR$/src/mv_root" />
     </key>
   </component>
   <component name="RunAnythingCache">
@@ -220,7 +264,7 @@
       <command value="cargo clean" />
     </option>
   </component>
-  <component name="RunManager" selected="Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict">
+  <component name="RunManager" selected="Cargo.Test smo_race_investigation_tests">
     <configuration name="Generate" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
       <option name="buildProfileId" value="dev" />
       <option name="command" value="run --package cMVBT --bin cMVBT -- generate 1mio_inserts.dat 10000 1000 1000 0 0 0" />
@@ -295,8 +339,8 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables --exact" />
+    <configuration name="Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1)" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure --exact" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -312,8 +356,8 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables --exact" />
+    <configuration name="Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure --exact --ignored" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -329,8 +373,8 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict --exact" />
+    <configuration name="Test mv_test::smo_race_investigation_tests::sequential_workload_never_violates_the_split_invariant" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::smo_race_investigation_tests::sequential_workload_never_violates_the_split_invariant --exact" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -346,8 +390,8 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip --exact" />
+    <configuration name="Test mv_test::smo_race_investigation_tests::serialized_concurrent_workload_never_violates_the_split_invariant" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::smo_race_investigation_tests::serialized_concurrent_workload_never_violates_the_split_invariant --exact" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -363,8 +407,8 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Test mv_wal::integration_tests::torn_write_stops_cleanly" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_wal::integration_tests::torn_write_stops_cleanly --exact" />
+    <configuration name="Test smo_race_investigation_tests" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::smo_race_investigation_tests" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -383,19 +427,19 @@
     <list>
       <item itemvalue="Cargo.Generate" />
       <item itemvalue="Cargo.Run" />
-      <item itemvalue="Cargo.Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables" />
-      <item itemvalue="Cargo.Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables" />
-      <item itemvalue="Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict" />
-      <item itemvalue="Cargo.Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip" />
-      <item itemvalue="Cargo.Test mv_wal::integration_tests::torn_write_stops_cleanly" />
+      <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure" />
+      <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1)" />
+      <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::sequential_workload_never_violates_the_split_invariant" />
+      <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::serialized_concurrent_workload_never_violates_the_split_invariant" />
+      <item itemvalue="Cargo.Test smo_race_investigation_tests" />
     </list>
     <recent_temporary>
       <list>
-        <item itemvalue="Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict" />
-        <item itemvalue="Cargo.Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables" />
-        <item itemvalue="Cargo.Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables" />
-        <item itemvalue="Cargo.Test mv_wal::integration_tests::torn_write_stops_cleanly" />
-        <item itemvalue="Cargo.Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip" />
+        <item itemvalue="Cargo.Test smo_race_investigation_tests" />
+        <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1)" />
+        <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure" />
+        <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::serialized_concurrent_workload_never_violates_the_split_invariant" />
+        <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::sequential_workload_never_violates_the_split_invariant" />
       </list>
     </recent_temporary>
   </component>
@@ -1312,14 +1356,15 @@
       <workItem from="1784198190846" duration="2733000" />
       <workItem from="1784211735173" duration="7925000" />
       <workItem from="1784280130354" duration="1128000" />
-    </task>
-    <task id="LOCAL-00138" summary="Added load_cc_new">
-      <option name="closed" value="true" />
-      <created>1763623351914</created>
-      <option name="number" value="00138" />
-      <option name="presentableId" value="LOCAL-00138" />
-      <option name="project" value="LOCAL" />
-      <updated>1763623351914</updated>
+      <workItem from="1784309390513" duration="504000" />
+      <workItem from="1784309903031" duration="242000" />
+      <workItem from="1784317031402" duration="3417000" />
+      <workItem from="1784388943306" duration="3452000" />
+      <workItem from="1784406636442" duration="931000" />
+      <workItem from="1784448057078" duration="93000" />
+      <workItem from="1784469105688" duration="945000" />
+      <workItem from="1784484108855" duration="6418000" />
+      <workItem from="1784494760936" duration="796000" />
     </task>
     <task id="LOCAL-00139" summary="Changed commit from CAS to fetch_add via SeqCst.">
       <option name="closed" value="true" />
@@ -1705,7 +1750,15 @@
       <option name="project" value="LOCAL" />
       <updated>1784221807603</updated>
     </task>
-    <option name="localTasksCounter" value="187" />
+    <task id="LOCAL-00187" summary="Added benchmark suite for auto-testing and scripts for plot">
+      <option name="closed" value="true" />
+      <created>1784309513067</created>
+      <option name="number" value="00187" />
+      <option name="presentableId" value="LOCAL-00187" />
+      <option name="project" value="LOCAL" />
+      <updated>1784309513067</updated>
+    </task>
+    <option name="localTasksCounter" value="188" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1723,7 +1776,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Cleaned." />
     <MESSAGE value="Init" />
     <MESSAGE value="Commit for exps" />
     <MESSAGE value="Fix GC lag in blocks; Remove extra latch for SMO" />
@@ -1748,7 +1800,8 @@
     <MESSAGE value="Introduce Tables per indexes, not encoded into a single tree" />
     <MESSAGE value="Add commit log truncate setting turned on now by default (gc = off + truncate_commit_log = on)" />
     <MESSAGE value="Cleaned and added tests" />
-    <option name="LAST_COMMIT_MESSAGE" value="Cleaned and added tests" />
+    <MESSAGE value="Added benchmark suite for auto-testing and scripts for plot" />
+    <option name="LAST_COMMIT_MESSAGE" value="Added benchmark suite for auto-testing and scripts for plot" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

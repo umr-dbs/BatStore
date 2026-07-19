@@ -103,28 +103,21 @@ impl<const FAN_OUT: usize,
     /// recovery already trusted for the identical class of race on the
     /// write path, and re-verified clean across repeated heavy-concurrency
     /// stress runs with GC on.
-    /// Takes `root` by reference, not by value: `SmartCell::borrow_read`
-    /// hands back a `SmartGuard::Reader(&'a SmartCell<E>, ..)` — a raw
-    /// reference to wherever the `SmartCell` it was called on physically
-    /// lives, `mem::transmute`d to claim a `'static` lifetime, not an
-    /// owned Arc clone. That's sound when called on `internal_page
-    /// .get_pointer(pos)` below (a reference into the *parent* page's own
-    /// long-lived, tree-owned array), but calling it on `root.clone()` — a
-    /// bare temporary — would return a guard referencing this function's
-    /// *own* stack frame, which is gone the moment it returns. That's
-    /// invisible whenever the tree has real internal pages (this loop
-    /// runs at least once, so `curr` ends up referencing the last visited
-    /// page's array instead), but a tree that never grows past
-    /// height 1 — the *root itself* is the leaf, e.g. any table whose live
-    /// key cardinality never exceeds one leaf's capacity, such as TPC-C's
-    /// per-table `Warehouse`/`District` trees at standard scale — takes
-    /// zero loop iterations, so `curr` is exactly that dangling
-    /// caller-frame reference: a real, silent, single-threaded UB bug
-    /// (confirmed via gdb: a null-pointer dereference reading stack bytes
-    /// the caller's own subsequent calls had since overwritten), not a
-    /// concurrency race. Borrowing `root` from the *caller's* frame
-    /// instead — which outlives this whole call and everything the
-    /// returned guard is used for — fixes it for that case too.
+    /// `root` is taken by reference purely to avoid an unnecessary refcount
+    /// bump at the call boundary — it is no longer load-bearing for
+    /// soundness. `SmartCell::borrow_read` used to hand back a
+    /// `SmartGuard::Reader(&'a SmartCell<E>, ..)`, a raw reference
+    /// `mem::transmute`d to claim a `'static` lifetime; that was unsound for
+    /// a tree that never grows past height 1 (root itself is the leaf —
+    /// e.g. TPC-C's per-table `Warehouse`/`District` trees at standard
+    /// scale), where this loop takes zero iterations and `curr` ended up a
+    /// dangling reference into this function's own stack frame (confirmed
+    /// via gdb: a null-pointer dereference reading stack bytes the caller's
+    /// own subsequent calls had since overwritten). `SmartGuard::Reader` now
+    /// owns a cloned `SmartCell` (a real `Arc` clone, see its doc) instead of
+    /// borrowing one, so it can never dangle regardless of tree height or
+    /// where the `SmartCell` it was produced from lives — this class of bug
+    /// is now categorically ruled out, not just avoided by call-site care.
     #[inline]
     fn traverse_read_key<'a>(
         root: &'a BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,

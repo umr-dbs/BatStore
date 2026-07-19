@@ -22,11 +22,15 @@ impl<const FAN_OUT: usize,
     Payload: Display + Clone + Default + Sync + 'static
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
+    /// See `olc_query::traversal_write_olc`'s matching doc — same
+    /// GC-reclaim-registration gap, same fix.
     #[inline]
     pub(crate) fn traversal_write_rand_query(&self) -> (Fence<Key>, BlockGuard<FAN_OUT, NUM_RECORDS, Key, Payload>) {
+        let ts_start = self.begin_snapshot();
+
         let mut attempt = 0;
 
-        loop {
+        let result = loop {
             match self.traversal_write_internal_rand(attempt) {
                 Err(n_attempt) => {
                     attempt = n_attempt;
@@ -35,7 +39,11 @@ impl<const FAN_OUT: usize,
                 }
                 Ok(guard) => break guard,
             }
-        }
+        };
+
+        self.end_snapshot(ts_start);
+
+        result
     }
 
     #[inline]
@@ -109,7 +117,15 @@ impl<const FAN_OUT: usize,
                     match next_curr_guard.deref().unsafe_degree() {
                         BlockUnsafeDegree::Overflow
                         if curr_guard.upgrade_write_lock()
-                        => curr_guard = self.on_overflow_node(curr_guard, next_curr_guard, index),
+                        => match self.on_overflow_node(curr_guard, next_curr_guard, index) {
+                            Ok(guard) => curr_guard = guard,
+                            Err(..) => {
+                                if VERBOSE {
+                                    println!("traversal_write_internal_rand: on_overflow_node Err()");
+                                }
+                                return Err(attempts + 1)
+                            }
+                        },
                         BlockUnsafeDegree::ActiveUnderflow
                         if curr_guard.upgrade_write_lock()
                         => match self.on_underflow_node(curr_guard, next_curr_guard, index) {

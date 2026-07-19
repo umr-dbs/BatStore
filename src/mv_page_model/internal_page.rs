@@ -1,8 +1,10 @@
+use crate::mv_block::block::Block;
 use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::node::{Active, Dead, PageLenField, PageLenPrimitive, active_len, dead_len, from_active_dead, from_len, from_len_sum};
 use crate::mv_page_model::time_matcher::OBSOLETE_VERSION_MARK;
 use crate::mv_query::interval::Interval;
 use crate::mv_record_model::version_info::Version;
+use crate::mv_sync::smart_cell::{OptCell, SmartCell};
 use std::fmt::Display;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -11,6 +13,9 @@ use std::ptr;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 pub type Fence<Key> = Interval<Key>;
+
+type ChildBase<const FAN_OUT: usize, const NUM_RECORDS: usize, Key, Payload> =
+    OptCell<Block<FAN_OUT, NUM_RECORDS, Key, Payload>>;
 
 pub struct InternalPage<
     const FAN_OUT: usize,
@@ -21,7 +26,23 @@ pub struct InternalPage<
     pub(crate) len: PageLenField,
     key_interval_region: [MaybeUninit<Interval<Key>>; FAN_OUT],
     version_region: [MaybeUninit<Version>; FAN_OUT],
-    pointer_region: [MaybeUninit<BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>>; FAN_OUT],
+    // A slot holds either `null` (never written this "life" of the page) or
+    // a genuinely raw pointer to a `Block`'s `OptCell`, wrapped in the same
+    // `BlockRef`/`SmartCell` every other alias of that block uses — not an
+    // `Arc` reconstructed via `into_raw`/`from_raw`, and not owning
+    // anything: `get_pointer` just copies it out, no refcount bump. See
+    // `SmartCell`'s own doc for why that's sound (nothing here is ever
+    // freed while the tree is live) and what trade-off that rests on.
+    // Storing `BlockRef` directly (not a bare raw pointer) means the whole
+    // array is `Copy`/unconditionally `Send + Sync` the same way
+    // `SmartCell` itself is, and a slice of it can be handed out directly —
+    // no per-element unwrap/rewrap needed the way a bare `*const` would.
+    // Plain reads/writes, same as `key_interval_region`/`version_region`:
+    // every caller reads `sum_len()` (an `Acquire` load) before ever
+    // indexing into this array, and that already establishes happens-before
+    // for everything a writer stored (via `Release`) before its own `len`
+    // bump — no per-slot atomicity needed on top of that.
+    pointer_region: [BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>; FAN_OUT],
     _marker: PhantomData<[(Key, BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)]>,
 }
 
@@ -32,22 +53,6 @@ impl<const FAN_OUT: usize,
 > Clone for InternalPage<FAN_OUT, NUM_RECORDS, Key, Payload> {
     fn clone(&self) -> Self {
         Self::from(self)
-    }
-}
-
-impl<const FAN_OUT: usize,
-    const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
-> Drop for InternalPage<FAN_OUT, NUM_RECORDS, Key, Payload>
-{
-    fn drop(&mut self) {
-        unsafe {
-            self.children().iter().for_each(|ptr|
-                (ptr as *const BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>
-                    as *mut BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)
-                    .drop_in_place())
-        }
     }
 }
 
@@ -66,30 +71,25 @@ impl<const FAN_OUT: usize,
 
         keys.iter()
             .zip(versions.iter())
-            .zip(pointers.iter())
+            .zip(pointers.into_iter())
             .enumerate()
-            .for_each(|(index, ((key, version), pointer))| unsafe {
-                new_page.key_interval_region
-                    .as_mut_ptr()
-                    .add(index)
-                    .write(MaybeUninit::new(key.clone()));
+            .for_each(|(index, ((key, version), pointer))| {
+                unsafe {
+                    new_page.key_interval_region
+                        .as_mut_ptr()
+                        .add(index)
+                        .write(MaybeUninit::new(key.clone()));
 
-                new_page.version_region
-                    .as_mut_ptr()
-                    .add(index)
-                    .write(MaybeUninit::new(*version));
+                    new_page.version_region
+                        .as_mut_ptr()
+                        .add(index)
+                        .write(MaybeUninit::new(*version));
+                }
 
-                new_page.pointer_region
-                    .as_mut_ptr()
-                    .add(index)
-                    .write(MaybeUninit::new(pointer.clone()));
+                // Fresh page, never-written slot: no concurrent reader of
+                // this brand new page exists yet.
+                new_page.pointer_region[index] = *pointer;
             });
-
-        // Pairs with `sum_len`/`active_len`/`dead_len`'s `fence(Acquire)` —
-        // see `leaf_page::LeafPage::len`'s doc for why this is needed even
-        // on x86: the CPU's own store-ordering doesn't help if the
-        // compiler reorders these plain writes past the Relaxed store.
-        // fence(Release);
 
         let (active, dead)
             = from.active_dead_count();
@@ -108,26 +108,30 @@ impl<const FAN_OUT: usize,
         //                   mem::size_of::<Len>()
         //                   <= 4096, "FAN_OUT Invalid!"
         // );
-        unsafe {
-            InternalPage {
-                len: PageLenField::new(0),
-                key_interval_region: MaybeUninit::uninit().assume_init(),
-                version_region: MaybeUninit::uninit().assume_init(),
-                pointer_region: MaybeUninit::uninit().assume_init(),
-                _marker: PhantomData,
-            }
+        InternalPage {
+            len: PageLenField::new(0),
+            key_interval_region: unsafe { MaybeUninit::uninit().assume_init() },
+            version_region: unsafe { MaybeUninit::uninit().assume_init() },
+            pointer_region: [SmartCell(ptr::null()); FAN_OUT],
+            _marker: PhantomData,
         }
     }
 
-    // #[inline(always)]
-    // pub fn push_committed(&mut self, key_interval: Interval<Key>, version: Version, ptr: BlockRef<FAN_OUT, NUM_RECORDS, Key>) {
-    //     let len = self.len();
-    //     self.push_uncommitted(key_interval, version, ptr, len);
-    //     self.commit_until(len);
-    // }
-
     #[inline]
     pub fn push_uncommitted(&mut self, key_interval: Interval<Key>, version: Version, ptr: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>, index: usize) {
+        // A real `assert!`, not `debug_assert!` (this profile has
+        // `debug-assertions = false`, so that never actually ran): without
+        // it, `index == FAN_OUT` writes past the end of
+        // `key_interval_region`/`version_region` via a raw, unchecked
+        // pointer store, landing in whatever's next in the struct's layout
+        // — in practice, `pointer_region[0]`, corrupting a real pointer with
+        // a stray `Version`/`Key` value (confirmed: caught a slot holding
+        // `0x16b5`, not a plausible heap address). That's a silent
+        // memory-corruption bug wearing a SIGSEGV-shaped costume; this
+        // turns it into the same loud, clean panic `pointer_region`'s own
+        // bounds-checked indexing already gives for the same out-of-bounds
+        // condition.
+        assert!(index < FAN_OUT, "InternalPage::push_uncommitted: index {index} out of bounds for FAN_OUT={FAN_OUT}");
         unsafe {
             self.key_interval_region
                 .as_mut_ptr()
@@ -138,12 +142,12 @@ impl<const FAN_OUT: usize,
                 .as_mut_ptr()
                 .add(index)
                 .write(MaybeUninit::new(version));
-
-            self.pointer_region
-                .as_mut_ptr()
-                .add(index)
-                .write(MaybeUninit::new(ptr));
         }
+
+        // Fresh slot (never written this "life" of the page): there's no
+        // prior value to read/drop, and nothing here owns a refcount to
+        // release either way (see `SmartCell`'s doc).
+        self.pointer_region[index] = ptr;
     }
 
     #[inline(always)]
@@ -152,34 +156,40 @@ impl<const FAN_OUT: usize,
         let active = active_len(len) as i32 + active_delta;
         let dead = dead_len(len) + dead_delta;
 
-        // See `InternalPage::from`'s doc.
-        // fence(Release);
+        debug_assert!(active >= 0,
+                      "InternalPage active count went negative: len={len}, active_delta={active_delta}");
         self.len.store(from_active_dead(active as Active, dead as Dead), Release)
     }
 
-    // #[inline]
-    // pub fn undo_uncommitted(&self, commit: Version) {
-    //     unsafe {
-    //         self.pointer_region
-    //             .as_ptr()
-    //             .add(commit as usize * mem::size_of::<BlockRef<FAN_OUT, NUM_RECORDS, Key>>())
-    //             .read()
-    //             .assume_init();
-    //     }
-    // }
-
     #[inline]
     pub fn on_reuse(&mut self) {
-        let len = self.sum_len();
-        self.len.store(0, Relaxed);
+        // Just resets the length — no per-slot release loop anymore.
+        // `pointer_region`'s old entries own nothing (see `SmartCell`'s
+        // doc), so there's nothing to drop; they're simply unreachable
+        // (`sum_len() == 0` means no reader/accessor ever iterates to them)
+        // until the next round of `push_uncommitted`/`bulk_push*` overwrites
+        // them with fresh content.
+        self.len.store(0, Release);
+    }
 
-        unsafe {
-            (0..len).for_each(|index| {
-                ptr::drop_in_place(self.pointer_region
-                    .as_mut_ptr()
-                    .add(index) as *mut BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>);
-            });
-        }
+    /// Unconditionally re-initializes every slot to `null` via a raw write
+    /// that never reads whatever was previously there. Needed because
+    /// `Node`'s `page` field is a `union` (`InnerPage`): when a block that
+    /// was previously a *leaf* gets reused as an *internal* page
+    /// (`Node::on_reuse` dispatches to `LeafPage::on_reuse`, which knows
+    /// nothing about `pointer_region`), this array's bytes are still
+    /// whatever `LeafPage`'s record data left behind — not a legitimate
+    /// `AtomicPtr`. Treating it as one (reading or swapping into it as-is)
+    /// would interpret garbage bytes as a raw pointer, which `get_pointer`'s
+    /// caller could then dereference. Safe to call unconditionally even
+    /// when the block *was* already internal: `on_reuse` above has already
+    /// made every slot unreachable (`sum_len() == 0`) by then, so
+    /// overwriting them again without reading them first loses nothing.
+    #[inline]
+    pub fn force_reinit_pointer_region(&mut self) {
+        self.pointer_region
+            .iter_mut()
+            .for_each(|slot| *slot = SmartCell(ptr::null()));
     }
 
     #[inline]
@@ -191,27 +201,36 @@ impl<const FAN_OUT: usize,
         let add
             = entries.len();
 
+        // See `push_uncommitted`'s matching assert: without this, an
+        // overflowing bulk-push writes `key_interval_region`/
+        // `version_region` past `FAN_OUT` via a raw, unchecked store,
+        // silently corrupting `pointer_region`'s adjacent bytes instead of
+        // failing where the actual out-of-bounds condition is.
+        assert!(len + add <= FAN_OUT, "InternalPage::bulk_push: {add} entries pushed at len={len} overflow FAN_OUT={FAN_OUT}");
+
         entries.into_iter()
             .enumerate()
-            .for_each(|(index, ((key, version), pointer))| unsafe {
-                (self.key_interval_region
-                    .as_ptr() as *mut Interval<Key>)
-                    .add(index + len)
-                    .write(key.clone());
+            .for_each(|(index, ((key, version), pointer))| {
+                unsafe {
+                    (self.key_interval_region
+                        .as_ptr() as *mut Interval<Key>)
+                        .add(index + len)
+                        .write(key.clone());
 
-                (self.version_region
-                    .as_ptr() as *mut Version)
-                    .add(index + len)
-                    .write(*version);
+                    (self.version_region
+                        .as_ptr() as *mut Version)
+                        .add(index + len)
+                        .write(*version);
+                }
 
-                (self.pointer_region
-                    .as_ptr() as *mut BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)
-                    .add(index + len)
-                    .write(pointer.clone());
+                unsafe {
+                    (self.pointer_region
+                        .as_ptr() as *mut BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)
+                        .add(index + len)
+                        .write(*pointer);
+                }
             });
 
-        // See `InternalPage::from`'s doc.
-        // fence(Release);
         self.len.store(
             from_active_dead(len as PageLenPrimitive + add as PageLenPrimitive, 0), Release);
     }
@@ -228,27 +247,32 @@ impl<const FAN_OUT: usize,
         let add
             = entries.len();
 
+        // See `push_uncommitted`'s matching assert.
+        assert!(len + add <= FAN_OUT, "InternalPage::bulk_push_from_slice: {add} entries pushed at len={len} overflow FAN_OUT={FAN_OUT}");
+
         entries.into_iter()
             .enumerate()
-            .for_each(|(index, ((key, version), pointer))| unsafe {
-                self.key_interval_region
-                    .as_mut_ptr()
-                    .add(index + len)
-                    .write(MaybeUninit::new((*key).clone()));
+            .for_each(|(index, ((key, version), pointer))| {
+                unsafe {
+                    self.key_interval_region
+                        .as_mut_ptr()
+                        .add(index + len)
+                        .write(MaybeUninit::new((*key).clone()));
 
-                self.version_region
-                    .as_mut_ptr()
-                    .add(index + len)
-                    .write(MaybeUninit::new(**version));
+                    self.version_region
+                        .as_mut_ptr()
+                        .add(index + len)
+                        .write(MaybeUninit::new(**version));
+                }
 
-                self.pointer_region
-                    .as_mut_ptr()
-                    .add(index + len)
-                    .write(MaybeUninit::new((*pointer).clone()));
+                unsafe {
+                    (self.pointer_region
+                        .as_ptr() as *mut BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)
+                        .add(index + len)
+                        .write(**pointer);
+                }
             });
 
-        // See `InternalPage::from`'s doc.
-        // fence(Release);
         self.len.store(
             from_active_dead(len as PageLenPrimitive + add as PageLenPrimitive, 0), Release)
     }
@@ -261,8 +285,6 @@ impl<const FAN_OUT: usize,
     #[inline(always)]
     pub fn active_len(&self) -> usize {
         let len = self.len.load(Acquire);
-        // See `InternalPage::from`'s doc — pairs with its `fence(Release)`.
-        // fence(Acquire);
 
         active_len(len) as _
     }
@@ -270,8 +292,6 @@ impl<const FAN_OUT: usize,
     #[inline(always)]
     pub fn dead_len(&self) -> usize {
         let len = self.len.load(Acquire);
-        // See `InternalPage::from`'s doc.
-        // fence(Acquire);
 
         dead_len(len) as _
     }
@@ -279,14 +299,10 @@ impl<const FAN_OUT: usize,
     #[inline(always)]
     pub fn sum_len(&self) -> usize {
         let len = self.len.load(Acquire) as _;
-        // See `InternalPage::from`'s doc — every reader of `key_interval_region`/
-        // `version_region`/`pointer_region` (`keys_versions`/`children`/...)
-        // routes through this, so this one fence protects all of them.
-        // fence(Acquire);
 
         from_len_sum(len)
     }
-    
+
     #[inline(always)]
     pub fn keys_versions(&self) -> (&[Interval<Key>], &[Version]) {
         let len
@@ -299,7 +315,7 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline(always)]
-    pub fn last_child(&self) -> &BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
+    pub fn last_child(&self) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
         self.get_pointer(self.sum_len() - 1)
     }
 
@@ -311,7 +327,7 @@ impl<const FAN_OUT: usize,
         unsafe {
             (std::slice::from_raw_parts(self.key_interval_region.as_ptr() as _, len),
              std::slice::from_raw_parts(self.version_region.as_ptr() as _, len),
-             std::slice::from_raw_parts(self.pointer_region.as_ptr() as _, len))
+             std::slice::from_raw_parts(self.pointer_region.as_ptr(), len))
         }
     }
 
@@ -321,18 +337,8 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline(always)]
-    pub fn keys_mut(&self) -> &mut [Interval<Key>] {
-        unsafe { std::slice::from_raw_parts_mut(self.key_interval_region.as_ptr() as _, self.sum_len()) }
-    }
-
-    #[inline(always)]
     pub fn get_key(&self, index: usize) -> &Interval<Key> {
         unsafe { &*(self.key_interval_region.as_ptr().add(index) as *const Interval<Key>) }
-    }
-
-    #[inline(always)]
-    pub fn get_key_mut(&self, index: usize) -> &mut Interval<Key> {
-        unsafe { &mut *(self.key_interval_region.as_ptr().add(index) as *mut Interval<Key>) }
     }
 
     #[inline(always)]
@@ -341,43 +347,36 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline(always)]
-    pub unsafe fn versions_mut(&mut self) -> &mut [Version] {
-        std::slice::from_raw_parts_mut(self.version_region.as_mut_ptr() as _, self.sum_len())
-    }
-
-    #[inline(always)]
-    pub unsafe fn versions_byKey_uncommitted_mut(&mut self) -> &mut [Version] {
-        std::slice::from_raw_parts_mut(self.version_region.as_mut_ptr() as _, self.sum_len() + 2)
-    }
-
-    #[inline(always)]
-    pub fn get_version_mut(&mut self, index: usize) -> &mut Version {
-        unsafe { &mut *(self.version_region.as_mut_ptr().add(index) as *mut Version) }
-    }
-
-    #[inline(always)]
     pub fn get_version(&self, index: usize) -> Version {
         unsafe { *(self.version_region.as_ptr().add(index) as *const Version) }
     }
 
     #[inline(always)]
-    pub fn get_version_ptr(&self, index: usize) -> *mut Version {
-        unsafe { (self.version_region.as_ptr().add(index) as *mut Version) }
-    }
-
-    #[inline(always)]
     pub fn children(&self) -> &[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>] {
-        unsafe {
-            std::slice::from_raw_parts(self.pointer_region.as_ptr() as _, self.sum_len())
-        }
+        let len
+            = self.sum_len();
+
+        unsafe { std::slice::from_raw_parts(self.pointer_region.as_ptr(), len) }
     }
 
     #[inline(always)]
-    pub fn get_pointer(&self, index: usize) -> &BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
-        unsafe {
-            &*(self.pointer_region.as_ptr() as *const BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)
-                .add(index)
-        }
+    pub fn get_pointer(&self, index: usize) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let cell = self.pointer_region[index];
+        let raw = cell.0;
+
+        // A real `assert!`, not `debug_assert!`: a null slot here means the
+        // caller is about to dereference a null `SmartCell` — an instant,
+        // silent SIGSEGV, in release builds too (this profile has
+        // `debug-assertions = false`). Fail loudly instead of trading a
+        // diagnosable panic for a crash with no message.
+        assert!(!raw.is_null(), "InternalPage::get_pointer: slot {index} must be populated");
+        assert!(
+            (raw as usize) >= 0x1000 && (raw as usize) % std::mem::align_of::<ChildBase<FAN_OUT, NUM_RECORDS, Key, Payload>>() == 0,
+            "InternalPage::get_pointer: slot {index} holds a garbage pointer {raw:#x?} (sum_len={}, self={:p})",
+            self.sum_len(), self
+        );
+
+        cell
     }
 
     #[inline(always)]

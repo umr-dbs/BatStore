@@ -153,7 +153,7 @@ impl<'a,
                         .rev()
                         .find_map(|(pos, (v, range))|
                             if range.contains(self.range.lower) && v.matched(si){
-                                Some((*range, internal_page.get_pointer(pos).clone()))
+                                Some((*range, internal_page.get_pointer(pos)))
                             } else {
                                 None
                             })

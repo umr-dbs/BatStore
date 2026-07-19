@@ -2,7 +2,6 @@ use std::collections::LinkedList;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use CCBPlusTree::record_model::Version;
-use triomphe::Arc;
 use crate::mv_block::block_handle::BlockAllocManager;
 use crate::mv_page_model::{BlockRef, Height};
 use crate::mv_query::SnapShot;
@@ -74,30 +73,29 @@ type FrugalRootValue<
 > = ValueRootInner<FAN_OUT, NUM_RECORDS, Key, Payload>;
 
 pub enum RootIndexGuard<
-    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Display + Default + Ord + Copy + Hash + Sync + 'static,
     Payload: Display + Default + Clone + Sync + 'static>
 {
-    FrugalGuard(SmartGuard<'a, AtomicFrugalList<ValueRootInner<FAN_OUT, NUM_RECORDS, Key, Payload>>>),
+    FrugalGuard(SmartGuard<AtomicFrugalList<ValueRootInner<FAN_OUT, NUM_RECORDS, Key, Payload>>>),
     // FrugalGuardMut(ArcMutexGuard<RawMutex, AtomicFrugalList<FrugalRootValue<FAN_OUT, NUM_RECORDS, Key, Payload>>>),
 
-    BTreeGuard(SmartGuard<'a, RootTree<FAN_OUT, NUM_RECORDS, Key, Payload>>),
+    BTreeGuard(SmartGuard<RootTree<FAN_OUT, NUM_RECORDS, Key, Payload>>),
     // BTreeGuardMut(SmartGuard<RootTree<FAN_OUT, NUM_RECORDS, Key, Payload>>),
 
-    SkipListGuard(SmartGuard<'a, RootSkipList<FAN_OUT, NUM_RECORDS, Key, Payload>>),
+    SkipListGuard(SmartGuard<RootSkipList<FAN_OUT, NUM_RECORDS, Key, Payload>>),
     // SkipListGuardMut(SmartGuard<RootSkipList<FAN_OUT, NUM_RECORDS, Key, Payload>>),
 
-    LinkedListGuard(SmartGuard<'a, VanillaRootSt<FAN_OUT, NUM_RECORDS, Key, Payload>>),
+    LinkedListGuard(SmartGuard<VanillaRootSt<FAN_OUT, NUM_RECORDS, Key, Payload>>),
     // LinkedListGuardMut(SmartGuard<LinkedList<Root<FAN_OUT, NUM_RECORDS, Key, Payload>>>)
 }
 
-impl<'a,
+impl<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Display + Default + Ord + Copy + Hash + Sync + 'static,
-    Payload: Display + Default + Clone + Sync + 'static> RootIndexGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+    Payload: Display + Default + Clone + Sync + 'static> RootIndexGuard<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     #[inline(always)]
     pub fn block(&self) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
@@ -219,7 +217,7 @@ impl<const FAN_OUT: usize,
                 rt.append_root(
                     Root::new(root_inner.0, version, root_inner.1));
 
-                Self::BTree(SmartCell(Arc::new(OptCell::new(rt))))
+                Self::BTree(SmartCell(Box::into_raw(Box::new(OptCell::new(rt))) as *const _))
             },
             RootIndexType::SkipList => {
                 let sk = RootSkipList::new();
@@ -227,7 +225,7 @@ impl<const FAN_OUT: usize,
                     = make_start_value_root_inner(block_manager, ctx);
 
                 sk.0.insert(version, root_inner);
-                Self::SkipList(SmartCell(Arc::new(OptCell::new(sk))))
+                Self::SkipList(SmartCell(Box::into_raw(Box::new(OptCell::new(sk))) as *const _))
             }
             RootIndexType::LinkedList => {
                 let mut ll = LinkedList::new();
@@ -235,13 +233,13 @@ impl<const FAN_OUT: usize,
                     = make_start_value_root_inner(block_manager, ctx);
 
                 ll.push_back(Root::new(root_inner.0, version, root_inner.1));
-                Self::LinkedList(SmartCell(Arc::new(OptCell::new(ll))))
+                Self::LinkedList(SmartCell(Box::into_raw(Box::new(OptCell::new(ll))) as *const _))
             }
             RootIndexType::FrugalList => {
                 let (root_inner, version)
                     = make_start_value_root_inner(block_manager, ctx);
 
-                Self::FrugalList(SmartCell(Arc::new(OptCell::new(FrugalRootList::new(root_inner, version)))))
+                Self::FrugalList(SmartCell(Box::into_raw(Box::new(OptCell::new(FrugalRootList::new(root_inner, version)))) as *const _))
             }
             // RootIndexType::HybridArray => {}
         }

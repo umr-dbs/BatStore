@@ -6,12 +6,21 @@ use crate::mv_page_model::{BlockRef, Height};
 use crate::mv_query::interval::Interval;
 use crate::mv_root::index_root::RootIndexGuard;
 use crate::mv_root::root::Root;
-use crate::mv_test::VERBOSE;
+use crate::mv_test::{DIAG, VERBOSE};
 use crate::mv_tree::mvbt::MVBTSt;
 use itertools::Itertools;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::Deref;
+
+
+// TEMPORARY diagnostic helper.
+fn diag_thread_hash() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish()
+}
 
 #[repr(u8)]
 pub enum BlockUnsafeDegree {
@@ -170,7 +179,6 @@ impl<const FAN_OUT: usize,
 > { }
 
 pub(crate) enum MergeResult<
-    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
@@ -179,10 +187,10 @@ pub(crate) enum MergeResult<
     Merged(usize,
            Interval<Key>,
            BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
-           BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>),
+           BlockGuard<'static, FAN_OUT, NUM_RECORDS, Key, Payload>),
     KeySplit(usize,
              BlockSplit<FAN_OUT, NUM_RECORDS, Key, Payload>,
-             BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>),
+             BlockGuard<'static, FAN_OUT, NUM_RECORDS, Key, Payload>),
     Error,
 }
 
@@ -196,8 +204,33 @@ impl<const FAN_OUT: usize,
         &self,
         mufasa: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         simba: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
-        child_index: usize) -> BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+        child_index: usize) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
     {
+        // `mufasa` may already be a `Writer` carried over from a *different*
+        // child's overflow/underflow round earlier in this same traversal —
+        // `SmartGuard::upgrade_write_lock` is a no-op once a guard is
+        // already a `Writer` (no version-CAS re-validates capacity the way
+        // it does the *first* time a `Reader` upgrades). A split always
+        // needs room for up to 2 fresh entries; without this check, a
+        // second round landing on an already-full `mufasa` writes past
+        // `FAN_OUT` — confirmed empirically (not just in theory): this
+        // raced in practice, corrupting `pointer_region`'s adjacent memory
+        // before the array's own bounds check turned it into a panic
+        // instead. If there isn't room, `mufasa` now needs splitting
+        // itself — which a fresh `unsafe_degree()` check one level up (or,
+        // if `mufasa` is the root, `retrieve_root_write_olc`'s own
+        // `unsafe_degree_root()` check, reached the same way on retry)
+        // will correctly detect, since reaching this capacity limit
+        // implies `sum_len >= overflow_units_count()` already — so bail out
+        // and force a restart rather than corrupt it. Root and non-root
+        // `mufasa` share this same fixed-size-array capacity constraint
+        // identically; `split_root`/`merge_root` don't need the same guard
+        // because they only ever push into a *freshly allocated* page,
+        // never one that could have already absorbed an earlier round.
+        // if mufasa.as_internal_page_ref().sum_len() + 2 > FAN_OUT {
+        //     return Err(());
+        // }
+
         let mufasa_deref_mut
             = mufasa.deref_mut();
 
@@ -210,6 +243,26 @@ impl<const FAN_OUT: usize,
 
         let current_len
             = internal_page.sum_len();
+
+        if DIAG && format!("{}", fence.upper) == "18446744073709551615" {
+            eprintln!("DIAG on_overflow_node ENTER thread={:#x} page={:p} child_index={child_index} current_len={current_len} fence=[{},{}] sum_len_before={} already_obsolete={}",
+                diag_thread_hash(), internal_page as *const _, fence.lower, fence.upper, internal_page.sum_len(), !internal_page.get_version(child_index).is_active());
+        }
+
+        // `simba`'s content is fully consumed here (copied into `left`/
+        // `right`, then `simba` itself is retired) — this isn't a read-only
+        // traversal step that can tolerate staleness, so `simba` needs
+        // genuine exclusion for the read, the same way `mufasa` already has
+        // it and `merge()`'s `candidate` already gets. A version-check
+        // after the fact can't substitute for this: `cell_version` is
+        // pinned at one constant value for a writer's *entire* critical
+        // section (only the unlock bumps it), so a before/after comparison
+        // is blind to a writer that's already mid-flight when the "before"
+        // sample is taken and still mid-flight at "after" — exactly the
+        // race this project confirmed happening in practice.
+        // if !simba.upgrade_write_lock() {
+        //     return Err(());
+        // }
 
         let version = match self.split(simba.deref(), &fence) {
             BlockSplit::ByKey(left_fence,
@@ -234,6 +287,10 @@ impl<const FAN_OUT: usize,
 
                 internal_page.commit_delta(1, 1);
                 internal_page.mark_version_obsolete(child_index);
+                if DIAG && format!("{}", right_fence.upper) == "18446744073709551615" {
+                    eprintln!("DIAG on_overflow_node ByKey thread={:#x} page={:p} child_index={child_index} obsoleted, pushed left=[{},{}]@{current_len} right=[{},{}]@{}",
+                        diag_thread_hash(), internal_page as *const _, left_fence.lower, left_fence.upper, right_fence.lower, right_fence.upper, current_len + 1);
+                }
                 version
             }
             BlockSplit::ByVersion(fresh) => {
@@ -248,6 +305,10 @@ impl<const FAN_OUT: usize,
 
                 internal_page.commit_delta(0, 1);
                 internal_page.mark_version_obsolete(child_index);
+                if DIAG && format!("{}", fence.upper) == "18446744073709551615" {
+                    eprintln!("DIAG on_overflow_node ByVersion thread={:#x} page={:p} child_index={child_index} obsoleted, pushed fence=[{},{}]@{current_len}",
+                        diag_thread_hash(), internal_page as *const _, fence.lower, fence.upper);
+                }
                 version
             }
         };
@@ -266,23 +327,43 @@ impl<const FAN_OUT: usize,
         self.block_manager.register_dead(
             self.worker_id(),
             version,
-            internal_page.get_pointer(child_index).clone());
+            internal_page.get_pointer(child_index));
 
-        mufasa
+        Ok(mufasa)
     }
 
     pub(crate) fn on_underflow_node<'a>(
         &self,
         mufasa: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
-        simba: BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>,
+        mut simba: BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>,
         index_simba: usize)
         -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
     {
         if VERBOSE {
             println!("on_underflow_node");
         }
+
+        // See `on_overflow_node`'s matching comment: a merge can need up to
+        // 2 fresh entries (`MergeResult::KeySplit`), and `mufasa` gets the
+        // same "already a Writer from an earlier round in this traversal,
+        // no re-validated capacity" exposure. Checked conservatively for
+        // both outcomes before doing any of the (otherwise wasted) work
+        // below, since which one `merge()` produces isn't known yet.
+        // if mufasa.as_internal_page_ref().sum_len() + 2 > FAN_OUT {
+        //     return Err(());
+        // }
+
         let mufasa_deref_mut
             = mufasa.deref_mut();
+
+        // See `on_overflow_node`'s matching comment: `simba`'s content is
+        // fully consumed here (folded into `merged_block`/the key-split
+        // halves, then `simba` itself retired), so it needs the same
+        // genuine exclusion `candidate` already gets inside `merge()`, not
+        // a post-hoc version check.
+        // if !simba.upgrade_write_lock() {
+        //     return Err(());
+        // }
 
         match self.merge(mufasa_deref_mut, simba.deref(), index_simba) {
             MergeResult::Merged(
@@ -327,6 +408,11 @@ impl<const FAN_OUT: usize,
                 mufasa_internal_page
                     .mark_version_obsolete(index_simba);
 
+                if DIAG && format!("{}", merged_fence.upper) == "18446744073709551615" {
+                    eprintln!("DIAG on_underflow_node Merged thread={:#x} page={:p} index_simba={index_simba} index_sibling={index_sibling} obsoleted, pushed merged=[{},{}]@{mufasa_len}",
+                        diag_thread_hash(), mufasa_internal_page as *const _, merged_fence.lower, merged_fence.upper);
+                }
+
                 // See `on_overflow_node`'s matching comment: the new
                 // `merged_block` entry's birth version (`version`) is the
                 // correct death point for these two now-obsoleted entries,
@@ -335,9 +421,9 @@ impl<const FAN_OUT: usize,
                     self.worker_id(),
                     [
                         (version,
-                         mufasa_internal_page.get_pointer(index_simba).clone()),
+                         mufasa_internal_page.get_pointer(index_simba)),
                         (version,
-                         mufasa_internal_page.get_pointer(index_sibling).clone())
+                         mufasa_internal_page.get_pointer(index_sibling))
                     ])
             }
             MergeResult::KeySplit(
@@ -393,14 +479,19 @@ impl<const FAN_OUT: usize,
                 mufasa_internal_page
                     .mark_version_obsolete(index_simba);
 
+                if DIAG && format!("{}", right_interval.upper) == "18446744073709551615" {
+                    eprintln!("DIAG on_underflow_node KeySplit thread={:#x} page={:p} index_simba={index_simba} index_sibling={index_sibling} obsoleted, pushed left=[{},{}]@{mufasa_len} right=[{},{}]@{}",
+                        diag_thread_hash(), mufasa_internal_page as *const _, left_interval.lower, left_interval.upper, right_interval.lower, right_interval.upper, mufasa_len + 1);
+                }
+
                 // See `on_overflow_node`'s matching comment.
                 self.block_manager.register_dead_col(
                     self.worker_id(),
                     [
                         (version,
-                         mufasa_internal_page.get_pointer(index_simba).clone()),
+                         mufasa_internal_page.get_pointer(index_simba)),
                         (version,
-                         mufasa_internal_page.get_pointer(index_sibling).clone())
+                         mufasa_internal_page.get_pointer(index_sibling))
                     ])
             }
             _ => return Err(()),
@@ -414,7 +505,7 @@ impl<const FAN_OUT: usize,
         mufasa: &'a Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
         simba: &Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
         simba_index: usize,
-    ) -> MergeResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+    ) -> MergeResult<FAN_OUT, NUM_RECORDS, Key, Payload>
     {
         let mufasa_internal_page
             = mufasa.as_internal_page_ref();
@@ -434,8 +525,10 @@ impl<const FAN_OUT: usize,
         let (simba_active_count, _simba_dead_count)
             = (simba_active_count as usize, _simba_dead_count as usize);
 
-        let mut all_candidates = mufasa_internal_page
-            .children()
+        let mufasa_children
+            = mufasa_internal_page.children();
+
+        let mut all_candidates = mufasa_children
             .iter()
             .enumerate()
             .zip(mufasa_internal_page.versions())
@@ -507,12 +600,12 @@ impl<const FAN_OUT: usize,
 
                     let shadow_copy = keys
                         .iter()
-                        .zip(versions)
-                        .zip(pointers)
+                        .zip(versions.iter())
+                        .zip(pointers.iter())
                         .filter(|((.., version), ..)| version.is_active())
                         .merge_by(c_keys.iter()
-                                      .zip(c_versions)
-                                      .zip(c_pointers)
+                                      .zip(c_versions.iter())
+                                      .zip(c_pointers.iter())
                                       .filter(|((.., version), ..)| version.is_active()),
                                   |((.., v0), ..), ((.., v1), ..)| v0 <= v1)
                         .collect_vec();
@@ -552,13 +645,14 @@ impl<const FAN_OUT: usize,
         } else { // Keysplit when merged: > 80% active entries ---> redistribute the keys
             match is_simba_leaf {
                 true => unsafe {
-                    let mut joined = candidate_guard
-                        .deref()
-                        .as_records()
+                    let candidate_records = candidate_guard.deref().as_records();
+                    let simba_records = simba.as_records();
+
+                    let mut joined = candidate_records
                         .iter()
                         .filter(|r| r.version().is_live())
                         .sorted_by_key(|r| r.key)
-                        .merge_by(simba.as_records()
+                        .merge_by(simba_records
                                       .iter()
                                       .filter(|r| r.version().is_live())
                                       .sorted_by_key(|r| r.key),
@@ -622,13 +716,13 @@ impl<const FAN_OUT: usize,
 
                     let mut joined = c_keys
                         .iter()
-                        .zip(c_versions)
-                        .zip(c_children)
+                        .zip(c_versions.iter())
+                        .zip(c_children.iter())
                         .filter(|((.., v), ..)| v.is_active())
                         .sorted_by_key(|((k, ..), ..)| k.lower)
                         .merge_by(s_keys.iter()
-                                      .zip(s_version)
-                                      .zip(s_children)
+                                      .zip(s_version.iter())
+                                      .zip(s_children.iter())
                                       .filter(|((.., v), ..)| v.is_active())
                                       .sorted_by_key(|((k, ..), ..)| k.lower),
                                   |((f, ..), ..), ((s, ..), ..)|
@@ -705,8 +799,9 @@ impl<const FAN_OUT: usize,
                          self.block_manager
                              .new_empty_leaf(&self.ctx));
 
-                    let mut sorted_block = block
-                        .as_records()
+                    let block_records = block.as_records();
+
+                    let mut sorted_block = block_records
                         .iter()
                         .filter(|r| r.version().is_live())
                         .sorted_by_key(|r| r.key())
@@ -794,8 +889,9 @@ impl<const FAN_OUT: usize,
                     let new_leaf = self.block_manager
                         .new_empty_leaf(&self.ctx);
 
-                    let active_records = block
-                        .as_records()
+                    let block_records = block.as_records();
+
+                    let active_records = block_records
                         .iter()
                         .filter(|record| record.version().is_live())
                         .collect_vec();
@@ -867,7 +963,7 @@ impl<const FAN_OUT: usize,
     #[inline]
     pub(crate) fn merge_root<'a>(
         &self,
-        master_guard: RootIndexGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
+        master_guard: RootIndexGuard<FAN_OUT, NUM_RECORDS, Key, Payload>,
         root_guard: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         height: Height,
     ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
@@ -876,9 +972,25 @@ impl<const FAN_OUT: usize,
             println!("merge root");
         }
 
-        let mut child_guard = root_guard
+        // `merge_root` was reached because `unsafe_degree_root()` observed
+        // exactly 1 active child — but that check happened before
+        // `master_guard`'s own upgrade, and `root_guard` itself is still
+        // just a `Reader` at this point. If a *different* thread
+        // concurrently treats this same root as mufasa for one of its
+        // children (splitting or merging it — root's own write lock is
+        // entirely free for that until now), root's content can change
+        // between that original check and the `last_child()` read below.
+        // See `on_overflow_node`'s matching comment for why a version check
+        // can't substitute for actually excluding writers here.
+        // if !root_guard.upgrade_write_lock() {
+        //     return Err(());
+        // }
+
+        let child_ref = root_guard
             .as_internal_page_ref()
-            .last_child()
+            .last_child();
+
+        let mut child_guard = child_ref
             .borrow_read();
 
         if !child_guard.upgrade_write_lock() {
@@ -890,7 +1002,7 @@ impl<const FAN_OUT: usize,
         }
 
         let guard
-            = self.split_root(master_guard, child_guard, height - 1);
+            = self.split_root(master_guard, child_guard, height - 1)?;
 
         if VERBOSE {
             let guard_deref
@@ -908,15 +1020,15 @@ impl<const FAN_OUT: usize,
     #[inline]
     pub(crate) fn split_root<'a>(
         &self,
-        _master_guard: RootIndexGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
+        _master_guard: RootIndexGuard<FAN_OUT, NUM_RECORDS, Key, Payload>,
         root_guard: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         height: Height,
-    ) -> BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+    ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
     {
         let root_guard_deref_mut
             = root_guard.deref_mut();
 
-        match self.split(root_guard_deref_mut, &Interval::new(self.min_key, self.max_key)) {
+        Ok(match self.split(root_guard_deref_mut, &Interval::new(self.min_key, self.max_key)) {
             BlockSplit::ByKey(left_fence,
                               left,
                               right_fence,
@@ -946,7 +1058,7 @@ impl<const FAN_OUT: usize,
                     = new_root_block.borrow_read();
 
                 self.root.append_root(
-                    Root::new(new_root_block.clone(), version, height + 1));
+                    Root::new(new_root_block, version, height + 1));
 
                 // Registers the *new* root's birth version (`version`) as
                 // the old root's death, not `_master_guard.version()` (the
@@ -968,13 +1080,13 @@ impl<const FAN_OUT: usize,
                     = new_root_block.borrow_read();
 
                 self.root.append_root(
-                    Root::new(new_root_block.clone(), version, height));
+                    Root::new(new_root_block, version, height));
 
                 self.block_manager.register_dead(
                     self.worker_id(), version, root_guard.inner_cell());
 
                 new_root_latch
             }
-        }
+        })
     }
 }

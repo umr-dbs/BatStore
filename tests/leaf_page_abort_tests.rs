@@ -23,7 +23,7 @@ fn abort_write_reverts_a_plain_insert() {
     assert_eq!(leaf.active_dead_count(), (1, 0));
 
     assert_eq!(leaf.abort_write(1, stamp), AbortOutcome::Invalidated);
-    let record = leaf.as_records().iter().rfind(|r| r.key == 1).unwrap();
+    let record = leaf.as_records().into_iter().rfind(|r| r.key == 1).unwrap();
     assert!(!record.version().is_live());
     assert!(record.version().insertion_stamp().is_invalid());
     assert_eq!(leaf.active_dead_count(), (0, 1));
@@ -55,11 +55,11 @@ fn abort_write_reverts_an_update_and_resurrects_its_predecessor() {
 
     assert_eq!(leaf.abort_write(5, stamp), AbortOutcome::Invalidated);
 
-    let records: Vec<_> = leaf.as_records().iter().filter(|r| r.key == 5).collect();
+    let records: Vec<_> = leaf.as_records().into_iter().filter(|r| r.key == 5).collect();
     assert_eq!(records.len(), 2);
     assert!(!records[1].version().is_live(), "the update's own new entry must be invalidated");
     assert!(records[0].version().is_live(), "the original entry must be resurrected");
-    assert_eq!(records[0].payload, 1, "the resurrected entry is the original value");
+    assert_eq!(*records[0].payload(), 1, "the resurrected entry is the original value");
 
     // The invalidated entry is still physically present (SMO drops it
     // at the next split/version-compaction, see smo.rs's `is_live()`
@@ -100,12 +100,12 @@ fn delete_after_update_skips_an_invalidated_entry_to_reach_the_true_predecessor(
         "delete_after_update must skip the invalidated v1 and mark v0 deleted");
     leaf.commit_delta(-1, 1);
 
-    let records: Vec<_> = leaf.as_records().iter().filter(|r| r.key == 1).collect();
+    let records: Vec<_> = leaf.as_records().into_iter().filter(|r| r.key == 1).collect();
     assert_eq!(records.len(), 3);
     assert!(records[0].version().is_deleted(), "v0 must now be marked deleted by T2's update");
     assert!(!records[1].version().is_live(), "v1 stays invalid");
     assert!(records[2].version().is_live(), "v2 is the new live value");
-    assert_eq!(records[2].payload, 12);
+    assert_eq!(*records[2].payload(), 12);
 }
 
 /// Regression for a second bug found alongside the one above:
@@ -133,7 +133,7 @@ fn apply_invalidate_does_not_resurrect_an_unrelated_deletion() {
 
     // The unrelated, genuinely-deleted original entry must stay
     // deleted — this abort has nothing to do with it.
-    let records: Vec<_> = leaf.as_records().iter().filter(|r| r.key == 1).collect();
+    let records: Vec<_> = leaf.as_records().into_iter().filter(|r| r.key == 1).collect();
     assert_eq!(records.len(), 2);
     assert!(records[0].version().is_deleted(), "the unrelated deletion must not be reverted");
     assert!(!records[1].version().is_live(), "the aborted fresh insert must be invalid");

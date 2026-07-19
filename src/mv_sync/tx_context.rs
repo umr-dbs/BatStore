@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 use crate::mv_gc::query_tracer::TransactionTrace;
 use crate::mv_query::SnapShot;
@@ -108,14 +108,27 @@ impl TxContext {
 
     /// See `mv_gc::tracker_handle::TrackerHandleSt::begin_snapshot_registration`
     /// (moved here unchanged, same pairing contract with `end_snapshot_registration`).
+    ///
+    /// `Release`, paired with `registrations_in_flight()`'s `Acquire` load:
+    /// this is a flag gating visibility of a *different* write (the
+    /// `live_tx` insert `draw_snapshot_version_with` performs between this
+    /// call and `end_snapshot_registration`), not a plain counter GC merely
+    /// spins on — see that method's doc.
     #[inline]
     fn begin_snapshot_registration(&self) {
-        self.registrations_in_flight.fetch_add(1, Relaxed);
+        self.registrations_in_flight.fetch_add(1, Release);
     }
 
+    /// `Release`: this decrement is what `registrations_in_flight()`'s
+    /// `Acquire` load synchronizes with. Without that pairing, GC observing
+    /// the count reach zero would carry no happens-before guarantee that the
+    /// `live_tx` insert this registration performed is visible to GC's
+    /// subsequent `live_min_snapshot()` read — two independent atomics don't
+    /// transfer ordering to each other just because they're touched in
+    /// program order on the registering thread.
     #[inline]
     fn end_snapshot_registration(&self) {
-        self.registrations_in_flight.fetch_sub(1, Relaxed);
+        self.registrations_in_flight.fetch_sub(1, Release);
     }
 
     /// Draws a fresh `ts_start` and hands it to `register` before releasing
@@ -236,9 +249,15 @@ impl TxContext {
 
     /// See `registrations_in_flight`'s field doc — `TrackerHandleSt::free_block`
     /// must not reclaim anything while this is nonzero.
+    ///
+    /// `Acquire`, paired with `end_snapshot_registration`'s `Release` store:
+    /// observing zero here must happens-before this call for every
+    /// registration that was ever in flight, so that `free_block`'s
+    /// following `live_min_snapshot()` read is guaranteed to see that
+    /// registration's `live_tx` insert rather than a stale, pre-insert view.
     #[inline]
     pub(crate) fn registrations_in_flight(&self) -> usize {
-        self.registrations_in_flight.load(Relaxed)
+        self.registrations_in_flight.load(Acquire)
     }
 
     /// Test-only: current entry count of one worker's `CommitLog`, for tests
@@ -249,3 +268,9 @@ impl TxContext {
         self.commit_logs[worker_id as usize].len()
     }
 }
+
+// See `mv_test/mod.rs`'s `#[path]`-mod doc for why this file lives in
+// `tests/` instead of next to this module.
+#[cfg(test)]
+#[path = "../../tests/tx_context_registration_tests.rs"]
+mod tests;

@@ -6,7 +6,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr;
-use std::sync::atomic::{fence, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{Ordering::{Acquire, Relaxed, Release}};
 
 pub struct LeafPage<
     const NUM_RECORDS: usize,
@@ -70,12 +70,6 @@ impl<const NUM_RECORDS: usize,
                 );
         }
 
-        // Pairs with `len()`'s `fence(Acquire)`: without this, the compiler
-        // (regardless of CPU memory model) is free to reorder the plain
-        // record_data writes above past this Relaxed store, so a reader
-        // that observes the new `len` isn't guaranteed to observe the
-        // record data it describes.
-        // fence(Release);
         let (active, dead)
             = leaf_page.active_dead_count();
 
@@ -154,6 +148,7 @@ impl<const NUM_RECORDS: usize,
 
     #[inline]
     pub fn push_uncommitted(&mut self, record: RecordPoint<Key, Payload>, index: usize) {
+        debug_assert!(index < NUM_RECORDS, "LeafPage::push_uncommitted: index {index} out of bounds for NUM_RECORDS={NUM_RECORDS}");
         unsafe {
             self.record_data
                 .as_mut_ptr()
@@ -166,11 +161,15 @@ impl<const NUM_RECORDS: usize,
     pub fn commit_delta(&self, active_delta: i32, dead_delta: i32) {
         let len= self.len.load(Relaxed);
         let active = active_len(len) as i32 + active_delta;
-        let dead = (dead_len(len) as i32 + dead_delta) as u32;
-
-        // See `len()`'s doc — pairs with its `fence(Acquire)`, publishing
-        // whatever `push_uncommitted` wrote just before this call.
-        // fence(Release);
+        let dead = dead_len(len) as i32 + dead_delta;
+        
+        debug_assert!(active >= 0, 
+                      "LeafPage active count went negative: len={len}, active_delta={active_delta}");
+        debug_assert!(dead >= 0,
+                      "LeafPage dead count went negative: len={len}, dead_delta={dead_delta}");
+        // let active = active.max(0);
+        // let dead = dead.max(0) as u32;
+        
         self.len.store(from_active_dead(active as Active, dead as Dead), Release)
     }
 
@@ -186,7 +185,7 @@ impl<const NUM_RECORDS: usize,
     #[inline]
     pub fn on_reuse(&mut self) {
         let len = self.len();
-        self.len.store(0, Relaxed);
+        self.len.store(0, Release);
 
         unsafe {
             (0..len).for_each(|index| {

@@ -29,6 +29,11 @@ use crate::mv_tree::mvbt::NUM_RECORDS;
 
 pub const VERBOSE: bool = false;
 pub const LOG_REORG: bool = false;
+/// Gates the `smo.rs` split/merge diagnostic `eprintln!`s left over from the
+/// lost-write investigation (thread id, page address, obsoleted/pushed
+/// fences per split/merge) — flip to `true` to bring them back without
+/// having to re-thread them by hand.
+pub const DIAG: bool = false;
 const SYSTEM_STR: &str = "MVTree";
 pub static MERGES_COUNTER: Mutex<Vec<SnapShot>> = Mutex::new(vec![]);
 pub static SPLITS_COUNTER: Mutex<Vec<SnapShot>> = Mutex::new(vec![]);
@@ -1317,31 +1322,56 @@ pub fn format_insertions(mut i: usize) -> String {
         parts.join(" + ")
     }
 }
+// Test files physically live in `tests/` (not `src/mv_test/`) so all of the
+// project's tests are collected in one place; `#[path]` keeps them wired in
+// as unit tests compiled into the bin crate, since none of this is reachable
+// from a real `tests/` integration test without a `[lib]` target (see
+// `tests/loom_registration_ordering.rs`'s doc for the one test that's a true,
+// self-contained integration test). Each file's `[[test]]`-less status is
+// enforced via `autotests = false` in `Cargo.toml`, so cargo doesn't also try
+// to build these as their own standalone integration-test crates.
 #[cfg(test)]
+#[path = "../../tests/wal_record_tests.rs"]
 mod wal_record_tests;
 #[cfg(test)]
+#[path = "../../tests/wal_writer_tests.rs"]
 mod wal_writer_tests;
 #[cfg(test)]
+#[path = "../../tests/wal_recovery_tests.rs"]
 mod wal_recovery_tests;
 #[cfg(test)]
+#[path = "../../tests/wal_integration_tests.rs"]
 mod wal_integration_tests;
 #[cfg(test)]
+#[path = "../../tests/db_integration_tests.rs"]
 mod db_integration_tests;
 #[cfg(test)]
+#[path = "../../tests/query_dispatch_tests.rs"]
 mod query_dispatch_tests;
 #[cfg(test)]
+#[path = "../../tests/query_transaction_tests.rs"]
 mod query_transaction_tests;
 #[cfg(test)]
+#[path = "../../tests/iter_query_tests.rs"]
+mod iter_query_tests;
+#[cfg(test)]
+#[path = "../../tests/leaf_page_abort_tests.rs"]
 mod leaf_page_abort_tests;
 #[cfg(test)]
+#[path = "../../tests/gc_query_tracer_tests.rs"]
 mod gc_query_tracer_tests;
 #[cfg(test)]
+#[path = "../../tests/sync_commit_log_tests.rs"]
 mod sync_commit_log_tests;
 #[cfg(test)]
+#[path = "../../tests/bench_tpcc_txn_tests.rs"]
 mod bench_tpcc_txn_tests;
 #[cfg(test)]
+#[path = "../../tests/bench_tpcc_wal_codec_tests.rs"]
 mod bench_tpcc_wal_codec_tests;
 #[cfg(test)]
+#[path = "../../tests/tree_wal_consistency_tests.rs"]
 mod tree_wal_consistency_tests;
 #[cfg(test)]
+#[path = "../../tests/smo_race_investigation_tests.rs"]
 mod smo_race_investigation_tests;

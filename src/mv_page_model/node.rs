@@ -297,6 +297,11 @@ impl<const FAN_OUT: usize,
         unsafe {
             self.page.leaf.len.store(0, Relaxed);
             self.page.internal.len.store(0, Relaxed);
+            // See `InternalPage::force_reinit_pointer_region`'s doc: needed
+            // unconditionally, not just on a leaf->internal transition —
+            // it's always sound and the alternative is tracking the old
+            // type here too, for no benefit.
+            self.page.internal.force_reinit_pointer_region();
         }
     }
 
