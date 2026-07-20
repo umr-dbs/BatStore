@@ -165,12 +165,12 @@ impl<const FAN_OUT: usize,
                     // into it. Skipped when `curr_guard` is already *our
                     // own* `Writer` from earlier in this traversal — that
                     // exclusion already makes its content stable.
-                    let curr_is_reader
-                        = curr_guard.is_reader();
-
-                    if curr_is_reader && curr_guard.is_write_locked() {
-                        return Err(attempts + 1);
-                    }
+                    // let curr_is_reader
+                    //     = curr_guard.is_reader();
+                    //
+                    // if curr_is_reader && curr_guard.is_write_locked() {
+                    //     return Err(attempts + 1);
+                    // }
 
                     let curr_version_before
                         = curr_guard.live_version();
@@ -205,7 +205,7 @@ impl<const FAN_OUT: usize,
                         .get_pointer(index)
                         .borrow_read();
 
-                    if curr_is_reader && curr_guard.live_version() != curr_version_before {
+                    if curr_guard.live_version() != curr_version_before {
                         if VERBOSE {
                             println!("traversal_write_internal_olc: curr_guard changed during index lookup");
                         }
@@ -238,7 +238,7 @@ impl<const FAN_OUT: usize,
                                 }
                             },
                         BlockUnsafeDegree::ActiveUnderflow // next_curr_guard.upgrade_write_lock() &&
-                        if curr_guard.upgrade_write_lock() 
+                        if curr_guard.upgrade_write_lock()
                             && next_curr_guard.upgrade_write_lock()
                         => match self.on_underflow_node(curr_guard, next_curr_guard, index) {
                                 Ok(guard) => curr_guard = guard,

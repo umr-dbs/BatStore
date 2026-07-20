@@ -16,19 +16,10 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Bulk improve system">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Improve Tx conflict findings">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_block/block_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_block/block_handle.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_db/transaction.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_db/transaction.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_page_model/node.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/node.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/leaf_page_abort_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/leaf_page_abort_tests.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -82,61 +73,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.5467938840212094E-10" />
-      <entry key="MS500" value="0.011245005083682745" />
-      <entry key="S2" value="0.5388302696658758" />
-      <entry key="S5" value="1.514547794399975" />
-      <entry key="S10" value="2.3502269438585297" />
-      <entry key="S30" value="5.287044440422152" />
-      <entry key="S60" value="10.236655742800261" />
-      <entry key="M2" value="17.307232731860502" />
-      <entry key="M5" value="30.723717028445783" />
-      <entry key="M10" value="46.644313165345324" />
-      <entry key="M15" value="60.128071449373934" />
-      <entry key="M30" value="96.42348604178596" />
-      <entry key="H1" value="159.3166225692646" />
-      <entry key="H2" value="251.20929622818502" />
-      <entry key="H4" value="357.9575177959798" />
-      <entry key="D1" value="2470.1804760956425" />
-      <entry key="W1" value="9005.209742416731" />
+      <entry key="MS100" value="1.0000058902736206" />
+      <entry key="MS500" value="1.1486275253857299" />
+      <entry key="S2" value="2.9302543032725206" />
+      <entry key="S5" value="4.740431617987635" />
+      <entry key="S10" value="5.723065077395182" />
+      <entry key="S30" value="6.536361074639249" />
+      <entry key="S60" value="6.7637773856963195" />
+      <entry key="M2" value="7.021977932743719" />
+      <entry key="M5" value="11.682473051538778" />
+      <entry key="M10" value="26.058164191304662" />
+      <entry key="M15" value="40.81776808628264" />
+      <entry key="M30" value="80.73670248876417" />
+      <entry key="H1" value="147.8236316888148" />
+      <entry key="H2" value="245.1629713988303" />
+      <entry key="H4" value="358.3284113196645" />
+      <entry key="D1" value="2468.084295462487" />
+      <entry key="W1" value="9012.25725408435" />
     </decayedCancelled>
     <decayedSelected>
-      <entry key="MS100" value="1.000000057176597" />
-      <entry key="MS500" value="1.0355994805381912" />
-      <entry key="S2" value="1.4343710925758129" />
-      <entry key="S5" value="1.7163936387531942" />
-      <entry key="S10" value="1.8501920561573533" />
-      <entry key="S30" value="2.2002178158723673" />
-      <entry key="S60" value="3.08421509950686" />
-      <entry key="M2" value="5.129523430323692" />
-      <entry key="M5" value="10.321426956429532" />
-      <entry key="M10" value="17.212922802809196" />
-      <entry key="M15" value="23.528527762473065" />
-      <entry key="M30" value="39.177727740019485" />
-      <entry key="H1" value="59.51992867080035" />
-      <entry key="H2" value="83.035178915525" />
-      <entry key="H4" value="108.17973671345611" />
-      <entry key="D1" value="335.00265690638156" />
-      <entry key="W1" value="1010.1608469506242" />
+      <entry key="MS100" value="0.0" />
+      <entry key="MS500" value="0.0" />
+      <entry key="S2" value="1.181805056755039E-145" />
+      <entry key="S5" value="1.5884393025142837E-58" />
+      <entry key="S10" value="1.7798921019242356E-29" />
+      <entry key="S30" value="4.679412149314194E-10" />
+      <entry key="S60" value="4.4978759098716416E-5" />
+      <entry key="M2" value="0.019588826660663628" />
+      <entry key="M5" value="1.1130439300902948" />
+      <entry key="M10" value="5.652504308932215" />
+      <entry key="M15" value="11.199164070216476" />
+      <entry key="M30" value="27.029292052465593" />
+      <entry key="H1" value="49.43791148278798" />
+      <entry key="H2" value="75.67649034172828" />
+      <entry key="H4" value="103.27503444662995" />
+      <entry key="D1" value="332.42204956699015" />
+      <entry key="W1" value="1009.0455142520666" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="2.2265369399312085E-7" />
-      <entry key="MS500" value="0.05958465769657917" />
-      <entry key="S2" value="1.1215172682529566" />
-      <entry key="S5" value="2.617684515771416" />
-      <entry key="S10" value="3.795843416478909" />
-      <entry key="S30" value="7.302814283831803" />
-      <entry key="S60" value="13.189946443337526" />
-      <entry key="M2" value="22.329681227146768" />
-      <entry key="M5" value="40.96255884131447" />
-      <entry key="M10" value="63.791394281277476" />
-      <entry key="M15" value="83.59853713172186" />
-      <entry key="M30" value="135.55466612173612" />
-      <entry key="H1" value="218.80085149081933" />
-      <entry key="H2" value="334.2184703590093" />
-      <entry key="H4" value="466.119430523882" />
-      <entry key="D1" value="2805.1736608547662" />
-      <entry key="W1" value="10015.366577245159" />
+      <entry key="MS100" value="0.058720572111693334" />
+      <entry key="MS500" value="0.6679124976927041" />
+      <entry key="S2" value="2.691758173155657" />
+      <entry key="S5" value="4.616145668513924" />
+      <entry key="S10" value="5.6541515490641245" />
+      <entry key="S30" value="6.5116339871466655" />
+      <entry key="S60" value="6.751219389180951" />
+      <entry key="M2" value="7.034795284805657" />
+      <entry key="M5" value="12.784042650839291" />
+      <entry key="M10" value="31.687752606534453" />
+      <entry key="M15" value="51.98842907127942" />
+      <entry key="M30" value="107.7334449042126" />
+      <entry key="H1" value="197.2316719473412" />
+      <entry key="H2" value="320.81565201437485" />
+      <entry key="H4" value="461.58637507665946" />
+      <entry key="D1" value="2800.4969367044323" />
+      <entry key="W1" value="10021.298759337564" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -1348,15 +1339,7 @@
       <workItem from="1784494760936" duration="1653000" />
       <workItem from="1784496573345" duration="1000" />
       <workItem from="1784497342647" duration="285000" />
-      <workItem from="1784536738406" duration="5539000" />
-    </task>
-    <task id="LOCAL-00140" summary="Optimized range iter and fixed update invariant issue. I will transform it into a set of 2 sequential atomic operations. For now, I use a fixed visibility window.">
-      <option name="closed" value="true" />
-      <created>1766242075533</created>
-      <option name="number" value="00140" />
-      <option name="presentableId" value="LOCAL-00140" />
-      <option name="project" value="LOCAL" />
-      <updated>1766242075533</updated>
+      <workItem from="1784536738406" duration="6607000" />
     </task>
     <task id="LOCAL-00141" summary="Fix SI for update operations; Divided into two atomic sequential operations, as described in the paper.">
       <option name="closed" value="true" />
@@ -1742,7 +1725,15 @@
       <option name="project" value="LOCAL" />
       <updated>1784495700487</updated>
     </task>
-    <option name="localTasksCounter" value="189" />
+    <task id="LOCAL-00189" summary="Improve Tx conflict findings">
+      <option name="closed" value="true" />
+      <created>1784542379621</created>
+      <option name="number" value="00189" />
+      <option name="presentableId" value="LOCAL-00189" />
+      <option name="project" value="LOCAL" />
+      <updated>1784542379621</updated>
+    </task>
+    <option name="localTasksCounter" value="190" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1760,7 +1751,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Commit for exps" />
     <MESSAGE value="Fix GC lag in blocks; Remove extra latch for SMO" />
     <MESSAGE value="Fix GC on empty Reader threads" />
     <MESSAGE value="Fix UIP logic" />
@@ -1785,7 +1775,8 @@
     <MESSAGE value="Cleaned and added tests" />
     <MESSAGE value="Added benchmark suite for auto-testing and scripts for plot" />
     <MESSAGE value="Bulk improve system" />
-    <option name="LAST_COMMIT_MESSAGE" value="Bulk improve system" />
+    <MESSAGE value="Improve Tx conflict findings" />
+    <option name="LAST_COMMIT_MESSAGE" value="Improve Tx conflict findings" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

@@ -294,9 +294,9 @@ impl<E: Default + 'static> SmartGuard<E> {
     #[inline(always)]
     pub fn live_version(&self) -> LatchVersion {
         match self {
-            Reader(cell, ..) |
-            Writer(cell, ..) =>
+            Reader(cell, ..) =>
                 unsafe { (*cell.0).cell_version.load(Acquire) },
+            Writer(.., latch) => *latch
         }
     }
 
