@@ -112,6 +112,30 @@ type IsRead = bool;
 pub struct OptCell<E: Default> {
     pub cell: SafeCell<E>,
     pub cell_version: AtomicVersion,
+    /// Set once, permanently, the moment this cell stops being anyone's live
+    /// child — i.e. exactly when its *parent's* corresponding entry is
+    /// `mark_version_obsolete`'d (see `TrackerHandleSt::register_died_page`/
+    /// `register_died_page_col`, called from the same `on_overflow_node`/
+    /// `on_underflow_node`/`split_root`/`merge_root` sites that do the
+    /// obsoleting). Closes a gap the version-CAS alone can't: a `Reader`
+    /// that obtained this cell as a *child pointer* before it was retired
+    /// keeps re-validating cleanly forever afterward — nothing ever mutates
+    /// a retired cell's content again, so a before/after `cell_version`
+    /// comparison trivially "passes" for it for all time, even though the
+    /// parent that handed it out no longer considers it live. A thread
+    /// delayed (scheduling, contention) between reading that stale parent
+    /// and finally locking this cell could walk an entire already-orphaned
+    /// subtree and silently commit a write nobody currently reachable from
+    /// the root will ever see (confirmed empirically: a fresh insert
+    /// landing in a leaf a concurrent merge had already folded into a
+    /// different combined block moments earlier). Checked by
+    /// `upgrade_write_lock` (refuses to lock a retired cell, forcing the
+    /// caller to restart from the root, where the still-live replacement is
+    /// reachable) and by the traversal's own "is this still safe to read"
+    /// gate, independent of GC/block-reclaim — this is a correctness fix,
+    /// not a reclaim-scheduling one, so it applies whether or not block
+    /// reuse is ever turned on.
+    pub retired: std::sync::atomic::AtomicBool,
 }
 
 impl<E: Default + Display> Display for OptCell<E> {
@@ -134,6 +158,7 @@ impl<E: Default> OptCell<E> {
         Self {
             cell: SafeCell::new(data),
             cell_version: AtomicVersion::new(Self::CELL_START_VERSION),
+            retired: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -241,6 +266,18 @@ impl<E: Default + 'static> SmartGuard<E> {
     pub fn upgrade_write_lock(&mut self) -> bool {
         match self {
             Reader(cell, read_latch) => unsafe {
+                // A retired cell's `cell_version` never changes again (see
+                // `OptCell::retired`'s doc), so the CAS below would happily
+                // succeed against a stale `read_latch` from long before this
+                // cell was folded into its replacement — refusing here,
+                // before even attempting the CAS, is what actually closes
+                // that gap; a version-only check can't, because "unchanged"
+                // is exactly what a permanently-frozen retired cell looks
+                // like.
+                if (*cell.0).retired.load(Acquire) {
+                    return false;
+                }
+
                 if let Some(write_latch)
                     = (*cell.0).write_lock(*read_latch & !WRITE_FLAG_VERSION)
                 {
@@ -251,6 +288,18 @@ impl<E: Default + 'static> SmartGuard<E> {
                 false
             }
             _ => true
+        }
+    }
+
+    /// See `OptCell::retired`'s doc. Always `false` for a `Writer` — nothing
+    /// still holding this cell's own write lock could have had it retired
+    /// out from under it (retiring a cell requires *its own* write lock
+    /// first).
+    #[inline(always)]
+    pub fn is_retired(&self) -> bool {
+        match self {
+            Reader(cell, ..) => unsafe { (*cell.0).retired.load(Acquire) },
+            Writer(..) => false,
         }
     }
 
@@ -393,6 +442,29 @@ impl<E: Default> SmartCell<E> {
     #[inline(always)]
     pub fn borrow_read(&self) -> SmartGuard<E> {
         Reader(self.clone(), unsafe { (*self.0).cell_version.load(Acquire) } & !WRITE_FLAG_VERSION)
+    }
+
+    /// See `OptCell::retired`'s doc. Called exactly where a cell stops being
+    /// anyone's live child — the same `register_died_page`/
+    /// `register_died_page_col` call sites that already exist for GC, but
+    /// unconditional on `block_reclaim_enabled`: this is a correctness fix
+    /// for the write traversal, not a reclaim-scheduling one.
+    #[inline(always)]
+    pub fn mark_retired(&self) {
+        unsafe { (*self.0).retired.store(true, Release); }
+    }
+
+    #[inline(always)]
+    pub fn is_retired(&self) -> bool {
+        unsafe { (*self.0).retired.load(Acquire) }
+    }
+
+    /// Reverses `mark_retired` for a block GC hands back out via
+    /// `free_block` — otherwise a reused block would look permanently
+    /// retired to `upgrade_write_lock` and could never be written to again.
+    #[inline(always)]
+    pub fn clear_retired(&self) {
+        unsafe { (*self.0).retired.store(false, Release); }
     }
 }
 

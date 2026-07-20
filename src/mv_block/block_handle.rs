@@ -225,6 +225,10 @@ impl<const FAN_OUT: usize,
                     m_page.mark_internal()
                 }
 
+                // See `OptCell::retired`'s doc: reverses `mark_retired` so
+                // this reused block isn't permanently un-lockable.
+                block.clear_retired();
+
                 // Synchronizes with whatever `fence(Release)` last published
                 // this block's *previous* life's content (see
                 // `leaf_page::LeafPage::len`'s doc) before we reset and

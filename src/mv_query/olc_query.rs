@@ -172,6 +172,21 @@ impl<const FAN_OUT: usize,
                         return Err(attempts + 1);
                     }
 
+                    // `curr_guard` may be a `Reader` obtained *before* this
+                    // exact node was folded into a replacement by a
+                    // concurrent `on_overflow_node`/`on_underflow_node`
+                    // elsewhere (this level itself was never the one
+                    // overflowing/underflowing — only reached here as
+                    // *somebody else's* now-obsolete child). Once that
+                    // happens its content is frozen forever (nothing ever
+                    // mutates a retired node again), so the version-based
+                    // check above can never catch it — a before/after
+                    // comparison sees "unchanged" for all eternity. See
+                    // `OptCell::retired`'s doc.
+                    if curr_is_reader && curr_guard.is_retired() {
+                        return Err(attempts + 1);
+                    }
+
                     let curr_version_before
                         = curr_guard.live_version();
 

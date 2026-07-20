@@ -68,10 +68,15 @@ impl<const P_F: usize,
         self.block_reclaim_enabled.load(Relaxed)
     }
 
-    /// No-op while block reclaim is disabled — otherwise `dead_blocks` would
-    /// just grow forever recording pages nothing will ever come collect.
+    /// Always marks `page` retired (see `OptCell::retired`'s doc) — a
+    /// correctness fix independent of GC, so it applies whether or not block
+    /// reclaim is on. The actual `dead_blocks` bookkeeping stays gated
+    /// behind `block_reclaim_enabled` as before — otherwise it would just
+    /// grow forever recording pages nothing will ever come collect.
     #[inline]
     pub fn register_died_page(&self, worker_id: WorkerId, page_version: Version, page: DeadPageValue<P_F, P_N, Key, Payload>) {
+        page.mark_retired();
+
         if self.block_reclaim_enabled.load(Relaxed) {
             self.dead_blocks.register_died_page(worker_id, page_version, page)
         }
@@ -79,6 +84,8 @@ impl<const P_F: usize,
 
     #[inline]
     pub fn register_died_page_col(&self, worker_id: WorkerId, dead_pages: [(Version, BlockRef<P_F, P_N, Key, Payload>); 2]) {
+        dead_pages.iter().for_each(|(_, page)| page.mark_retired());
+
         if self.block_reclaim_enabled.load(Relaxed) {
             self.dead_blocks.register_died_page_col(worker_id, dead_pages)
         }

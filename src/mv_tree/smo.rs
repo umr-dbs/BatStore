@@ -20,7 +20,7 @@ use std::ops::Deref;
 // itself doesn't perturb the race being chased; call `drain_trace_log` to
 // dump it out once a failure is detected. Remove once the investigation
 // concludes.
-pub(crate) const TRACE_KEY_DEBUG: bool = true;
+pub(crate) const TRACE_KEY_DEBUG: bool = false;
 
 pub(crate) static TRACE_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
