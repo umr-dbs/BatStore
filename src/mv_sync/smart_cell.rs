@@ -294,7 +294,9 @@ impl<E: Default + 'static> SmartGuard<E> {
     #[inline(always)]
     pub fn live_version(&self) -> LatchVersion {
         match self {
-            Reader(cell, ..) | Writer(cell, ..) => unsafe { (*cell.0).cell_version.load(Acquire) },
+            Reader(cell, ..) |
+            Writer(cell, ..) =>
+                unsafe { (*cell.0).cell_version.load(Acquire) },
         }
     }
 
@@ -390,7 +392,7 @@ impl<E: Default> SmartCell<E> {
     /// ever frees it, by design, as long as GC's block-reclaim stays off).
     #[inline(always)]
     pub fn borrow_read(&self) -> SmartGuard<E> {
-        Reader(self.clone(), unsafe { (*self.0).cell_version.load(Relaxed) } & !WRITE_FLAG_VERSION)
+        Reader(self.clone(), unsafe { (*self.0).cell_version.load(Acquire) } & !WRITE_FLAG_VERSION)
     }
 }
 

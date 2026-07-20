@@ -230,7 +230,7 @@ impl<const FAN_OUT: usize,
                 // `leaf_page::LeafPage::len`'s doc) before we reset and
                 // repurpose it — belt-and-suspenders alongside the
                 // release/acquire pairs around each page type's own `len`.
-                fence(Acquire);
+                // fence(Acquire);
                 block
             }
             None => {

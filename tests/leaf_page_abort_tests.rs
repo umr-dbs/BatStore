@@ -26,12 +26,12 @@ fn abort_write_reverts_a_plain_insert() {
     let record = leaf.as_records().into_iter().rfind(|r| r.key == 1).unwrap();
     assert!(!record.version().is_live());
     assert!(record.version().insertion_stamp().is_invalid());
-    assert_eq!(leaf.active_dead_count(), (0, 1));
+    assert_eq!(leaf.active_dead_invalid(), (0, 0, 1));
 
     // Idempotent: processing the same key's abort twice must not
     // double-adjust the counts.
     assert_eq!(leaf.abort_write(1, stamp), AbortOutcome::NotFound);
-    assert_eq!(leaf.active_dead_count(), (0, 1));
+    assert_eq!(leaf.active_dead_invalid(), (0, 0, 1));
 }
 
 /// Reverting an aborted `Update`: the newer entry must be invalidated

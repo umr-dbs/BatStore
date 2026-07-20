@@ -226,8 +226,8 @@ impl<const FAN_OUT: usize,
                     }
                     match next_curr_guard.unsafe_degree() {
                         BlockUnsafeDegree::Overflow // next_curr_guard.upgrade_write_lock() &&
-                        if curr_guard.upgrade_write_lock() &&
-                            next_curr_guard.upgrade_write_lock()
+                        if curr_guard.upgrade_write_lock()
+                             && next_curr_guard.upgrade_write_lock()
                         => match self.on_overflow_node(curr_guard, next_curr_guard, index) {
                                 Ok(guard) => curr_guard = guard,
                                 Err(..) => {
@@ -238,8 +238,8 @@ impl<const FAN_OUT: usize,
                                 }
                             },
                         BlockUnsafeDegree::ActiveUnderflow // next_curr_guard.upgrade_write_lock() &&
-                        if  curr_guard.upgrade_write_lock() &&
-                            next_curr_guard.upgrade_write_lock()
+                        if curr_guard.upgrade_write_lock() 
+                            && next_curr_guard.upgrade_write_lock()
                         => match self.on_underflow_node(curr_guard, next_curr_guard, index) {
                                 Ok(guard) => curr_guard = guard,
                                 Err(..) => {

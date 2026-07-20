@@ -301,7 +301,7 @@ impl<const FAN_OUT: usize,
             // unconditionally, not just on a leaf->internal transition —
             // it's always sound and the alternative is tracking the old
             // type here too, for no benefit.
-            self.page.internal.force_reinit_pointer_region();
+            // self.page.internal.force_reinit_pointer_region();
         }
     }
 

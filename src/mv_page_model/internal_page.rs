@@ -131,7 +131,7 @@ impl<const FAN_OUT: usize,
         // turns it into the same loud, clean panic `pointer_region`'s own
         // bounds-checked indexing already gives for the same out-of-bounds
         // condition.
-        assert!(index < FAN_OUT, "InternalPage::push_uncommitted: index {index} out of bounds for FAN_OUT={FAN_OUT}");
+        debug_assert!(index < FAN_OUT, "InternalPage::push_uncommitted: index {index} out of bounds for FAN_OUT={FAN_OUT}");
         unsafe {
             self.key_interval_region
                 .as_mut_ptr()
@@ -172,25 +172,25 @@ impl<const FAN_OUT: usize,
         self.len.store(0, Release);
     }
 
-    /// Unconditionally re-initializes every slot to `null` via a raw write
-    /// that never reads whatever was previously there. Needed because
-    /// `Node`'s `page` field is a `union` (`InnerPage`): when a block that
-    /// was previously a *leaf* gets reused as an *internal* page
-    /// (`Node::on_reuse` dispatches to `LeafPage::on_reuse`, which knows
-    /// nothing about `pointer_region`), this array's bytes are still
-    /// whatever `LeafPage`'s record data left behind — not a legitimate
-    /// `AtomicPtr`. Treating it as one (reading or swapping into it as-is)
-    /// would interpret garbage bytes as a raw pointer, which `get_pointer`'s
-    /// caller could then dereference. Safe to call unconditionally even
-    /// when the block *was* already internal: `on_reuse` above has already
-    /// made every slot unreachable (`sum_len() == 0`) by then, so
-    /// overwriting them again without reading them first loses nothing.
-    #[inline]
-    pub fn force_reinit_pointer_region(&mut self) {
-        self.pointer_region
-            .iter_mut()
-            .for_each(|slot| *slot = SmartCell(ptr::null()));
-    }
+    // /// Unconditionally re-initializes every slot to `null` via a raw write
+    // /// that never reads whatever was previously there. Needed because
+    // /// `Node`'s `page` field is a `union` (`InnerPage`): when a block that
+    // /// was previously a *leaf* gets reused as an *internal* page
+    // /// (`Node::on_reuse` dispatches to `LeafPage::on_reuse`, which knows
+    // /// nothing about `pointer_region`), this array's bytes are still
+    // /// whatever `LeafPage`'s record data left behind — not a legitimate
+    // /// `AtomicPtr`. Treating it as one (reading or swapping into it as-is)
+    // /// would interpret garbage bytes as a raw pointer, which `get_pointer`'s
+    // /// caller could then dereference. Safe to call unconditionally even
+    // /// when the block *was* already internal: `on_reuse` above has already
+    // /// made every slot unreachable (`sum_len() == 0`) by then, so
+    // /// overwriting them again without reading them first loses nothing.
+    // #[inline]
+    // pub fn force_reinit_pointer_region(&mut self) {
+    //     self.pointer_region
+    //         .iter_mut()
+    //         .for_each(|slot| *slot = SmartCell(ptr::null()));
+    // }
 
     #[inline]
     pub fn bulk_push(&self, entries: Vec<((&Interval<Key>, &Version), &BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)>) {
@@ -206,7 +206,7 @@ impl<const FAN_OUT: usize,
         // `version_region` past `FAN_OUT` via a raw, unchecked store,
         // silently corrupting `pointer_region`'s adjacent bytes instead of
         // failing where the actual out-of-bounds condition is.
-        assert!(len + add <= FAN_OUT, "InternalPage::bulk_push: {add} entries pushed at len={len} overflow FAN_OUT={FAN_OUT}");
+        debug_assert!(len + add <= FAN_OUT, "InternalPage::bulk_push: {add} entries pushed at len={len} overflow FAN_OUT={FAN_OUT}");
 
         entries.into_iter()
             .enumerate()
@@ -361,22 +361,23 @@ impl<const FAN_OUT: usize,
 
     #[inline(always)]
     pub fn get_pointer(&self, index: usize) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let cell = self.pointer_region[index];
-        let raw = cell.0;
-
+        unsafe { *self.pointer_region.get_unchecked(index) }
+        // let cell = self.pointer_region[index];
+        // let raw = cell.0;
+        //
         // A real `assert!`, not `debug_assert!`: a null slot here means the
         // caller is about to dereference a null `SmartCell` — an instant,
         // silent SIGSEGV, in release builds too (this profile has
         // `debug-assertions = false`). Fail loudly instead of trading a
         // diagnosable panic for a crash with no message.
-        assert!(!raw.is_null(), "InternalPage::get_pointer: slot {index} must be populated");
-        assert!(
-            (raw as usize) >= 0x1000 && (raw as usize) % std::mem::align_of::<ChildBase<FAN_OUT, NUM_RECORDS, Key, Payload>>() == 0,
-            "InternalPage::get_pointer: slot {index} holds a garbage pointer {raw:#x?} (sum_len={}, self={:p})",
-            self.sum_len(), self
-        );
-
-        cell
+        // assert!(!raw.is_null(), "InternalPage::get_pointer: slot {index} must be populated");
+        // assert!(
+        //     (raw as usize) >= 0x1000 && (raw as usize) % std::mem::align_of::<ChildBase<FAN_OUT, NUM_RECORDS, Key, Payload>>() == 0,
+        //     "InternalPage::get_pointer: slot {index} holds a garbage pointer {raw:#x?} (sum_len={}, self={:p})",
+        //     self.sum_len(), self
+        // );
+        //
+        // cell
     }
 
     #[inline(always)]

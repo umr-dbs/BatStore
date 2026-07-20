@@ -61,6 +61,7 @@ use crate::mv_wal::record::{TableId, WalPayload};
 use std::cell::RefCell;
 use std::fmt::Display;
 use std::hash::Hash;
+use std::ops::DerefMut;
 use triomphe::Arc;
 
 use super::database::Database;
@@ -140,24 +141,24 @@ impl<
         CRUDOperationResult::MatchedRecords(scan.collect())
     }
 
-    /// First-writer-wins check, on `table`: the physically newest version at
-    /// `key`, if any, must be visible to this transaction's snapshot — see
-    /// `TpccTxn::newest_visible_to_me`'s identical reasoning (including why
-    /// an invalid/aborted entry is skipped rather than checked).
-    fn newest_visible_to_me(
-        &self,
-        tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
-        leaf_page: &LeafPage<NUM_RECORDS, Key, Payload>,
-        key: Key,
-    ) -> bool {
-        let is_visible = |stamp| tree.is_visible_stamp(self.worker_id, self.ts_start, stamp);
-
-        leaf_page.as_records()
-            .iter()
-            .rfind(|r| r.key() == key && !r.version().insertion_stamp().is_invalid())
-            .map(|record| is_visible(record.version().insertion_stamp()))
-            .unwrap_or(true)
-    }
+    // /// First-writer-wins check, on `table`: the physically newest version at
+    // /// `key`, if any, must be visible to this transaction's snapshot — see
+    // /// `TpccTxn::newest_visible_to_me`'s identical reasoning (including why
+    // /// an invalid/aborted entry is skipped rather than checked).
+    // fn newest_visible_to_me(
+    //     &self,
+    //     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    //     leaf_page: &LeafPage<NUM_RECORDS, Key, Payload>,
+    //     key: Key,
+    // ) -> bool {
+    //     let is_visible = |stamp| tree.is_visible_stamp(self.worker_id, self.ts_start, stamp);
+    //
+    //     leaf_page.as_records()
+    //         .iter()
+    //         .rfind(|r| r.key() == key && !r.version().insertion_stamp().is_invalid())
+    //         .map(|record| is_visible(record.version().insertion_stamp()))
+    //         .unwrap_or(true)
+    // }
 
     pub fn insert(&self, table: TableId, key: Key, payload: Payload) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let tree = self.tree(table);
@@ -165,17 +166,23 @@ impl<
         let leaf_deref_mut = leaf_guard.deref_mut();
         let leaf_page = leaf_deref_mut.as_leaf_page();
 
-        if !self.newest_visible_to_me(&tree, leaf_page, key) {
-            return CRUDOperationResult::Conflict;
-        }
+        // if !self.newest_visible_to_me(&tree, leaf_page, key) {
+        //     return CRUDOperationResult::Conflict;
+        // }
 
-        if leaf_page.as_records()
+        if let Some(crud_error) = leaf_page
+            .as_records()
             .iter()
             .rfind(|r| r.key == key)
-            .map(|r| r.version.is_live())
-            .unwrap_or(false)
+            .filter(|r| r.version.is_live())
+            .map(|r|
+                if r.version.insertion_stamp().worker_id() != self.worker_id {
+                    CRUDOperationResult::Conflict
+                } else {
+                    CRUDOperationResult::ZeroAffected(KeyAlreadyExists)
+                })
         {
-            return CRUDOperationResult::ZeroAffected(KeyAlreadyExists);
+            return crud_error
         }
 
         let stamp = TxStamp::new(self.worker_id, self.ts_start);
@@ -199,38 +206,69 @@ impl<
         let leaf_deref_mut = leaf_guard.deref_mut();
         let leaf_page = leaf_deref_mut.as_leaf_page();
 
-        if !self.newest_visible_to_me(&tree, leaf_page, key) {
-            return CRUDOperationResult::Conflict;
-        }
+        // if !self.newest_visible_to_me(&tree, leaf_page, key) {
+        //     return CRUDOperationResult::Conflict;
+        // }
+        match leaf_page
+            .as_records_mut()
+            .iter_mut()
+            .rfind(|r| r.key() == key)
+        {
+            Some(record) =>
+            if tree.is_visible_stamp(self.worker_id, self.ts_start, record.version.insert_stamp) {
+                let stamp
+                    = TxStamp::new(self.worker_id, self.ts_start);
 
-        let stamp = TxStamp::new(self.worker_id, self.ts_start);
-        tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
+                tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
+                if !record.version.delete(stamp) {
+                    return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
+                }
 
-        let current_len = leaf_page.len();
+                let current_len
+                    = leaf_page.len();
 
-        leaf_page.push_uncommitted(
-            RecordPoint::new(key, VersionInfo::new(stamp), payload),
-            current_len);
+                leaf_page.push_uncommitted(
+                    RecordPoint::new(key, VersionInfo::new(stamp), payload),
+                    current_len);
 
-        leaf_page.commit_delta(1, 0);
-
-        match leaf_page.delete_after_update(key, stamp) {
-            Ok(Some(..)) => {
-                leaf_page.commit_delta(-1, 1);
+                leaf_page.commit_delta(0, 1);
                 self.written.borrow_mut().push((table, key));
                 CRUDOperationResult::Updated(stamp.ts_start())
             }
-            Ok(None) => {
-                leaf_page.commit_delta(-1, 0);
-                leaf_page.undo_uncommitted(current_len);
-                CRUDOperationResult::ZeroAffected(KeyDoesNotExist)
+            else {
+                CRUDOperationResult::Conflict
             }
-            Err(()) => {
-                leaf_page.commit_delta(-1, 0);
-                leaf_page.undo_uncommitted(current_len);
-                CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
-            }
+            None => CRUDOperationResult::ZeroAffected(KeyDoesNotExist)
         }
+
+    // let stamp = TxStamp::new(self.worker_id, self.ts_start);
+    //     tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
+    //
+    //     let current_len = leaf_page.len();
+    //
+    //     leaf_page.push_uncommitted(
+    //         RecordPoint::new(key, VersionInfo::new(stamp), payload),
+    //         current_len);
+    //
+    //     leaf_page.commit_delta(1, 0);
+    //
+    //     match leaf_page.delete_after_update(key, stamp) {
+    //         Ok(Some(..)) => {
+    //             leaf_page.commit_delta(-1, 1);
+    //             self.written.borrow_mut().push((table, key));
+    //             CRUDOperationResult::Updated(stamp.ts_start())
+    //         }
+    //         Ok(None) => {
+    //             leaf_page.commit_delta(-1, 0);
+    //             leaf_page.undo_uncommitted(current_len);
+    //             CRUDOperationResult::ZeroAffected(KeyDoesNotExist)
+    //         }
+    //         Err(()) => {
+    //             leaf_page.commit_delta(-1, 0);
+    //             leaf_page.undo_uncommitted(current_len);
+    //             CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
+    //         }
+    //     }
     }
 
     pub fn delete(&self, table: TableId, key: Key) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
@@ -239,22 +277,51 @@ impl<
         let leaf_deref_mut = leaf_guard.deref_mut();
         let leaf_page = leaf_deref_mut.as_leaf_page();
 
-        if !self.newest_visible_to_me(&tree, leaf_page, key) {
-            return CRUDOperationResult::Conflict;
-        }
+        // if !self.newest_visible_to_me(&tree, leaf_page, key) {
+        //     return CRUDOperationResult::Conflict;
+        // }
 
-        let stamp = TxStamp::new(self.worker_id, self.ts_start);
-        tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));
+        match leaf_page
+            .as_records_mut()
+            .iter_mut()
+            .rfind(|r| r.key == key)
+        {
+            Some(record) => if tree.is_visible_stamp(
+                self.worker_id,
+                self.ts_start,
+                record.version.insert_stamp)
+            {
+                let stamp = TxStamp::new(self.worker_id, self.ts_start);
+                tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));
 
-        match leaf_page.delete(key, stamp) {
-            Ok(Some(..)) => {
-                leaf_page.commit_delta(-1, 1);
-                self.written.borrow_mut().push((table, key));
-                CRUDOperationResult::Deleted(stamp.ts_start())
+                if record.version.delete(stamp) {
+                    leaf_page.commit_delta(-1, 1);
+                    self.written.borrow_mut().push((table, key));
+
+                    CRUDOperationResult::Deleted(stamp.ts_start())
+                }
+                else {
+                    CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
+                }
             }
-            Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
-            Err(()) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted),
+            else {
+                CRUDOperationResult::Conflict
+            }
+            None => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
         }
+
+        // let stamp = TxStamp::new(self.worker_id, self.ts_start);
+        // tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));
+        //
+        // match leaf_page.delete(key, stamp) {
+        //     Ok(Some(..)) => {
+        //         leaf_page.commit_delta(-1, 1);
+        //         self.written.borrow_mut().push((table, key));
+        //         CRUDOperationResult::Deleted(stamp.ts_start())
+        //     }
+        //     Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
+        //     Err(()) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted),
+        // }
     }
 
     /// Instant commit: appends `ts_commit` to this worker's (shared)

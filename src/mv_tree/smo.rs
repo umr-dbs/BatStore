@@ -335,7 +335,7 @@ impl<const FAN_OUT: usize,
     pub(crate) fn on_underflow_node<'a>(
         &self,
         mufasa: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
-        mut simba: BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>,
+        simba: BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>,
         index_simba: usize)
         -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
     {
