@@ -497,15 +497,28 @@ fn dump_tree(tree: &TestTree, version: crate::mv_record_model::version_info::Ver
         let indent = "  ".repeat(depth);
         match node.as_page_ref() {
             PageType::IndexRef(internal_page) => {
+                // Capture `is_active()`/the range *once* per entry and reuse
+                // that same captured snapshot for both printing and the
+                // recursion decision below — `keys_versions()` returns live,
+                // unsynchronized slices into the page's own memory, not an
+                // owned copy, so two separate reads of the same slice can
+                // observe different values if a concurrent thread's
+                // `mark_version_obsolete` lands in between (confirmed in
+                // practice: this diagnostic itself used to show an entry as
+                // `active=true` in the listing pass, then skip it in the
+                // recursion pass moments later, on the exact same node).
                 let (keys, versions) = internal_page.keys_versions();
+                let entries: Vec<_> = keys.iter().zip(versions.iter())
+                    .map(|(range, ver)| (*range, ver.is_active()))
+                    .collect();
                 let _ = writeln!(out, "[K{target_key}]{indent}[internal] page={:p} sum_len={} active_len={} entries:", internal_page as *const _, internal_page.sum_len(), internal_page.active_len());
-                for (pos, (range, ver)) in keys.iter().zip(versions.iter()).enumerate() {
+                for (pos, (range, active)) in entries.iter().enumerate() {
                     let covers = range.contains(target_key);
                     let _ = writeln!(out, "[K{target_key}]{indent}  #{pos} range=[{},{}] active={} covers_target={}",
-                        range.lower, range.upper, ver.is_active(), covers);
+                        range.lower, range.upper, active, covers);
                 }
-                for (pos, (range, ver)) in keys.iter().zip(versions.iter()).enumerate() {
-                    if ver.is_active() {
+                for (pos, (range, active)) in entries.iter().enumerate() {
+                    if *active {
                         let child = internal_page.get_pointer(pos);
                         let _ = writeln!(out, "[K{target_key}]{indent}  -> descending into #{pos} range=[{},{}]", range.lower, range.upper);
                         walk(&child, depth + 1, target_key, out);
@@ -552,6 +565,10 @@ fn repro_run_range(tree: &TestTree, t: u64) {
                 let point = tree.dispatch_crud(CRUDOperation::Point(key, v));
                 let retry = tree.dispatch_crud(CRUDOperation::Update(key, key * 3 + 2));
                 dump_tree(tree, v, key);
+                if crate::mv_tree::smo::TRACE_KEY_DEBUG {
+                    let log = crate::mv_tree::smo::drain_trace_log().join("\n");
+                    let _ = std::fs::write("/tmp/claude-1000/-home-amir-RustroverProjects-cMVBT/f3d9fdfb-aec9-4964-9963-71106541c3dd/scratchpad/trace_log_dump.txt", &log);
+                }
                 panic!("update {key} failed: {other}; immediate Point({key}, {v})={point}; immediate retry Update={retry}");
             }
         }
@@ -582,6 +599,9 @@ fn repro_sequential_insert_update_delete() {
 #[test]
 fn repro_concurrent_insert_update_delete() {
     for _ in 0..REPRO_ITERATIONS {
+        if crate::mv_tree::smo::TRACE_KEY_DEBUG {
+            let _ = crate::mv_tree::smo::drain_trace_log();
+        }
         let tree = TestTree::make_standard(RootIndexType::default());
         std::thread::scope(|scope| {
             for t in 0..REPRO_THREADS {
@@ -916,12 +936,24 @@ fn repro_high_thread_count_insert_update_delete_reports_all_failures() {
                         }
                         match tree.dispatch_crud(CRUDOperation::Update(key, key * 3 + 2)) {
                             CRUDOperationResult::Updated(_) => {}
-                            other => failures.lock().unwrap().push((key, format!("update: {other}"))),
+                            other => {
+                                let v = tree.current_version();
+                                let point = tree.dispatch_crud(CRUDOperation::Point(key, v));
+                                dump_tree(tree, v, key);
+                                failures.lock().unwrap().push((key,
+                                    format!("update: {other}; immediate Point({key}, {v})={point}")));
+                            }
                         }
                         if key % 2 == 0 {
                             match tree.dispatch_crud(CRUDOperation::Delete(key)) {
                                 CRUDOperationResult::Deleted(_) => {}
-                                other => failures.lock().unwrap().push((key, format!("delete: {other}"))),
+                                other => {
+                                    let v = tree.current_version();
+                                    let point = tree.dispatch_crud(CRUDOperation::Point(key, v));
+                                    dump_tree(tree, v, key);
+                                    failures.lock().unwrap().push((key,
+                                        format!("delete: {other}; immediate Point({key}, {v})={point}")));
+                                }
                             }
                         }
                     }

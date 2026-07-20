@@ -98,15 +98,11 @@ impl<const P_F: usize,
             return None;
         }
 
-        // A reader mid-registration (drawn a ts_start, not yet recorded as
-        // live — see `TxContext::registrations_in_flight`'s doc) might need
-        // exactly the block we're about to hand out; defer entirely rather
-        // than risk it. Self-limiting: registration is a couple of
-        // instructions, so this is never held for long.
-        if ctx.registrations_in_flight() > 0 {
-            return None;
-        }
-
+        // `live_min_snapshot` already folds in any worker mid-registration
+        // (drawn a ts_start, not yet recorded in `live_tx` — might need
+        // exactly the block we're about to hand out) alongside fully-active
+        // transactions — see `TxContext::in_flight_bound`'s doc. No separate
+        // "wait until nothing anywhere is mid-registration" check needed.
         let live_min_snapshot = ctx.live_min_snapshot();
 
         self.dead_blocks.try_reclaim(|dead_v| match live_min_snapshot {

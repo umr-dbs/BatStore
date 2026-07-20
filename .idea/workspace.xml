@@ -17,9 +17,22 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Improve Tx conflict findings">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/cMVBT.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/cMVBT.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/rand_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/rand_query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_record_model/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_record_model/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_record_model/record_point.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_record_model/record_point.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_record_model/unsafe_clone.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/loom_registration_ordering.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/loom_registration_ordering.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/tree_wal_consistency_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/tree_wal_consistency_tests.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/tx_context_registration_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/tx_context_registration_tests.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -30,7 +43,7 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="110" />
+    <option name="cachedIndexableFilesCount" value="932" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:test" />
@@ -73,61 +86,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0000058902736206" />
-      <entry key="MS500" value="1.1486275253857299" />
-      <entry key="S2" value="2.9302543032725206" />
-      <entry key="S5" value="4.740431617987635" />
-      <entry key="S10" value="5.723065077395182" />
-      <entry key="S30" value="6.536361074639249" />
-      <entry key="S60" value="6.7637773856963195" />
-      <entry key="M2" value="7.021977932743719" />
-      <entry key="M5" value="11.682473051538778" />
-      <entry key="M10" value="26.058164191304662" />
-      <entry key="M15" value="40.81776808628264" />
-      <entry key="M30" value="80.73670248876417" />
-      <entry key="H1" value="147.8236316888148" />
-      <entry key="H2" value="245.1629713988303" />
-      <entry key="H4" value="358.3284113196645" />
-      <entry key="D1" value="2468.084295462487" />
-      <entry key="W1" value="9012.25725408435" />
+      <entry key="MS100" value="1.0" />
+      <entry key="MS500" value="1.0" />
+      <entry key="S2" value="1.0" />
+      <entry key="S5" value="1.0" />
+      <entry key="S10" value="1.0" />
+      <entry key="S30" value="1.0000000003557379" />
+      <entry key="S60" value="1.0000188610127094" />
+      <entry key="M2" value="1.0043429267446515" />
+      <entry key="M5" value="1.1135361485367723" />
+      <entry key="M10" value="1.3548723762527852" />
+      <entry key="M15" value="1.8023380794722867" />
+      <entry key="M30" value="8.823472946764351" />
+      <entry key="H1" value="45.756023431037754" />
+      <entry key="H2" value="135.54925966072992" />
+      <entry key="H4" value="266.51034695496406" />
+      <entry key="D1" value="2348.3760913711935" />
+      <entry key="W1" value="8949.387494257959" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
       <entry key="MS500" value="0.0" />
-      <entry key="S2" value="1.181805056755039E-145" />
-      <entry key="S5" value="1.5884393025142837E-58" />
-      <entry key="S10" value="1.7798921019242356E-29" />
-      <entry key="S30" value="4.679412149314194E-10" />
-      <entry key="S60" value="4.4978759098716416E-5" />
-      <entry key="M2" value="0.019588826660663628" />
-      <entry key="M5" value="1.1130439300902948" />
-      <entry key="M10" value="5.652504308932215" />
-      <entry key="M15" value="11.199164070216476" />
-      <entry key="M30" value="27.029292052465593" />
-      <entry key="H1" value="49.43791148278798" />
-      <entry key="H2" value="75.67649034172828" />
-      <entry key="H4" value="103.27503444662995" />
-      <entry key="D1" value="332.42204956699015" />
-      <entry key="W1" value="1009.0455142520666" />
+      <entry key="S2" value="9.831963833460354E-140" />
+      <entry key="S5" value="2.9759860133066915E-56" />
+      <entry key="S10" value="2.280251973725204E-28" />
+      <entry key="S30" value="9.53291798705804E-10" />
+      <entry key="S60" value="4.356776166631216E-5" />
+      <entry key="M2" value="0.009329449437342855" />
+      <entry key="M5" value="0.23361640630202624" />
+      <entry key="M10" value="0.6874175087276029" />
+      <entry key="M15" value="1.0649232947297103" />
+      <entry key="M30" value="3.7845163646452904" />
+      <entry key="H1" value="16.361463541088998" />
+      <entry key="H2" value="43.0793400368375" />
+      <entry key="H4" value="78.16068771517766" />
+      <entry key="D1" value="318.0155370845038" />
+      <entry key="W1" value="1003.7804486568576" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.058720572111693334" />
-      <entry key="MS500" value="0.6679124976927041" />
-      <entry key="S2" value="2.691758173155657" />
-      <entry key="S5" value="4.616145668513924" />
-      <entry key="S10" value="5.6541515490641245" />
-      <entry key="S30" value="6.5116339871466655" />
-      <entry key="S60" value="6.751219389180951" />
-      <entry key="M2" value="7.034795284805657" />
-      <entry key="M5" value="12.784042650839291" />
-      <entry key="M10" value="31.687752606534453" />
-      <entry key="M15" value="51.98842907127942" />
-      <entry key="M30" value="107.7334449042126" />
-      <entry key="H1" value="197.2316719473412" />
-      <entry key="H2" value="320.81565201437485" />
-      <entry key="H4" value="461.58637507665946" />
-      <entry key="D1" value="2800.4969367044323" />
-      <entry key="W1" value="10021.298759337564" />
+      <entry key="MS100" value="0.05872017182587573" />
+      <entry key="MS500" value="0.567227742467977" />
+      <entry key="S2" value="0.8678394052570476" />
+      <entry key="S5" value="0.9448780198253188" />
+      <entry key="S10" value="0.9720483629045001" />
+      <entry key="S30" value="0.9905946047668551" />
+      <entry key="S60" value="0.995347842484255" />
+      <entry key="M2" value="1.0112264973408174" />
+      <entry key="M5" value="1.3453263115123881" />
+      <entry key="M10" value="2.040502651863658" />
+      <entry key="M15" value="2.8654826166773213" />
+      <entry key="M30" value="12.60406817276978" />
+      <entry key="H1" value="62.10799989539333" />
+      <entry key="H2" value="178.61529031598758" />
+      <entry key="H4" value="344.65825915957015" />
+      <entry key="D1" value="2666.3826543839436" />
+      <entry key="W1" value="9953.163958509278" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -141,78 +154,81 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "Cargo.Build --release.executor": "Run",
-    "Cargo.Build `Generate`.executor": "Run",
-    "Cargo.Check.executor": "Run",
-    "Cargo.Generate.executor": "Run",
-    "Cargo.Run MV-BPlusTree.executor": "Run",
-    "Cargo.Run cMVBT.executor": "Run",
-    "Cargo.Run.executor": "Run",
-    "Cargo.Test gc_query_tracer_tests.executor": "Run",
-    "Cargo.Test leaf_page_abort_tests.executor": "Run",
-    "Cargo.Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables.executor": "Run",
-    "Cargo.Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables.executor": "Run",
-    "Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict.executor": "Run",
-    "Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert.executor": "Run",
-    "Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1).executor": "Run",
-    "Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure.executor": "Run",
-    "Cargo.Test mv_test::smo_race_investigation_tests::sequential_workload_never_violates_the_split_invariant.executor": "Run",
-    "Cargo.Test mv_test::smo_race_investigation_tests::serialized_concurrent_workload_never_violates_the_split_invariant.executor": "Run",
-    "Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures.executor": "Run",
-    "Cargo.Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others.executor": "Run",
-    "Cargo.Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip.executor": "Run",
-    "Cargo.Test mv_wal::integration_tests::crash_recovery_round_trip.executor": "Valgrind",
-    "Cargo.Test mv_wal::integration_tests::torn_write_stops_cleanly.executor": "Run",
-    "Cargo.Test mv_wal::record::tests::detects_corrupted_body.executor": "Run",
-    "Cargo.Test mv_wal::record::tests::detects_truncated_frame.executor": "Run",
-    "Cargo.Test mv_wal::record::tests::round_trips_all_variants.executor": "Run",
-    "Cargo.Test mv_wal::writer::tests::group_commit_flushes_and_wait_unblocks.executor": "Run",
-    "Cargo.Test query_dispatch_tests.executor": "Run",
-    "Cargo.Test smo_race_investigation_tests.executor": "Run",
-    "Cargo.Test wal_record_tests.executor": "Run",
-    "Cargo.Test wal_writer_tests.executor": "Run",
-    "Cargo.Test wal_writer_tests::group_commit_flushes_and_wait_unblocks.executor": "Run",
-    "Cargo.Test writer::tests (1).executor": "Run",
-    "Cargo.Test writer::tests.executor": "Run",
-    "Cargo.Tests in 'tests'.executor": "Run",
-    "Cargo.build.executor": "Run",
-    "Cargo.check.executor": "Run",
-    "Cargo.clean.executor": "Run",
-    "CidrDebugProfileConversion": "true",
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "RunOnceActivity.MCP Project settings loaded": "true",
-    "RunOnceActivity.OpenProjectViewOnStart": "true",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.cidr.known.project.marker": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.readMode.enableVisualFormatting": "true",
-    "RunOnceActivity.rust.reset.selective.auto.import": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "cf.first.check.clang-format": "false",
-    "cidr.known.project.marker": "true",
-    "codeWithMe.voiceChat.enabledByDefault": "false",
-    "git-widget-placeholder": "main",
-    "junie.onboarding.icon.badge.shown": "true",
-    "last_opened_file_path": "/home/amir/RustroverProjects/cMVBT/src/mv_page_model",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.jshint": "true",
-    "node.js.detected.package.tslint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.jshint": "",
-    "node.js.selected.package.tslint": "(autodetect)",
-    "nodejs_package_manager_path": "npm",
-    "org.rust.cargo.project.model.PROJECT_DISCOVERY": "true",
-    "org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon": "",
-    "org.rust.first.attach.projects": "true",
-    "org.rust.first.attach.projects.stats": "true",
-    "run.code.analysis.last.selected.profile": "pProject Default",
-    "settings.editor.selected.configurable": "reference.settingsdialog.project.grazie",
-    "to.speed.mode.migration.done": "true",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Cargo.Build --release.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Build `Generate`.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Check.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Generate.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Run MV-BPlusTree.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Run cMVBT.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Run.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test gc_query_tracer_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test leaf_page_abort_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1).executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::smo_race_investigation_tests::sequential_workload_never_violates_the_split_invariant.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::smo_race_investigation_tests::serialized_concurrent_workload_never_violates_the_split_invariant.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_wal::integration_tests::crash_recovery_round_trip.executor&quot;: &quot;Valgrind&quot;,
+    &quot;Cargo.Test mv_wal::integration_tests::torn_write_stops_cleanly.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_wal::record::tests::detects_corrupted_body.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_wal::record::tests::detects_truncated_frame.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_wal::record::tests::round_trips_all_variants.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test mv_wal::writer::tests::group_commit_flushes_and_wait_unblocks.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test query_dispatch_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test smo_race_investigation_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test tx_context::tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test wal_record_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test wal_writer_tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test wal_writer_tests::group_commit_flushes_and_wait_unblocks.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test writer::tests (1).executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Test writer::tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Tests in 'tests'.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.build.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.check.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.clean.executor&quot;: &quot;Run&quot;,
+    &quot;CidrDebugProfileConversion&quot;: &quot;true&quot;,
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.MCP Project settings loaded&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.OpenProjectViewOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.cidr.known.project.marker&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.readMode.enableVisualFormatting&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.rust.reset.selective.auto.import&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;SHELLCHECK.PATH&quot;: &quot;/home/amir/.local/share/JetBrains/RustRover2026.2/Shell Script/shellcheck&quot;,
+    &quot;cf.first.check.clang-format&quot;: &quot;false&quot;,
+    &quot;cidr.known.project.marker&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
+    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/home/amir/RustroverProjects/cMVBT/src/mv_page_model&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.jshint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.jshint&quot;: &quot;&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;org.rust.cargo.project.model.PROJECT_DISCOVERY&quot;: &quot;true&quot;,
+    &quot;org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon&quot;: &quot;&quot;,
+    &quot;org.rust.first.attach.projects&quot;: &quot;true&quot;,
+    &quot;org.rust.first.attach.projects.stats&quot;: &quot;true&quot;,
+    &quot;run.code.analysis.last.selected.profile&quot;: &quot;pProject Default&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;reference.settingsdialog.project.grazie&quot;,
+    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/src/mv_page_model" />
@@ -236,7 +252,7 @@
       <command value="cargo clean" />
     </option>
   </component>
-  <component name="RunManager" selected="Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert">
+  <component name="RunManager" selected="Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot">
     <configuration name="Generate" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
       <option name="buildProfileId" value="dev" />
       <option name="command" value="run --package cMVBT --bin cMVBT -- generate 1mio_inserts.dat 10000 1000 1000 0 0 0" />
@@ -311,42 +327,25 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
+    <configuration name="Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot --exact" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
     <configuration name="Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
       <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert --exact" />
-      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
-      <envs />
-      <option name="emulateTerminal" value="true" />
-      <option name="channel" value="DEFAULT" />
-      <option name="requiredFeatures" value="true" />
-      <option name="allFeatures" value="false" />
-      <option name="withSudo" value="false" />
-      <option name="buildTarget" value="REMOTE" />
-      <option name="backtrace" value="SHORT" />
-      <option name="isRedirectInput" value="false" />
-      <option name="redirectInputPath" value="" />
-      <method v="2">
-        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
-      </method>
-    </configuration>
-    <configuration name="Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1)" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure --exact" />
-      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
-      <envs />
-      <option name="emulateTerminal" value="true" />
-      <option name="channel" value="DEFAULT" />
-      <option name="requiredFeatures" value="true" />
-      <option name="allFeatures" value="false" />
-      <option name="withSudo" value="false" />
-      <option name="buildTarget" value="REMOTE" />
-      <option name="backtrace" value="SHORT" />
-      <option name="isRedirectInput" value="false" />
-      <option name="redirectInputPath" value="" />
-      <method v="2">
-        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
-      </method>
-    </configuration>
-    <configuration name="Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure --exact --ignored" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -396,22 +395,39 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
+    <configuration name="Test tx_context::tests" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_sync::tx_context::tests" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
     <list>
       <item itemvalue="Cargo.Generate" />
       <item itemvalue="Cargo.Run" />
+      <item itemvalue="Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot" />
+      <item itemvalue="Cargo.Test tx_context::tests" />
       <item itemvalue="Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" />
       <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
-      <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1)" />
-      <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure" />
       <item itemvalue="Cargo.Test smo_race_investigation_tests" />
     </list>
     <recent_temporary>
       <list>
+        <item itemvalue="Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot" />
+        <item itemvalue="Cargo.Test tx_context::tests" />
         <item itemvalue="Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" />
         <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
         <item itemvalue="Cargo.Test smo_race_investigation_tests" />
-        <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1)" />
-        <item itemvalue="Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure" />
       </list>
     </recent_temporary>
   </component>
@@ -1339,15 +1355,9 @@
       <workItem from="1784494760936" duration="1653000" />
       <workItem from="1784496573345" duration="1000" />
       <workItem from="1784497342647" duration="285000" />
-      <workItem from="1784536738406" duration="6607000" />
-    </task>
-    <task id="LOCAL-00141" summary="Fix SI for update operations; Divided into two atomic sequential operations, as described in the paper.">
-      <option name="closed" value="true" />
-      <created>1766331142439</created>
-      <option name="number" value="00141" />
-      <option name="presentableId" value="LOCAL-00141" />
-      <option name="project" value="LOCAL" />
-      <updated>1766331142440</updated>
+      <workItem from="1784536738406" duration="11087000" />
+      <workItem from="1784552764753" duration="8525000" />
+      <workItem from="1784562372617" duration="2521000" />
     </task>
     <task id="LOCAL-00142" summary="Fix SI for update operations; Divided into two atomic sequential operations, as described in the paper.">
       <option name="closed" value="true" />
@@ -1733,7 +1743,15 @@
       <option name="project" value="LOCAL" />
       <updated>1784542379621</updated>
     </task>
-    <option name="localTasksCounter" value="190" />
+    <task id="LOCAL-00190" summary="Improve Tx conflict findings">
+      <option name="closed" value="true" />
+      <created>1784543516793</created>
+      <option name="number" value="00190" />
+      <option name="presentableId" value="LOCAL-00190" />
+      <option name="project" value="LOCAL" />
+      <updated>1784543516793</updated>
+    </task>
+    <option name="localTasksCounter" value="191" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

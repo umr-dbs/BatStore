@@ -106,6 +106,12 @@ impl<'a,
 
                 leaf_page.commit_delta(1, 0);
 
+                if crate::mv_tree::smo::TRACE_KEY_DEBUG {
+                    crate::mv_tree::smo::push_trace(format!("TRACE insert thread={:#x} key={key} into leaf={:p}",
+                        { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); std::thread::current().id().hash(&mut h); h.finish() },
+                        leaf_deref_mut as *const _));
+                }
+
                 drop(leaf_guard);
                 // Commit (visibility) and return immediately — the WAL
                 // record (if any) is flushed asynchronously in a batch by

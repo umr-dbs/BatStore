@@ -1,12 +1,8 @@
-use std::alloc::Layout;
 use std::hash::Hash;
-use std::{alloc, mem, ptr};
+use std::ptr;
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
-use std::mem::{align_of, size_of, ManuallyDrop};
-use std::ops::{Add, Deref, DerefMut};
-use std::ptr::{addr_of, addr_of_mut, slice_from_raw_parts};
-use crate::mv_record_model::unsafe_clone::UnsafeClone;
+use std::mem::{align_of, size_of};
 use crate::mv_record_model::version_info::VersionInfo;
 
 // pub type Payload = Box<()>;
@@ -24,11 +20,13 @@ use crate::mv_record_model::version_info::VersionInfo;
 ///
 /// `Clone` clones the *referenced* `Payload` value and re-wraps it — never a
 /// shallow copy of the raw slot, which for the boxed case would let two
-/// `RecordPoint`s alias (and corrupt each other's) the same payload once
-/// either is mutated. Like every other allocation in this codebase, a
-/// boxed payload is never explicitly freed (see `SmartCell`'s doc for why
-/// that's sound while GC's block reclaim stays off) — dropping a
-/// `PayloadSlot` is a no-op either way.
+/// `RecordPoint`s alias (and corrupt each other's, or double-free, the same
+/// payload). Every live code path in this codebase respects that: a
+/// `PayloadSlot` is either moved by value (sole ownership transferred, e.g.
+/// `LeafPage::push_uncommitted`) or `.clone()`'d into a fresh, independent
+/// allocation (e.g. `LeafPage::bulk_push`/`bulk_push_from_slice_ref`/`from`,
+/// used when a split copies live records into a new page) — never
+/// byte-copied/aliased. `Drop` below relies on that invariant.
 struct PayloadSlot<Payload> {
     raw: usize,
     _marker: PhantomData<Payload>,
@@ -69,6 +67,23 @@ impl<Payload> PayloadSlot<Payload> {
                 &mut *(&mut self.raw as *mut usize as *mut Payload)
             } else {
                 &mut *(self.raw as *mut Payload)
+            }
+        }
+    }
+}
+
+impl<Payload> Drop for PayloadSlot<Payload> {
+    /// Frees the boxed payload (a no-op for the inline case, which never
+    /// allocated one). Sound under this struct's doc invariant: nothing
+    /// else ever holds a copy of `raw` for a boxed payload, so exactly one
+    /// `PayloadSlot` reaches this `drop` per allocation.
+    #[inline(always)]
+    fn drop(&mut self) {
+        unsafe {
+            if Self::INLINE {
+                ptr::drop_in_place(&mut self.raw as *mut usize as *mut Payload);
+            } else {
+                drop(Box::from_raw(self.raw as *mut Payload));
             }
         }
     }
@@ -119,46 +134,6 @@ impl<Key: Ord + Copy + Hash + Default, Payload: Clone + Default> RecordPointResu
     }
 }
 
-// impl<Key: Ord + Copy + Hash + Default> Drop for RecordPointResult<Key> {
-//     fn drop(&mut self) {
-//         unsafe {
-//             let _ = Payload::from_raw(self.payload.as_mut());
-//
-//             // ManuallyDrop::drop(&mut self.payload)
-//             // let layout = Layout::from_size_align_unchecked(
-//             //     mem::size_of::<usize>(),
-//             //     mem::align_of::<u8>());
-//
-//             // alloc::dealloc(self.payload.deref_mut().deref_mut(), layout);
-//         }
-//     }
-// }
-
-// impl<Key: Ord + Copy + Hash + Default> Clone for RecordPoint<Key> {
-//     fn clone(&self) -> Self {
-//         Self {
-//             key: self.key(),
-//             version: self.version().clone(),
-//             payload: ManuallyDrop::new(self.payload().clone()),
-//         }
-//     }
-// }
-
-// impl<Key: Ord + Copy + Hash + Default> Drop for RecordPoint<Key> {
-//     fn drop(&mut self) {
-//         unsafe {
-//             let _ = Payload::from_raw(self.payload.as_mut());
-//             // ManuallyDrop::drop(&mut self.payload)
-//
-//             // let layout = Layout::from_size_align_unchecked(
-//             //     mem::size_of::<usize>(),
-//             //     mem::align_of::<u8>());
-//             //
-//             // alloc::dealloc(self.payload_mut().deref_mut(), layout);
-//         }
-//     }
-// }
-
 impl<Key: Ord + Copy + Hash + Default, Payload: Clone + Default> RecordPoint<Key, Payload> {
     #[inline(always)]
     pub fn new(key: Key, version: VersionInfo, payload: Payload) -> Self {
@@ -197,14 +172,6 @@ impl<Key: Ord + Copy + Hash + Default, Payload: Clone + Default> RecordPoint<Key
     #[inline(always)]
     pub fn version_mut(&mut self) -> &mut VersionInfo {
         &mut self.version
-    }
-}
-
-impl<Key: Ord + Copy + Hash + Default, Payload: Clone + Default> UnsafeClone
-for RecordPoint<Key, Payload> {
-    #[inline(always)]
-    unsafe fn unsafe_clone(&self) -> Self {
-        mem::transmute_copy(self)
     }
 }
 

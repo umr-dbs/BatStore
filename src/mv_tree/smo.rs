@@ -14,6 +14,24 @@ use std::hash::Hash;
 use std::ops::Deref;
 
 
+// TEMPORARY diagnostic: traces every leaf-level split/merge's source(s) and
+// result so a lost key's lifecycle across pages can be reconstructed after a
+// repro. Buffered in-memory (not `eprintln!`'d live) so the stderr lock
+// itself doesn't perturb the race being chased; call `drain_trace_log` to
+// dump it out once a failure is detected. Remove once the investigation
+// concludes.
+pub(crate) const TRACE_KEY_DEBUG: bool = true;
+
+pub(crate) static TRACE_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn push_trace(s: String) {
+    TRACE_LOG.lock().unwrap().push(s);
+}
+
+pub fn drain_trace_log() -> Vec<String> {
+    std::mem::take(&mut *TRACE_LOG.lock().unwrap())
+}
+
 // TEMPORARY diagnostic helper.
 fn diag_thread_hash() -> u64 {
     use std::hash::{Hash, Hasher};
@@ -637,6 +655,17 @@ impl<const FAN_OUT: usize,
                                           f.version().insertion_stamp().ts_start() <= s.version().insertion_stamp().ts_start())
                             .collect_vec());
 
+                    if TRACE_KEY_DEBUG {
+                        push_trace(format!("TRACE merge::Merged(leaf) thread={:#x} simba={:p} simba_fence={} simba_live={} candidate={:p} candidate_fence={} candidate_live={} -> combined={:p} combined_live={}",
+                            diag_thread_hash(),
+                            simba, simba_fence,
+                            simba.as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            candidate_guard.deref(), candidate_fence,
+                            candidate_guard.deref().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            combined_block.unsafe_borrow(),
+                            combined_block.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(",")));
+                    }
+
                     combined_block
                 }
             };
@@ -693,6 +722,19 @@ impl<const FAN_OUT: usize,
                         .unsafe_borrow_mut()
                         .as_leaf_page()
                         .bulk_push_from_slice_ref(second);
+
+                    if TRACE_KEY_DEBUG {
+                        push_trace(format!("TRACE merge::KeySplit(leaf) thread={:#x} simba={:p} simba_fence={} simba_live={} candidate={:p} candidate_fence={} candidate_live={} -> left={:p} left_fence={} left_live={} right={:p} right_fence={} right_live={}",
+                            diag_thread_hash(),
+                            simba, simba_fence,
+                            simba_records.iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            candidate_guard.deref(), candidate_fence,
+                            candidate_records.iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            combined_block_0.unsafe_borrow(), left_interval,
+                            combined_block_0.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            combined_block_1.unsafe_borrow(), right_interval,
+                            combined_block_1.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(",")));
+                    }
 
                     MergeResult::KeySplit(
                         candidate_index,
@@ -829,6 +871,17 @@ impl<const FAN_OUT: usize,
                         leaf_page.bulk_push_from_slice_ref(second)
                     }
 
+                    if TRACE_KEY_DEBUG {
+                        push_trace(format!("TRACE split::ByKey(leaf) thread={:#x} old={:p} old_fence={} old_live={} -> left={:p} left_fence={} left_live={} right={:p} right_fence={} right_live={}",
+                            diag_thread_hash(),
+                            block, fence,
+                            block_records.iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            left.unsafe_borrow(), fence_left,
+                            left.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            right.unsafe_borrow(), fence_right,
+                            right.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(",")));
+                    }
+
                     BlockSplit::ByKey(fence_left, left, fence_right, right)
                 }
                 false => unsafe { // KEY_SPLIT InternalPage
@@ -912,6 +965,15 @@ impl<const FAN_OUT: usize,
 
                     if let PageType::LeafMut(leaf_page) = new_leaf.unsafe_borrow_mut().as_page_mut() {
                         leaf_page.bulk_push(active_records);
+                    }
+
+                    if TRACE_KEY_DEBUG {
+                        push_trace(format!("TRACE split::ByVersion(leaf) thread={:#x} old={:p} fence={} old_live={} -> new={:p} new_live={}",
+                            diag_thread_hash(),
+                            block, fence,
+                            block_records.iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            new_leaf.unsafe_borrow(),
+                            new_leaf.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(",")));
                     }
 
                     BlockSplit::ByVersion(new_leaf)

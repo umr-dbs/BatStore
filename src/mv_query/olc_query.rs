@@ -42,8 +42,8 @@ impl<const FAN_OUT: usize,
     /// since `TxContext::on_tx_start`/`on_tx_completed` short-circuit on
     /// that flag.
     #[inline]
-    pub(crate) fn traversal_write_olc(&self, key: Key) -> BlockGuard<FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let ts_start = self.begin_snapshot();
+    pub(crate) fn traversal_write_olc(&self, key: Key) -> BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        // let ts_start = self.begin_snapshot();
 
         let mut attempt = 0;
 
@@ -63,7 +63,7 @@ impl<const FAN_OUT: usize,
             }
         };
 
-        self.end_snapshot(ts_start);
+        // self.end_snapshot(ts_start);
 
         guard
     }
@@ -72,7 +72,7 @@ impl<const FAN_OUT: usize,
     pub(crate) fn retrieve_root_write_olc(
         &self,
         mut attempts: Attempts,
-    ) -> (BlockGuard<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    ) -> (BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>,
         Attempts)
     {
         loop {
@@ -165,12 +165,12 @@ impl<const FAN_OUT: usize,
                     // into it. Skipped when `curr_guard` is already *our
                     // own* `Writer` from earlier in this traversal — that
                     // exclusion already makes its content stable.
-                    // let curr_is_reader
-                    //     = curr_guard.is_reader();
-                    //
-                    // if curr_is_reader && curr_guard.is_write_locked() {
-                    //     return Err(attempts + 1);
-                    // }
+                    let curr_is_reader
+                        = curr_guard.is_reader();
+
+                    if curr_is_reader && curr_guard.is_write_locked() {
+                        return Err(attempts + 1);
+                    }
 
                     let curr_version_before
                         = curr_guard.live_version();

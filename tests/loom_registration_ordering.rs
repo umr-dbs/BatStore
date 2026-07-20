@@ -1,21 +1,29 @@
 #![cfg(loom)]
 
-//! Loom model of the synchronization shape used by
-//! `TxContext::begin_snapshot_registration`/`end_snapshot_registration`/
-//! `registrations_in_flight` (src/mv_sync/tx_context.rs) together with
-//! `TrackerHandleSt::free_block`'s use of them (src/mv_gc/tracker_handle.rs):
-//! one thread publishes a value into shared state and then clears an
-//! "in flight" flag; a concurrent reader must never observe the flag clear
-//! without also observing the published value, or it may treat a still-live
-//! snapshot as if it doesn't exist and reclaim a block out from under it.
+//! Loom model of a *separate-flag-and-value* publish/clear pattern: one
+//! thread publishes a value into shared state and then clears an "in flight"
+//! flag; a concurrent reader must never observe the flag clear without also
+//! observing the published value, or it may treat a still-live snapshot as
+//! if it doesn't exist and reclaim a block out from under it.
 //!
-//! Modeled in isolation rather than against the real `TxContext` — its other
-//! fields (`crossbeam_skiplist::SkipMap`, a `parking_lot`-backed
-//! `CommitLog`) aren't loom-instrumented, so exercising the real type here
-//! wouldn't let loom explore the interleavings that matter. This reproduces
+//! Historical note: this modeled `TxContext::begin_snapshot_registration`/
+//! `end_snapshot_registration`/`registrations_in_flight`
+//! (src/mv_sync/tx_context.rs) as they existed when this test was written —
+//! a single global `AtomicUsize` counter every worker incremented/decremented,
+//! checked via a separate `Acquire` load from `live_tx`'s `SkipMap` state.
+//! That design was replaced by `TxContext::in_flight_bound` (see that field's
+//! doc): a per-worker slot where the "flag" and the "value" are the *same*
+//! atomic word (`NOT_IN_FLIGHT` sentinel vs. an actual bound), so a single
+//! `Release`-store/`Acquire`-load pair on one location is sufficient on its
+//! own — the two-atomics hazard this file models no longer has a live call
+//! site. Kept as a standing regression guard against reintroducing this
+//! specific shape (separate flag + value, `Relaxed` on either side of the
+//! pairing) anywhere else in the codebase, and as a worked example of why
+//! `Relaxed` is unsound for it.
+//!
+//! Modeled in isolation rather than against any real type — this reproduces
 //! just the two atomics and the exact begin/publish/end/check shape and
-//! orderings, so it stands or falls with whichever `Ordering`s are used for
-//! the same pattern in the real code.
+//! orderings, independent of whatever real code may or may not still use it.
 //!
 //! Run with: RUSTFLAGS="--cfg loom" cargo test --test loom_registration_ordering --release
 

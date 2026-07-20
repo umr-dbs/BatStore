@@ -1,19 +1,25 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 use crate::mv_gc::query_tracer::TransactionTrace;
 use crate::mv_query::SnapShot;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
-use crate::mv_record_model::version_info::Version;
+use crate::mv_record_model::version_info::{AtomicVersion, Version};
 use crate::mv_sync::clock::GlobalClock;
 use crate::mv_sync::commit_log::CommitLog;
 use crate::mv_sync::visibility;
 use crate::mv_sync::worker::WorkerRegistry;
 
+/// Sentinel for "this worker isn't mid-registration right now" in
+/// `TxContext::in_flight_bound` — real `ts_start`s are drawn from a counter
+/// starting at `version_handle::START_VERSION`, so `Version::MAX` is
+/// unreachable as a genuine one.
+const NOT_IN_FLIGHT: Version = Version::MAX;
+
 /// The transactional core one or more `MVBTSt` trees share: the OSIC Global
 /// Logical Clock, every worker's `CommitLog`, the `WorkerRegistry`, and
-/// active-snapshot tracking (`live_tx`/`registrations_in_flight`, moved here
-/// from `mv_gc::tracker_handle::TrackerHandleSt`). None of this is generic
+/// active-snapshot tracking (`live_tx`/`in_flight_bound`, moved here from
+/// `mv_gc::tracker_handle::TrackerHandleSt`). None of this is generic
 /// over `Key`/`Payload` — it only ever operates on `Version`/`WorkerId` — so
 /// a single, non-generic `TxContext` can be shared (via `Arc`) by any number
 /// of differently-typed per-table trees, letting one `Transaction`-like
@@ -31,9 +37,9 @@ use crate::mv_sync::worker::WorkerRegistry;
 /// deliberately stays OUT of this type and per-table instead: dead pages are
 /// physically owned by one table's `BlockAllocManager`, so reclaiming them is
 /// never a cross-table concern the way visibility/commit/snapshot-liveness
-/// is. See `TrackerHandleSt::free_block`'s use of `live_min_snapshot`/
-/// `registrations_in_flight` below for the one place block reclaim still
-/// needs to *read* (not own) this shared state.
+/// is. See `TrackerHandleSt::free_block`'s use of `live_min_snapshot` below
+/// for the one place block reclaim still needs to *read* (not own) this
+/// shared state.
 pub(crate) struct TxContext {
     global_clock: GlobalClock,
     commit_logs: Vec<CommitLog>,
@@ -43,11 +49,47 @@ pub(crate) struct TxContext {
     /// is only sound while this precisely reflects every transaction with a
     /// live, unreleased `ts_start` across every table sharing this context.
     live_tx: TransactionTrace,
-    /// See `TrackerHandleSt::registrations_in_flight`'s original doc
-    /// (moved here unchanged): counts `begin_snapshot` calls that have drawn
-    /// a `ts_start` but not yet finished recording it in `live_tx` — nothing
-    /// may treat a page as reclaimable while this is nonzero.
-    registrations_in_flight: AtomicUsize,
+    /// One slot per worker (`WorkerId`-indexed, sized to `max_workers` like
+    /// `commit_logs`): each worker publishes its own conservative lower bound
+    /// here — `global_clock.current_version()` read just *before* drawing
+    /// its real `ts_start` — while it's mid-registration (drawn a `ts_start`
+    /// but not yet recorded it in `live_tx`), and clears it back to
+    /// `NOT_IN_FLIGHT` once that's done. `free_block` needs *some* protection
+    /// for this narrow window (a reader mid-registration might need exactly
+    /// the block about to be handed out), but the window is per-worker and
+    /// short, so protecting it shouldn't require every *other* worker
+    /// system-wide to be simultaneously quiescent.
+    ///
+    /// Superseded a single global `registrations_in_flight: AtomicUsize`
+    /// (a shared counter every worker had to contend on, incremented/
+    /// decremented on literally every snapshot draw) that measurably
+    /// collapsed under concurrency: instrumented under a 16-thread
+    /// update-heavy YCSB workload, it rejected 73.8% of `free_block` attempts
+    /// (vs. 5.2% at 2 threads) — with more workers each drawing snapshots
+    /// constantly, the odds that *some* worker is inside that tiny window at
+    /// any sampled instant approach certainty, even though the window itself
+    /// never got any longer. A per-worker slot has no such effect: each
+    /// worker only ever contends with itself (one `Release` store, no CAS,
+    /// no shared cache line with any other worker's slot), so `free_block`
+    /// scanning every slot costs `O(max_workers)` with zero contention
+    /// instead of waiting on a single hot counter every worker is
+    /// incrementing/decrementing at full throughput.
+    ///
+    /// Each slot is `Release`-written by its own worker and `Acquire`-read
+    /// by `free_block`/`live_min_snapshot` — a single atomic word, so a
+    /// pairwise Release/Acquire on that one location is sufficient on its
+    /// own (unlike the old design's separate counter+`live_tx` pairing,
+    /// which needed the counter to reach *zero* specifically to paper over
+    /// the fact that a `ts_start`'s draw and its `live_tx` insert are two
+    /// different pieces of state). Soundness relies on: a fresh `ts_start`
+    /// is always >= any bound already published by an in-flight-or-complete
+    /// registration (the clock only ever increases via `next_timestamp`'s
+    /// `fetch_add`), so a slot transitioning from `NOT_IN_FLIGHT` to some
+    /// value *during* a scan can only ever raise the true minimum, never
+    /// lower it — the scan doesn't need every slot to be simultaneously
+    /// consistent with every other, each is independently safe to read on
+    /// its own.
+    in_flight_bound: Vec<AtomicVersion>,
     /// Own copy, independent of any single table's
     /// `TrackerHandleSt::block_reclaim_enabled` (which still gates that
     /// table's own dead-page bookkeeping/reuse) — this one gates whether
@@ -68,7 +110,7 @@ impl TxContext {
             commit_logs: (0..max_workers).map(|_| CommitLog::new()).collect(),
             worker_registry: WorkerRegistry::new(max_workers),
             live_tx: TransactionTrace::new(),
-            registrations_in_flight: AtomicUsize::new(0),
+            in_flight_bound: (0..max_workers).map(|_| AtomicVersion::new(NOT_IN_FLIGHT)).collect(),
             block_reclaim_enabled: AtomicBool::new(false),
             freshest_si_truncate_commit_log: AtomicBool::new(true),
         }
@@ -106,29 +148,32 @@ impl TxContext {
         crate::mv_sync::worker::worker_id_for(&self.worker_registry)
     }
 
-    /// See `mv_gc::tracker_handle::TrackerHandleSt::begin_snapshot_registration`
-    /// (moved here unchanged, same pairing contract with `end_snapshot_registration`).
-    ///
-    /// `Release`, paired with `registrations_in_flight()`'s `Acquire` load:
-    /// this is a flag gating visibility of a *different* write (the
-    /// `live_tx` insert `draw_snapshot_version_with` performs between this
-    /// call and `end_snapshot_registration`), not a plain counter GC merely
-    /// spins on — see that method's doc.
+    /// Publishes this worker's conservative lower bound — see
+    /// `in_flight_bound`'s field doc for why a plain `Release` store to this
+    /// worker's own slot is sufficient (no counter, no cross-worker
+    /// contention). Returns the `WorkerId` used, so the matching
+    /// `end_snapshot_registration` call touches the same slot without a
+    /// second thread-local lookup.
     #[inline]
-    fn begin_snapshot_registration(&self) {
-        self.registrations_in_flight.fetch_add(1, Release);
+    fn begin_snapshot_registration(&self) -> WorkerId {
+        let worker_id = self.worker_id();
+        // Read *before* drawing the real ts_start below: `next_timestamp`'s
+        // `fetch_add` only ever increases the same counter this reads, so
+        // the real ts_start is guaranteed >= this bound.
+        let conservative_bound = self.global_clock.current_version();
+        self.in_flight_bound[worker_id as usize].store(conservative_bound, Release);
+        worker_id
     }
 
-    /// `Release`: this decrement is what `registrations_in_flight()`'s
-    /// `Acquire` load synchronizes with. Without that pairing, GC observing
-    /// the count reach zero would carry no happens-before guarantee that the
-    /// `live_tx` insert this registration performed is visible to GC's
-    /// subsequent `live_min_snapshot()` read — two independent atomics don't
-    /// transfer ordering to each other just because they're touched in
-    /// program order on the registering thread.
+    /// `Release`: pairs with the `Acquire` load `live_min_snapshot` does on
+    /// this exact slot. Clearing back to `NOT_IN_FLIGHT` here (after
+    /// `draw_snapshot_version_with`'s `register` closure — which performs
+    /// the `live_tx` insert — has already run) means this worker's
+    /// protection has already handed off to `live_tx` by the time this call
+    /// returns; there's no gap between the two mechanisms.
     #[inline]
-    fn end_snapshot_registration(&self) {
-        self.registrations_in_flight.fetch_sub(1, Release);
+    fn end_snapshot_registration(&self, worker_id: WorkerId) {
+        self.in_flight_bound[worker_id as usize].store(NOT_IN_FLIGHT, Release);
     }
 
     /// Draws a fresh `ts_start` and hands it to `register` before releasing
@@ -137,12 +182,12 @@ impl TxContext {
     /// before the gap-closing logic moved here).
     #[inline(always)]
     pub(crate) fn draw_snapshot_version_with<R>(&self, register: impl FnOnce(Version) -> R) -> R {
-        self.begin_snapshot_registration();
+        let worker_id = self.begin_snapshot_registration();
 
         let ts_start = self.global_clock.next_timestamp();
         let result = register(ts_start);
 
-        self.end_snapshot_registration();
+        self.end_snapshot_registration(worker_id);
 
         result
     }
@@ -236,28 +281,46 @@ impl TxContext {
         self.live_tx.peek_max()
     }
 
-    /// The oldest currently-active snapshot across every table sharing this
-    /// context, or `None` if there are none — the "safe to reclaim anything
-    /// dead strictly before this" bound `TrackerHandleSt::free_block` needs
-    /// (see that method's doc: it must consult this *shared* bound, not a
-    /// per-table one, since a snapshot registered once here may later read
-    /// any table).
+    /// The oldest currently-active-or-in-flight snapshot across every table
+    /// sharing this context, or `None` if there are none — the "safe to
+    /// reclaim anything dead strictly before this" bound
+    /// `TrackerHandleSt::free_block` needs (see that method's doc: it must
+    /// consult this *shared* bound, not a per-table one, since a snapshot
+    /// registered once here may later read any table). Combines two sources:
+    /// `live_tx` (fully-registered, possibly long-lived active transactions)
+    /// and `in_flight_bound` (workers mid-registration right now — see that
+    /// field's doc for why an `Acquire` load per slot is sufficient, no
+    /// further cross-slot synchronization needed).
+    ///
+    /// Order matters: `in_flight_bound` MUST be read before `live_tx`, not
+    /// after. A worker's slot only clears (back to `NOT_IN_FLIGHT`) *after*
+    /// its `live_tx` insert has already happened (see
+    /// `end_snapshot_registration`'s doc) — so observing a cleared slot via
+    /// `Acquire` establishes happens-before with everything that preceded
+    /// that clear on the writer, *including* its `live_tx` insert, making a
+    /// *subsequent* `live_tx` read on this thread guaranteed to see it.
+    /// Reading `live_tx` first has no such guarantee: it can race ahead of
+    /// the writer and observe neither the insert (too early) nor the slot
+    /// still holding its bound (already cleared by then) — a real gap this
+    /// implementation hit under `tx_context_registration_tests.rs`'s
+    /// regression test before the ordering was fixed here.
     #[inline]
     pub(crate) fn live_min_snapshot(&self) -> Option<SnapShot> {
-        self.live_tx.peek_min()
-    }
+        let mut min: Option<SnapShot> = None;
+        for slot in &self.in_flight_bound {
+            let bound = slot.load(Acquire);
+            if bound != NOT_IN_FLIGHT {
+                min = Some(min.map_or(bound, |m| m.min(bound)));
+            }
+        }
 
-    /// See `registrations_in_flight`'s field doc — `TrackerHandleSt::free_block`
-    /// must not reclaim anything while this is nonzero.
-    ///
-    /// `Acquire`, paired with `end_snapshot_registration`'s `Release` store:
-    /// observing zero here must happens-before this call for every
-    /// registration that was ever in flight, so that `free_block`'s
-    /// following `live_min_snapshot()` read is guaranteed to see that
-    /// registration's `live_tx` insert rather than a stale, pre-insert view.
-    #[inline]
-    pub(crate) fn registrations_in_flight(&self) -> usize {
-        self.registrations_in_flight.load(Acquire)
+        let live_min = self.live_tx.peek_min();
+        match (min, live_min) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
     }
 
     /// Test-only: current entry count of one worker's `CommitLog`, for tests

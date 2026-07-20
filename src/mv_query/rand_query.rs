@@ -25,8 +25,8 @@ impl<const FAN_OUT: usize,
     /// See `olc_query::traversal_write_olc`'s matching doc — same
     /// GC-reclaim-registration gap, same fix.
     #[inline]
-    pub(crate) fn traversal_write_rand_query(&self) -> (Fence<Key>, BlockGuard<FAN_OUT, NUM_RECORDS, Key, Payload>) {
-        let ts_start = self.begin_snapshot();
+    pub(crate) fn traversal_write_rand_query(&self) -> (Fence<Key>, BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>) {
+        // let ts_start = self.begin_snapshot();
 
         let mut attempt = 0;
 
@@ -41,7 +41,7 @@ impl<const FAN_OUT: usize,
             }
         };
 
-        self.end_snapshot(ts_start);
+        // self.end_snapshot(ts_start);
 
         result
     }
