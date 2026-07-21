@@ -478,6 +478,34 @@ impl<E: Default + 'static> SmartGuard<E> {
         self.live_version() & WRITE_FLAG_VERSION != 0
     }
 
+    /// Combines `is_reader() && (is_write_locked() || is_retired())`'s
+    /// pre-check with capturing the "before" value for the subsequent
+    /// before/after bracket (`live_version()`, called again after the read)
+    /// into a single atomic load instead of three. All three were reading
+    /// the exact same `cell_version` back to back, with nothing of ours in
+    /// between that could legitimately make them disagree — a `Writer`
+    /// never needed any of the three (its own lock already makes the
+    /// content stable), and a `Reader`'s three separate loads were just
+    /// asking the same question three times. Returns `None` (bail, retry —
+    /// same signal a failed `upgrade_write_lock` gives) if a `Reader`
+    /// observes either flag; `Some(version)` — the raw, unmasked live
+    /// value, straight into `curr_version_before` — otherwise. Always
+    /// `Some(latch)` for a `Writer`.
+    #[inline(always)]
+    pub fn checked_live_version(&self) -> Option<LatchVersion> {
+        match self {
+            Reader(cell, ..) => unsafe {
+                let v = (*cell.0).cell_version.load(Acquire);
+                if v & (WRITE_FLAG_VERSION | RETIRED_FLAG_VERSION) != 0 {
+                    None
+                } else {
+                    Some(v)
+                }
+            },
+            Writer(.., latch) => Some(*latch),
+        }
+    }
+
     #[inline(always)]
     pub fn downgrade(&mut self) {
         match self {

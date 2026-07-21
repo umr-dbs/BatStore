@@ -170,30 +170,27 @@ impl<const FAN_OUT: usize,
                     // into it. Skipped when `curr_guard` is already *our
                     // own* `Writer` from earlier in this traversal — that
                     // exclusion already makes its content stable.
-                    let curr_is_reader
-                        = curr_guard.is_reader();
-
-                    if curr_is_reader && curr_guard.is_write_locked() {
-                        return Err(attempts + 1);
-                    }
-
-                    // `curr_guard` may be a `Reader` obtained *before* this
-                    // exact node was folded into a replacement by a
+                    //
+                    // `curr_guard` may also be a `Reader` obtained *before*
+                    // this exact node was folded into a replacement by a
                     // concurrent `on_overflow_node`/`on_underflow_node`
                     // elsewhere (this level itself was never the one
                     // overflowing/underflowing — only reached here as
                     // *somebody else's* now-obsolete child). Once that
                     // happens its content is frozen forever (nothing ever
-                    // mutates a retired node again), so the version-based
-                    // check above can never catch it — a before/after
-                    // comparison sees "unchanged" for all eternity. See
-                    // `RETIRED_FLAG_VERSION`'s doc.
-                    if curr_is_reader && curr_guard.is_retired() {
-                        return Err(attempts + 1);
-                    }
-
-                    let curr_version_before
-                        = curr_guard.live_version();
+                    // mutates a retired node again), so a plain before/after
+                    // version comparison alone can never catch it — it sees
+                    // "unchanged" for all eternity. See `RETIRED_FLAG_VERSION`'s
+                    // doc. `checked_live_version()` folds both this check
+                    // and the write-locked one into the same single atomic
+                    // load that captures `curr_version_before` below — see
+                    // its own doc for why collapsing three back-to-back
+                    // reads of the same value into one changes nothing about
+                    // what can be observed.
+                    let curr_version_before = match curr_guard.checked_live_version() {
+                        Some(v) => v,
+                        None => return Err(attempts + 1),
+                    };
 
                     let (keys_page, versions_page) = internal_page
                         .keys_versions();
