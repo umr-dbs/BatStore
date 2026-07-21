@@ -138,3 +138,47 @@ fn apply_invalidate_does_not_resurrect_an_unrelated_deletion() {
     assert!(records[0].version().is_deleted(), "the unrelated deletion must not be reverted");
     assert!(!records[1].version().is_live(), "the aborted fresh insert must be invalid");
 }
+
+/// Regression: reverting a plain `Delete` (not an `Update`) must find the
+/// deleted entry even when a physically newer, invalidated entry for the
+/// same key sits after it. `delete` itself already skips such invalid
+/// entries via `is_live_lineage` to find the true live record to mark
+/// deleted (see `delete_after_update_skips_an_invalidated_entry_...`
+/// above) — `apply_undelete` must search the same way to find it again,
+/// rather than a raw newest-by-key search that lands on the trailing
+/// invalid entry instead and reports nothing to undo.
+#[test]
+fn abort_write_reverts_a_plain_delete_past_a_trailing_invalidated_entry() {
+    let mut leaf = TestLeaf::new();
+    let stamp0 = TxStamp::new(1, 100);
+
+    insert(&mut leaf, 1, stamp0, 10); // v0: the original, live value
+
+    // An unrelated transaction inserts a second physical entry for the
+    // same key, then aborts it: v1 ends up invalid, sitting physically
+    // after v0 (which is still live).
+    let stamp_x = TxStamp::new(1, 150);
+    insert(&mut leaf, 1, stamp_x, 99); // v1
+    assert_eq!(leaf.abort_write(1, stamp_x), AbortOutcome::Invalidated);
+    assert_eq!(leaf.active_dead_invalid(), (1, 0, 1)); // v0 live, v1 invalid
+
+    // T2 now plainly deletes key 1: `delete` skips the invalid v1 and
+    // marks the true live v0 deleted.
+    let stamp_t2 = TxStamp::new(1, 200);
+    assert!(leaf.delete(1, stamp_t2).unwrap().is_some());
+    leaf.commit_delta(-1, 1);
+    assert_eq!(leaf.active_dead_invalid(), (0, 1, 1)); // v0 dead, v1 invalid
+
+    // T2 aborts the delete. Before the fix, `apply_undelete` re-found the
+    // physically-newest entry (v1, invalid but not deleted) instead of
+    // v0, reported no deleted entry to undo, and left v0 wrongly deleted
+    // forever.
+    assert_eq!(leaf.abort_write(1, stamp_t2), AbortOutcome::Undeleted);
+
+    let records: Vec<_> = leaf.as_records().into_iter().filter(|r| r.key == 1).collect();
+    assert_eq!(records.len(), 2);
+    assert!(records[0].version().is_live(), "v0 must be resurrected");
+    assert_eq!(*records[0].payload(), 10);
+    assert!(!records[1].version().is_live(), "v1 stays invalid");
+    assert_eq!(leaf.active_dead_invalid(), (1, 0, 1));
+}

@@ -66,6 +66,12 @@ use triomphe::Arc;
 
 use super::database::Database;
 
+pub enum TransactionState {
+    InFlight,
+    Committed,
+    Aborted
+}
+
 pub struct DbTransaction<
     'a,
     const FAN_OUT: usize,
@@ -76,7 +82,7 @@ pub struct DbTransaction<
     db: &'a Database<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     ts_start: Version,
-    committed: bool,
+    committed: TransactionState,
     /// `(table, key)` pairs this transaction has actually written (on a
     /// successful `Inserted`/`Updated`/`Deleted` outcome only — never on
     /// `Conflict`/`ZeroAffected`, since nothing was written there to
@@ -101,7 +107,7 @@ impl<
         let worker_id = db.worker_id();
         let ts_start = db.begin_snapshot();
 
-        Self { db, worker_id, ts_start, committed: false, written: RefCell::new(Vec::new()) }
+        Self { db, worker_id, ts_start, committed: TransactionState::InFlight, written: RefCell::new(Vec::new()) }
     }
 
     #[inline(always)]
@@ -324,6 +330,14 @@ impl<
         // }
     }
 
+    pub const fn is_committed(&self) -> bool {
+        matches!(self.committed, TransactionState::Committed)
+    }
+
+    pub const fn is_aborted(&self) -> bool {
+        matches!(self.committed, TransactionState::Aborted)
+    }
+
     /// Instant commit: appends `ts_commit` to this worker's (shared)
     /// `CommitLog` — making every write this transaction made, across every
     /// table it touched, visible at once — then logs exactly **one** WAL
@@ -333,17 +347,40 @@ impl<
     /// which must log one marker per touched table since each has its own
     /// file). No-op (nothing to log) if this transaction never wrote
     /// anything.
-    pub fn commit(mut self) -> Version {
-        self.committed = true;
-        let ts_commit = self.db.ctx.commit_tx(self.worker_id);
+    pub fn commit(mut self) -> Option<Version> {
+        if let TransactionState::InFlight = self.committed {
+            self.committed = TransactionState::Committed;
 
-        if let Some(&(table, _)) = self.written.borrow().first() {
-            let stamp = TxStamp::new(self.worker_id, self.ts_start);
+            let ts_commit = self.db.ctx.commit_tx( self.worker_id);
+
+            if let Some( & (table, _)) = self.written.borrow().first() {
+            let stamp = TxStamp::new( self.worker_id, self.ts_start);
             self.tree(table).wal_log_commit(stamp, ts_commit);
-        }
+            }
 
-        self.db.end_snapshot(self.ts_start);
-        ts_commit
+            self.db.end_snapshot(self.ts_start);
+            Some(ts_commit)
+        }
+        else {
+            None
+        }
+    }
+
+    pub fn abort(mut self) -> bool {
+        if let TransactionState::InFlight = self.committed {
+            self.committed = TransactionState::Aborted;
+
+            let stamp = TxStamp::new(self.worker_id, self.ts_start);
+            for &(table, key) in self.written.borrow().iter() {
+                self.tree(table).abort_write(key, stamp);
+            }
+
+            self.db.end_snapshot(self.ts_start);
+            true
+        }
+        else {
+            false
+        }
     }
 }
 
@@ -356,12 +393,15 @@ impl<
 > Drop for DbTransaction<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     fn drop(&mut self) {
-        // Dropped without calling `commit` (e.g. the caller gave up after a
-        // `Conflict`, or a business-logic abort) — abort every write this
-        // transaction made, on whichever table it made it on, before
-        // releasing the registered snapshot (see the type doc and
-        // `MVBTSt::abort_write`).
-        if !self.committed {
+        // Dropped without calling `commit`/`abort` (e.g. the caller gave up
+        // after a `Conflict` without calling `abort` explicitly) — abort
+        // every write this transaction made, on whichever table it made it
+        // on, before releasing the registered snapshot (see the type doc
+        // and `MVBTSt::abort_write`). An explicit `commit()`/`abort()` call
+        // already did this (and released the snapshot) itself, so skip
+        // here — not just belt-and-suspenders: re-running would double
+        // `end_snapshot` this transaction's `ts_start`.
+        if let TransactionState::InFlight = self.committed {
             let stamp = TxStamp::new(self.worker_id, self.ts_start);
             for &(table, key) in self.written.borrow().iter() {
                 self.tree(table).abort_write(key, stamp);

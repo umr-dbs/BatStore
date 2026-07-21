@@ -90,7 +90,7 @@ impl<'a> TpccTxn<'a> {
     /// Instant commit — see `DbTransaction::commit`'s doc: exactly one WAL
     /// Commit marker for the whole transaction (every table on this
     /// database shares one WAL), not one marker per touched table.
-    pub fn commit(self) -> Version {
+    pub fn commit(self) -> Option<Version> {
         self.inner.commit()
     }
 }

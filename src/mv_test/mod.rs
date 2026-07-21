@@ -1375,3 +1375,6 @@ mod tree_wal_consistency_tests;
 #[cfg(test)]
 #[path = "../../tests/smo_race_investigation_tests.rs"]
 mod smo_race_investigation_tests;
+#[cfg(test)]
+#[path = "../../tests/db_transaction_abort_tests.rs"]
+mod db_transaction_abort_tests;

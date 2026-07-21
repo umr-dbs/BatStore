@@ -363,16 +363,18 @@ impl<const NUM_RECORDS: usize,
                 self.apply_invalidate(key);
                 AbortOutcome::Invalidated
             }
-            // // `apply_undelete` reports back whether it actually found a
-            // // deleted entry to undo — needed because "not mine" also
-            // // matches the idempotent-recall case (see this method's doc):
-            // // a key already fully processed by a prior `abort_write` call
-            // // has a newest entry that's now invalid (so no longer "mine"
-            // // by raw-stamp equality) but isn't deleted, and reporting that
-            // // as `Undeleted` would make the caller WAL-log a spurious op.
-            // Some(false) => if self.apply_undelete(key) {
-            //     AbortOutcome::Undeleted
-            // }
+            // `apply_undelete` reports back whether it actually found a
+            // deleted entry to undo — needed because "not mine" also
+            // matches the idempotent-recall case (see this method's doc):
+            // a key already fully processed by a prior `abort_write` call
+            // has a newest entry that's now invalid (so no longer "mine"
+            // by raw-stamp equality) but isn't deleted, and reporting that
+            // as `Undeleted` would make the caller WAL-log a spurious op.
+            Some(false) => if self.apply_undelete(key) {
+                AbortOutcome::Undeleted
+            } else {
+                AbortOutcome::NotFound
+            }
             _ => {
                 AbortOutcome::NotFound
             }
@@ -438,26 +440,34 @@ impl<const NUM_RECORDS: usize,
         }
     }
 
-    // /// Clears the newest entry's delete_stamp for `key`, adjusting
-    // /// `commit_delta` back from dead to active, and reports whether there
-    // /// was actually a deleted entry to undo. Used by `abort_write` (live
-    // /// path, reversing a plain `Delete`) and WAL replay of a logged
-    // /// `Undelete` op.
-    // #[inline]
-    // pub(crate) fn apply_undelete(&mut self, key: Key) -> bool {
-    //     if let Some(record) = self
-    //         .as_records_mut()
-    //         .iter_mut()
-    //         .rfind(|r| r.key == key)
-    //     {
-    //         if record.version().is_deleted() {
-    //             record.version_mut().undelete();
-    //             self.commit_delta(1, -1);
-    //             return true;
-    //         }
-    //     }
-    //     false
-    // }
+    /// Clears the newest entry's delete_stamp for `key`, adjusting
+    /// `commit_delta` back from dead to active, and reports whether there
+    /// was actually a deleted entry to undo. Used by `abort_write` (live
+    /// path, reversing a plain `Delete`) and WAL replay of a logged
+    /// `Undelete` op.
+    ///
+    /// Must search via `is_live_lineage`, not raw key equality: `delete`
+    /// (the op this reverses) only ever marks a *live-lineage* record
+    /// deleted, skipping past any invalid entry that sits physically after
+    /// it (see `is_live_lineage`'s doc). A raw newest-by-key search would
+    /// instead land on that trailing invalid entry — which is never
+    /// deleted — and silently report `false`, leaving the true deleted
+    /// record un-undone.
+    #[inline]
+    pub(crate) fn apply_undelete(&mut self, key: Key) -> bool {
+        if let Some(record) = self
+            .as_records_mut()
+            .iter_mut()
+            .rfind(|r| Self::is_live_lineage(r, key))
+        {
+            if record.version().is_deleted() {
+                record.version_mut().undelete();
+                self.commit_delta(1, -1);
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,6 +480,6 @@ pub(crate) enum AbortOutcome {
     Invalidated,
     // /// The newest entry pre-dated the aborting transaction, which only
     // /// deleted it (a plain `Delete`) — it has been undeleted.
-    // Undeleted,
+    Undeleted,
 }
 
