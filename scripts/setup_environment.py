@@ -19,34 +19,42 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-CMVBT_REPO = Path(__file__).resolve().parent.parent
-LEANSTORE_REPO = Path("/home/amir/tx_tests/leanstore")
-WIREDTIGER_REPO = Path("/home/amir/tx_tests/wiredtiger")
-WIREDTIGER_BUILD_DIR = WIREDTIGER_REPO / "cmake-build-debug"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from engines import common  # noqa: E402 - needs sys.path set up first
+
+# Shared with scripts/engines/*.py (single source of truth - see common.py's module docs
+# for why these are env-var overridable).
+CMVBT_REPO = common.CMVBT_REPO
+LEANSTORE_REPO = common.LEANSTORE_REPO
+WIREDTIGER_BUILD_DIR = common.WIREDTIGER_BUILD_DIR
+WIREDTIGER_REPO = WIREDTIGER_BUILD_DIR.parent
 LEANSTORE_BUILD_DIR = LEANSTORE_REPO / "build"
-BENCHBASE_REPO = Path("/home/amir/tx_tests/benchbase")
-BENCHBASE_DIST = BENCHBASE_REPO / "target" / "benchbase-postgres"
+BENCHBASE_DIST = common.BENCHBASE_HOME
+BENCHBASE_REPO = BENCHBASE_DIST.parent.parent
 
 # Everything LeanStore's own README asks for, minus librocksdb-dev/liblmdb-dev
 # (only needed for the rocksdb_*/lmdb_* frontend targets, which
-# scripts/engines/leanstore.py never builds), plus postgresql itself. No
+# scripts/engines/leanstore.py never builds), plus postgresql itself, plus numactl
+# (every engine subprocess here runs under `numactl --cpubind=0 --membind=0` - see
+# engines/common.py::run_and_track_rss - matching the real 2-NUMA-node server). No
 # ninja-build: both cmake builds below go through `cmake --build`, which
 # drives whatever generator got configured (default: Unix Makefiles via the
 # system `make`, already required anyway) - one less dependency to install.
 APT_PACKAGES = [
     "cmake", "libtbb-dev", "libaio-dev", "libsnappy-dev", "zlib1g-dev",
-    "libbz2-dev", "liblz4-dev", "libzstd-dev", "liburing-dev",
+    "libbz2-dev", "liblz4-dev", "libzstd-dev", "liburing-dev", "numactl",
     "postgresql", "postgresql-contrib",
 ]
 
-PG_ROLE = "admin"
-PG_PASSWORD = "password"
-PG_DATABASE = "benchbase"
+PG_ROLE = common.PG_ROLE
+PG_PASSWORD = common.PG_PASSWORD
+PG_DATABASE = common.PG_DATABASE
 
 
 def log(msg: str) -> None:
@@ -91,6 +99,7 @@ def step_wiredtiger() -> None:
     # a fresh checkout with no IDE-generated build directory yet, and is
     # independent of the process's current working directory.
     WIREDTIGER_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    common.check_release_build(WIREDTIGER_BUILD_DIR, "WiredTiger")
     if not (WIREDTIGER_BUILD_DIR / "CMakeCache.txt").exists():
         run(["cmake", "-S", str(WIREDTIGER_REPO), "-B", str(WIREDTIGER_BUILD_DIR),
              "-DCMAKE_BUILD_TYPE=Release", "-DENABLE_PYTHON=OFF"])
@@ -116,6 +125,7 @@ def step_leanstore() -> None:
         sys.exit(f"{LEANSTORE_REPO} doesn't exist - clone/checkout the leanstore repo first.")
 
     LEANSTORE_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    common.check_release_build(LEANSTORE_BUILD_DIR, "LeanStore")
     if not (LEANSTORE_BUILD_DIR / "CMakeCache.txt").exists():
         wt_include = WIREDTIGER_BUILD_DIR / "include"
         run([
@@ -156,6 +166,41 @@ def step_postgres() -> None:
              f"CREATE DATABASE {PG_DATABASE} OWNER {PG_ROLE};"])
 
 
+# Non-essential quality-gate plugins (code-style checks, static analysis) that: (a) aren't
+# needed to produce a working benchbase.jar, and (b) some build environments (observed on
+# the server: com.spotify.fmt:fmt-maven-plugin) can't resolve/download at all - Maven must
+# fetch a plugin's descriptor before it can even decide whether to skip its goals, so a
+# `-Dfmt.skip=true`-style property doesn't help when the actual problem is the download
+# itself failing. Stripped from pom.xml entirely, right after cloning, so Maven never
+# attempts to resolve them. Add more (groupId, artifactId) pairs here if another
+# environment hits the same class of failure with a different plugin.
+BENCHBASE_POM_PLUGINS_TO_STRIP = [
+    ("com.spotify.fmt", "fmt-maven-plugin"),
+]
+
+
+def _patch_benchbase_pom(pom_path: Path) -> None:
+    text = pom_path.read_text()
+    original = text
+    for group_id, artifact_id in BENCHBASE_POM_PLUGINS_TO_STRIP:
+        # Matches the whole <plugin>...</plugin> block containing this artifactId - safe
+        # because Maven <plugin> elements never nest another <plugin> inside themselves.
+        pattern = re.compile(
+            r"[ \t]*<plugin>(?:(?!</plugin>).)*?<artifactId>" + re.escape(artifact_id)
+            + r"</artifactId>(?:(?!</plugin>).)*?</plugin>\n?",
+            re.DOTALL,
+        )
+        new_text, n = pattern.subn("", text)
+        if n:
+            log(f"Stripped {n} {group_id}:{artifact_id} block(s) from {pom_path.name} "
+                f"(build-environment workaround, see BENCHBASE_POM_PLUGINS_TO_STRIP)")
+            text = new_text
+        elif artifact_id not in text:
+            pass  # already stripped by a prior run - nothing to do, stays idempotent
+    if text != original:
+        pom_path.write_text(text)
+
+
 def step_benchbase() -> None:
     log("Building BenchBase (PostgreSQL TPC-C/YCSB client)")
     if BENCHBASE_DIST.exists():
@@ -164,6 +209,8 @@ def step_benchbase() -> None:
 
     if not BENCHBASE_REPO.exists():
         run(["git", "clone", "--depth", "1", "https://github.com/cmu-db/benchbase.git", str(BENCHBASE_REPO)])
+
+    _patch_benchbase_pom(BENCHBASE_REPO / "pom.xml")
 
     # BenchBase's pom.xml targets Java 23; override to whatever JDK is
     # actually installed (verified fine with 21 in prior runs) rather than

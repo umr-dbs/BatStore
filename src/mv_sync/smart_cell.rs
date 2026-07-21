@@ -368,6 +368,53 @@ impl<E: Default + 'static> SmartGuard<E> {
         }
     }
 
+    /// Attempts to retire straight from a `Reader` — a single CAS from this
+    /// guard's captured snapshot to `RETIRED_FLAG_VERSION | read_latch`,
+    /// never becoming a `Writer` at all. Returns `Err(self)` if the cell
+    /// changed since this snapshot (someone else wrote to it, or already
+    /// retired it first) — the same "restart" signal a failed
+    /// `upgrade_write_lock` gives.
+    ///
+    /// Sound *only* for a guard that, once excluded, is unconditionally
+    /// going to be retired — no path afterward that decides not to use it
+    /// after all. That distinction matters because retiring is terminal,
+    /// unlike a plain `Writer` lock: a guard that upgrades via
+    /// `upgrade_write_lock` and then turns out not to be needed can simply
+    /// be dropped (a normal, harmless unlock); one that goes straight to
+    /// `RETIRED_FLAG_VERSION` cannot un-retire itself if the caller
+    /// backs out. `on_overflow_node`'s `simba` and `split_root`'s
+    /// `root_guard` qualify — `split()` never fails, so once its result
+    /// exists it's always pushed into the parent and the source retired.
+    /// `merge()`'s `candidate` qualifies once `compute_candidate` has
+    /// already succeeded (nothing past that point in `merge()` can still
+    /// bail). `simba` inside `on_underflow_node` does *not*: `merge()` can
+    /// still fail to find a candidate, so `simba` needs the ordinary,
+    /// reversible `Writer` lock there (see that call site) — if the merge
+    /// doesn't pan out, its guard is just dropped, leaving it exactly as
+    /// live as before.
+    #[inline(always)]
+    pub fn try_retire(self) -> Result<SmartCell<E>, Self> {
+        match self {
+            Reader(cell, read_latch) => unsafe {
+                match (*cell.0).cell_version.compare_exchange_weak(
+                    read_latch,
+                    read_latch | RETIRED_FLAG_VERSION,
+                    AcqRel,
+                    Acquire)
+                {
+                    Ok(..) => Ok(cell),
+                    Err(..) => Err(Reader(cell, read_latch)),
+                }
+            },
+            // Defensive only — every call site of `try_retire` passes a
+            // fresh `Reader` (a guard that was never upgraded in the first
+            // place, that being the whole point). A `Writer` is already
+            // exclusively held, so retiring it can't race with anything;
+            // just do it the normal way.
+            writer @ Writer(..) => Ok(writer.retire()),
+        }
+    }
+
     /// Still an unexcluded `Reader` — as opposed to a `Writer` this same
     /// traversal already upgraded to (e.g. correcting a sibling's
     /// overflow/underflow earlier at this level), whose own held write lock

@@ -121,8 +121,13 @@ impl<const FAN_OUT: usize,
             }
         }
         match root_guard.deref().unsafe_degree_root() {
+            // `root_guard` deliberately stays an unexcluded `Reader` here —
+            // `split_root` retires it itself via `try_retire()`, since it's
+            // only ever read and, once reached, always used (see that
+            // function's doc). Only `master_guard` (mutated in place, via
+            // `self.root.append_root`) needs the ordinary upgrade.
             BlockUnsafeDegree::Overflow
-            if master_guard.upgrade_write_lock() && root_guard.upgrade_write_lock()
+            if master_guard.upgrade_write_lock()
             => self.split_root(master_guard, root_guard, root.height()),
             BlockUnsafeDegree::ActiveUnderflow
             if master_guard.upgrade_write_lock() && root_guard.upgrade_write_lock() => {
@@ -216,7 +221,7 @@ impl<const FAN_OUT: usize,
                     // mutate `key_interval_region`/`version_region` — keep
                     // it inside the validated window too, not just the
                     // index lookup above.
-                    let mut next_curr_guard = internal_page
+                    let next_curr_guard = internal_page
                         .get_pointer(index)
                         .borrow_read();
 
@@ -240,9 +245,14 @@ impl<const FAN_OUT: usize,
                         }
                     }
                     match next_curr_guard.unsafe_degree() {
-                        BlockUnsafeDegree::Overflow // next_curr_guard.upgrade_write_lock() &&
+                        // `next_curr_guard` deliberately stays an
+                        // unexcluded `Reader` here — `on_overflow_node`
+                        // retires it itself via `try_retire()` (only ever
+                        // read, and once reached, always used — see that
+                        // function's doc). Only `curr_guard`/`mufasa`
+                        // (mutated in place) needs the ordinary upgrade.
+                        BlockUnsafeDegree::Overflow
                         if curr_guard.upgrade_write_lock()
-                             && next_curr_guard.upgrade_write_lock()
                         => match self.on_overflow_node(curr_guard, next_curr_guard, index) {
                                 Ok(guard) => curr_guard = guard,
                                 Err(..) => {
@@ -252,9 +262,14 @@ impl<const FAN_OUT: usize,
                                     return Err(attempts + 1)
                                 }
                             },
-                        BlockUnsafeDegree::ActiveUnderflow // next_curr_guard.upgrade_write_lock() &&
+                        // `next_curr_guard` also stays an unexcluded
+                        // `Reader` here now — `on_underflow_node` retires
+                        // it itself via `try_retire()`, with an explicit
+                        // revert (`clear_retired()`) on the one path where
+                        // `merge()` fails after that point. See that
+                        // function's doc for why the revert is sound.
+                        BlockUnsafeDegree::ActiveUnderflow
                         if curr_guard.upgrade_write_lock()
-                            && next_curr_guard.upgrade_write_lock()
                         => match self.on_underflow_node(curr_guard, next_curr_guard, index) {
                                 Ok(guard) => curr_guard = guard,
                                 Err(..) => {

@@ -16,13 +16,21 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Stabilize GC and liveness is nodes, now re-added the obsolete/retired mark explicitly">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Added user abort logic for transactions">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_txn.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_txn.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_db/transaction.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_db/transaction.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_test/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_test/mod.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/leaf_page_abort_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/leaf_page_abort_tests.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/compare_engines.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/compare_engines.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/engines/cmvbt.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/cmvbt.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/engines/common.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/common.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/engines/leanstore.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/leanstore.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/engines/leanstore_build.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/leanstore_build.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/engines/postgres_benchbase.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/postgres_benchbase.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/engines/wiredtiger.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/wiredtiger.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/plot_compare.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/plot_compare.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/setup_environment.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/setup_environment.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/ycsb_driver.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/ycsb_driver.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -33,7 +41,7 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="933" />
+    <option name="cachedIndexableFilesCount" value="934" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
@@ -76,61 +84,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0" />
-      <entry key="MS500" value="1.0" />
-      <entry key="S2" value="1.0000019954029336" />
-      <entry key="S5" value="1.0098731220885488" />
-      <entry key="S10" value="1.2777787052929859" />
-      <entry key="S30" value="5.010083672363191" />
-      <entry key="S60" value="12.629737839549136" />
-      <entry key="M2" value="30.253212614842667" />
-      <entry key="M5" value="66.01160681389229" />
-      <entry key="M10" value="97.44512020833426" />
-      <entry key="M15" value="117.52021788437233" />
-      <entry key="M30" value="151.06702158247768" />
-      <entry key="H1" value="192.21885602665802" />
-      <entry key="H2" value="275.1305928864666" />
-      <entry key="H4" value="409.86763486740745" />
-      <entry key="D1" value="2466.982986094985" />
-      <entry key="W1" value="9107.2300850704" />
+      <entry key="MS100" value="1.006129614561157" />
+      <entry key="MS500" value="1.4157417451014023" />
+      <entry key="S2" value="2.7234672816091283" />
+      <entry key="S5" value="4.7339917681494725" />
+      <entry key="S10" value="6.783590124244433" />
+      <entry key="S30" value="9.23504811926166" />
+      <entry key="S60" value="10.062157451470977" />
+      <entry key="M2" value="10.567954943499105" />
+      <entry key="M5" value="15.962879389119813" />
+      <entry key="M10" value="38.145164633473804" />
+      <entry key="M15" value="61.1822948382897" />
+      <entry key="M30" value="109.74820514619574" />
+      <entry key="H1" value="166.41836256754868" />
+      <entry key="H2" value="258.40056111490975" />
+      <entry key="H4" value="399.6665588542374" />
+      <entry key="D1" value="2456.245099910644" />
+      <entry key="W1" value="9106.722738448776" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
-      <entry key="MS500" value="6.689452887449166E-85" />
-      <entry key="S2" value="9.207748163319636E-22" />
-      <entry key="S5" value="4.594721170915672E-9" />
-      <entry key="S10" value="9.088374236377285E-5" />
-      <entry key="S30" value="0.0872542194754688" />
-      <entry key="S60" value="0.6100304467103613" />
-      <entry key="M2" value="1.8084676809033238" />
-      <entry key="M5" value="3.658971281182558" />
-      <entry key="M10" value="4.676992154738982" />
-      <entry key="M15" value="5.107634440700723" />
-      <entry key="M30" value="6.164013400076198" />
-      <entry key="H1" value="12.516139306745552" />
-      <entry key="H2" value="33.57168793900526" />
-      <entry key="H4" value="68.60817182467144" />
-      <entry key="D1" value="312.5112340135776" />
-      <entry key="W1" value="1004.5141277705158" />
+      <entry key="MS500" value="0.0" />
+      <entry key="S2" value="8.301730664131857E-188" />
+      <entry key="S5" value="1.7549520068323302E-75" />
+      <entry key="S10" value="5.616803662707587E-38" />
+      <entry key="S30" value="7.432258135143089E-13" />
+      <entry key="S60" value="1.7804045062015637E-6" />
+      <entry key="M2" value="0.0030895436730418086" />
+      <entry key="M5" value="0.2860173875199044" />
+      <entry key="M10" value="1.307625432574493" />
+      <entry key="M15" value="2.183890965359163" />
+      <entry key="M30" value="4.030594859041159" />
+      <entry key="H1" value="10.12099416549241" />
+      <entry key="H2" value="30.18905861590141" />
+      <entry key="H4" value="65.05999769519127" />
+      <entry key="D1" value="309.75762078835436" />
+      <entry key="W1" value="1003.2448952316395" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.008974205898414338" />
-      <entry key="MS500" value="0.3895822898302499" />
-      <entry key="S2" value="0.7900429452352258" />
-      <entry key="S5" value="0.9190636285177504" />
-      <entry key="S10" value="1.2219695533877504" />
-      <entry key="S30" value="5.038979956040404" />
-      <entry key="S60" value="13.16530877132624" />
-      <entry key="M2" value="31.983249363505482" />
-      <entry key="M5" value="69.61392082911303" />
-      <entry key="M10" value="102.08617079800086" />
-      <entry key="M15" value="122.60166079508032" />
-      <entry key="M30" value="157.21601652845368" />
-      <entry key="H1" value="204.72353445145876" />
-      <entry key="H2" value="308.6898559603826" />
-      <entry key="H4" value="478.46360344625685" />
-      <entry key="D1" value="2779.4852401477133" />
-      <entry key="W1" value="10111.740202067236" />
+      <entry key="MS100" value="0.9854237668057745" />
+      <entry key="MS500" value="1.4098853402178164" />
+      <entry key="S2" value="2.7206753869369" />
+      <entry key="S5" value="4.732095570224899" />
+      <entry key="S10" value="6.7822494004759974" />
+      <entry key="S30" value="9.234444689296641" />
+      <entry key="S60" value="10.061830872576618" />
+      <entry key="M2" value="10.570739168114413" />
+      <entry key="M5" value="16.24439758203609" />
+      <entry key="M10" value="39.442705782282815" />
+      <entry key="M15" value="63.35496325634146" />
+      <entry key="M30" value="113.76896766632515" />
+      <entry key="H1" value="176.53008309749822" />
+      <entry key="H2" value="288.5784437929924" />
+      <entry key="H4" value="464.71498292106236" />
+      <entry key="D1" value="2765.993819614105" />
+      <entry key="W1" value="10109.963627938934" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -1350,15 +1358,8 @@
       <workItem from="1784552764753" duration="8525000" />
       <workItem from="1784562372617" duration="3898000" />
       <workItem from="1784575451124" duration="633000" />
-      <workItem from="1784630490333" duration="3472000" />
-    </task>
-    <task id="LOCAL-00145" summary="Simplified commit-clock. Now includes reads in row counter to adjust commit-version handle of that worker. The terminate logic now only sets the local commit-version to MAX, indicating exit.">
-      <option name="closed" value="true" />
-      <created>1767805186325</created>
-      <option name="number" value="00145" />
-      <option name="presentableId" value="LOCAL-00145" />
-      <option name="project" value="LOCAL" />
-      <updated>1767805186325</updated>
+      <workItem from="1784630490333" duration="6095000" />
+      <workItem from="1784639299357" duration="8244000" />
     </task>
     <task id="LOCAL-00146" summary="Updated clock commit logic.">
       <option name="closed" value="true" />
@@ -1744,7 +1745,15 @@
       <option name="project" value="LOCAL" />
       <updated>1784632061876</updated>
     </task>
-    <option name="localTasksCounter" value="194" />
+    <task id="LOCAL-00194" summary="Added user abort logic for transactions">
+      <option name="closed" value="true" />
+      <created>1784634923870</created>
+      <option name="number" value="00194" />
+      <option name="presentableId" value="LOCAL-00194" />
+      <option name="project" value="LOCAL" />
+      <updated>1784634923870</updated>
+    </task>
+    <option name="localTasksCounter" value="195" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1762,7 +1771,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Add insert check" />
     <MESSAGE value="Pin Root* for root_live reorg, without actual latching of root_live. Move node tag to single cacheline" />
     <MESSAGE value="Correct root* count" />
     <MESSAGE value="Remove free cell" />
@@ -1787,7 +1795,8 @@
     <MESSAGE value="Fix memory leak; Add leanstore, wiredtiger and postgresql drivers" />
     <MESSAGE value="Stabilize cells, now indicates via dedicated flag obsolete" />
     <MESSAGE value="Stabilize GC and liveness is nodes, now re-added the obsolete/retired mark explicitly" />
-    <option name="LAST_COMMIT_MESSAGE" value="Stabilize GC and liveness is nodes, now re-added the obsolete/retired mark explicitly" />
+    <MESSAGE value="Added user abort logic for transactions" />
+    <option name="LAST_COMMIT_MESSAGE" value="Added user abort logic for transactions" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

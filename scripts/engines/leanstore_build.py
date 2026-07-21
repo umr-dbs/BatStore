@@ -9,13 +9,28 @@ import os
 import subprocess
 from pathlib import Path
 
-LEANSTORE_REPO = Path("/home/amir/CLionProjects/leanstore")
+from . import common
+
+LEANSTORE_REPO = common.LEANSTORE_REPO
 BUILD_DIR = LEANSTORE_REPO / "build"
-WIREDTIGER_BUILD_DIR = Path("/home/amir/CLionProjects/wiredtiger/cmake-build-debug")
+WIREDTIGER_BUILD_DIR = common.WIREDTIGER_BUILD_DIR
 
 
 def ensure_built(targets=("tpcc", "ycsb", "wiredtiger_tpcc", "wiredtiger_ycsb")) -> None:
-    subprocess.run(["make", "-j", str(os.cpu_count() or 4), *targets], cwd=BUILD_DIR, check=True)
+    common.check_release_build(WIREDTIGER_BUILD_DIR, "WiredTiger")
+    common.check_release_build(BUILD_DIR, "LeanStore")
+    if not (BUILD_DIR / "CMakeCache.txt").exists():
+        BUILD_DIR.mkdir(parents=True, exist_ok=True)
+        subprocess.run([
+            "cmake", "-S", str(LEANSTORE_REPO), "-B", str(BUILD_DIR),
+            "-DCMAKE_BUILD_TYPE=Release",
+            f"-DCMAKE_CXX_FLAGS=-I{WIREDTIGER_BUILD_DIR / 'include'}",
+            f"-DCMAKE_EXE_LINKER_FLAGS=-L{WIREDTIGER_BUILD_DIR} -Wl,-rpath,{WIREDTIGER_BUILD_DIR}",
+        ], check=True)
+    subprocess.run(
+        ["cmake", "--build", str(BUILD_DIR), "--target", *targets, "--parallel", str(os.cpu_count() or 4)],
+        check=True,
+    )
 
 
 def run_env() -> dict:

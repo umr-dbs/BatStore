@@ -1,6 +1,6 @@
 [package]
 name = "cMVBT"
-version = "0.0.118"
+version = "0.0.119"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
 description = "cMVBT Research Implementation"

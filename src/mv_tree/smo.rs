@@ -205,10 +205,14 @@ pub(crate) enum MergeResult<
     Merged(usize,
            Interval<Key>,
            BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
-           BlockGuard<'static, FAN_OUT, NUM_RECORDS, Key, Payload>),
+           // Already retired (`SmartGuard::try_retire`) by the time
+           // `merge()` builds this — see that call site's doc — so this is
+           // a bare cell, not a guard: there's no lock left to hold or
+           // later release.
+           BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>),
     KeySplit(usize,
              BlockSplit<FAN_OUT, NUM_RECORDS, Key, Payload>,
-             BlockGuard<'static, FAN_OUT, NUM_RECORDS, Key, Payload>),
+             BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>),
     Error,
 }
 
@@ -278,11 +282,25 @@ impl<const FAN_OUT: usize,
         // is blind to a writer that's already mid-flight when the "before"
         // sample is taken and still mid-flight at "after" — exactly the
         // race this project confirmed happening in practice.
-        // if !simba.upgrade_write_lock() {
-        //     return Err(());
-        // }
+        //
+        // `try_retire()`, not `upgrade_write_lock()`: `simba` is never
+        // mutated in place here (`split()` only reads it, building fresh
+        // `left`/`right` pages elsewhere), and once this call decides to
+        // split `simba` at all, it's unconditionally committed — `split()`
+        // has no failure path, so there's no later "actually, never mind"
+        // that would need `simba`'s exclusion to be reversible. That's
+        // exactly the condition `try_retire`'s doc requires: a single CAS
+        // straight to permanently retired, skipping the intermediate
+        // locked state entirely. Bail and restart the whole traversal if
+        // someone else got to `simba` first (wrote to it, or is retiring it
+        // via some other path) — the same recovery a failed
+        // `upgrade_write_lock` would need.
+        let simba_cell = match simba.try_retire() {
+            Ok(cell) => cell,
+            Err(..) => return Err(()),
+        };
 
-        let version = match self.split(simba.deref(), &fence) {
+        let version = match self.split(simba_cell.deref(), &fence) {
             BlockSplit::ByKey(left_fence,
                               left,
                               right_fence,
@@ -343,18 +361,12 @@ impl<const FAN_OUT: usize,
         // block to an unrelated concurrent writer while a reader was still
         // (or about to start) traversing into it.
         //
-        // `simba.retire()`, not `internal_page.get_pointer(child_index)`:
-        // the latter would leave `simba`'s own `Writer` guard to unlock
-        // *implicitly* at this function's end, well after `register_dead`
-        // has already handed this cell to GC as reclaimable — a window a
-        // concurrent `free_block`/reuse could land in and race with that
-        // deferred `Drop`. `retire()` unlocks (and marks retired) right
-        // here instead, before the cell is ever exposed as reclaimable. See
-        // `SmartGuard::retire`'s doc.
+        // `simba_cell` is already retired (via `try_retire()` above) by the
+        // time we get here — nothing left to do but hand it to the tracker.
         self.block_manager.register_dead(
             self.worker_id(),
             version,
-            simba.retire());
+            simba_cell);
 
         Ok(mufasa)
     }
@@ -383,21 +395,35 @@ impl<const FAN_OUT: usize,
         let mufasa_deref_mut
             = mufasa.deref_mut();
 
-        // See `on_overflow_node`'s matching comment: `simba`'s content is
-        // fully consumed here (folded into `merged_block`/the key-split
-        // halves, then `simba` itself retired), so it needs the same
-        // genuine exclusion `candidate` already gets inside `merge()`, not
-        // a post-hoc version check.
-        // if !simba.upgrade_write_lock() {
-        //     return Err(());
-        // }
+        // `simba` arrives here as a plain `Reader`, same as `merge()`'s own
+        // `candidate` — but unlike `candidate`, this call *can* still fail
+        // below (`merge()` returns `MergeResult::Error` when
+        // `compute_candidate` finds no sibling), and by the time that's
+        // known, `simba` is already retired. Rather than keep `simba` on
+        // the reversible `Writer` path for that reason, retire it upfront
+        // and explicitly *un*-retire (`clear_retired`) on that one failure
+        // exit: sound because nothing else can observe or act on a retired
+        // cell before it's registered as dead (`register_dead_col`, below,
+        // gated on `merge()` actually succeeding) — no CAS can ever match a
+        // retired value, so no concurrent writer/retirer can race in
+        // during the window before the revert. Saves an atomic op on the
+        // success path (no separate `retire()` unlock-and-mark-dead store
+        // needed) at the cost of an explicit revert on the one failure
+        // path — if `merge()` ever grows a *second* way to fail after
+        // `simba` is retired, that path needs the same `clear_retired()`
+        // call, since nothing enforces it structurally the way a `Writer`
+        // guard's `Drop` would.
+        let simba_cell = match simba.try_retire() {
+            Ok(cell) => cell,
+            Err(..) => return Err(()),
+        };
 
-        match self.merge(mufasa_deref_mut, simba.deref(), index_simba) {
+        match self.merge(mufasa_deref_mut, simba_cell.deref(), index_simba) {
             MergeResult::Merged(
                 index_sibling,
                 fence_sibling,
                 merged_block,
-                candidate_guard
+                candidate_cell
             ) => {
                 if VERBOSE {
 
@@ -443,14 +469,15 @@ impl<const FAN_OUT: usize,
                 // See `on_overflow_node`'s matching comment: the new
                 // `merged_block` entry's birth version (`version`) is the
                 // correct death point for these two now-obsoleted entries,
-                // not their own (older) birth versions. `simba.retire()`/
-                // `candidate_guard.retire()`, not `get_pointer(..)` — see
-                // `SmartGuard::retire`'s doc for why that matters here.
+                // not their own (older) birth versions. Both `simba_cell`
+                // and `candidate_cell` are already retired by this point
+                // (this function's own `try_retire()`, and `merge()`'s),
+                // so they're used as-is.
                 self.block_manager.register_dead_col(
                     self.worker_id(),
                     [
-                        (version, simba.retire()),
-                        (version, candidate_guard.retire())
+                        (version, simba_cell),
+                        (version, candidate_cell)
                     ])
             }
             MergeResult::KeySplit(
@@ -459,7 +486,7 @@ impl<const FAN_OUT: usize,
                                   left,
                                   right_interval,
                                   right),
-                candidate_guard
+                candidate_cell
             ) => {
                 if VERBOSE {
                     unsafe {
@@ -472,7 +499,7 @@ impl<const FAN_OUT: usize,
                                  right_interval,
                                  mufasa_deref_mut.keys().get_unchecked(index_simba),
                                  mufasa_deref_mut.keys().get_unchecked(index_sibling),
-                                 simba.deref().node_data.as_ref()
+                                 simba_cell.deref().node_data.as_ref()
                         );
                     }
                 }
@@ -511,15 +538,24 @@ impl<const FAN_OUT: usize,
                         diag_thread_hash(), mufasa_internal_page as *const _, left_interval.lower, left_interval.upper, right_interval.lower, right_interval.upper, mufasa_len + 1);
                 }
 
-                // See `on_overflow_node`'s matching comment.
+                // See the `Merged` arm's matching comment.
                 self.block_manager.register_dead_col(
                     self.worker_id(),
                     [
-                        (version, simba.retire()),
-                        (version, candidate_guard.retire())
+                        (version, simba_cell),
+                        (version, candidate_cell)
                     ])
             }
-            _ => return Err(()),
+            // `merge()` failed (`compute_candidate` found no sibling) —
+            // `simba_cell` was already retired above in anticipation of
+            // success; since that didn't happen, undo it so `simba` is
+            // exactly as live as it was before this call, for whoever
+            // retries next. See this function's own doc for why this
+            // revert is sound.
+            _ => {
+                simba_cell.clear_retired();
+                return Err(());
+            }
         }
 
         Ok(mufasa)
@@ -595,15 +631,24 @@ impl<const FAN_OUT: usize,
 
         all_candidates.clear();
 
-        let mut candidate_guard = candidate_block
-            .borrow_read();
+        // `try_retire()`, not `upgrade_write_lock()`: `candidate` is never
+        // mutated in place below (only read, to build `combined_block`/the
+        // key-split halves), and once selected here it's unconditionally
+        // used — nothing past this point in `merge()` can still decide not
+        // to use it. See `SmartGuard::try_retire`'s doc for why that's
+        // exactly the condition that makes skipping the reversible
+        // `Writer` phase sound. `simba` (the caller's, not `candidate`)
+        // stays on the ordinary write-lock path precisely because *this*
+        // function can still fail above (`compute_candidate` finding
+        // nothing) — `simba`'s exclusion has to stay reversible for that,
+        // `candidate`'s doesn't once we're here.
+        let candidate_cell = match candidate_block.borrow_read().try_retire() {
+            Ok(cell) => cell,
+            Err(..) => return MergeResult::Error,
+        };
 
-        if !candidate_guard.upgrade_write_lock() {
-            return MergeResult::Error
-        }
-
-        let (candidate_active_count, _candidate_dead_count) = candidate_block
-            .unsafe_borrow()
+        let (candidate_active_count, _candidate_dead_count) = candidate_cell
+            .deref()
             .active_dead_count();
 
         let candidate_active_count
@@ -618,7 +663,7 @@ impl<const FAN_OUT: usize,
                     let (keys, versions, pointers)
                         = simba.as_internal_page_ref().keys_versions_pointers();
 
-                    let (c_keys, c_versions, c_pointers) = candidate_guard
+                    let (c_keys, c_versions, c_pointers) = candidate_cell
                         .deref()
                         .as_internal_page_ref()
                         .keys_versions_pointers();
@@ -653,7 +698,7 @@ impl<const FAN_OUT: usize,
                             .as_records()
                             .iter()
                             .filter(|r| r.version().is_live())
-                            .merge_by(candidate_guard
+                            .merge_by(candidate_cell
                                           .deref()
                                           .as_records()
                                           .iter()
@@ -667,8 +712,8 @@ impl<const FAN_OUT: usize,
                             diag_thread_hash(),
                             simba, simba_fence,
                             simba.as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
-                            candidate_guard.deref(), candidate_fence,
-                            candidate_guard.deref().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            candidate_cell.deref(), candidate_fence,
+                            candidate_cell.deref().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
                             combined_block.unsafe_borrow(),
                             combined_block.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(",")));
                     }
@@ -677,11 +722,11 @@ impl<const FAN_OUT: usize,
                 }
             };
 
-            MergeResult::Merged(candidate_index, candidate_fence.clone(), combined_block, candidate_guard)
+            MergeResult::Merged(candidate_index, candidate_fence.clone(), combined_block, candidate_cell)
         } else { // Keysplit when merged: > 80% active entries ---> redistribute the keys
             match is_simba_leaf {
                 true => unsafe {
-                    let candidate_records = candidate_guard.deref().as_records();
+                    let candidate_records = candidate_cell.deref().as_records();
                     let simba_records = simba.as_records();
 
                     let mut joined = candidate_records
@@ -735,7 +780,7 @@ impl<const FAN_OUT: usize,
                             diag_thread_hash(),
                             simba, simba_fence,
                             simba_records.iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
-                            candidate_guard.deref(), candidate_fence,
+                            candidate_cell.deref(), candidate_fence,
                             candidate_records.iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
                             combined_block_0.unsafe_borrow(), left_interval,
                             combined_block_0.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
@@ -750,10 +795,10 @@ impl<const FAN_OUT: usize,
                             combined_block_0,
                             right_interval,
                             combined_block_1),
-                        candidate_guard)
+                        candidate_cell)
                 }
                 false => unsafe {
-                    let candidate_internal_page = candidate_guard
+                    let candidate_internal_page = candidate_cell
                         .deref()
                         .as_internal_page_ref();
 
@@ -816,7 +861,7 @@ impl<const FAN_OUT: usize,
                             combined_block_0,
                             right_fence,
                             combined_block_1),
-                        candidate_guard)
+                        candidate_cell)
                 }
             }
         }
@@ -1059,12 +1104,12 @@ impl<const FAN_OUT: usize,
             .as_internal_page_ref()
             .last_child();
 
-        let mut child_guard = child_ref
+        // Left as a plain `Reader` — `split_root` now excludes it itself
+        // via `try_retire()` (see that function's doc), rather than this
+        // caller pre-upgrading it to a `Writer` that `split_root` would
+        // then just retire anyway.
+        let child_guard = child_ref
             .borrow_read();
-
-        if !child_guard.upgrade_write_lock() {
-            return Err(())
-        }
 
         if VERBOSE {
             println!("Old root height = {}, new height = {}", height, height - 1);
@@ -1094,10 +1139,17 @@ impl<const FAN_OUT: usize,
         height: Height,
     ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
     {
-        let root_guard_deref_mut
-            = root_guard.deref_mut();
+        // `try_retire()`, not `upgrade_write_lock()`: `root_guard` is only
+        // ever read below (`split()` takes `&Block`, never mutates it in
+        // place), and `split()` has no failure path — once this call is
+        // reached, the old root is unconditionally superseded. Same
+        // reasoning as `on_overflow_node`'s `simba`; see
+        // `SmartGuard::try_retire`'s doc. Both callers (the root-overflow
+        // arm in `retrieve_root_write_internal_olc`, and `merge_root`) pass
+        // `root_guard`/`child_guard` in as a still-unexcluded `Reader`.
+        let root_cell = root_guard.try_retire().map_err(|_| ())?;
 
-        Ok(match self.split(root_guard_deref_mut, &Interval::new(self.min_key, self.max_key)) {
+        Ok(match self.split(root_cell.deref(), &Interval::new(self.min_key, self.max_key)) {
             BlockSplit::ByKey(left_fence,
                               left,
                               right_fence,
@@ -1135,10 +1187,10 @@ impl<const FAN_OUT: usize,
                 // `on_overflow_node`'s matching comment; the same
                 // premature-reclaim bug applied here too, since any active
                 // reader whose snapshot predates `version` still needs to
-                // resolve through this now-superseded root. `retire()`, not
-                // `inner_cell()` — see `SmartGuard::retire`'s doc.
+                // resolve through this now-superseded root. `root_cell` is
+                // already retired (`try_retire()` above) — used as-is.
                 self.block_manager.register_dead(
-                    self.worker_id(), version, root_guard.retire());
+                    self.worker_id(), version, root_cell);
 
                 new_root_latch
             }
@@ -1153,7 +1205,7 @@ impl<const FAN_OUT: usize,
                     Root::new(new_root_block, version, height));
 
                 self.block_manager.register_dead(
-                    self.worker_id(), version, root_guard.retire());
+                    self.worker_id(), version, root_cell);
 
                 new_root_latch
             }

@@ -57,6 +57,10 @@ struct WorkerStats {
     ops_per_sec: Vec<u64>,
     totals: [u64; NUM_COUNTERS],
     scanned_tuples: u64,
+    /// Per-scan-op wall-clock latency (nanoseconds), one entry per YCSB-E scan op
+    /// completed by this thread - empty for every other workload (A/B/C/D/F never
+    /// take the `Scan` arm below).
+    scan_latencies_ns: Vec<u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -76,6 +80,7 @@ fn worker_thread(
     let mut ops_per_sec = vec![0u64; duration.as_secs() as usize + 2];
     let mut totals = [0u64; NUM_COUNTERS];
     let mut scanned_tuples = 0u64;
+    let mut scan_latencies_ns = Vec::new();
     let start = Instant::now();
 
     while !stop.load(Relaxed) {
@@ -103,7 +108,9 @@ fn worker_thread(
             YcsbOpType::Scan => {
                 let key = sampler.sample(record_count, max_key_now);
                 let len = random_scan_length(max_scan_length);
+                let scan_start = Instant::now();
                 scanned_tuples += ycsb_txn::scan(&tree, key, len) as u64;
+                scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
                 totals[SCAN] += 1;
             }
             YcsbOpType::ReadModifyWrite => {
@@ -117,7 +124,7 @@ fn worker_thread(
         ops_per_sec[idx] += 1;
     }
 
-    WorkerStats { ops_per_sec, totals, scanned_tuples }
+    WorkerStats { ops_per_sec, totals, scanned_tuples, scan_latencies_ns }
 }
 
 pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
@@ -213,6 +220,7 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_COUNTERS];
     let mut scanned_tuples = 0u64;
+    let mut scan_latencies_ns: Vec<u64> = Vec::new();
     for s in stats {
         for (i, v) in s.ops_per_sec.iter().enumerate() {
             per_sec[i] += v;
@@ -221,6 +229,7 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
             totals[i] += s.totals[i];
         }
         scanned_tuples += s.scanned_tuples;
+        scan_latencies_ns.extend_from_slice(&s.scan_latencies_ns);
     }
 
     let ts_path = out_dir.join("ycsb_timeseries.csv");
@@ -230,6 +239,36 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
     for (sec, count) in per_sec.iter().enumerate() {
         ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
     }
+
+    // Summary (not raw per-op samples - a scan-heavy workload E run can complete millions
+    // of scans per second per thread, so a raw-sample CSV would blow up to tens of millions
+    // of rows at full sweep scale). Nearest-rank percentiles over the sorted latencies,
+    // in microseconds - empty (all-zero) file for every other workload. Every engine's
+    // wrapper computes this the same way (see scripts/engines/common.py's
+    // read_latency_summary, mirroring this exact nearest-rank formula) so percentiles are
+    // comparable across engines even though each is computed in its own process/language.
+    scan_latencies_ns.sort_unstable();
+    let scan_latency_path = out_dir.join("ycsb_scan_latency_summary.csv");
+    let _ = fs::remove_file(&scan_latency_path);
+    let mut scan_latency_file = OpenOptions::new().create(true).append(true).open(&scan_latency_path).unwrap();
+    scan_latency_file.write_all(b"p50_us,p95_us,p99_us,count,avg_us\n").unwrap();
+    let pct = |p: f64| -> f64 {
+        if scan_latencies_ns.is_empty() {
+            0.0
+        } else {
+            let idx = ((p * (scan_latencies_ns.len() - 1) as f64).round() as usize).min(scan_latencies_ns.len() - 1);
+            scan_latencies_ns[idx] as f64 / 1000.0
+        }
+    };
+    let avg_us = if scan_latencies_ns.is_empty() {
+        0.0
+    } else {
+        scan_latencies_ns.iter().sum::<u64>() as f64 / scan_latencies_ns.len() as f64 / 1000.0
+    };
+    scan_latency_file.write_all(format!(
+        "{:.3},{:.3},{:.3},{},{:.3}\n",
+        pct(0.50), pct(0.95), pct(0.99), scan_latencies_ns.len(), avg_us,
+    ).as_bytes()).unwrap();
 
     let total_ops: u64 = totals.iter().sum();
     let throughput = total_ops as f64 / actual_wall.as_secs_f64();
@@ -241,7 +280,10 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
     println!("{:<20} {}", "scanned_tuples", scanned_tuples);
     println!("{:<20} {}", "total_ops", total_ops);
     println!("{:<20} {:.2}", "throughput (ops/sec)", throughput);
-    println!("Wrote {}", ts_path.display());
+    if !scan_latencies_ns.is_empty() {
+        println!("{:<20} {}", "scan ops timed", scan_latencies_ns.len());
+    }
+    println!("Wrote {} and {}", ts_path.display(), scan_latency_path.display());
 
     YcsbRunSummary { throughput_ops_sec: throughput, totals }
 }
