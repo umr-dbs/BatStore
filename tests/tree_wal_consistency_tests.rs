@@ -612,6 +612,32 @@ fn repro_concurrent_insert_update_delete() {
     }
 }
 
+// Same workload as `repro_concurrent_insert_update_delete`, but with
+// GC/block-reclaim turned on — regression coverage for a real,
+// reproducible-under-gdb crash: `traversal_write_olc` never registered
+// itself as a live reader, so `live_min_snapshot` (and thus `free_block`)
+// was blind to in-flight write traversals. GC could reclaim and reset
+// (`Node::on_reuse`) a node a writer was still mid-descent through, and a
+// leaf-to-internal reuse cycle left `pointer_region` full of leftover
+// `RecordPoint` bytes reinterpreted as pointers on top of that. Fixed by
+// actually registering the traversal's snapshot (`MVBTSt::begin_snapshot`/
+// `end_snapshot` in `traversal_write_olc`) and by
+// `InternalPage::force_reinit_pointer_region` (now wired into
+// `Node::on_reuse`) — see both call sites' docs.
+#[test]
+fn repro_concurrent_insert_update_delete_with_gc() {
+    for _ in 0..REPRO_ITERATIONS {
+        let tree = TestTree::make_standard(RootIndexType::default());
+        tree.enable_gc(false);
+        std::thread::scope(|scope| {
+            for t in 0..REPRO_THREADS {
+                let tree = &tree;
+                scope.spawn(move || repro_run_range(tree, t));
+            }
+        });
+    }
+}
+
 // Same workload, keys shuffled instead of ascending-per-thread, to test
 // whether this is the same "ascending sequential-key splits leave some
 // leaves unreachable from the root's fence intervals" bug documented in

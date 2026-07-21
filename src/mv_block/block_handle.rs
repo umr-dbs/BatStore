@@ -225,7 +225,7 @@ impl<const FAN_OUT: usize,
                     m_page.mark_internal()
                 }
 
-                // See `OptCell::retired`'s doc: reverses `mark_retired` so
+                // See `RETIRED_FLAG_VERSION`'s doc: reverses `mark_retired` so
                 // this reused block isn't permanently un-lockable.
                 block.clear_retired();
 

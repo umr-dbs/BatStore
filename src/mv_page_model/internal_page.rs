@@ -172,25 +172,34 @@ impl<const FAN_OUT: usize,
         self.len.store(0, Release);
     }
 
-    // /// Unconditionally re-initializes every slot to `null` via a raw write
-    // /// that never reads whatever was previously there. Needed because
-    // /// `Node`'s `page` field is a `union` (`InnerPage`): when a block that
-    // /// was previously a *leaf* gets reused as an *internal* page
-    // /// (`Node::on_reuse` dispatches to `LeafPage::on_reuse`, which knows
-    // /// nothing about `pointer_region`), this array's bytes are still
-    // /// whatever `LeafPage`'s record data left behind — not a legitimate
-    // /// `AtomicPtr`. Treating it as one (reading or swapping into it as-is)
-    // /// would interpret garbage bytes as a raw pointer, which `get_pointer`'s
-    // /// caller could then dereference. Safe to call unconditionally even
-    // /// when the block *was* already internal: `on_reuse` above has already
-    // /// made every slot unreachable (`sum_len() == 0`) by then, so
-    // /// overwriting them again without reading them first loses nothing.
-    // #[inline]
-    // pub fn force_reinit_pointer_region(&mut self) {
-    //     self.pointer_region
-    //         .iter_mut()
-    //         .for_each(|slot| *slot = SmartCell(ptr::null()));
-    // }
+    /// Unconditionally re-initializes every slot to `null` via a raw write
+    /// that never reads whatever was previously there. Needed because
+    /// `Node`'s `page` field is a `union` (`InnerPage`): when a block that
+    /// was previously a *leaf* gets reused as an *internal* page
+    /// (`Node::on_reuse` dispatches to `LeafPage::on_reuse`, which knows
+    /// nothing about `pointer_region`), this array's bytes are still
+    /// whatever `LeafPage`'s record data left behind — not a legitimate
+    /// `AtomicPtr`. Treating it as one (reading or swapping into it as-is)
+    /// would interpret garbage bytes as a raw pointer, which `get_pointer`'s
+    /// caller could then dereference. Safe to call unconditionally even
+    /// when the block *was* already internal: `on_reuse` above has already
+    /// made every slot unreachable (`sum_len() == 0`) by then, so
+    /// overwriting them again without reading them first loses nothing.
+    ///
+    /// Was drafted but never actually wired into `Node::on_reuse` — GC
+    /// stayed off by default long enough that a leaf/internal reuse cycle
+    /// (the only way to hit this) was rare in practice. Confirmed via gdb on
+    /// a GC-enabled heavy-concurrency repro: `get_pointer` returning a
+    /// straight-up null `BlockRef` (0x0), later dereferenced by
+    /// `borrow_read` inside `traversal_write_internal_olc` — a leftover
+    /// `RecordPoint` field (small inline payload, unset key, ...) from this
+    /// exact block's previous life as a leaf, reinterpreted as a pointer.
+    #[inline]
+    pub fn force_reinit_pointer_region(&mut self) {
+        self.pointer_region
+            .iter_mut()
+            .for_each(|slot| *slot = SmartCell(ptr::null()));
+    }
 
     #[inline]
     pub fn bulk_push(&self, entries: Vec<((&Interval<Key>, &Version), &BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)>) {

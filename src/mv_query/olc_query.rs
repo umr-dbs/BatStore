@@ -43,7 +43,7 @@ impl<const FAN_OUT: usize,
     /// that flag.
     #[inline]
     pub(crate) fn traversal_write_olc(&self, key: Key) -> BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        // let ts_start = self.begin_snapshot();
+        let ts_start = self.begin_snapshot();
 
         let mut attempt = 0;
 
@@ -63,7 +63,7 @@ impl<const FAN_OUT: usize,
             }
         };
 
-        // self.end_snapshot(ts_start);
+        self.end_snapshot(ts_start);
 
         guard
     }
@@ -182,7 +182,7 @@ impl<const FAN_OUT: usize,
                     // mutates a retired node again), so the version-based
                     // check above can never catch it — a before/after
                     // comparison sees "unchanged" for all eternity. See
-                    // `OptCell::retired`'s doc.
+                    // `RETIRED_FLAG_VERSION`'s doc.
                     if curr_is_reader && curr_guard.is_retired() {
                         return Err(attempts + 1);
                     }

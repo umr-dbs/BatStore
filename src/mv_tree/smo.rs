@@ -342,10 +342,19 @@ impl<const FAN_OUT: usize,
         // was done with it — a premature-reclaim bug that could hand this
         // block to an unrelated concurrent writer while a reader was still
         // (or about to start) traversing into it.
+        //
+        // `simba.retire()`, not `internal_page.get_pointer(child_index)`:
+        // the latter would leave `simba`'s own `Writer` guard to unlock
+        // *implicitly* at this function's end, well after `register_dead`
+        // has already handed this cell to GC as reclaimable — a window a
+        // concurrent `free_block`/reuse could land in and race with that
+        // deferred `Drop`. `retire()` unlocks (and marks retired) right
+        // here instead, before the cell is ever exposed as reclaimable. See
+        // `SmartGuard::retire`'s doc.
         self.block_manager.register_dead(
             self.worker_id(),
             version,
-            internal_page.get_pointer(child_index));
+            simba.retire());
 
         Ok(mufasa)
     }
@@ -388,7 +397,7 @@ impl<const FAN_OUT: usize,
                 index_sibling,
                 fence_sibling,
                 merged_block,
-                _candidate_guard
+                candidate_guard
             ) => {
                 if VERBOSE {
 
@@ -434,14 +443,14 @@ impl<const FAN_OUT: usize,
                 // See `on_overflow_node`'s matching comment: the new
                 // `merged_block` entry's birth version (`version`) is the
                 // correct death point for these two now-obsoleted entries,
-                // not their own (older) birth versions.
+                // not their own (older) birth versions. `simba.retire()`/
+                // `candidate_guard.retire()`, not `get_pointer(..)` — see
+                // `SmartGuard::retire`'s doc for why that matters here.
                 self.block_manager.register_dead_col(
                     self.worker_id(),
                     [
-                        (version,
-                         mufasa_internal_page.get_pointer(index_simba)),
-                        (version,
-                         mufasa_internal_page.get_pointer(index_sibling))
+                        (version, simba.retire()),
+                        (version, candidate_guard.retire())
                     ])
             }
             MergeResult::KeySplit(
@@ -450,7 +459,7 @@ impl<const FAN_OUT: usize,
                                   left,
                                   right_interval,
                                   right),
-                _candidate_guard
+                candidate_guard
             ) => {
                 if VERBOSE {
                     unsafe {
@@ -506,10 +515,8 @@ impl<const FAN_OUT: usize,
                 self.block_manager.register_dead_col(
                     self.worker_id(),
                     [
-                        (version,
-                         mufasa_internal_page.get_pointer(index_simba)),
-                        (version,
-                         mufasa_internal_page.get_pointer(index_sibling))
+                        (version, simba.retire()),
+                        (version, candidate_guard.retire())
                     ])
             }
             _ => return Err(()),
@@ -1128,9 +1135,10 @@ impl<const FAN_OUT: usize,
                 // `on_overflow_node`'s matching comment; the same
                 // premature-reclaim bug applied here too, since any active
                 // reader whose snapshot predates `version` still needs to
-                // resolve through this now-superseded root.
+                // resolve through this now-superseded root. `retire()`, not
+                // `inner_cell()` — see `SmartGuard::retire`'s doc.
                 self.block_manager.register_dead(
-                    self.worker_id(), version, root_guard.inner_cell());
+                    self.worker_id(), version, root_guard.retire());
 
                 new_root_latch
             }
@@ -1145,7 +1153,7 @@ impl<const FAN_OUT: usize,
                     Root::new(new_root_block, version, height));
 
                 self.block_manager.register_dead(
-                    self.worker_id(), version, root_guard.inner_cell());
+                    self.worker_id(), version, root_guard.retire());
 
                 new_root_latch
             }

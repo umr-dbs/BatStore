@@ -16,13 +16,17 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Fix memory leak; Add leanstore, wiredtiger and postgresql drivers">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Stabilize cells, now indicates via dedicated flag obsolete">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_block/block_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_block/block_handle.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/node.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/node.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/tree_wal_consistency_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/tree_wal_consistency_tests.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -76,61 +80,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0142786164102742" />
-      <entry key="MS500" value="1.4340904592272472" />
-      <entry key="S2" value="2.766773007099499" />
-      <entry key="S5" value="5.763239728363746" />
-      <entry key="S10" value="9.071288906202604" />
-      <entry key="S30" value="13.494059495284255" />
-      <entry key="S60" value="15.103916597170983" />
-      <entry key="M2" value="16.012772620534065" />
-      <entry key="M5" value="16.59741245465046" />
-      <entry key="M10" value="16.855933664802055" />
-      <entry key="M15" value="17.089191563066763" />
-      <entry key="M30" value="20.05342895953312" />
-      <entry key="H1" value="44.1823156760618" />
-      <entry key="H2" value="121.5245904798775" />
-      <entry key="H4" value="251.04233931519983" />
-      <entry key="D1" value="2315.088539443963" />
-      <entry key="W1" value="8938.75630883109" />
+      <entry key="MS100" value="1.1174404503882136" />
+      <entry key="MS500" value="1.7011584149493872" />
+      <entry key="S2" value="3.2104194451034624" />
+      <entry key="S5" value="6.715528097032793" />
+      <entry key="S10" value="12.14949280058441" />
+      <entry key="S30" value="27.81894188714093" />
+      <entry key="S60" value="37.85140695673735" />
+      <entry key="M2" value="44.94227148092441" />
+      <entry key="M5" value="50.106992197703214" />
+      <entry key="M10" value="52.06088267082696" />
+      <entry key="M15" value="52.87634117016354" />
+      <entry key="M30" value="56.393767694957674" />
+      <entry key="H1" value="80.65143028717237" />
+      <entry key="H2" value="157.937658399226" />
+      <entry key="H4" value="287.47954080760354" />
+      <entry key="D1" value="2351.2794565558925" />
+      <entry key="W1" value="8975.312782951853" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
       <entry key="MS500" value="0.0" />
       <entry key="S2" value="0.0" />
-      <entry key="S5" value="1.0736465417778665E-218" />
-      <entry key="S10" value="1.369613607586557E-109" />
-      <entry key="S30" value="8.043238204041101E-37" />
-      <entry key="S60" value="1.2655164221584277E-18" />
-      <entry key="M2" value="1.5900371953927557E-9" />
-      <entry key="M5" value="4.5827255216559587E-4" />
-      <entry key="M10" value="0.030446042077208215" />
-      <entry key="M15" value="0.13330870091561323" />
-      <entry key="M30" value="1.3389996764725238" />
-      <entry key="H1" value="9.732114082661175" />
-      <entry key="H2" value="33.224737819058674" />
-      <entry key="H4" value="68.6411628901739" />
-      <entry key="D1" value="311.20582357293466" />
-      <entry key="W1" value="1000.6813048549194" />
+      <entry key="S5" value="2.691673464128784E-221" />
+      <entry key="S10" value="6.857701604269838E-111" />
+      <entry key="S30" value="2.964543117588226E-37" />
+      <entry key="S60" value="7.683006586573303E-19" />
+      <entry key="M2" value="1.238907819184271E-9" />
+      <entry key="M5" value="4.1474057972481256E-4" />
+      <entry key="M10" value="0.028963909730416404" />
+      <entry key="M15" value="0.12894645023707144" />
+      <entry key="M30" value="1.3169094660489284" />
+      <entry key="H1" value="9.651502219537424" />
+      <entry key="H2" value="33.086850139023184" />
+      <entry key="H4" value="68.49857920381332" />
+      <entry key="D1" value="311.0979890369508" />
+      <entry key="W1" value="1000.6317629835316" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.986543114305941" />
-      <entry key="MS500" value="1.4261601856166781" />
-      <entry key="S2" value="2.762949932556544" />
-      <entry key="S5" value="5.7599895393575125" />
-      <entry key="S10" value="9.068639608138533" />
-      <entry key="S30" value="13.492696016615279" />
-      <entry key="S60" value="15.103145248991808" />
-      <entry key="M2" value="16.01236145793337" />
-      <entry key="M5" value="16.597696118407185" />
-      <entry key="M10" value="16.886213903690788" />
-      <entry key="M15" value="17.222219577894833" />
-      <entry key="M30" value="21.391012160640447" />
-      <entry key="H1" value="53.90877206165493" />
-      <entry key="H2" value="154.73905619268405" />
-      <entry key="H4" value="319.6722790226786" />
-      <entry key="D1" value="2626.2855804986066" />
-      <entry key="W1" value="9939.433641495118" />
+      <entry key="MS100" value="0.2324639045194399" />
+      <entry key="MS500" value="1.34981034098355" />
+      <entry key="S2" value="3.1063913588861203" />
+      <entry key="S5" value="6.670888751443125" />
+      <entry key="S10" value="12.125257810616475" />
+      <entry key="S30" value="27.808702389133142" />
+      <entry key="S60" value="37.84555178813506" />
+      <entry key="M2" value="44.93908061557119" />
+      <entry key="M5" value="50.106050279566965" />
+      <entry key="M10" value="52.08908036624051" />
+      <entry key="M15" value="53.004608367616946" />
+      <entry key="M30" value="57.70907911456241" />
+      <entry key="H1" value="90.29721893422577" />
+      <entry key="H2" value="191.014227625929" />
+      <entry key="H4" value="355.96689440651573" />
+      <entry key="D1" value="2662.368661826158" />
+      <entry key="W1" value="9975.940573328013" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -408,17 +412,17 @@
       <item itemvalue="Cargo.Run" />
       <item itemvalue="Cargo.Run cMVBT" />
       <item itemvalue="Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot" />
-      <item itemvalue="Cargo.Test tx_context::tests" />
       <item itemvalue="Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" />
       <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
+      <item itemvalue="Cargo.Test tx_context::tests" />
     </list>
     <recent_temporary>
       <list>
-        <item itemvalue="Cargo.Run cMVBT" />
-        <item itemvalue="Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot" />
         <item itemvalue="Cargo.Test tx_context::tests" />
-        <item itemvalue="Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" />
         <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
+        <item itemvalue="Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" />
+        <item itemvalue="Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot" />
+        <item itemvalue="Cargo.Run cMVBT" />
       </list>
     </recent_temporary>
   </component>
@@ -1349,15 +1353,8 @@
       <workItem from="1784536738406" duration="11087000" />
       <workItem from="1784552764753" duration="8525000" />
       <workItem from="1784562372617" duration="3898000" />
-      <workItem from="1784575451124" duration="452000" />
-    </task>
-    <task id="LOCAL-00143" summary="Updated commit-logic">
-      <option name="closed" value="true" />
-      <created>1767714746123</created>
-      <option name="number" value="00143" />
-      <option name="presentableId" value="LOCAL-00143" />
-      <option name="project" value="LOCAL" />
-      <updated>1767714746124</updated>
+      <workItem from="1784575451124" duration="633000" />
+      <workItem from="1784630490333" duration="705000" />
     </task>
     <task id="LOCAL-00144" summary="OLTP clock commit updated, now if a oltp thread moves to reader it will try to correct its local commit">
       <option name="closed" value="true" />
@@ -1743,7 +1740,15 @@
       <option name="project" value="LOCAL" />
       <updated>1784566503259</updated>
     </task>
-    <option name="localTasksCounter" value="192" />
+    <task id="LOCAL-00192" summary="Stabilize cells, now indicates via dedicated flag obsolete">
+      <option name="closed" value="true" />
+      <created>1784576022959</created>
+      <option name="number" value="00192" />
+      <option name="presentableId" value="LOCAL-00192" />
+      <option name="project" value="LOCAL" />
+      <updated>1784576022960</updated>
+    </task>
+    <option name="localTasksCounter" value="193" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1761,7 +1766,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Fix GC on empty Reader threads" />
     <MESSAGE value="Fix UIP logic" />
     <MESSAGE value="Add insert check" />
     <MESSAGE value="Pin Root* for root_live reorg, without actual latching of root_live. Move node tag to single cacheline" />
@@ -1786,7 +1790,8 @@
     <MESSAGE value="Bulk improve system" />
     <MESSAGE value="Improve Tx conflict findings" />
     <MESSAGE value="Fix memory leak; Add leanstore, wiredtiger and postgresql drivers" />
-    <option name="LAST_COMMIT_MESSAGE" value="Fix memory leak; Add leanstore, wiredtiger and postgresql drivers" />
+    <MESSAGE value="Stabilize cells, now indicates via dedicated flag obsolete" />
+    <option name="LAST_COMMIT_MESSAGE" value="Stabilize cells, now indicates via dedicated flag obsolete" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

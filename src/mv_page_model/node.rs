@@ -300,8 +300,14 @@ impl<const FAN_OUT: usize,
             // See `InternalPage::force_reinit_pointer_region`'s doc: needed
             // unconditionally, not just on a leaf->internal transition —
             // it's always sound and the alternative is tracking the old
-            // type here too, for no benefit.
-            // self.page.internal.force_reinit_pointer_region();
+            // type here too, for no benefit. Confirmed via gdb (GC-enabled
+            // heavy-concurrency repro) that skipping this is a real,
+            // reproducible null-pointer-deref crash, not just a theoretical
+            // gap: a block last used as a leaf, reused as an internal page,
+            // still had a leftover `RecordPoint` field sitting at
+            // `pointer_region`'s byte offset — `get_pointer` handed that
+            // back as a `BlockRef`, and `borrow_read` dereferenced it.
+            self.page.internal.force_reinit_pointer_region();
         }
     }
 

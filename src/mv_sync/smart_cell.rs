@@ -16,6 +16,46 @@ const WRITE_FLAG_VERSION: LatchVersion = 0x4_000000000000000;
 const WRITE_PIN_FLAG_VERSION: LatchVersion = 0x6_000000000000000;
 const WRITE_PIN_OBSOLETE_FLAG_VERSION: LatchVersion = 0xE_000000000000000;
 
+/// Set once, permanently, the moment a cell stops being anyone's live child —
+/// i.e. exactly when its *parent's* corresponding entry is
+/// `mark_version_obsolete`'d (see `TrackerHandleSt::register_died_page`/
+/// `register_died_page_col`, called from the same `on_overflow_node`/
+/// `on_underflow_node`/`split_root`/`merge_root` sites that do the
+/// obsoleting). Closes a gap the version-CAS alone can't: a `Reader` that
+/// obtained this cell as a *child pointer* before it was retired keeps
+/// re-validating cleanly forever afterward — nothing ever mutates a retired
+/// cell's content again, so a before/after `cell_version` comparison
+/// trivially "passes" for it for all time, even though the parent that
+/// handed it out no longer considers it live. A thread delayed (scheduling,
+/// contention) between reading that stale parent and finally locking this
+/// cell could walk an entire already-orphaned subtree and silently commit a
+/// write nobody currently reachable from the root will ever see (confirmed
+/// empirically: a fresh insert landing in a leaf a concurrent merge had
+/// already folded into a different combined block moments earlier).
+///
+/// Packed into `cell_version` itself (a distinct bit from `WRITE_FLAG_VERSION`)
+/// rather than a separate field: `borrow_read` masks it out of the captured
+/// `read_latch` the same way it already masks `WRITE_FLAG_VERSION`, so a
+/// retired cell's actual value (base version | this bit) can never again
+/// equal any `read_latch` a `Reader` could hold — `write_lock`'s CAS fails
+/// *by construction*, no separate check required for that path alone (an
+/// explicit `is_retired` check on the `Reader` side is kept anyway, both as
+/// a fast path that skips a doomed CAS and for the traversal's own
+/// stale-ancestor gate, which never attempts to lock at all). The one thing
+/// this sharing requires: `SmartGuard`'s `Writer` `Drop` must preserve
+/// whatever's in this bit rather than blindly overwriting `cell_version` —
+/// every call site that retires a node does so *while still holding its
+/// dying write-lock guard* (the guard only drops at scope end), so without
+/// that preservation, `Drop`'s unconditional store — computed purely from
+/// the version captured back at lock *acquisition* time, before any
+/// retirement — would silently erase the bit again.
+///
+/// Independent of GC/block-reclaim — this is a correctness fix, not a
+/// reclaim-scheduling one, so it applies whether or not block reuse is ever
+/// turned on. Cleared (`SmartCell::clear_retired`) when a block is handed
+/// back out by `free_block` for reuse.
+const RETIRED_FLAG_VERSION: LatchVersion = 0x2_000000000000000;
+
 #[cfg(all(feature = "hardware-lock-elision", any(target_arch = "x86", target_arch = "x86_64")))]
 pub trait AtomicElisionExt {
     fn elision_compare_exchange_acquire(
@@ -112,30 +152,6 @@ type IsRead = bool;
 pub struct OptCell<E: Default> {
     pub cell: SafeCell<E>,
     pub cell_version: AtomicVersion,
-    /// Set once, permanently, the moment this cell stops being anyone's live
-    /// child — i.e. exactly when its *parent's* corresponding entry is
-    /// `mark_version_obsolete`'d (see `TrackerHandleSt::register_died_page`/
-    /// `register_died_page_col`, called from the same `on_overflow_node`/
-    /// `on_underflow_node`/`split_root`/`merge_root` sites that do the
-    /// obsoleting). Closes a gap the version-CAS alone can't: a `Reader`
-    /// that obtained this cell as a *child pointer* before it was retired
-    /// keeps re-validating cleanly forever afterward — nothing ever mutates
-    /// a retired cell's content again, so a before/after `cell_version`
-    /// comparison trivially "passes" for it for all time, even though the
-    /// parent that handed it out no longer considers it live. A thread
-    /// delayed (scheduling, contention) between reading that stale parent
-    /// and finally locking this cell could walk an entire already-orphaned
-    /// subtree and silently commit a write nobody currently reachable from
-    /// the root will ever see (confirmed empirically: a fresh insert
-    /// landing in a leaf a concurrent merge had already folded into a
-    /// different combined block moments earlier). Checked by
-    /// `upgrade_write_lock` (refuses to lock a retired cell, forcing the
-    /// caller to restart from the root, where the still-live replacement is
-    /// reachable) and by the traversal's own "is this still safe to read"
-    /// gate, independent of GC/block-reclaim — this is a correctness fix,
-    /// not a reclaim-scheduling one, so it applies whether or not block
-    /// reuse is ever turned on.
-    pub retired: std::sync::atomic::AtomicBool,
 }
 
 impl<E: Default + Display> Display for OptCell<E> {
@@ -158,7 +174,6 @@ impl<E: Default> OptCell<E> {
         Self {
             cell: SafeCell::new(data),
             cell_version: AtomicVersion::new(Self::CELL_START_VERSION),
-            retired: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -267,19 +282,23 @@ impl<E: Default + 'static> SmartGuard<E> {
         match self {
             Reader(cell, read_latch) => unsafe {
                 // A retired cell's `cell_version` never changes again (see
-                // `OptCell::retired`'s doc), so the CAS below would happily
-                // succeed against a stale `read_latch` from long before this
-                // cell was folded into its replacement — refusing here,
-                // before even attempting the CAS, is what actually closes
-                // that gap; a version-only check can't, because "unchanged"
-                // is exactly what a permanently-frozen retired cell looks
-                // like.
-                if (*cell.0).retired.load(Acquire) {
+                // `RETIRED_FLAG_VERSION`'s doc), so — since `read_latch`
+                // never carries this bit (masked out in `borrow_read`, same
+                // as `WRITE_FLAG_VERSION`) — the CAS below would already
+                // fail on its own once the cell is actually retired (its
+                // real value now carries a bit `read_latch` doesn't).
+                // Checked explicitly here anyway, before even attempting
+                // the CAS: a fast path that skips a doomed compare-exchange
+                // outright, and the one spot that still needs an *explicit*
+                // check regardless of masking, since a `Reader` snapshot
+                // taken *after* retirement would otherwise have to fall
+                // through to the CAS to find out.
+                if (*cell.0).cell_version.load(Acquire) & RETIRED_FLAG_VERSION != 0 {
                     return false;
                 }
 
                 if let Some(write_latch)
-                    = (*cell.0).write_lock(*read_latch & !WRITE_FLAG_VERSION)
+                    = (*cell.0).write_lock(*read_latch & !(WRITE_FLAG_VERSION | RETIRED_FLAG_VERSION))
                 {
                     let writer = Writer(cell.clone(), write_latch);
                     ptr::write(self, writer);
@@ -291,15 +310,61 @@ impl<E: Default + 'static> SmartGuard<E> {
         }
     }
 
-    /// See `OptCell::retired`'s doc. Always `false` for a `Writer` — nothing
-    /// still holding this cell's own write lock could have had it retired
-    /// out from under it (retiring a cell requires *its own* write lock
-    /// first).
+    /// See `RETIRED_FLAG_VERSION`'s doc. Always `false` for a `Writer` —
+    /// nothing still holding this cell's own write lock could have had it
+    /// retired out from under it (retiring a cell requires *its own* write
+    /// lock first).
     #[inline(always)]
     pub fn is_retired(&self) -> bool {
         match self {
-            Reader(cell, ..) => unsafe { (*cell.0).retired.load(Acquire) },
+            Reader(cell, ..) => unsafe { (*cell.0).cell_version.load(Acquire) & RETIRED_FLAG_VERSION != 0 },
             Writer(..) => false,
+        }
+    }
+
+    /// Consumes a dying `Writer` guard, unlocking it and marking it retired
+    /// in one atomic store — unlike calling `SmartCell::mark_retired`
+    /// separately and letting this guard's ordinary `Drop` run afterward
+    /// (the every-call-site-today pattern: `register_dead`/
+    /// `register_dead_col` mark a node retired and hand it to GC as
+    /// reclaimable *before* the dying guard that's still "holding" it
+    /// actually goes out of scope). That gap doesn't matter while retired
+    /// only lives in a separate field — but packed into `cell_version`
+    /// itself, it's a real race: a concurrent `free_block`/reuse of this
+    /// exact cell in that window calls `clear_retired` (a plain
+    /// `fetch_and`), and this guard's *later*, already-in-flight `Drop`
+    /// would then blindly store a value computed from its own
+    /// lock-acquisition-time snapshot — silently reverting whatever the
+    /// reused cell's new life had already done to `cell_version` (confirmed
+    /// empirically: reused this way, a GC-enabled heavy-concurrency repro
+    /// that passes cleanly with a separate `retired` field hangs/livelocks
+    /// instead). Calling `retire()` at the exact point a call site used to
+    /// call `mark_retired` (via `register_dead`) — instead of separately,
+    /// then leaving the guard to drop implicitly at scope end — closes the
+    /// window: the cell is fully unlocked *before* it's ever handed to the
+    /// tracker as reclaimable, so nothing can race with it. Returns the
+    /// bare cell so callers can still pass it to `register_dead`/
+    /// `register_dead_col` exactly as before.
+    #[inline(always)]
+    pub fn retire(self) -> SmartCell<E> {
+        match &self {
+            Writer(cell, write_version) => unsafe {
+                let cell_copy = cell.clone();
+                (*cell.0).cell_version.store(
+                    ((*write_version + 1) ^ WRITE_FLAG_VERSION) | RETIRED_FLAG_VERSION,
+                    Release);
+                mem::forget(self);
+                cell_copy
+            },
+            // Defensive only — every real call site already upgraded to a
+            // `Writer` before retiring (an SMO always excludes `simba`/its
+            // merge `candidate` first). Falls back to the plain, separately-
+            // ordered `mark_retired` rather than assuming it's unreachable.
+            Reader(cell, ..) => {
+                let cell_copy = cell.clone();
+                cell_copy.mark_retired();
+                cell_copy
+            }
         }
     }
 
@@ -441,22 +506,28 @@ impl<E: Default> SmartCell<E> {
     /// ever frees it, by design, as long as GC's block-reclaim stays off).
     #[inline(always)]
     pub fn borrow_read(&self) -> SmartGuard<E> {
-        Reader(self.clone(), unsafe { (*self.0).cell_version.load(Acquire) } & !WRITE_FLAG_VERSION)
+        Reader(self.clone(), unsafe { (*self.0).cell_version.load(Acquire) } & !(WRITE_FLAG_VERSION | RETIRED_FLAG_VERSION))
     }
 
-    /// See `OptCell::retired`'s doc. Called exactly where a cell stops being
-    /// anyone's live child — the same `register_died_page`/
+    /// See `RETIRED_FLAG_VERSION`'s doc. Called exactly where a cell stops
+    /// being anyone's live child — the same `register_died_page`/
     /// `register_died_page_col` call sites that already exist for GC, but
     /// unconditional on `block_reclaim_enabled`: this is a correctness fix
-    /// for the write traversal, not a reclaim-scheduling one.
+    /// for the write traversal, not a reclaim-scheduling one. Every current
+    /// call site invokes this *while still holding this exact cell's own
+    /// write-lock guard* (dropped later, at scope end) — safe as a plain
+    /// `fetch_or` rather than a CAS, since nothing else can be concurrently
+    /// writing to `cell_version` while that guard lives, but it does mean
+    /// the dying guard's own `Drop` must preserve this bit rather than
+    /// overwrite it (see `Drop for SmartGuard`).
     #[inline(always)]
     pub fn mark_retired(&self) {
-        unsafe { (*self.0).retired.store(true, Release); }
+        unsafe { (*self.0).cell_version.fetch_or(RETIRED_FLAG_VERSION, AcqRel); }
     }
 
     #[inline(always)]
     pub fn is_retired(&self) -> bool {
-        unsafe { (*self.0).retired.load(Acquire) }
+        unsafe { (*self.0).cell_version.load(Acquire) & RETIRED_FLAG_VERSION != 0 }
     }
 
     /// Reverses `mark_retired` for a block GC hands back out via
@@ -464,15 +535,34 @@ impl<E: Default> SmartCell<E> {
     /// retired to `upgrade_write_lock` and could never be written to again.
     #[inline(always)]
     pub fn clear_retired(&self) {
-        unsafe { (*self.0).retired.store(false, Release); }
+        unsafe { (*self.0).cell_version.fetch_and(!RETIRED_FLAG_VERSION, AcqRel); }
     }
 }
 
 impl<E: Default> Drop for SmartGuard<E> {
     fn drop(&mut self) {
         match self {
-            Writer(cell, write_version) =>
-                unsafe { (*cell.0).cell_version.store((*write_version + 1) ^ WRITE_FLAG_VERSION, Release) },
+            Writer(cell, write_version) => unsafe {
+                // Preserves `RETIRED_FLAG_VERSION` if `mark_retired` set it
+                // on this exact cell while we still held this write lock
+                // (the common case: every call site retires a node before
+                // its dying guard goes out of scope) — a blind store here,
+                // computed purely from `write_version` as captured back at
+                // lock *acquisition* time, would otherwise silently erase
+                // it again, since that capture necessarily predates any
+                // retirement decided during this critical section. Reading
+                // the current value first is safe without a CAS: nothing
+                // else can be concurrently writing `cell_version` while this
+                // `Writer` still exists, `mark_retired` included (it's only
+                // ever called by this same thread, earlier in this same
+                // critical section, never by a genuinely different one).
+                let retired_bit
+                    = (*cell.0).cell_version.load(Relaxed) & RETIRED_FLAG_VERSION;
+
+                (*cell.0).cell_version.store(
+                    ((*write_version + 1) ^ WRITE_FLAG_VERSION) | retired_bit,
+                    Release)
+            },
             _ => {}
         }
     }

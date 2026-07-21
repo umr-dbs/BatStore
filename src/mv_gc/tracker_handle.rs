@@ -68,7 +68,7 @@ impl<const P_F: usize,
         self.block_reclaim_enabled.load(Relaxed)
     }
 
-    /// Always marks `page` retired (see `OptCell::retired`'s doc) — a
+    /// Always marks `page` retired (see `RETIRED_FLAG_VERSION`'s doc) — a
     /// correctness fix independent of GC, so it applies whether or not block
     /// reclaim is on. The actual `dead_blocks` bookkeeping stays gated
     /// behind `block_reclaim_enabled` as before — otherwise it would just
