@@ -47,6 +47,13 @@ pub enum BlockUnsafeDegree {
     ActiveUnderflow
 }
 
+impl BlockUnsafeDegree {
+    #[inline(always)]
+    pub const fn is_overflow(&self) -> bool {
+        matches!(self, BlockUnsafeDegree::Overflow)
+    }
+}
+
 impl<const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + 'static,
@@ -56,6 +63,11 @@ impl<const FAN_OUT: usize,
     // pub const fn block_id(&self) -> BlockID {
     //     0
     // }
+
+    #[inline]
+    fn is_overflow(&self) -> bool {
+        self.unsafe_degree().is_overflow()
+    }
 
     #[inline(always)]
     pub fn unsafe_degree(&self) -> BlockUnsafeDegree {
@@ -249,9 +261,30 @@ impl<const FAN_OUT: usize,
         // identically; `split_root`/`merge_root` don't need the same guard
         // because they only ever push into a *freshly allocated* page,
         // never one that could have already absorbed an earlier round.
-        // if mufasa.as_internal_page_ref().sum_len() + 2 > FAN_OUT {
-        //     return Err(());
-        // }
+        //
+        // This was written and documented but left disabled — confirmed via
+        // `generate` on a large population: `rand_query`'s per-level
+        // *random* child selection (unlike the key-routed write path) makes
+        // a second overflow/underflow round landing on the same already-near-
+        // capacity `mufasa` far more likely once the tree is large enough for
+        // several of its children to be near their own thresholds at once —
+        // reproduced as exactly the corruption this comment predicted:
+        // `push_uncommitted`'s `index == FAN_OUT` bounds panic.
+        //
+        // Must be the narrow "is there literally no room for 2 more
+        // entries" check (`sum_len`, not the full `unsafe_degree()`) —
+        // `unsafe_degree().is_unsafe()` also trips on plain `ActiveUnderflow`
+        // (`active <= one_d`, ~20% of capacity), which is the *normal*,
+        // expected state for almost every internal page in a small/young
+        // tree (plenty of physical room, just not many children yet) — using
+        // the broad check here permanently blocks every split attempt on
+        // such a `mufasa` (its "too few children" never resolves on its own,
+        // and nothing above it can fix it either, since the ancestor hits
+        // the identical false trip), a total deadlock confirmed via
+        // `generate` stalling at ~234 keys, essentially immediately.
+        if mufasa.is_overflow() { // is_overflow in re-repeated corrections
+            return Err(());
+        }
 
         let mufasa_deref_mut
             = mufasa.deref_mut();
@@ -382,15 +415,19 @@ impl<const FAN_OUT: usize,
             println!("on_underflow_node");
         }
 
-        // See `on_overflow_node`'s matching comment: a merge can need up to
-        // 2 fresh entries (`MergeResult::KeySplit`), and `mufasa` gets the
-        // same "already a Writer from an earlier round in this traversal,
-        // no re-validated capacity" exposure. Checked conservatively for
-        // both outcomes before doing any of the (otherwise wasted) work
-        // below, since which one `merge()` produces isn't known yet.
-        // if mufasa.as_internal_page_ref().sum_len() + 2 > FAN_OUT {
-        //     return Err(());
-        // }
+        // See `on_overflow_node`'s matching comment (including why this was
+        // written but left disabled, why it must be the narrow `sum_len`
+        // capacity check and not the broad `unsafe_degree().is_unsafe()`,
+        // and how `generate` reproduces each failure mode in turn): a merge
+        // can need up to 2 fresh entries (`MergeResult::KeySplit`), and
+        // `mufasa` gets the same "already a Writer from an earlier round in
+        // this traversal, no re-validated capacity" exposure. Checked
+        // conservatively for both outcomes before doing any of the
+        // (otherwise wasted) work below, since which one `merge()` produces
+        // isn't known yet.
+        if mufasa.is_overflow() {
+            return Err(());
+        }
 
         let mufasa_deref_mut
             = mufasa.deref_mut();

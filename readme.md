@@ -1,6 +1,6 @@
 # cMVBT-OSIC
->## Prototype Build Date: 21.07.2026
->## Version: 0.0.119
+>## Prototype Build Date: 22.07.2026
+>## Version: 0.0.120
 ---------------------------------------
 
 # Contact

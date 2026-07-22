@@ -17,8 +17,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Remove conservitive child latch. Updated scripts">
-      <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/readme.md" beforeDir="false" afterPath="$PROJECT_DIR$/readme.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -29,7 +31,7 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="934" />
+    <option name="cachedIndexableFilesCount" value="935" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
@@ -72,61 +74,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0000000000064226" />
-      <entry key="MS500" value="1.0063694613805227" />
-      <entry key="S2" value="1.534892409353782" />
-      <entry key="S5" value="2.8666569859826825" />
-      <entry key="S10" value="5.372971863236772" />
-      <entry key="S30" value="19.064241219712432" />
-      <entry key="S60" value="31.57455548837496" />
-      <entry key="M2" value="41.754315598591916" />
-      <entry key="M5" value="54.094202667572056" />
-      <entry key="M10" value="77.90578496760583" />
-      <entry key="M15" value="101.4634667812822" />
-      <entry key="M30" value="151.09495467164055" />
-      <entry key="H1" value="208.83737316176544" />
-      <entry key="H2" value="301.50107650148317" />
-      <entry key="H4" value="443.25003761536686" />
-      <entry key="D1" value="2499.8782797090194" />
-      <entry key="W1" value="9151.005097435824" />
+      <entry key="MS100" value="1.0000000035735372" />
+      <entry key="MS500" value="1.0207103824101296" />
+      <entry key="S2" value="1.5137436579062997" />
+      <entry key="S5" value="2.339698292320608" />
+      <entry key="S10" value="3.2567630929803446" />
+      <entry key="S30" value="5.744788765295103" />
+      <entry key="S60" value="8.776963250744078" />
+      <entry key="M2" value="15.049236395080968" />
+      <entry key="M5" value="27.22948331402061" />
+      <entry key="M10" value="39.35925200121424" />
+      <entry key="M15" value="51.73408861383636" />
+      <entry key="M30" value="97.12416713330825" />
+      <entry key="H1" value="179.73746193835996" />
+      <entry key="H2" value="302.58111544757946" />
+      <entry key="H4" value="472.4644585820074" />
+      <entry key="D1" value="2536.256842119325" />
+      <entry key="W1" value="9227.381058373729" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
-      <entry key="MS500" value="0.0" />
-      <entry key="S2" value="4.017207759484183E-198" />
-      <entry key="S5" value="1.312706106820143E-79" />
-      <entry key="S10" value="4.857808315340755E-40" />
-      <entry key="S30" value="1.5255899834896293E-13" />
-      <entry key="S60" value="8.066352682395226E-7" />
-      <entry key="M2" value="0.002079570267766098" />
-      <entry key="M5" value="0.24413168005482958" />
-      <entry key="M10" value="1.2080897816178353" />
-      <entry key="M15" value="2.0716108952155206" />
-      <entry key="M30" value="3.9256155384911233" />
-      <entry key="H1" value="9.988320819168191" />
-      <entry key="H2" value="29.990535815229524" />
-      <entry key="H4" value="64.8457280668596" />
-      <entry key="D1" value="309.58736022039744" />
-      <entry key="W1" value="1003.1660993852446" />
+      <entry key="MS500" value="1.049772886082712E-138" />
+      <entry key="S2" value="3.2587213715538925E-35" />
+      <entry key="S5" value="1.9682575301283226E-14" />
+      <entry key="S10" value="2.131597836741905E-7" />
+      <entry key="S30" value="0.014730210364548121" />
+      <entry key="S60" value="0.26379751961107406" />
+      <entry key="M2" value="1.1399269362810123" />
+      <entry key="M5" value="2.763576613079981" />
+      <entry key="M10" value="3.815902674226538" />
+      <entry key="M15" value="4.620484505108876" />
+      <entry key="M30" value="7.406412885371808" />
+      <entry key="H1" value="13.819004596442852" />
+      <entry key="H2" value="31.758127506000154" />
+      <entry key="H4" value="66.27812463755414" />
+      <entry key="D1" value="314.13396016707304" />
+      <entry key="W1" value="1013.3657729120148" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.9012504626169063" />
-      <entry key="MS500" value="0.9857142567680438" />
-      <entry key="S2" value="1.527806871357436" />
-      <entry key="S5" value="2.8616162630574733" />
-      <entry key="S10" value="5.3670198902343245" />
-      <entry key="S30" value="19.056217355001888" />
-      <entry key="S60" value="31.568261300610068" />
-      <entry key="M2" value="41.75231678924589" />
-      <entry key="M5" value="54.33270911725823" />
-      <entry key="M10" value="79.10362203740044" />
-      <entry key="M15" value="103.52379806042737" />
-      <entry key="M30" value="155.01067183276442" />
-      <entry key="H1" value="218.81637955480065" />
-      <entry key="H2" value="331.48042836843365" />
-      <entry key="H4" value="508.0841893374366" />
-      <entry key="D1" value="2809.4567369201877" />
-      <entry key="W1" value="10154.167190420081" />
+      <entry key="MS100" value="0.965936332376655" />
+      <entry key="MS500" value="1.0136594577904867" />
+      <entry key="S2" value="1.5110741811265633" />
+      <entry key="S5" value="2.3379463550712907" />
+      <entry key="S10" value="3.2548812336645363" />
+      <entry key="S30" value="5.752846917089006" />
+      <entry key="S60" value="9.029567338517577" />
+      <entry key="M2" value="16.174013374951375" />
+      <entry key="M5" value="29.980300310224397" />
+      <entry key="M10" value="43.16635889635494" />
+      <entry key="M15" value="56.34693054944041" />
+      <entry key="M30" value="104.52273204198497" />
+      <entry key="H1" value="193.54781103876" />
+      <entry key="H2" value="334.32884210478574" />
+      <entry key="H4" value="538.7314317630459" />
+      <entry key="D1" value="2850.38187581855" />
+      <entry key="W1" value="10240.74279795101" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -1347,15 +1349,9 @@
       <workItem from="1784562372617" duration="3898000" />
       <workItem from="1784575451124" duration="633000" />
       <workItem from="1784630490333" duration="6095000" />
-      <workItem from="1784639299357" duration="9495000" />
-    </task>
-    <task id="LOCAL-00147" summary="Added OLTP command for concurrent workloads.">
-      <option name="closed" value="true" />
-      <created>1767886538181</created>
-      <option name="number" value="00147" />
-      <option name="presentableId" value="LOCAL-00147" />
-      <option name="project" value="LOCAL" />
-      <updated>1767886538181</updated>
+      <workItem from="1784639299357" duration="9765000" />
+      <workItem from="1784721132716" duration="688000" />
+      <workItem from="1784725777534" duration="5643000" />
     </task>
     <task id="LOCAL-00148" summary="Clock now allocates correctly for extended threads.">
       <option name="closed" value="true" />
@@ -1741,7 +1737,15 @@
       <option name="project" value="LOCAL" />
       <updated>1784669310424</updated>
     </task>
-    <option name="localTasksCounter" value="196" />
+    <task id="LOCAL-00196" summary="Remove conservitive child latch. Updated scripts">
+      <option name="closed" value="true" />
+      <created>1784670357372</created>
+      <option name="number" value="00196" />
+      <option name="presentableId" value="LOCAL-00196" />
+      <option name="project" value="LOCAL" />
+      <updated>1784670357373</updated>
+    </task>
+    <option name="localTasksCounter" value="197" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
