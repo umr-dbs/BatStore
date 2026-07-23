@@ -1,0 +1,12 @@
+diff --git a/benchmarks/bench.cc b/benchmarks/bench.cc
+index 1b5adc0..1b09380 100755
+--- a/benchmarks/bench.cc
++++ b/benchmarks/bench.cc
+@@ -11,7 +11,6 @@
+ #include <stdlib.h>
+ #include <sys/sysinfo.h>
+ #include <sys/times.h>
+-#include <sys/vtimes.h>
+ #include <unistd.h>
+ 
+ #include "bench.h"

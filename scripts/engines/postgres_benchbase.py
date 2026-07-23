@@ -6,13 +6,13 @@ Requires: local PostgreSQL server, an `admin`/`password` superuser role, and a
 `benchbase` database (see the plan's setup notes) - `--create=true` recreates
 the benchmark's own tables against that database on every run.
 
-Note: peak_rss_mb is intentionally left at 0 here. Unlike the other three
-engines (where the wrapped process *is* the storage engine), BenchBase is
-only the JDBC client; the actual engine is Postgres's multi-process server
-cluster (postmaster + per-connection backends), and there is no single PID
-whose RSS is a fair analogue to the other engines' single-process peak RSS.
-Tracking the Java client's own memory would be a different, misleading
-number, so it's left unmeasured rather than reported inaccurately.
+Note: peak_rss_mb reports the PostgreSQL SERVER's memory, not the JDBC client's (those
+would be a different, misleading number - the client is just driving requests, not
+storing anything). Unlike the other three engines (a single process IS the storage
+engine), Postgres's engine is a whole process tree (postmaster + checkpointer + bgwriter +
+walwriter + one backend per connection) - see common.py's start_process_tree_sampler,
+which sums current RSS across that whole tree and tracks its peak, the cross-process
+analogue of the other engines' single-PID VmHWM sampling.
 
 Not NUMA-pinned: the actual engine here is the PostgreSQL *server* process
 (postmaster + backends), which is a pre-existing system service this harness
@@ -26,6 +26,7 @@ import csv
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from . import common
 
@@ -177,6 +178,20 @@ YCSB_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 """
 
 
+def _find_postmaster_pid() -> Optional[int]:
+    """The oldest process matching the postmaster's own invocation - `-o` asks pgrep for
+    the single oldest match, which is the postmaster itself (every backend/checkpointer/
+    etc. process is younger and forked from it, so this is stable even with active
+    connections)."""
+    result = subprocess.run(
+        ["pgrep", "-o", "-f", "postgres -D"], capture_output=True, text=True,
+    )
+    try:
+        return int(result.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
+
+
 def _set_autovacuum(enabled: bool) -> None:
     """ALTER SYSTEM + reload takes effect immediately, no server restart needed. Runs
     directly (not through common.run_and_track_rss) - this is a tiny admin statement, not
@@ -199,12 +214,13 @@ def _latency_from_results(results_dir: Path, tx_type_name: str) -> dict:
     microseconds, and averages across windows.
     """
     path = next(results_dir.glob(f"*.results.{tx_type_name}.csv"), None)
+    empty = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if not path:
-        return {"p50": 0.0, "p95": 0.0, "p99": 0.0, "count": 0}
+        return empty
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     if not rows:
-        return {"p50": 0.0, "p95": 0.0, "p99": 0.0, "count": 0}
+        return empty
 
     def avg_ms(col: str) -> float:
         vals = [float(r[col]) for r in rows if r.get(col)]
@@ -220,6 +236,7 @@ def _latency_from_results(results_dir: Path, tx_type_name: str) -> dict:
         "p50": avg_ms("Median Latency (millisecond)") * 1000.0,
         "p95": avg_ms("95th Percentile Latency (millisecond)") * 1000.0,
         "p99": avg_ms("99th Percentile Latency (millisecond)") * 1000.0,
+        "avg": avg_ms("Average Latency (millisecond)") * 1000.0,
         "count": round(total_count),
     }
 
@@ -266,6 +283,9 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
 
     _set_autovacuum(gc != "off")
 
+    postmaster_pid = _find_postmaster_pid()
+    tree_sampler = common.start_process_tree_sampler(postmaster_pid) if postmaster_pid else None
+
     create_load = ["--create=true", "--load=true"] if reload else ["--create=false", "--load=false"]
     args = [
         "java", "-Duser.language=en", "-Duser.country=US", "-jar", str(BENCHBASE_JAR),
@@ -276,9 +296,17 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     returncode, _client_rss_unused = common.run_and_track_rss(
         args, cwd=BENCHBASE_HOME, stdout_path=output_dir / "stdout.log",
     )
+
+    server_peak_rss_mb = 0.0
+    if tree_sampler:
+        stop, thread, peak_box = tree_sampler
+        stop.set()
+        thread.join()
+        server_peak_rss_mb = peak_box["mb"]
+
     if returncode != 0:
         return common.NormalizedResult(
-            "postgres", workload, scale.label, duration, metric_name, 0.0, 0.0,
+            "postgres", workload, scale.label, duration, metric_name, 0.0, server_peak_rss_mb,
             threads=threads, gc_enabled=gc,
             notes=f"FAILED exit={returncode}, see stdout.log",
         )
@@ -295,16 +323,16 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
 
     value = common.avg_csv_column(results_csv, "Throughput (requests/second)") if results_csv else 0.0
 
-    latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "count": 0}
+    latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if workload == "ycsb_e":
         latency = _latency_from_results(results_dir, "ScanRecord")
     elif workload in ("htap_q1", "htap_q6"):
         latency = _latency_from_results(results_dir, "Q1" if workload == "htap_q1" else "Q6")
 
     return common.NormalizedResult(
-        "postgres", workload, scale.label, duration, metric_name, value, 0.0,
+        "postgres", workload, scale.label, duration, metric_name, value, server_peak_rss_mb,
         threads=threads, gc_enabled=gc,
         scan_p50_us=latency["p50"], scan_p95_us=latency["p95"], scan_p99_us=latency["p99"],
-        scan_count=latency["count"],
-        notes="peak_rss not tracked (multi-process Postgres server, see module docstring)",
+        scan_avg_us=latency["avg"], scan_count=latency["count"],
+        notes="" if postmaster_pid else "peak_rss unavailable (couldn't locate the postmaster PID)",
     )

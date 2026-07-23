@@ -1,0 +1,524 @@
+diff --git a/backend/leanstore/profiling/counters/WorkerCounters.hpp b/backend/leanstore/profiling/counters/WorkerCounters.hpp
+index 66ecd27..7cafb98 100644
+--- a/backend/leanstore/profiling/counters/WorkerCounters.hpp
++++ b/backend/leanstore/profiling/counters/WorkerCounters.hpp
+@@ -25,6 +25,7 @@ struct WorkerCounters {
+    atomic<u64> allocate_operations_counter = 0;
+    atomic<u64> restarts_counter = 0;
+    atomic<u64> tx = 0;
++   atomic<u64> new_order_tx = 0;  // subset of tx: TPC-C New-Order only, for tpmC-comparable throughput
+    atomic<u64> olap_tx = 0;
+    atomic<u64> olap_scanned_tuples = 0;
+    atomic<u64> tx_abort = 0;
+diff --git a/backend/leanstore/profiling/tables/CRTable.cpp b/backend/leanstore/profiling/tables/CRTable.cpp
+index 7e3e87c..d8e4892 100644
+--- a/backend/leanstore/profiling/tables/CRTable.cpp
++++ b/backend/leanstore/profiling/tables/CRTable.cpp
+@@ -29,6 +29,7 @@ void CRTable::open()
+    columns.emplace("gct_committed_tx", [&](Column& col) { col << sum(CRCounters::cr_counters, &CRCounters::gct_committed_tx); });
+    columns.emplace("gct_rounds", [&](Column& col) { col << sum(CRCounters::cr_counters, &CRCounters::gct_rounds); });
+    columns.emplace("tx", [](Column& col) { col << sum(WorkerCounters::worker_counters, &WorkerCounters::tx); });
++   columns.emplace("new_order_tx", [](Column& col) { col << sum(WorkerCounters::worker_counters, &WorkerCounters::new_order_tx); });
+    columns.emplace("tx_abort", [](Column& col) { col << sum(WorkerCounters::worker_counters, &WorkerCounters::tx_abort); });
+    columns.emplace("olap_tx", [](Column& col) { col << sum(WorkerCounters::worker_counters, &WorkerCounters::olap_tx); });
+    columns.emplace("olap_scanned_tuples", [](Column& col) { col << sum(WorkerCounters::worker_counters, &WorkerCounters::olap_scanned_tuples); });
+diff --git a/frontend/shared/Schema.hpp b/frontend/shared/Schema.hpp
+index 43a220f..6aabb42 100644
+--- a/frontend/shared/Schema.hpp
++++ b/frontend/shared/Schema.hpp
+@@ -1,6 +1,8 @@
+ #pragma once
+ #include "../shared/Types.hpp"
+ // -------------------------------------------------------------------------------------
++#include <ostream>
++// -------------------------------------------------------------------------------------
+ // -------------------------------------------------------------------------------------
+ template <typename TableKey, typename TablePayload>
+ struct Relation {
+@@ -41,7 +43,7 @@ struct BytesPayload {
+       std::memcpy(value, other.value, sizeof(value));
+       return *this;
+    }
+-   friend ostream& operator<<(ostream& os, const BytesPayload& payload) {
++   friend std::ostream& operator<<(std::ostream& os, const BytesPayload& payload) {
+       os << std::string_view(reinterpret_cast<const char*>(payload.value), size);
+       return os;
+    }
+diff --git a/frontend/tpc-c/TPCCWorkload.hpp b/frontend/tpc-c/TPCCWorkload.hpp
+index 575cc43..33a31eb 100644
+--- a/frontend/tpc-c/TPCCWorkload.hpp
++++ b/frontend/tpc-c/TPCCWorkload.hpp
+@@ -9,6 +9,11 @@
+ #include "leanstore/storage/btree/core/WALMacros.hpp"
+ #include "leanstore/utils/RandomGenerator.hpp"
+ // -------------------------------------------------------------------------------------
++#include <algorithm>
++#include <chrono>
++#include <cmath>
++#include <fstream>
++#include <mutex>
+ #include <vector>
+ using std::vector;
+ // -------------------------------------------------------------------------------------
+@@ -41,6 +46,13 @@ class TPCCWorkload
+    const bool manually_handle_isolation_anomalies;
+    const bool warehouse_affinity;
+    // -------------------------------------------------------------------------------------
++   // Per-query wall-clock latency (ns) for the real CH-benCHmark queries in
++   // analyticalQuery() below - mutex-guarded since FLAGS_ch_a_threads can in principle be
++   // >1 (this TPCCWorkload instance is shared across all worker threads), even though the
++   // cross-engine harness that drives this always uses exactly one CH-analytics thread.
++   std::mutex ch_query_latency_mutex;
++   std::vector<uint64_t> ch_query_latencies_ns;
++   // -------------------------------------------------------------------------------------
+    Integer urandexcept(Integer low, Integer high, Integer v)
+    {
+       if (high <= low)
+@@ -1062,8 +1074,77 @@ class TPCCWorkload
+           key, [&](const typename Relation::Key&, const Relation&) { return true; }, [&]() {});
+    }
+    // -------------------------------------------------------------------------------------
++   // Drains the latency samples analyticalQuery() has accumulated so far - called once
++   // after the run's OLAP thread(s) have stopped, to write a percentile summary (see
++   // tpcc.cpp/wiredtiger_tpcc.cpp's post-join CH-query-latency block).
++   std::vector<uint64_t> takeCHQueryLatencies()
++   {
++      std::lock_guard<std::mutex> guard(ch_query_latency_mutex);
++      return std::move(ch_query_latencies_ns);
++   }
++   // -------------------------------------------------------------------------------------
+    void analyticalQuery(s32 query_no = 0)
+    {
++      // query_no 101/106 are this harness's real CH-benCHmark Q1/Q6 (see
++      // cMVBT's src/mv_bench/tpch_queries.rs::q1/q6, the reference implementation this
++      // ports) - deliberately not "1"/"6" to avoid colliding with the pre-existing debug
++      // sanity-check scans below (query_no 0-4/44/99), which predate any real CH
++      // integration and are left untouched for backward compatibility.
++      if (query_no == 101 || query_no == 106) {
++         const auto query_start = std::chrono::high_resolution_clock::now();
++         if (query_no == 101) {
++            // CH-benCHmark Q1 ("Pricing Summary Report", adapted from TPC-H Q1): groups
++            // every *delivered* order-line by its position within the order (ol_number,
++            // 1..=15 - this schema's stand-in for TPC-H lineitem's
++            // l_returnflag/l_linestatus), aggregating count/sum(quantity)/sum(amount).
++            // One full ORDER_LINE table scan. Wide-open "delivered before" threshold,
++            // matching this harness's default date range (see the module doc on the
++            // Rust reference implementation for why an unrestricted range is correct
++            // here: every row's date fields are stamped with the load's actual
++            // wall-clock time, not spread across years like a real TPC-H date filter
++            // would assume).
++            struct OrderLineSummary {
++               u64 count = 0;
++               double sum_qty = 0;
++               double sum_amount = 0;
++            };
++            OrderLineSummary groups[16];
++            orderline.scan(
++                {0, 0, 0, 0},
++                [&](const orderline_t::Key& key, const orderline_t& rec) {
++                   if (rec.ol_delivery_d > 0) {
++                      auto& g = groups[key.ol_number];
++                      g.count++;
++                      g.sum_qty += rec.ol_quantity;
++                      g.sum_amount += rec.ol_amount;
++                   }
++                   return true;
++                },
++                [&]() {});
++         } else {
++            // CH-benCHmark Q6 ("Forecasting Revenue Change", adapted from TPC-H Q6):
++            // total revenue (sum(ol_amount)) from delivered order-lines with quantity <
++            // 24 - the one real filter here, matching the reference implementation's
++            // `max_qty = 24` (the date range is wide-open by default, same reasoning as
++            // Q1 above, so no separate date check is needed to match its behavior). One
++            // full ORDER_LINE table scan.
++            double revenue = 0;
++            orderline.scan(
++                {0, 0, 0, 0},
++                [&](const orderline_t::Key&, const orderline_t& rec) {
++                   if (rec.ol_delivery_d > 0 && rec.ol_quantity < 24) {
++                      revenue += rec.ol_amount;
++                   }
++                   return true;
++                },
++                [&]() {});
++         }
++         const auto latency_ns =
++             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - query_start).count();
++         std::lock_guard<std::mutex> guard(ch_query_latency_mutex);
++         ch_query_latencies_ns.push_back(static_cast<uint64_t>(latency_ns));
++         return;
++      }
+       // TODO: implement CH analytical queries
+       Integer sum = 0, last_w = 0, last_i = 0;
+       if (query_no == 0) {
+@@ -1151,3 +1232,29 @@ class TPCCWorkload
+       }
+    }
+ };
++// -------------------------------------------------------------------------------------
++// Shared by tpcc.cpp/wiredtiger_tpcc.cpp - writes the same percentile-summary CSV format
++// as cMVBT's ycsb_driver.rs / this repo's own ycsb.cpp/wiredtiger_ycsb.cpp scan-latency
++// instrumentation (nearest-rank percentiles, microseconds, one summary row - not raw
++// samples, since a long CH-analytics run can accumulate many samples). Call once after
++// the OLAP thread(s) have joined, passing TPCCWorkload::takeCHQueryLatencies()'s result.
++inline void writeCHQueryLatencySummary(std::vector<uint64_t> latencies_ns, const std::string& path)
++{
++   std::sort(latencies_ns.begin(), latencies_ns.end());
++   auto pct = [&](double p) -> double {
++      if (latencies_ns.empty())
++         return 0.0;
++      size_t idx = std::min(latencies_ns.size() - 1, static_cast<size_t>(std::llround(p * (latencies_ns.size() - 1))));
++      return latencies_ns[idx] / 1000.0;
++   };
++   double avg_us = 0.0;
++   if (!latencies_ns.empty()) {
++      uint64_t sum = 0;
++      for (auto v : latencies_ns)
++         sum += v;
++      avg_us = static_cast<double>(sum) / latencies_ns.size() / 1000.0;
++   }
++   std::ofstream f(path);
++   f << "p50_us,p95_us,p99_us,count,avg_us\n";
++   f << pct(0.50) << "," << pct(0.95) << "," << pct(0.99) << "," << latencies_ns.size() << "," << avg_us << "\n";
++}
+diff --git a/frontend/tpc-c/tpcc.cpp b/frontend/tpc-c/tpcc.cpp
+index 7ec3351..9b1b0df 100644
+--- a/frontend/tpc-c/tpcc.cpp
++++ b/frontend/tpc-c/tpcc.cpp
+@@ -253,13 +253,16 @@ int main(int argc, char** argv)
+                   } else {
+                      w_id = tpcc.urand(1, FLAGS_tpcc_warehouse_count);
+                   }
+-                  tpcc.tx(w_id);
++                  const int tx_kind = tpcc.tx(w_id);
+                   if (FLAGS_tpcc_abort_pct && tpcc.urand(0, 100) <= FLAGS_tpcc_abort_pct) {
+                      cr::Worker::my().abortTX();
+                   } else {
+                      cr::Worker::my().commitTX();
+                   }
+                   WorkerCounters::myCounters().tx++;
++                  if (tx_kind == 4) {
++                     WorkerCounters::myCounters().new_order_tx++;
++                  }
+                   tx_acc = tx_acc + 1;
+                }
+                jumpmuCatch()
+@@ -309,6 +312,7 @@ int main(int argc, char** argv)
+       }
+       cout << "CH = " << total << endl;
+    }
++   writeCHQueryLatencySummary(tpcc.takeCHQueryLatencies(), "ch_query_latency_summary.csv");
+    // -------------------------------------------------------------------------------------
+    gib = (db.getBufferManager().consumedPages() * EFFECTIVE_PAGE_SIZE / 1024.0 / 1024.0 / 1024.0);
+    cout << endl << "consumed space in GiB = " << gib << endl;
+diff --git a/frontend/tpc-c/wiredtiger_tpcc.cpp b/frontend/tpc-c/wiredtiger_tpcc.cpp
+index 6f93e7d..a0e01f1 100644
+--- a/frontend/tpc-c/wiredtiger_tpcc.cpp
++++ b/frontend/tpc-c/wiredtiger_tpcc.cpp
+@@ -102,10 +102,12 @@ int main(int argc, char** argv)
+    atomic<u64> keep_running = true;
+    std::atomic<u64> thread_committed[FLAGS_worker_threads];
+    std::atomic<u64> thread_aborted[FLAGS_worker_threads];
++   std::atomic<u64> thread_new_order_committed[FLAGS_worker_threads];  // subset of thread_committed: New-Order only, for tpmC-comparable throughput
+    // -------------------------------------------------------------------------------------
+    for (u64 t_i = 0; t_i < FLAGS_ch_a_threads; t_i++) {
+       thread_committed[t_i] = 0;
+       thread_aborted[t_i] = 0;
++      thread_new_order_committed[t_i] = 0;
+       // -------------------------------------------------------------------------------------
+       threads.emplace_back([&, t_i]() {
+          running_threads_counter++;
+@@ -140,6 +142,7 @@ int main(int argc, char** argv)
+    for (u64 t_i = FLAGS_ch_a_threads; t_i < FLAGS_worker_threads; t_i++) {
+       thread_committed[t_i] = 0;
+       thread_aborted[t_i] = 0;
++      thread_new_order_committed[t_i] = 0;
+       // -------------------------------------------------------------------------------------
+       threads.emplace_back([&, t_i]() {
+          running_threads_counter++;
+@@ -158,9 +161,12 @@ int main(int argc, char** argv)
+                } else {
+                   w_id = tpcc.urand(1, FLAGS_tpcc_warehouse_count);
+                }
+-               tpcc.tx(w_id);
++               const int tx_kind = tpcc.tx(w_id);
+                wiredtiger_db.commitTX();
+                thread_committed[t_i]++;
++               if (tx_kind == 4) {
++                  thread_new_order_committed[t_i]++;
++               }
+             }
+             jumpmuCatch() { thread_aborted[t_i]++; }
+          }
+@@ -172,7 +178,7 @@ int main(int argc, char** argv)
+       running_threads_counter++;
+       u64 time = 0;
+       if (FLAGS_print_header) {
+-         cout << "t,tag,olap_committed,olap_aborted,oltp_committed,oltp_aborted" << endl;
++         cout << "t,tag,olap_committed,olap_aborted,oltp_committed,oltp_aborted,oltp_new_order_committed" << endl;
+       }
+       while (keep_running) {
+          cout << time++ << "," << FLAGS_tag << ",";
+@@ -184,12 +190,14 @@ int main(int argc, char** argv)
+          cout << total_committed << "," << total_aborted << ",";
+          total_committed = 0;
+          total_aborted = 0;
++         u64 total_new_order_committed = 0;
+          // -------------------------------------------------------------------------------------
+          for (u64 t_i = FLAGS_ch_a_threads; t_i < FLAGS_worker_threads; t_i++) {
+             total_committed += thread_committed[t_i].exchange(0);
+             total_aborted += thread_aborted[t_i].exchange(0);
++            total_new_order_committed += thread_new_order_committed[t_i].exchange(0);
+          }
+-         cout << total_committed << "," << total_aborted << endl;
++         cout << total_committed << "," << total_aborted << "," << total_new_order_committed << endl;
+          sleep(1);
+       }
+       running_threads_counter--;
+@@ -201,6 +209,7 @@ int main(int argc, char** argv)
+    for (auto& thread : threads) {
+       thread.join();
+    }
++   writeCHQueryLatencySummary(tpcc.takeCHQueryLatencies(), "ch_query_latency_summary.csv");
+    // -------------------------------------------------------------------------------------
+    return 0;
+ }
+diff --git a/frontend/ycsb/wiredtiger_ycsb.cpp b/frontend/ycsb/wiredtiger_ycsb.cpp
+index 2b7e79a..28139c0 100644
+--- a/frontend/ycsb/wiredtiger_ycsb.cpp
++++ b/frontend/ycsb/wiredtiger_ycsb.cpp
+@@ -12,7 +12,10 @@
+ #include "leanstore/utils/RandomGenerator.hpp"
+ #include "leanstore/utils/ScrambledZipfGenerator.hpp"
+ // -------------------------------------------------------------------------------------
++#include <algorithm>
+ #include <chrono>
++#include <cmath>
++#include <fstream>
+ #include <iostream>
+ #include <string>
+ #include <thread>
+@@ -27,6 +30,12 @@ DEFINE_uint32(ycsb_warmup_rounds, 0, "");
+ DEFINE_bool(ycsb_single_statement_tx, true, "");
+ DEFINE_bool(ycsb_count_unique_lookup_keys, true, "");
+ // -------------------------------------------------------------------------------------
++// YCSB D/E/F support, mirroring frontend/ycsb/ycsb.cpp - see the comment there.
++DEFINE_uint32(ycsb_insert_ratio, 0, "pct of ops that insert a brand-new key (YCSB D)");
++DEFINE_uint32(ycsb_scan_ratio, 0, "pct of ops that scan forward from a key (YCSB E)");
++DEFINE_uint32(ycsb_rmw_ratio, 0, "pct of ops that read-then-update the same key in one tx (YCSB F)");
++DEFINE_uint32(ycsb_max_scan_length, 100, "max tuples per scan op (YCSB E); actual length is uniform(1, max)");
++// -------------------------------------------------------------------------------------
+ DEFINE_bool(print_header, true, "");
+ // -------------------------------------------------------------------------------------
+ thread_local WT_SESSION* WiredTigerDB::session = nullptr;
+@@ -75,6 +84,7 @@ int main(int argc, char** argv)
+    // -------------------------------------------------------------------------------------
+    std::vector<thread> threads;
+    auto zipf_random = std::make_unique<leanstore::utils::ScrambledZipfGenerator>(0, ycsb_tuple_count, FLAGS_zipf_factor);
++   std::atomic<u64> next_insert_key = ycsb_tuple_count;  // fresh, never-before-used keys for YCSB D's insert ops
+    cout << setprecision(4);
+    // -------------------------------------------------------------------------------------
+    cout << "~Transactions" << endl;
+@@ -82,6 +92,9 @@ int main(int argc, char** argv)
+    atomic<u64> running_threads_counter = 0;
+    std::atomic<u64> thread_committed[FLAGS_worker_threads];
+    std::atomic<u64> thread_aborted[FLAGS_worker_threads];
++   // Per-scan-op latency (ns), one slot per thread - each thread only ever touches its own
++   // index, so no synchronization is needed despite the shared outer vector.
++   std::vector<std::vector<uint64_t>> scan_latencies_ns(FLAGS_worker_threads);
+    for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
+       thread_committed[t_i] = 0;
+       thread_aborted[t_i] = 0;
+@@ -101,7 +114,34 @@ int main(int argc, char** argv)
+                }
+                assert(key < ycsb_tuple_count);
+                YCSBPayload result;
+-               if (FLAGS_ycsb_read_ratio == 100 || leanstore::utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
++               const u64 op_rnd = leanstore::utils::RandomGenerator::getRandU64(0, 100);
++               if (op_rnd < FLAGS_ycsb_insert_ratio) {
++                  // YCSB D: insert a brand-new key.
++                  YCSBPayload payload;
++                  leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
++                  table.insert({next_insert_key++}, {payload});
++               } else if (op_rnd < FLAGS_ycsb_insert_ratio + FLAGS_ycsb_scan_ratio) {
++                  // YCSB E: scan forward from `key` for a random length in [1, ycsb_max_scan_length].
++                  const u64 scan_length = leanstore::utils::RandomGenerator::getRandU64(1, FLAGS_ycsb_max_scan_length + 1);
++                  u64 scanned = 0;
++                  const auto scan_start = chrono::high_resolution_clock::now();
++                  table.scan(
++                      {key},
++                      [&](const YCSBTable::Key&, const YCSBTable&) {
++                         scanned++;
++                         return scanned < scan_length;
++                      },
++                      [&]() {});
++                  scan_latencies_ns[t_i].push_back(
++                      chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - scan_start).count());
++               } else if (op_rnd < FLAGS_ycsb_insert_ratio + FLAGS_ycsb_scan_ratio + FLAGS_ycsb_rmw_ratio) {
++                  // YCSB F: read-modify-write - read then update the same key in one op.
++                  table.lookup1({key}, [&](const YCSBTable&) {});
++                  UpdateDescriptorGenerator1(rmw_update_descriptor, YCSBTable, my_payload);
++                  leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result), sizeof(YCSBPayload));
++                  table.update1(
++                      {key}, [&](YCSBTable& rec) { rec.my_payload = result; }, rmw_update_descriptor);
++               } else if (FLAGS_ycsb_read_ratio == 100 || leanstore::utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
+                   table.lookup1({key}, [&](const YCSBTable&) {});  // result = record.my_payload;
+                } else {
+                   UpdateDescriptorGenerator1(tabular_update_descriptor, YCSBTable, my_payload);
+@@ -143,5 +183,31 @@ int main(int argc, char** argv)
+    for (auto& thread : threads) {
+       thread.join();
+    }
++   // Summary (not raw per-op samples - see the matching comment in ycsb.cpp / cMVBT's
++   // ycsb_driver.rs::write_results for why). Nearest-rank percentiles, in microseconds -
++   // empty (all-zero) row for every non-scan workload. Written to the current working
++   // directory, matching every other engine's convention here (the Python wrapper always
++   // invokes this binary with cwd=output_dir).
++   std::vector<uint64_t> all_scan_latencies_ns;
++   for (auto& v : scan_latencies_ns) {
++      all_scan_latencies_ns.insert(all_scan_latencies_ns.end(), v.begin(), v.end());
++   }
++   std::sort(all_scan_latencies_ns.begin(), all_scan_latencies_ns.end());
++   auto pct = [&](double p) -> double {
++      if (all_scan_latencies_ns.empty()) return 0.0;
++      size_t idx = std::min(all_scan_latencies_ns.size() - 1,
++                             static_cast<size_t>(std::llround(p * (all_scan_latencies_ns.size() - 1))));
++      return all_scan_latencies_ns[idx] / 1000.0;
++   };
++   double avg_us = 0.0;
++   if (!all_scan_latencies_ns.empty()) {
++      uint64_t sum = 0;
++      for (auto v : all_scan_latencies_ns) sum += v;
++      avg_us = static_cast<double>(sum) / all_scan_latencies_ns.size() / 1000.0;
++   }
++   std::ofstream scan_latency_file("ycsb_scan_latency_summary.csv");
++   scan_latency_file << "p50_us,p95_us,p99_us,count,avg_us\n";
++   scan_latency_file << pct(0.50) << "," << pct(0.95) << "," << pct(0.99) << ","
++                      << all_scan_latencies_ns.size() << "," << avg_us << "\n";
+    return 0;
+ }
+diff --git a/frontend/ycsb/ycsb.cpp b/frontend/ycsb/ycsb.cpp
+index d42a32f..4e336f6 100644
+--- a/frontend/ycsb/ycsb.cpp
++++ b/frontend/ycsb/ycsb.cpp
+@@ -13,6 +13,9 @@
+ #include <gflags/gflags.h>
+ #include <tbb/parallel_for.h>
+ // -------------------------------------------------------------------------------------
++#include <algorithm>
++#include <cmath>
++#include <fstream>
+ #include <iostream>
+ #include <set>
+ // -------------------------------------------------------------------------------------
+@@ -27,6 +30,15 @@ DEFINE_bool(ycsb_warmup, true, "");
+ DEFINE_uint32(ycsb_sleepy_thread, 0, "");
+ DEFINE_uint32(ycsb_ops_per_tx, 1, "");
+ // -------------------------------------------------------------------------------------
++// YCSB D/E/F support (originally only A/B/C's read/update ratio existed).
++// Evaluated in order per op: insert (D) > scan (E) > read-modify-write (F) >
++// existing read/update-ratio logic (A/B/C). All 0 by default, so existing
++// A/B/C invocations are unaffected.
++DEFINE_uint32(ycsb_insert_ratio, 0, "pct of ops that insert a brand-new key (YCSB D)");
++DEFINE_uint32(ycsb_scan_ratio, 0, "pct of ops that scan forward from a key (YCSB E)");
++DEFINE_uint32(ycsb_rmw_ratio, 0, "pct of ops that read-then-update the same key in one tx (YCSB F)");
++DEFINE_uint32(ycsb_max_scan_length, 100, "max tuples per scan op (YCSB E); actual length is uniform(1, max)");
++// -------------------------------------------------------------------------------------
+ using namespace leanstore;
+ // -------------------------------------------------------------------------------------
+ using YCSBKey = u64;
+@@ -139,6 +151,7 @@ int main(int argc, char** argv)
+    }
+    // -------------------------------------------------------------------------------------
+    auto zipf_random = std::make_unique<utils::ScrambledZipfGenerator>(0, ycsb_tuple_count, FLAGS_zipf_factor);
++   std::atomic<u64> next_insert_key = ycsb_tuple_count;  // fresh, never-before-used keys for YCSB D's insert ops
+    cout << setprecision(4);
+    // -------------------------------------------------------------------------------------
+    cout << "~Transactions" << endl;
+@@ -146,8 +159,12 @@ int main(int argc, char** argv)
+    atomic<bool> keep_running = true;
+    atomic<u64> running_threads_counter = 0;
+    const u32 exec_threads = FLAGS_ycsb_threads ? FLAGS_ycsb_threads : FLAGS_worker_threads;
++   // Per-scan-op latency (ns), one slot per thread - each thread only ever touches its own
++   // index (captured by value below, since scheduleJobAsync's [&] would otherwise see
++   // whatever value the shared loop variable `t_i` has by the time the job actually runs).
++   std::vector<std::vector<uint64_t>> scan_latencies_ns(exec_threads);
+    for (u64 t_i = 0; t_i < exec_threads - ((FLAGS_ycsb_sleepy_thread) ? 1 : 0); t_i++) {
+-      crm.scheduleJobAsync(t_i, [&]() {
++      crm.scheduleJobAsync(t_i, [&, t_i]() {
+          running_threads_counter++;
+          while (keep_running) {
+             jumpmuTry()
+@@ -162,7 +179,35 @@ int main(int argc, char** argv)
+                YCSBPayload result;
+                cr::Worker::my().startTX(tx_type, isolation_level);
+                for (u64 op_i = 0; op_i < FLAGS_ycsb_ops_per_tx; op_i++) {
+-                  if (FLAGS_ycsb_read_ratio == 100 || utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
++                  const u64 op_rnd = utils::RandomGenerator::getRandU64(0, 100);
++                  if (op_rnd < FLAGS_ycsb_insert_ratio) {
++                     // YCSB D: insert a brand-new key.
++                     YCSBPayload payload;
++                     utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
++                     table.insert({next_insert_key++}, {payload});
++                  } else if (op_rnd < FLAGS_ycsb_insert_ratio + FLAGS_ycsb_scan_ratio) {
++                     // YCSB E: scan forward from `key` for a random length in [1, ycsb_max_scan_length].
++                     const u64 scan_length = utils::RandomGenerator::getRandU64(1, FLAGS_ycsb_max_scan_length + 1);
++                     u64 scanned = 0;
++                     const auto scan_start = chrono::high_resolution_clock::now();
++                     table.scan(
++                         {key},
++                         [&](const KVTable::Key&, const KVTable&) {
++                            scanned++;
++                            return scanned < scan_length;
++                         },
++                         [&]() {});
++                     scan_latencies_ns[t_i].push_back(
++                         chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - scan_start).count());
++                  } else if (op_rnd < FLAGS_ycsb_insert_ratio + FLAGS_ycsb_scan_ratio + FLAGS_ycsb_rmw_ratio) {
++                     // YCSB F: read-modify-write - read then update the same key in one op.
++                     table.lookup1({key}, [&](const KVTable&) {});
++                     UpdateDescriptorGenerator1(rmw_update_descriptor, KVTable, my_payload);
++                     utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result), sizeof(YCSBPayload));
++                     table.update1(
++                         {key}, [&](KVTable& rec) { rec.my_payload = result; }, rmw_update_descriptor);
++                     leanstore::storage::BMC::global_bf->evictLastPage();
++                  } else if (FLAGS_ycsb_read_ratio == 100 || utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
+                      table.lookup1({key}, [&](const KVTable&) {});  // result = record.my_payload;
+                      leanstore::storage::BMC::global_bf->evictLastPage();  // to ignore the replacement strategy effect on MVCC experiment
+                   } else {
+@@ -208,6 +253,34 @@ int main(int argc, char** argv)
+       }
+       crm.joinAll();
+    }
++   // Summary (not raw per-op samples - see the matching comment in wiredtiger_ycsb.cpp /
++   // cMVBT's ycsb_driver.rs::write_results for why). Nearest-rank percentiles, in
++   // microseconds - empty (all-zero) row for every non-scan workload. Written to the
++   // current working directory, matching every other engine's convention here (the Python
++   // wrapper always invokes this binary with cwd=output_dir).
++   {
++      std::vector<uint64_t> all_scan_latencies_ns;
++      for (auto& v : scan_latencies_ns) {
++         all_scan_latencies_ns.insert(all_scan_latencies_ns.end(), v.begin(), v.end());
++      }
++      std::sort(all_scan_latencies_ns.begin(), all_scan_latencies_ns.end());
++      auto pct = [&](double p) -> double {
++         if (all_scan_latencies_ns.empty()) return 0.0;
++         size_t idx = std::min(all_scan_latencies_ns.size() - 1,
++                                static_cast<size_t>(std::llround(p * (all_scan_latencies_ns.size() - 1))));
++         return all_scan_latencies_ns[idx] / 1000.0;
++      };
++      double avg_us = 0.0;
++      if (!all_scan_latencies_ns.empty()) {
++         uint64_t sum = 0;
++         for (auto v : all_scan_latencies_ns) sum += v;
++         avg_us = static_cast<double>(sum) / all_scan_latencies_ns.size() / 1000.0;
++      }
++      std::ofstream scan_latency_file("ycsb_scan_latency_summary.csv");
++      scan_latency_file << "p50_us,p95_us,p99_us,count,avg_us\n";
++      scan_latency_file << pct(0.50) << "," << pct(0.95) << "," << pct(0.99) << ","
++                         << all_scan_latencies_ns.size() << "," << avg_us << "\n";
++   }
+    cout << "-------------------------------------------------------------------------------------" << endl;
+    return 0;
+ }

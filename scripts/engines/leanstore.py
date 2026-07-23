@@ -25,7 +25,10 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     unused - see SUPPORTS_GC_TOGGLE above, and every run here is a fresh --trunc load."""
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
-    ssd_path = output_dir / "ssd"
+    # Fixed, wiped-before-every-run path (not a unique per-combo directory) - LeanStore's
+    # on-disk data never accumulates across a long sweep this way. Small artifacts
+    # (stdout.log, CSVs) still go in output_dir, which stays per-combo for inspection.
+    ssd_path = common.fresh_scratch_dir("leanstore_data") / "ssd"
     csv_prefix = output_dir / "log"
     env = leanstore_build.run_env()
 
@@ -95,7 +98,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     total = common.sum_csv_column(Path(f"{csv_prefix}_cr.csv"), metric_column)
     value = total / duration if duration else 0.0
 
-    latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "count": 0}
+    latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if workload == "ycsb_e":
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
     elif workload in ("htap_q1", "htap_q6"):
@@ -105,5 +108,5 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         "leanstore", workload, scale.label, duration, metric_name, value, peak_rss_mb,
         threads=threads, gc_enabled="n/a",
         scan_p50_us=latency["p50"], scan_p95_us=latency["p95"], scan_p99_us=latency["p99"],
-        scan_count=latency["count"],
+        scan_avg_us=latency["avg"], scan_count=latency["count"],
     )

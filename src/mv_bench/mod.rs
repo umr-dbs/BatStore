@@ -22,3 +22,8 @@ pub mod ycsb_driver;
 
 pub mod mem_stats;
 pub mod suite;
+
+#[cfg(feature = "mdbx-backend")]
+pub mod mdbx_ycsb;
+#[cfg(feature = "mdbx-backend")]
+pub mod mdbx_tpcc;

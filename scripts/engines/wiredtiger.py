@@ -52,7 +52,9 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     unused - see SUPPORTS_GC_TOGGLE above, and every run here is a fresh ssd_dir."""
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
-    ssd_dir = output_dir / "ssd"
+    # Fixed, wiped-before-every-run path (not a unique per-combo directory) - matches
+    # leanstore.py's treatment, keeps disk usage bounded across a long sweep.
+    ssd_dir = common.fresh_scratch_dir("wiredtiger_data") / "ssd"
     ssd_dir.mkdir(parents=True, exist_ok=True)
     env = leanstore_build.run_env()
     stdout_path = output_dir / "stdout.log"
@@ -117,7 +119,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     total = _sum_stdout_column(stdout_path, metric_column)
     value = total / duration if duration else 0.0
 
-    latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "count": 0}
+    latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if workload == "ycsb_e":
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
     elif workload in ("htap_q1", "htap_q6"):
@@ -127,5 +129,5 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         "wiredtiger", workload, scale.label, duration, metric_name, value, peak_rss_mb,
         threads=threads, gc_enabled="n/a",
         scan_p50_us=latency["p50"], scan_p95_us=latency["p95"], scan_p99_us=latency["p99"],
-        scan_count=latency["count"],
+        scan_avg_us=latency["avg"], scan_count=latency["count"],
     )
