@@ -9,27 +9,38 @@ from __future__ import annotations
 import csv
 import dataclasses
 import os
+import shutil
 import subprocess
 import threading
 from pathlib import Path
 from typing import Optional
 
-# Single source of truth for every sibling-repo checkout this harness drives, env-var
-# overridable so the same scripts work unchanged on the real server (whose home directory
-# layout may differ from this workstation's).
-#
-# CMVBT_REPO is self-referential (matching setup_environment.py's existing CMVBT_REPO) -
-# this file lives at <cmvbt-repo>/scripts/engines/common.py, so its own grandparent
-# directory is always the correct cMVBT checkout to build/run, whether that's
-# RustroverProjects/cMVBT (this workstation's dev repo) or wherever the repo lives on the
-# server - no hardcoded path or env var needed for the common case.
-CMVBT_REPO = Path(os.environ.get("CMVBT_REPO", str(Path(__file__).resolve().parent.parent.parent)))
-LEANSTORE_REPO = Path(os.environ.get("LEANSTORE_REPO", "/home/amir/tx_tests/leanstore"))
+# Every sibling-repo checkout this harness drives lives under one workspace, rooted at
+# wherever setup_environment.py was invoked FROM - not a hardcoded absolute path - so the
+# exact same scripts clone/build/run into place unchanged on any machine (this workstation
+# or the real server), starting from nothing. Override via WORKSPACE_ROOT if you want the
+# checkouts somewhere other than <invocation-dir>/tx_tests.
+WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT", str(Path.cwd() / "tx_tests")))
+
+# CMVBT_REPO: setup_environment.py always attempts to clone cMVBT-OSIC into
+# WORKSPACE_ROOT/cmvbt (see its step_cmvbt). If that succeeded (Cargo.toml present -
+# distinguishes a real clone from a stray empty directory), use it; otherwise fall back to
+# this file's own grandparent directory - the checkout this script is already part of,
+# self-referential so it's always correct without a clone (the case that actually engages
+# on this workstation, since cMVBT-OSIC is currently private and can't be cloned here).
+_workspace_cmvbt = WORKSPACE_ROOT / "cmvbt"
+_self_referential_cmvbt = Path(__file__).resolve().parent.parent.parent
+CMVBT_REPO = Path(os.environ.get(
+    "CMVBT_REPO",
+    str(_workspace_cmvbt) if (_workspace_cmvbt / "Cargo.toml").exists() else str(_self_referential_cmvbt),
+))
+LEANSTORE_REPO = Path(os.environ.get("LEANSTORE_REPO", str(WORKSPACE_ROOT / "leanstore")))
 # Directory name is a misleading holdover from an old CLion default - it's actually
 # configured with -DCMAKE_BUILD_TYPE=Release (see setup_environment.py::step_wiredtiger and
 # leanstore_build.py's build-type sanity check).
-WIREDTIGER_BUILD_DIR = Path(os.environ.get("WIREDTIGER_BUILD_DIR", "/home/amir/tx_tests/wiredtiger/cmake-build-debug"))
-BENCHBASE_HOME = Path(os.environ.get("BENCHBASE_HOME", "/home/amir/tx_tests/benchbase/target/benchbase-postgres"))
+WIREDTIGER_BUILD_DIR = Path(os.environ.get("WIREDTIGER_BUILD_DIR", str(WORKSPACE_ROOT / "wiredtiger" / "cmake-build-debug")))
+BENCHBASE_HOME = Path(os.environ.get("BENCHBASE_HOME", str(WORKSPACE_ROOT / "benchbase" / "target" / "benchbase-postgres")))
+VWEAVER_REPO = Path(os.environ.get("VWEAVER_REPO", str(WORKSPACE_ROOT / "vWeaver_ermia")))
 
 # Matches the role/database setup_environment.py::step_postgres creates (admin is a
 # SUPERUSER role, needed for postgres_benchbase.py's ALTER SYSTEM autovacuum toggle).
@@ -47,6 +58,25 @@ NUMA_NODE = 0
 
 def numactl_prefix() -> list:
     return ["numactl", f"--cpubind={NUMA_NODE}", f"--membind={NUMA_NODE}"]
+
+
+def fresh_scratch_dir(name: str) -> Path:
+    """Returns WORKSPACE_ROOT/scratch/<name>, entirely deleted and recreated first - the
+    SAME path every call, for every engine's on-disk data (ssd images, mdbx/DB
+    directories, WAL/log dirs). Called at the start of every single run(), so disk usage
+    never accumulates across a long thread/workload sweep the way a fresh uniquely-named
+    directory per sweep point would - only the current experiment's data ever exists on
+    disk, never every prior one's too.
+
+    Deliberately separate from a run's own `output_dir` (under the timestamped
+    comparison_results/run_<ts>/ tree) - that keeps holding the small per-run artifacts
+    (stdout.log, result CSVs) worth preserving for post-hoc inspection; only the heavy
+    data files live here.
+    """
+    scratch_dir = WORKSPACE_ROOT / "scratch" / name
+    shutil.rmtree(scratch_dir, ignore_errors=True)
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    return scratch_dir
 
 
 def check_release_build(build_dir: Path, label: str) -> None:
@@ -117,6 +147,7 @@ class NormalizedResult:
     scan_p50_us: float = 0.0
     scan_p95_us: float = 0.0
     scan_p99_us: float = 0.0
+    scan_avg_us: float = 0.0
     scan_count: int = 0
     notes: str = ""
 
@@ -124,7 +155,7 @@ class NormalizedResult:
 MANIFEST_HEADER = [
     "engine", "workload", "config_label", "threads", "gc_enabled", "duration_secs",
     "primary_metric_name", "primary_metric_value", "peak_rss_mb",
-    "scan_p50_us", "scan_p95_us", "scan_p99_us", "scan_count", "notes",
+    "scan_p50_us", "scan_p95_us", "scan_p99_us", "scan_avg_us", "scan_count", "notes",
 ]
 
 YCSB_WORKLOADS = ["ycsb_a", "ycsb_b", "ycsb_c", "ycsb_d", "ycsb_e", "ycsb_f"]
@@ -138,7 +169,7 @@ YCSB_WORKLOADS = ["ycsb_a", "ycsb_b", "ycsb_c", "ycsb_d", "ycsb_e", "ycsb_f"]
 # reference implementation this ports.
 HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
 ALL_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_WORKLOADS
-ENGINES = ["cmvbt", "leanstore", "wiredtiger", "postgres"]
+ENGINES = ["cmvbt", "leanstore", "wiredtiger", "postgres", "vweaver_ermia", "libmdbx"]
 
 
 def _read_vmhwm_kb(pid: int) -> float:
@@ -151,6 +182,73 @@ def _read_vmhwm_kb(pid: int) -> float:
     except (FileNotFoundError, ProcessLookupError):
         pass
     return 0.0
+
+
+def _read_vmrss_kb(pid: int) -> float:
+    """Current (not peak) resident set size for a running process, 0 if it has exited -
+    used to sum memory across a whole process TREE (see sum_process_tree_rss_mb), where
+    each member's own VmHWM would double-count each process's historical peak rather than
+    a coherent instant-in-time total across the tree."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1])
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+    return 0.0
+
+
+def _process_tree_pids(root_pid: int) -> list:
+    """root_pid plus every recursive descendant, found by scanning /proc/*/stat's PPID
+    field - used for multi-process engines (PostgreSQL: postmaster + checkpointer +
+    bgwriter + walwriter + one backend process per connection) where a single PID's RSS
+    isn't the whole engine's memory footprint."""
+    children = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+            # comm (2nd field) is parenthesized and may itself contain spaces/parens, so
+            # split on the LAST ')' - everything after it is state, ppid, ...
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(ppid, []).append(int(entry.name))
+
+    pids, stack = [], [root_pid]
+    while stack:
+        pid = stack.pop()
+        pids.append(pid)
+        stack.extend(children.get(pid, []))
+    return pids
+
+
+def sum_process_tree_rss_mb(root_pid: int) -> float:
+    return sum(_read_vmrss_kb(pid) for pid in _process_tree_pids(root_pid)) / 1024.0
+
+
+def start_process_tree_sampler(root_pid: int, interval: float = 0.5):
+    """Background peak-RSS sampler for a whole process tree, mirroring
+    run_and_track_rss's own single-PID sampler thread but tracking the peak of the
+    SUMMED current RSS across root_pid + all its descendants (there's no per-tree
+    equivalent of a single process's VmHWM to just read directly).
+
+    Returns (stop_event, thread, peak_box) - set stop_event, join thread, then read
+    peak_box["mb"] once stopped.
+    """
+    peak_box = {"mb": 0.0}
+    stop = threading.Event()
+
+    def loop():
+        while not stop.is_set():
+            peak_box["mb"] = max(peak_box["mb"], sum_process_tree_rss_mb(root_pid))
+            stop.wait(interval)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    return stop, thread, peak_box
 
 
 def run_and_track_rss(cmd, cwd=None, env=None, stdout_path: Optional[Path] = None, timeout=None):
@@ -262,7 +360,7 @@ def append_manifest_row(manifest_path: Path, result: NormalizedResult) -> None:
             result.primary_metric_name, f"{result.primary_metric_value:.3f}",
             f"{result.peak_rss_mb:.2f}",
             f"{result.scan_p50_us:.2f}", f"{result.scan_p95_us:.2f}", f"{result.scan_p99_us:.2f}",
-            result.scan_count, result.notes,
+            f"{result.scan_avg_us:.2f}", result.scan_count, result.notes,
         ])
 
 

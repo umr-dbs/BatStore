@@ -19,7 +19,13 @@ SUPPORTS_GC_TOGGLE = True
 
 
 def ensure_built() -> None:
-    subprocess.run(["cargo", "build", "--release"], cwd=REPO_ROOT, check=True)
+    # Always built with --features mdbx-backend (not just when "libmdbx" is also in
+    # --engines): cmvbt.py and libmdbx.py share this exact same binary path, and whichever
+    # engine's ensure_built() runs last would otherwise silently determine whether the
+    # mdbx_ycsb/mdbx_tpcc subcommands exist - building with the feature unconditionally
+    # here removes that ordering dependency entirely. The extra subcommands are inert for
+    # cMVBT's own tpcc/ycsb/htap_* workloads.
+    subprocess.run(["cargo", "build", "--release", "--features", "mdbx-backend"], cwd=REPO_ROOT, check=True)
 
 
 def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True) -> common.NormalizedResult:
@@ -105,11 +111,11 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         for k in ("p50", "p95", "p99", "avg"):
             latency[k] /= 1000.0  # ns -> us
     else:
-        latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "count": 0}
+        latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
 
     return common.NormalizedResult(
         "cmvbt", workload, scale.label, duration, metric_name, value, peak_rss_mb,
         threads=threads, gc_enabled=gc,
         scan_p50_us=latency["p50"], scan_p95_us=latency["p95"], scan_p99_us=latency["p99"],
-        scan_count=latency["count"],
+        scan_avg_us=latency["avg"], scan_count=latency["count"],
     )

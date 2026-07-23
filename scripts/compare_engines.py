@@ -26,7 +26,7 @@ measurement, no separate baseline sub-phase needed.
 
 Usage:
     python3 scripts/compare_engines.py
-    python3 scripts/compare_engines.py --tiny --threads 1,2
+    python3 scripts/compare_engines.py --tiny --threads 2,4
     python3 scripts/compare_engines.py --engines cmvbt,leanstore --workloads tpcc,ycsb_e
     python3 scripts/compare_engines.py --threads 1,4,16,64 --gc on
     python3 scripts/compare_engines.py --warehouses 16 --tpcc-duration 120
@@ -36,23 +36,27 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from engines import cmvbt, common, leanstore, postgres_benchbase, wiredtiger
+from engines import cmvbt, common, leanstore, libmdbx, postgres_benchbase, vweaver_ermia, wiredtiger
 
 ENGINE_MODULES = {
     "cmvbt": cmvbt,
     "leanstore": leanstore,
     "wiredtiger": wiredtiger,
     "postgres": postgres_benchbase,
+    "vweaver_ermia": vweaver_ermia,
+    "libmdbx": libmdbx,
 }
 
 # One socket's worth of SMT threads on the real server (2x AMD EPYC 7742, 64 cores/128
-# threads per socket) - matches --cpubind=0 pinning to a single node.
-DEFAULT_THREADS = [1, 2, 4, 8, 16, 32, 64, 128]
+# threads per socket) - matches --cpubind=0 pinning to a single node. Starts at 2 (not 1)
+# per the user's own thread-sweep spec.
+DEFAULT_THREADS = [2, 4, 8, 16, 32, 64, 128]
 DEFAULT_GC = ["on", "off"]
 
 
@@ -68,7 +72,7 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--threads", default=None,
                    help=f"comma-separated thread/terminal counts to sweep (default {DEFAULT_THREADS}, "
-                        f"or [1,2] with --tiny)")
+                        f"or [2,4] with --tiny)")
     p.add_argument("--gc", default=",".join(DEFAULT_GC),
                    help="comma-separated subset of on,off - ignored for engines with no working "
                         "GC toggle (see SUPPORTS_GC_TOGGLE in each engines/*.py)")
@@ -115,7 +119,7 @@ def main() -> None:
     if args.threads:
         thread_list = [int(t.strip()) for t in args.threads.split(",") if t.strip()]
     else:
-        thread_list = [1, 2] if args.tiny else list(DEFAULT_THREADS)
+        thread_list = [2, 4] if args.tiny else list(DEFAULT_THREADS)
 
     for e in engines:
         if e not in ENGINE_MODULES:
@@ -161,11 +165,28 @@ def main() -> None:
     print("#########################################################\n")
 
     if not args.skip_build:
+        failed_to_build = []
         for name in engines:
             ensure_built = getattr(ENGINE_MODULES[name], "ensure_built", None)
-            if ensure_built:
-                print(f"[build] {name}...")
+            if not ensure_built:
+                continue
+            print(f"[build] {name}...")
+            try:
                 ensure_built()
+            except SystemExit as e:
+                # An engine's own ensure_built() can deliberately refuse to build (e.g.
+                # vweaver_ermia.py's known, documented upstream blocker - see manual.txt)
+                # rather than emit a possibly-wrong binary. One engine's build failure
+                # shouldn't abort the whole comparison matrix, same reasoning as run()'s
+                # own try/except below.
+                print(f"    [build] {name} FAILED - excluding it from this run: {e}")
+                failed_to_build.append(name)
+            except subprocess.CalledProcessError as e:
+                print(f"    [build] {name} FAILED - excluding it from this run: {e}")
+                failed_to_build.append(name)
+        engines = [e for e in engines if e not in failed_to_build]
+        if not engines:
+            sys.exit("No engines left to run after build failures - see above.")
 
     for workload in workloads:
         for engine_name in engines:

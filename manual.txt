@@ -1,0 +1,443 @@
+CROSS-ENGINE BENCHMARK HARNESS - MANUAL
+========================================
+
+This harness runs matched TPC-C, YCSB (A-F), and HTAP/CH-benCHmark workloads against six
+storage engines - cMVBT (its own MVBTree, and a second libmdbx-backed comparison point),
+LeanStore, LeanStore's WiredTiger adapter, PostgreSQL (via BenchBase), and vWeaver_ermia
+(ERMIA) - and produces one normalized manifest.csv plus a set of comparison plots. It
+lives in this repo under scripts/ (compare_engines.py, setup_environment.py,
+plot_compare.py, engines/*.py) and is designed to run identically on this workstation and
+on the real 2x AMD EPYC 7742 server (2 NUMA nodes, 64 cores/128 threads per socket).
+
+Every sibling repo is cloned automatically (see section 2) into one workspace, rooted at
+wherever you invoke setup_environment.py FROM - not a hardcoded path - so the exact same
+scripts work starting from nothing, on any machine:
+
+    <wherever you ran setup from>/tx_tests/
+        leanstore/                 LeanStore checkout + build/ (CMake)
+        wiredtiger/                 WiredTiger checkout + cmake-build-debug/ (CMake)
+        benchbase/                   BenchBase checkout + target/benchbase-postgres/
+        vWeaver_ermia/                 ERMIA checkout + build/ (CMake)
+        cmvbt/                          only if umr-dbs/cMVBT-OSIC was reachable to clone
+        scratch/<engine>/                 reused, wiped-before-every-run data directories
+
+
+1. REQUIREMENTS
+----------------
+
+- Linux, x86_64. `numactl` is REQUIRED (every benchmark subprocess runs under
+  `numactl --cpubind=0 --membind=0` - there is no unpinned fallback, by design, so
+  results are never accidentally cross-NUMA-node).
+- Rust + Cargo (for cMVBT) - stable toolchain, whatever `cargo build --release` needs.
+- CMake + a C++ toolchain with TBB, liburing, and the usual compression libs (snappy,
+  zlib, bz2, lz4, zstd), for LeanStore + WiredTiger.
+- clang/clang++ + libnuma-dev + libgoogle-glog-dev + libibverbs-dev, for vWeaver_ermia
+  (ERMIA only builds with clang; the other three are linked unconditionally by its
+  CMakeLists.txt even though this harness never exercises RDMA replication).
+- A JDK (21 is verified working; BenchBase's pom.xml nominally wants 23 but the build is
+  pinned down to 21 via -Dmaven.compiler.source/target) + Maven (plain `mvn`, not
+  BenchBase's bundled ./mvnw wrapper - see section on why).
+- PostgreSQL server + client (`postgresql`, `postgresql-contrib`).
+- Python 3 with pandas + matplotlib (only needed for plot_compare.py - a venv is set up
+  automatically, see below).
+
+All of this (except Rust/Cargo, which is assumed already installed since this is the
+cMVBT repo itself) is installed/built by setup_environment.py - see section 2.
+
+
+2. FIRST-TIME SETUP
+--------------------
+
+    python3 scripts/setup_environment.py
+
+Run this yourself in an interactive terminal (not backgrounded) - it shells out to
+`sudo apt-get install` and `sudo -u postgres psql` for the apt/PostgreSQL steps, and both
+need to prompt you for a password / apt's own yes-no confirmation. It never tries to
+elevate privileges silently.
+
+It is idempotent: every step checks whether its target already exists/works before doing
+anything, so re-running after a partial failure (e.g. you had to fix a missing dev
+package) just picks up where it left off, without redoing finished steps.
+
+What it does, in order:
+  1. apt packages (see APT_PACKAGES in the script - cmake, libtbb-dev, libaio-dev,
+     compression libs, liburing-dev, numactl, postgresql, postgresql-contrib, maven,
+     clang, libnuma-dev, libgoogle-glog-dev, libibverbs-dev).
+  2. Clones (if missing) and builds WiredTiger from source (Release, -DENABLE_PYTHON=OFF)
+     into <workspace>/wiredtiger/cmake-build-debug (the directory name is a stale holdover
+     from an old CLion default - it IS a Release build, not Debug; a build-type sanity
+     check fails loudly if this ever regresses).
+  3. Clones (if missing) LeanStore, checks out the exact commit patches/leanstore.patch
+     was generated against, applies that patch (CH-benCHmark Q1/Q6 analytical queries,
+     YCSB-E/HTAP scan-latency instrumentation, New-Order-only counters - see section 5),
+     then builds its native + WiredTiger-adapter frontends (Release) into
+     <workspace>/leanstore/build.
+  4. Reserves hugepages for vWeaver_ermia's node-memory pool (sudo sysctl -w
+     vm.nr_hugepages=N, sized off common.Scale().dram_gib - see section 5).
+  5. Clones (if missing) vWeaver_ermia, checks out the pinned commit patches/
+     vweaver_ermia.patch was generated against, applies it (a dead include - see section
+     5), generates dbcore/burt-hash.cpp via patches/vweaver_burt_hash_gen.py (a Python 3
+     port of upstream's Python-2-only generator), then builds `ermia_SI` (CC=clang
+     CXX=clang++, -DCMAKE_BUILD_PARAM=Vweaver).
+  6. Creates the `admin` (superuser) role and `benchbase` database in PostgreSQL.
+  7. Clones (if missing) BenchBase and builds it with plain `mvn` (not the bundled
+     ./mvnw). Before building, the script PATCHES BenchBase's pom.xml to strip out
+     `com.spotify.fmt:fmt-maven-plugin` - see "MAVEN PLUGIN WORKAROUND" below. This step
+     is idempotent too (safe to re-run, detects if the plugin block is already gone).
+  8. Attempts to clone cMVBT itself (umr-dbs/cMVBT-OSIC) into the workspace; if that
+     fails (e.g. the repo is private and you don't have access here), falls back to
+     building the checkout this script is already part of instead - see "CMVBT_REPO
+     RESOLUTION" below for exactly how this is decided and a gotcha to know about.
+  9. Sets up the Python venv at scripts/.venv with pandas + matplotlib (needed only for
+     plot_compare.py, not for running experiments).
+
+Flags to skip individual steps (useful if you already have one piece set up, or are
+re-running after fixing just one failure):
+
+    --skip-apt --skip-wiredtiger --skip-leanstore --skip-hugepages --skip-vweaver
+    --skip-postgres --skip-benchbase --skip-cmvbt --skip-venv
+
+Example: `python3 scripts/setup_environment.py --skip-postgres --skip-benchbase`
+
+
+MAVEN: mvn, not mvnw
+-----------------------
+
+BenchBase is built with plain `mvn clean package ...` (no `-q`), not its own bundled
+`./mvnw` wrapper - so the full build output streams straight to this console instead of
+being interleaved with (or hidden by) the wrapper's own download/bootstrap noise, and so
+build errors (missing plugins, dependency failures) are visible immediately instead of
+buried in wrapper output. Requires a system `maven` install (see APT_PACKAGES).
+
+
+MAVEN PLUGIN WORKAROUND (fmt-maven-plugin / similar failures)
+---------------------------------------------------------------
+
+If Maven fails while building BenchBase with an error about not being able to
+download/resolve a plugin (observed on the server: `com.spotify.fmt:fmt-maven-plugin`),
+this is a network/repository-access problem, not a code problem - Maven has to fetch a
+plugin's descriptor before it can even decide whether to skip its goals, so this can't be
+worked around with a `-Dfmt.skip=true`-style property.
+
+setup_environment.py already handles this: right after cloning BenchBase, it strips the
+plugin's whole <plugin>...</plugin> block out of pom.xml before running the build, so
+Maven never attempts to resolve it. This is purely a code-style/static-analysis plugin -
+removing it doesn't affect the produced benchbase.jar.
+
+If you hit the SAME class of failure with a DIFFERENT plugin, add its
+(groupId, artifactId) to `BENCHBASE_POM_PLUGINS_TO_STRIP` at the top of
+scripts/setup_environment.py, then just re-run `python3 scripts/setup_environment.py` -
+as long as the build never actually finished (target/benchbase-postgres doesn't exist
+yet), it re-patches pom.xml and retries the Maven build automatically; no manual cleanup
+needed.
+
+
+CMVBT_REPO RESOLUTION (read this if cMVBT-related runs seem to use stale code)
+----------------------------------------------------------------------------------
+
+`scripts/engines/common.py` resolves `CMVBT_REPO` like this: if
+`<workspace>/cmvbt/Cargo.toml` exists, use `<workspace>/cmvbt`; otherwise fall back to
+this file's own grandparent directory (i.e. the checkout this script is already part of -
+self-referential, so it's automatically correct without any clone). The `Cargo.toml`
+check is meant to distinguish "a real clone happened" from "nothing's there yet" - but it
+can't distinguish a REAL, up-to-date clone from any OTHER directory that merely happens to
+contain a Cargo.toml (e.g. a stale manual copy from before this automation existed).
+
+If you have an old, non-git directory at `<workspace>/cmvbt` from before this clone
+automation existed, it will shadow the self-referential fallback and silently get used
+instead of your actively-developed checkout - any Rust source changes you make in the
+"real" repo won't be reflected in benchmark runs. Either delete that stale directory, or
+set the `CMVBT_REPO` environment variable explicitly to override auto-detection:
+
+    CMVBT_REPO=/path/to/the/repo/you/are/editing python3 scripts/compare_engines.py ...
+
+**cMVBT-OSIC is currently private.** On this workstation the clone attempt fails and the
+self-referential fallback engages (correct - it builds from wherever you're actually
+running this). On the real server, this only clones a fresh, up-to-date copy if you've
+pushed your local changes to that remote first - I have no credentials for a private repo
+and won't attempt to push on your behalf. If you want the server to have this session's
+harness/LeanStore-patch/libmdbx-backend work, push it yourself before relying on a
+server-side clone having it.
+
+
+3. RUNNING EXPERIMENTS
+------------------------
+
+    python3 scripts/compare_engines.py [options]
+
+This is the main entrypoint. It builds every requested engine (unless --skip-build),
+then runs every requested workload x engine x thread-count x GC-variant combination,
+appending one row per run to <output-root>/run_<timestamp>/manifest.csv as it goes (so a
+partially-finished run still leaves usable data if interrupted).
+
+Quick smoke test (fast, small data, threads=[2,4]):
+
+    python3 scripts/compare_engines.py --tiny
+
+Full run at the default (server) scale - WARNING: this is a lot of runs (engines x
+workloads x threads x gc), potentially many hours; the banner printed at the start says
+exactly how many runs and a lower-bound time estimate before anything starts:
+
+    python3 scripts/compare_engines.py
+
+Common ways to narrow scope for a faster/targeted run:
+
+    python3 scripts/compare_engines.py --engines cmvbt,leanstore --workloads tpcc,ycsb_e
+    python3 scripts/compare_engines.py --threads 2,4,16,64
+    python3 scripts/compare_engines.py --gc on
+    python3 scripts/compare_engines.py --workloads htap_q1,htap_q6
+
+Options:
+
+  --output-root DIR        where run_<timestamp>/ directories go (default:
+                            comparison_results)
+  --engines LIST            comma-separated subset of: cmvbt, leanstore, wiredtiger,
+                            postgres, vweaver_ermia, libmdbx (default: all six)
+  --workloads LIST           comma-separated subset of: tpcc, ycsb_a..ycsb_f, htap_q1,
+                            htap_q6 (default: all)
+  --tiny                    small/fast smoke-test scale (1 warehouse, 10k YCSB records,
+                            10s duration, threads=[2,4]) instead of the server scale
+  --skip-build              skip each engine's build step (use if you already built
+                            everything and just changed scale/workload/thread args)
+  --threads LIST             comma-separated thread/terminal counts to sweep (default:
+                            2,4,8,16,32,64,128 - one server socket's worth of SMT
+                            threads; becomes 2,4 automatically with --tiny)
+  --gc on|off|on,off         which GC variant(s) to run (default: both) - ignored for
+                            engines with no working GC toggle (see section 5)
+  --warehouses N             override TPC-C warehouse count (fixed across the whole
+                            thread sweep - only terminals/threads vary)
+  --tpcc-duration SECS
+  --ycsb-records N
+  --ycsb-duration SECS
+  --theta FLOAT              YCSB Zipfian skew parameter
+  --dram-gib FLOAT           LeanStore/WiredTiger buffer pool size (unused by
+                            cmvbt/postgres/libmdbx/vweaver_ermia)
+
+Output layout per run:
+
+    <output-root>/run_<timestamp>/
+        manifest.csv                          one row per (workload, engine, threads, gc)
+        <workload>/<engine>/threads_N/gc_X/    each run's raw output (stdout.log, CSVs)
+
+Note the engine's actual on-disk DATA (LeanStore/WiredTiger's ssd image, libmdbx's
+environment, ERMIA's log dir) does NOT live under this per-combo tree - see section 4.
+
+
+4. DISK HYGIENE: FIXED, WIPED-BEFORE-EVERY-RUN DATA DIRECTORIES
+--------------------------------------------------------------------
+
+Every engine's own on-disk DATA (not its small result artifacts - those still live under
+the per-combo tree above) lives at a FIXED path, entirely deleted and recreated before
+every single run:
+
+    <workspace>/scratch/<engine>_data/     (leanstore, wiredtiger, libmdbx)
+    <workspace>/scratch/vweaver_ermia_log/
+
+This means disk usage never accumulates across a long thread/workload sweep the way a
+fresh uniquely-named directory per sweep point would - only the CURRENT experiment's data
+ever exists on disk, never every prior one's too. The tradeoff: you can't go back and
+inspect e.g. run #47's raw ssd image after run #48 has started (it's been wiped) - only
+the small per-combo artifacts (stdout.log, result CSVs) survive for later inspection.
+
+
+5. WHAT EACH ENGINE ACTUALLY SUPPORTS (read before interpreting results)
+--------------------------------------------------------------------------
+
+Not every engine supports every dimension identically - the harness is explicit about
+this rather than papering over it:
+
+- GC on/off: cMVBT (real --gc flag), PostgreSQL (via `autovacuum`, toggled with
+  `ALTER SYSTEM` + `pg_reload_conf()`, no restart needed), and vWeaver_ermia (real
+  `-enable_gc` flag - gates actual version-chain reclamation in dbcore/sm-alloc.cpp and
+  dbcore/sm-oid.cpp, confirmed by reading both call sites, not just its own README) all
+  have a genuine, working toggle. LeanStore's `--pgc` flag is DEAD CODE in this checkout
+  (confirmed by grep: it's only read once, to report its own value into a profiling table
+  - nothing in its B-tree actually branches on it), and the WiredTiger adapter has no
+  equivalent at all (separate code path, doesn't touch LeanStore's MVCC machinery).
+  libmdbx (like any real path-copying/CoW MVCC store) reclaims old pages once no reader
+  references them, with no separate toggle either. LeanStore/WiredTiger/libmdbx always
+  report gc="n/a" and run once per (workload, threads) regardless of --gc.
+
+- HTAP/CH-benCHmark (htap_q1/htap_q6): CH-benCHmark has 22 standard analytical queries;
+  only Q1 ("Pricing Summary Report") and Q6 ("Forecasting Revenue Change") are
+  implemented across the engines that support this at all - these two happen to be the
+  only pure-aggregation, no-join queries in the set, which is why they're the ones that
+  could be ported everywhere without a lot of new work. cMVBT and PostgreSQL/BenchBase
+  already had real implementations (cMVBT also implements Q4/Q5 internally, but those
+  aren't part of this cross-engine comparison - only Q1/Q6 rows get read out of cMVBT's
+  own output). LeanStore/WiredTiger's analyticalQuery() was a literal "TODO: implement CH
+  analytical queries" stub before this harness added real Q1/Q6 bodies to it (see
+  frontend/tpc-c/TPCCWorkload.hpp in the LeanStore checkout). libmdbx and vWeaver_ermia
+  have NO CH-benCHmark/HTAP support at all - htap_q1/htap_q6 simply skip both.
+
+- libmdbx's single-writer model: unlike every other engine here, libmdbx (like LMDB)
+  allows only ONE read-write transaction active process-wide at a time - there is no
+  possible write-write race the way cMVBT's OSIC or a real distributed-lock MVCC engine
+  has. Any workload with a write component (update/insert/read-modify-write for YCSB;
+  New-Order/Payment/Delivery for TPC-C) will show throughput fundamentally bounded by that
+  single-writer serialization as thread count grows. This is a genuine, expected
+  characteristic of path-copying/CoW MVCC to surface honestly, not a wrapper bug - and it
+  means libmdbx's TxnOutcome has no "Conflict" case a concurrent writer can trigger; that
+  outcome is kept only for the same defensive "row unexpectedly missing" checks the
+  original TPC-C code has (which would indicate a genuine data/scale bug, not a race).
+
+- vWeaver_ermia (ERMIA) build status: BUILDS AND RUNS. After fixing missing
+  libgoogle-glog-dev/libibverbs-dev packages and a dead `#include <sys/vtimes.h>` (the
+  only fix in patches/vweaver_ermia.patch), and generating dbcore/burt-hash.cpp - a
+  gitignored build artifact upstream normally produces via `python2 dbcore/burt-hash.py`
+  (no python2 on this system; setup_environment.py runs a Python 3 port instead, see
+  patches/vweaver_burt_hash_gen.py) - `-DCMAKE_BUILD_PARAM=Vweaver` builds `ermia_SI`
+  cleanly. One operational requirement: ermia_SI preallocates its whole working set up
+  front via `mmap(..., MAP_HUGETLB)` (dbcore/sm-alloc.cpp::prepare_node_memory, sized by
+  `-node_memory_gb`) and crashes immediately (uncaught os_error) if the kernel has no
+  hugepages reserved - setup_environment.py's step_vweaver_hugepages() reserves them
+  (sudo sysctl, prompts for your password like the apt step).
+  An EARLIER version of this pin/patch was accidentally generated against a divergent
+  fork (Rudeus/vWeaver_ermia) instead of the repo actually specified
+  (SNU-DBXLab-papers/vWeaver_ermia) - that fork has a real masstree scan() overload-arity
+  bug this repo does NOT have; the wrong pin/patch/docstring describing it have all been
+  replaced with ones verified against the correct upstream.
+
+- Peak memory (peak_rss_mb): tracks PostgreSQL's actual SERVER process tree now
+  (postmaster + checkpointer + bgwriter + walwriter + every per-connection backend -
+  summed current RSS, peak-tracked over the run), not the JDBC client's own memory (which
+  would be a different, misleading number - the client just drives requests, it doesn't
+  store anything). Every other engine's peak_rss_mb is single-process VmHWM, since a
+  single process IS the storage engine for all of them.
+
+- NUMA pinning: every benchmark SUBPROCESS this harness spawns runs under
+  `numactl --cpubind=0 --membind=0`. The PostgreSQL SERVER itself is a pre-existing
+  system service, not spawned by this harness, so it is NOT NUMA-pinned by any of this -
+  only the BenchBase JDBC client that talks to it is. Pinning the Postgres server itself
+  would need a systemd unit override, outside this harness's scope.
+
+- Low-warehouse-count TPC-C contention: at very small scale (e.g. --tiny's 1 warehouse),
+  TPC-C throughput can drop sharply once the terminal/thread count exceeds the warehouse
+  count - this is expected TPC-C lock contention (only one warehouse to spread load
+  across), not a harness bug. Use --warehouses to scale data volume together with
+  --threads if you want to avoid this at higher thread counts. Similarly, at very small
+  customers-per-district counts, TPC-C's "by last name" customer lookups (Payment/
+  Order-Status, ~60% of those transactions) can have a high miss rate purely because the
+  ~1,000 possible last-name codes outnumber the loaded customer pool - also expected, not
+  a bug (verified identical behavior between cMVBT's own TPC-C driver and the new libmdbx
+  one at the same tiny scale).
+
+
+6. HOW LIBMDBX WAS ADDED (src/mv_bench/mdbx_ycsb.rs, mdbx_tpcc.rs)
+------------------------------------------------------------------------
+
+A second, independent storage backend inside cMVBT itself, using the `libmdbx` Rust crate
+(a path-copying/copy-on-write B+Tree) instead of cMVBT's own version-chain MVBTree, run
+through the SAME standard TPC-C/YCSB A-F workloads for a genuine architecture-vs-
+architecture MVCC comparison. Gated behind the `mdbx-backend` Cargo feature (optional -
+not every build needs a second storage engine):
+
+    cargo build --release --features mdbx-backend
+
+This reuses cMVBT's existing schema/row/key/WAL-codec layer entirely as-is (`TpccRow`/
+`YcsbRow`, their `WalPayload` byte encoders, `TpccConfig`/`YcsbConfig`, every bit-packed
+`u64` key-builder function) - that layer was already fully storage-engine-agnostic. Only
+the transaction logic and driver loop are reimplemented against libmdbx's
+`Transaction<RO|RW>` API, since there's no trait boundary in this codebase between
+cMVBT's own tree and its business logic - `mdbx_ycsb.rs`/`mdbx_tpcc.rs` are parallel
+files, not a generic backend swapped into the existing drivers. New CLI subcommands
+(`mdbx_ycsb`, `mdbx_tpcc`) mirror the existing `ycsb`/`tpcc` subcommands' positional-arg
+order wherever the concept overlaps, dropping every knob that has no libmdbx equivalent
+(cMVBT's own GC/root-index/WAL/affinity knobs).
+
+
+7. REBUILDING ONE ENGINE MANUALLY (after editing its source, without the full script)
+--------------------------------------------------------------------------------------
+
+cMVBT:
+    cargo build --release
+    cargo build --release --features mdbx-backend    # to also get mdbx_ycsb/mdbx_tpcc
+
+LeanStore + WiredTiger adapter (from <workspace>/leanstore, after WiredTiger's already
+built once via setup_environment.py):
+    cmake --build <workspace>/leanstore/build --target tpcc ycsb wiredtiger_tpcc wiredtiger_ycsb --parallel $(nproc)
+
+WiredTiger itself (rarely needed - only if you change WiredTiger's own source):
+    cmake --build <workspace>/wiredtiger/cmake-build-debug --target wiredtiger_shared wt --parallel $(nproc)
+
+vWeaver_ermia (needs dbcore/burt-hash.cpp generated first if it doesn't exist yet -
+python3 patches/vweaver_burt_hash_gen.py > <workspace>/vWeaver_ermia/dbcore/burt-hash.cpp
+- and hugepages reserved, see section 5):
+    CC=clang CXX=clang++ \
+    CXXFLAGS="-I/usr/include/c++/13 -I/usr/include/x86_64-linux-gnu/c++/13" \
+    LDFLAGS="-L/usr/lib/gcc/x86_64-linux-gnu/13" \
+    cmake -S <workspace>/vWeaver_ermia -B <workspace>/vWeaver_ermia/build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_BUILD_PARAM=Vweaver
+    cmake --build <workspace>/vWeaver_ermia/build --target ermia_SI --parallel $(nproc)
+
+BenchBase (from <workspace>/benchbase):
+    mvn clean package -P postgres -DskipTests \
+        -Dmaven.compiler.source=21 -Dmaven.compiler.target=21 -Djava.version=21
+    tar xzf target/benchbase-postgres.tgz -C target
+
+Or just run `python3 scripts/compare_engines.py` without --skip-build - every engine's
+own ensure_built() step already no-ops if nothing changed, so it's cheap to leave on by
+default.
+
+
+8. PLOTTING
+-------------
+
+    python3 scripts/plot_compare.py --run-dir <output-root>/run_<timestamp>
+
+(or omit --run-dir to auto-pick the most recently modified run_* directory under
+--results-root, default comparison_results). Needs the venv's pandas/matplotlib - either
+activate it (`source scripts/.venv/bin/activate`) or invoke its interpreter directly
+(`scripts/.venv/bin/python3 scripts/plot_compare.py ...`).
+
+Every figure is written as both PDF and SVG into <run-dir>/plots/. Figures produced:
+
+  tpcc_throughput_by_engine       TPC-C New-Order/sec, one bar per engine
+  ycsb_throughput_by_engine       YCSB A-F ops/sec, grouped bars per workload x engine
+  memory_by_engine                Peak RSS per workload x engine (PostgreSQL now
+                                  includes its actual server process-tree memory)
+  summary_all_workloads            Every workload's primary metric, log-scaled, one chart
+  threads_sweep_<workload>         Throughput vs. thread count, one line per engine (and
+                                  per GC variant where applicable) - one file per workload
+  gc_on_vs_off                     GC-on vs GC-off throughput, cmvbt/postgres only (the
+                                  only two with a real toggle - see section 5)
+  ycsb_e_scan_latency              YCSB-E scan-op latency (p50/p95/p99), across engines
+  cmvbt_tpcc_olap_scan_latency      cMVBT-only: its always-on concurrent OLAP-scan-sweep
+                                  thread's latency vs. staleness/delay (HTAP-mode data
+                                  specific to cMVBT, not comparable to the other engines'
+                                  plain-OLTP TPC-C run in this harness)
+  htap_interference                 OLTP throughput drop (%) under concurrent CH-benCHmark
+                                  analytics (htap_q1/htap_q6) vs. plain TPC-C, per engine
+  ch_query_latency                  CH-benCHmark Q1/Q6 analytical query latency, across
+                                  engines that support it
+
+Most bar-chart-style figures (everything except the threads_sweep_* ones, which use every
+thread point) are drawn from a "reference slice": the LARGEST thread count present in the
+manifest, and gc="on" for engines that support toggling GC / "n/a" for the ones that
+don't (never "off", so a bar chart never silently shows the GC-disabled number as if it
+were the default). Every such figure's title says which thread count it's pinned to.
+
+
+9. MANIFEST SCHEMA REFERENCE
+-------------------------------
+
+manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
+
+    engine                cmvbt | leanstore | wiredtiger | postgres | vweaver_ermia | libmdbx
+    workload               tpcc | ycsb_a..ycsb_f | htap_q1 | htap_q6
+    config_label            scale label ("tiny" or "server")
+    threads                 thread/terminal count for this row
+    gc_enabled               on | off | n/a
+    duration_secs            requested run duration
+    primary_metric_name       new_order_per_sec (tpcc/htap_q1/htap_q6) or ops_per_sec (ycsb)
+    primary_metric_value
+    peak_rss_mb               postgres now reports its server process-tree's peak RSS
+                            (see section 5), not 0
+    scan_p50_us / scan_p95_us / scan_p99_us / scan_avg_us / scan_count
+                              scan/analytical-query latency (microseconds) - populated for
+                              ycsb_e (scan ops), tpcc (cMVBT's own HTAP scan-sweep only),
+                              and htap_q1/htap_q6 (CH-benCHmark query latency); 0/blank
+                              elsewhere
+    notes                     "FAILED ..." / "EXCEPTION: ..." on error, or an
+                              engine-specific caveat (e.g. "not supported: ..." for
+                              libmdbx on htap_q1/htap_q6)

@@ -32,9 +32,15 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-ENGINE_ORDER = ["cmvbt", "leanstore", "wiredtiger", "postgres"]
-ENGINE_LABELS = {"cmvbt": "cMVBT", "leanstore": "LeanStore", "wiredtiger": "WiredTiger", "postgres": "PostgreSQL"}
-ENGINE_COLORS = {"cmvbt": "tab:green", "leanstore": "tab:blue", "wiredtiger": "tab:orange", "postgres": "tab:red"}
+ENGINE_ORDER = ["cmvbt", "leanstore", "wiredtiger", "postgres", "vweaver_ermia", "libmdbx"]
+ENGINE_LABELS = {
+    "cmvbt": "cMVBT", "leanstore": "LeanStore", "wiredtiger": "WiredTiger", "postgres": "PostgreSQL",
+    "vweaver_ermia": "vWeaver/ERMIA", "libmdbx": "libmdbx",
+}
+ENGINE_COLORS = {
+    "cmvbt": "tab:green", "leanstore": "tab:blue", "wiredtiger": "tab:orange", "postgres": "tab:red",
+    "vweaver_ermia": "tab:purple", "libmdbx": "tab:brown",
+}
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
 # Engines with a real, working GC on/off toggle (see engines/*.py's SUPPORTS_GC_TOGGLE) -
 # leanstore/wiredtiger only ever report gc_enabled="n/a" (no working toggle in this
