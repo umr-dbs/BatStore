@@ -112,7 +112,9 @@ impl<const P_F: usize,
         // "wait until nothing anywhere is mid-registration" check needed.
         let live_min_snapshot = ctx.live_min_snapshot();
 
-        self.dead_blocks.try_reclaim(|dead_v| match live_min_snapshot {
+        // Prefer this worker's own dead pages before stealing another
+        // worker's — see `BlockTrace::try_reclaim`'s doc.
+        self.dead_blocks.try_reclaim(ctx.worker_id(), |dead_v| match live_min_snapshot {
             None => true,
             Some(live_min_snapshot) => dead_v.lt_self_any(live_min_snapshot),
         })

@@ -40,9 +40,11 @@ pub(crate) struct BlockTrace<
     Payload: Clone + Default + 'static>
 {
     shards: Vec<BlockTracerIndex<P_F, P_N, Key, Payload>>,
-    // Round-robins `free_block`'s scan start across shards so no single
-    // shard is favored call after call (which would otherwise silently
-    // recreate the same hot-shard contention this sharding exists to avoid).
+    // Round-robins the *stealing* scan's start across the other shards, once
+    // a caller's own shard has already been tried and come up empty (see
+    // `try_reclaim`), so no single remote shard is favored steal after steal
+    // (which would otherwise silently recreate the same hot-shard contention
+    // this sharding exists to avoid).
     next_scan: AtomicUsize,
 }
 
@@ -92,7 +94,11 @@ impl<const P_F: usize,
             .map(|entry| (*entry.key(), entry.value().clone()))
     }
 
-    /// Tries every shard once, starting from a round-robin cursor, handing
+    /// Tries the calling worker's own shard first — reusing a worker's own
+    /// dead pages needs no cross-shard traffic at all, so this is the cheap,
+    /// common case. Only if `worker_id`'s shard is empty or its one dead page
+    /// isn't old enough yet does this fall back to "stealing": scanning
+    /// every other shard once, starting from a round-robin cursor, handing
     /// `try_reclaim` each shard's current minimum in turn. `try_reclaim`
     /// returns `Ok(block)` to reclaim it, or `Err(())` to reject it (it'll be
     /// reinserted into the same shard it came from) and move on to the next
@@ -101,13 +107,27 @@ impl<const P_F: usize,
     #[inline]
     pub(crate) fn try_reclaim(
         &self,
+        worker_id: WorkerId,
         mut try_reclaim: impl FnMut(DeadPageKey) -> bool,
     ) -> Option<DeadPageValue<P_F, P_N, Key, Payload>> {
+        let own_shard = self.shard_for(worker_id);
+
+        if let Some((dead_v, dead_block)) = self.pop_min_at(own_shard) {
+            if try_reclaim(dead_v) {
+                return Some(dead_block);
+            }
+            self.reinsert_at(own_shard, dead_v, dead_block);
+        }
+
+        // Own shard had nothing usable — steal from the rest.
         let shard_count = self.shards.len();
         let start = self.next_scan.fetch_add(1, Relaxed) % shard_count;
 
         for i in 0..shard_count {
             let shard = (start + i) % shard_count;
+            if shard == own_shard {
+                continue;
+            }
             if let Some((dead_v, dead_block)) = self.pop_min_at(shard) {
                 if try_reclaim(dead_v) {
                     return Some(dead_block);
