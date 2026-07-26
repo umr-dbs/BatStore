@@ -184,44 +184,6 @@ impl<'a,
                     Some(..) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted),
                     None =>  CRUDOperationResult::ZeroAffected(KeyDoesNotExist)
                 }
-
-                // let stamp
-                //     = self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
-                //
-                // leaf_page.push_uncommitted(
-                //     RecordPoint::new(key, VersionInfo::new(stamp), payload),
-                //     current_len);
-                //
-                // // soft commit for atomic visibility of new published record
-                // leaf_page.commit_delta(1, 0);
-                //
-                // match leaf_page.delete_after_update(key, stamp) {
-                //     Ok(Some(..)) => {
-                //         // Apply second soft atomic commit for lifetime end
-                //         leaf_page.commit_delta(-1, 1);
-                //
-                //         drop(leaf_guard);
-                //         // Fire-and-forget WAL, see the Insert arm above.
-                //         let ts_commit = self.commit_tx(stamp.worker_id());
-                //         self.wal_log_commit(stamp, ts_commit);
-                //
-                //         CRUDOperationResult::Updated(stamp.ts_start())
-                //     }
-                //     Ok(None) => {
-                //         // Reverse the soft commit above: the pushed record never
-                //         // became a real, superseding update, so it must not stay
-                //         // counted as active or `unsafe_degree()`'s fill-ratio reads
-                //         // drift out of sync with the leaf's true content.
-                //         leaf_page.commit_delta(-1, 0);
-                //         leaf_page.undo_uncommitted(current_len);
-                //         CRUDOperationResult::ZeroAffected(KeyDoesNotExist)
-                //     }
-                //     Err(()) => {
-                //         leaf_page.commit_delta(-1, 0);
-                //         leaf_page.undo_uncommitted(current_len);
-                //         CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
-                //     }
-                // }
             }
             CRUDOperation::Delete(key) => {
                 if VERBOSE {

@@ -126,8 +126,17 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         ]
         metric_name = "ops_per_sec"
 
+    # ermia_SI dynamically links libermia_si.so from the same build dir (see
+    # CMakeLists.txt's add_library(ermia_si SHARED ...)) with no install step and no
+    # baked-in install-RPATH - it only works unmodified via CMake's build-tree RPATH,
+    # which breaks the moment the build directory is moved (e.g. a renamed WORKSPACE_ROOT
+    # between sessions), producing "error while loading shared libraries: libermia_si.so:
+    # cannot open shared object file". Setting LD_LIBRARY_PATH explicitly sidesteps RPATH
+    # entirely so this can't recur.
+    run_env = os.environ.copy()
+    run_env["LD_LIBRARY_PATH"] = str(BUILD_DIR) + os.pathsep + run_env.get("LD_LIBRARY_PATH", "")
     returncode, peak_rss_mb = common.run_and_track_rss(
-        args, cwd=REPO, stdout_path=stdout_path,
+        args, cwd=REPO, env=run_env, stdout_path=stdout_path,
     )
     if returncode != 0:
         return common.NormalizedResult(

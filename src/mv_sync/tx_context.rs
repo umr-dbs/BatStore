@@ -281,6 +281,21 @@ impl TxContext {
         self.live_tx.peek_max()
     }
 
+    /// Is `ts_start` a currently-registered (not yet committed/aborted)
+    /// transaction? See `TransactionTrace::is_active`'s doc for why this
+    /// exists — `MVBTSt::record_survives_gc` uses it to keep a *deleted*
+    /// record physically present while its deleting transaction might
+    /// still abort and need to reverse that delete. Always `false` while
+    /// `block_reclaim_enabled` is off, matching `on_tx_start`/
+    /// `on_tx_completed`'s own gating: `live_tx` is never populated at all
+    /// in that mode, so there's nothing to protect (and nothing wrongly
+    /// discarded either, since block reclaim itself — the only thing that
+    /// physically reuses a block — is also off then).
+    #[inline]
+    pub(crate) fn is_snapshot_live(&self, ts_start: Version) -> bool {
+        self.block_reclaim_enabled.load(Relaxed) && self.live_tx.is_active(ts_start)
+    }
+
     /// The oldest currently-active-or-in-flight snapshot across every table
     /// sharing this context, or `None` if there are none — the "safe to
     /// reclaim anything dead strictly before this" bound

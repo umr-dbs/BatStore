@@ -215,66 +215,38 @@ impl<
         // if !self.newest_visible_to_me(&tree, leaf_page, key) {
         //     return CRUDOperationResult::Conflict;
         // }
+
         match leaf_page
             .as_records_mut()
             .iter_mut()
             .rfind(|r| r.key() == key)
         {
             Some(record) =>
-            if tree.is_visible_stamp(self.worker_id, self.ts_start, record.version.insert_stamp) {
-                let stamp
-                    = TxStamp::new(self.worker_id, self.ts_start);
+                if tree.is_visible_stamp(self.worker_id, self.ts_start, record.version.insert_stamp) {
+                    let stamp
+                        = TxStamp::new(self.worker_id, self.ts_start);
 
-                tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
-                if !record.version.delete(stamp) {
-                    return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
+                    tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
+                    if !record.version.delete(stamp) {
+                        return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
+                    }
+
+                    let current_len
+                        = leaf_page.len();
+
+                    leaf_page.push_uncommitted(
+                        RecordPoint::new(key, VersionInfo::new(stamp), payload),
+                        current_len);
+
+                    leaf_page.commit_delta(0, 1);
+                    self.written.borrow_mut().push((table, key));
+                    CRUDOperationResult::Updated(stamp.ts_start())
                 }
-
-                let current_len
-                    = leaf_page.len();
-
-                leaf_page.push_uncommitted(
-                    RecordPoint::new(key, VersionInfo::new(stamp), payload),
-                    current_len);
-
-                leaf_page.commit_delta(0, 1);
-                self.written.borrow_mut().push((table, key));
-                CRUDOperationResult::Updated(stamp.ts_start())
-            }
-            else {
-                CRUDOperationResult::Conflict
-            }
-            None => CRUDOperationResult::ZeroAffected(KeyDoesNotExist)
+                else {
+                    CRUDOperationResult::Conflict
+                },
+            None => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
         }
-
-    // let stamp = TxStamp::new(self.worker_id, self.ts_start);
-    //     tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
-    //
-    //     let current_len = leaf_page.len();
-    //
-    //     leaf_page.push_uncommitted(
-    //         RecordPoint::new(key, VersionInfo::new(stamp), payload),
-    //         current_len);
-    //
-    //     leaf_page.commit_delta(1, 0);
-    //
-    //     match leaf_page.delete_after_update(key, stamp) {
-    //         Ok(Some(..)) => {
-    //             leaf_page.commit_delta(-1, 1);
-    //             self.written.borrow_mut().push((table, key));
-    //             CRUDOperationResult::Updated(stamp.ts_start())
-    //         }
-    //         Ok(None) => {
-    //             leaf_page.commit_delta(-1, 0);
-    //             leaf_page.undo_uncommitted(current_len);
-    //             CRUDOperationResult::ZeroAffected(KeyDoesNotExist)
-    //         }
-    //         Err(()) => {
-    //             leaf_page.commit_delta(-1, 0);
-    //             leaf_page.undo_uncommitted(current_len);
-    //             CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
-    //         }
-    //     }
     }
 
     pub fn delete(&self, table: TableId, key: Key) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
@@ -312,22 +284,9 @@ impl<
             }
             else {
                 CRUDOperationResult::Conflict
-            }
+            },
             None => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
         }
-
-        // let stamp = TxStamp::new(self.worker_id, self.ts_start);
-        // tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));
-        //
-        // match leaf_page.delete(key, stamp) {
-        //     Ok(Some(..)) => {
-        //         leaf_page.commit_delta(-1, 1);
-        //         self.written.borrow_mut().push((table, key));
-        //         CRUDOperationResult::Deleted(stamp.ts_start())
-        //     }
-        //     Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
-        //     Err(()) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted),
-        // }
     }
 
     pub const fn is_committed(&self) -> bool {
@@ -370,8 +329,28 @@ impl<
         if let TransactionState::InFlight = self.committed {
             self.committed = TransactionState::Aborted;
 
+            // Reverse (LIFO) order, not chronological: reverting is not
+            // atomic across every written key at once — each `abort_write`
+            // individually re-exposes that one key to any other concurrent
+            // transaction the instant it runs, well before the rest of
+            // `self.written` has been reverted too. When an earlier write
+            // in this transaction effectively acts as a lock/dequeue step
+            // that later writes in the same transaction depend on (e.g.
+            // `mv_bench::tpcc_txn::deliver_one_district` deletes a NewOrder
+            // queue entry first, then updates that order's Orders/OrderLine/
+            // Customer rows), reverting in forward order un-deletes — i.e.
+            // re-queues — that entry *first*, while this abort still has
+            // several other writes left to revert: a concurrent Delivery
+            // scan can pick the freshly re-queued order back up and start
+            // racing this thread's own in-flight reversal of its
+            // OrderLine/Customer rows, corrupting them out from under it.
+            // Reverting last-write-first instead means every write this
+            // transaction made *after* that lock/dequeue step is already
+            // fully reverted by the time the dequeue step's own reversal
+            // makes the entry visible to anyone else again — the same
+            // ordering a plain undo-log/rollback would use.
             let stamp = TxStamp::new(self.worker_id, self.ts_start);
-            for &(table, key) in self.written.borrow().iter() {
+            for &(table, key) in self.written.borrow().iter().rev() {
                 self.tree(table).abort_write(key, stamp);
             }
 
@@ -402,8 +381,11 @@ impl<
         // here — not just belt-and-suspenders: re-running would double
         // `end_snapshot` this transaction's `ts_start`.
         if let TransactionState::InFlight = self.committed {
+            // Reverse (LIFO) order — see `abort`'s identical doc above for
+            // why forward order can expose a partially-unwound transaction
+            // to a concurrent one mid-abort.
             let stamp = TxStamp::new(self.worker_id, self.ts_start);
-            for &(table, key) in self.written.borrow().iter() {
+            for &(table, key) in self.written.borrow().iter().rev() {
                 self.tree(table).abort_write(key, stamp);
             }
             self.db.end_snapshot(self.ts_start);
