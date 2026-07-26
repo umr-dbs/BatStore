@@ -120,6 +120,26 @@ impl TransactionTrace {
         }
     }
 
+    /// Is `snapshot` a currently-registered (not yet committed/aborted)
+    /// transaction's `ts_start`? Used by `MVBTSt::record_survives_gc` to
+    /// decide whether a *deleted* record must still be physically retained
+    /// during a version-split/merge's GC compaction: `is_live()`/`is_deleted()`
+    /// are pure local bookkeeping with no notion of commit status, so a
+    /// delete from a transaction that's still in flight looks identical —
+    /// to that filter — to one whose deleting transaction has already
+    /// durably committed. If that transaction goes on to *abort* instead,
+    /// its reversal (`LeafPage::apply_invalidate`/`apply_undelete`) needs
+    /// the predecessor record to still be physically present to undelete;
+    /// discarding it here first makes that reversal silently impossible,
+    /// permanently losing the key (confirmed empirically: exactly this,
+    /// for TPC-C's District `d_next_o_id` update, racing New-Order's own
+    /// business-logic rollback path). A plain `self.0.get(&snapshot).is_some()`
+    /// lookup, same cost class as `peek_min`/`peek_max`.
+    #[inline(always)]
+    pub(crate) fn is_active(&self, snapshot: SnapShot) -> bool {
+        self.0.get(&snapshot).is_some()
+    }
+
     /// Test-only: current entry count, for tests confirming zero-count
     /// entries are actually removed rather than left as tombstones — see
     /// this type's doc for why that matters.

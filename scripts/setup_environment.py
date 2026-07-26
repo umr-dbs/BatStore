@@ -283,6 +283,22 @@ def step_postgres() -> None:
         run(["sudo", "-u", "postgres", "psql", "-c",
              f"CREATE DATABASE {PG_DATABASE} OWNER {PG_ROLE};"])
 
+    # Default max_connections=100 is below compare_engines.py's own DEFAULT_THREADS ceiling
+    # (128, see compare_engines.py) - BenchBase opens roughly one JDBC connection per
+    # terminal/thread, so the highest thread-count sweep points fail to even connect
+    # without this. Sized well above 128 for headroom (superuser/monitoring connections
+    # also count against the limit).
+    max_conn = subprocess.run(
+        ["sudo", "-u", "postgres", "psql", "-tAc", "SHOW max_connections"],
+        capture_output=True, text=True, check=True,
+    )
+    if int(max_conn.stdout.strip()) < 300:
+        log("Raising PostgreSQL max_connections to 300 (default 100 is below the thread sweep's ceiling)")
+        run(["sudo", "-u", "postgres", "psql", "-c", "ALTER SYSTEM SET max_connections = 300;"])
+        run(["sudo", "systemctl", "restart", "postgresql"])
+    else:
+        print(f"max_connections already {max_conn.stdout.strip()}, skipping.")
+
 
 # Non-essential quality-gate plugins (code-style checks, static analysis) that: (a) aren't
 # needed to produce a working benchbase.jar, and (b) some build environments (observed on

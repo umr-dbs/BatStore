@@ -201,7 +201,12 @@ def main() -> None:
             for threads in thread_list:
                 scale_variant = dataclasses.replace(scale, tpcc_terminals=threads, ycsb_threads=threads)
                 for gc_variant in gc_variants:
-                    out_dir = run_dir / workload / engine_name / f"threads_{threads}" / f"gc_{gc_variant}"
+                    # gc_variant is the literal string "n/a" for engines without a GC
+                    # toggle - the "/" is a path separator, so f"gc_{gc_variant}" used
+                    # unsanitized would silently split into two nested directories
+                    # (gc_n/a/) instead of one, leaving gc_n/ looking empty at a glance.
+                    gc_dir_name = f"gc_{gc_variant}".replace("/", "_")
+                    out_dir = run_dir / workload / engine_name / f"threads_{threads}" / gc_dir_name
                     print(f"=== {workload} / {engine_name} / threads={threads} / gc={gc_variant} ===")
                     try:
                         result = module.run(workload, scale_variant, out_dir, gc=gc_variant, reload=first_call)

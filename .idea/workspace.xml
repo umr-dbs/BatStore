@@ -16,13 +16,30 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Stabilized randquery generator">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="GC prefers own shard access first, and only steals (RoundRobin) on-demand instead">
+      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/manual.txt" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/readme.md" beforeDir="false" afterPath="$PROJECT_DIR$/readme.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/compare_engines.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/compare_engines.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/engines/vweaver_ermia.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/vweaver_ermia.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/plot_compare.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/plot_compare.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/plot_suite.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/plot_suite.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/setup_environment.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/setup_environment.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_db/transaction.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_db/transaction.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_gc/query_tracer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/query_tracer.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tx_tests/benchbase/pom.xml" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/benchbase/pom.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/backend/leanstore/profiling/counters/WorkerCounters.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/backend/leanstore/profiling/counters/WorkerCounters.hpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/backend/leanstore/profiling/tables/CRTable.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/backend/leanstore/profiling/tables/CRTable.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/shared/Schema.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/shared/Schema.hpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/TPCCWorkload.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/TPCCWorkload.hpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/tpcc.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/tpcc.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/wiredtiger_tpcc.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/wiredtiger_tpcc.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/ycsb/wiredtiger_ycsb.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/ycsb/wiredtiger_ycsb.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/ycsb/ycsb.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/ycsb/ycsb.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tx_tests/vWeaver_ermia/benchmarks/bench.cc" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/vWeaver_ermia/benchmarks/bench.cc" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -33,7 +50,7 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="935" />
+    <option name="cachedIndexableFilesCount" value="14677" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
@@ -76,61 +93,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0000557953737526" />
-      <entry key="MS500" value="1.1743201813112212" />
-      <entry key="S2" value="2.2846231327721314" />
-      <entry key="S5" value="3.1093143345185688" />
-      <entry key="S10" value="3.5920866758983045" />
-      <entry key="S30" value="5.000861175543015" />
-      <entry key="S60" value="7.221526717927374" />
-      <entry key="M2" value="11.641117080501848" />
-      <entry key="M5" value="24.211514747568557" />
-      <entry key="M10" value="41.32547640949753" />
-      <entry key="M15" value="56.16435707256368" />
-      <entry key="M30" value="102.60890024199739" />
-      <entry key="H1" value="186.93426978059205" />
-      <entry key="H2" value="313.67092407205024" />
-      <entry key="H4" value="488.2914804150271" />
-      <entry key="D1" value="2553.9713902202716" />
-      <entry key="W1" value="9252.442765203303" />
+      <entry key="MS100" value="1.0" />
+      <entry key="MS500" value="1.0000001218340628" />
+      <entry key="S2" value="1.0314025801379239" />
+      <entry key="S5" value="1.3814976488846247" />
+      <entry key="S10" value="2.0395647056133384" />
+      <entry key="S30" value="8.198448420966916" />
+      <entry key="S60" value="17.87320949012496" />
+      <entry key="M2" value="29.117569173402433" />
+      <entry key="M5" value="47.19703489165253" />
+      <entry key="M10" value="67.60452327950406" />
+      <entry key="M15" value="84.20542551595712" />
+      <entry key="M30" value="132.31702796667489" />
+      <entry key="H1" value="218.08168584222497" />
+      <entry key="H2" value="346.9508420390637" />
+      <entry key="H4" value="523.9766033208145" />
+      <entry key="D1" value="2590.7966837749973" />
+      <entry key="W1" value="9292.736098488043" />
     </decayedCancelled>
     <decayedSelected>
-      <entry key="MS100" value="0.0" />
-      <entry key="MS500" value="0.0" />
-      <entry key="S2" value="4.2154326976346166E-148" />
-      <entry key="S5" value="1.3765750506760987E-59" />
-      <entry key="S10" value="5.637210562912873E-30" />
-      <entry key="S30" value="4.3886263988346457E-10" />
-      <entry key="S60" value="4.553344804689759E-5" />
-      <entry key="M2" value="0.014976382779075629" />
-      <entry key="M5" value="0.4885212672296237" />
-      <entry key="M10" value="1.6043653450143152" />
-      <entry key="M15" value="2.5931332879860802" />
-      <entry key="M30" value="5.548512643938397" />
-      <entry key="H1" value="11.960823776577252" />
-      <entry key="H2" value="29.545888413765653" />
-      <entry key="H4" value="63.928025963008324" />
-      <entry key="D1" value="312.24948908385454" />
-      <entry key="W1" value="1012.4950859106228" />
+      <entry key="MS100" value="2.0492063017873738E-13" />
+      <entry key="MS500" value="0.002899460098884861" />
+      <entry key="S2" value="0.23204890338609585" />
+      <entry key="S5" value="0.5592227439353462" />
+      <entry key="S10" value="0.7883568420214846" />
+      <entry key="S30" value="1.2540024912637042" />
+      <entry key="S60" value="1.5413691482401204" />
+      <entry key="M2" value="1.745334626818316" />
+      <entry key="M5" value="2.1078214238908437" />
+      <entry key="M10" value="3.015308844663561" />
+      <entry key="M15" value="3.943672129315037" />
+      <entry key="M30" value="6.831219789482452" />
+      <entry key="H1" value="13.173413618183933" />
+      <entry key="H2" value="30.564247183537233" />
+      <entry key="H4" value="64.85995748014598" />
+      <entry key="D1" value="313.3754818105153" />
+      <entry key="W1" value="1014.0898653493584" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.9395755348539501" />
-      <entry key="MS500" value="1.1599733960197751" />
-      <entry key="S2" value="2.2775926092710184" />
-      <entry key="S5" value="3.105372703478041" />
-      <entry key="S10" value="3.589360923109594" />
-      <entry key="S30" value="4.998167572280833" />
-      <entry key="S60" value="7.219012389868763" />
-      <entry key="M2" value="11.6536260605241" />
-      <entry key="M5" value="24.695896275253865" />
-      <entry key="M10" value="42.92478510732356" />
-      <entry key="M15" value="58.7521627271257" />
-      <entry key="M30" value="108.15093403567782" />
-      <entry key="H1" value="198.887278976701" />
-      <entry key="H2" value="343.20696844282816" />
-      <entry key="H4" value="552.2086648622512" />
-      <entry key="D1" value="2866.2119919113006" />
-      <entry key="W1" value="10264.933819171203" />
+      <entry key="MS100" value="1.3523089321341144E-8" />
+      <entry key="MS500" value="0.027314695384840104" />
+      <entry key="S2" value="0.5932130092531195" />
+      <entry key="S5" value="1.5519066780671362" />
+      <entry key="S10" value="2.5778106379300842" />
+      <entry key="S30" value="9.279984722186546" />
+      <entry key="S60" value="19.290592961767842" />
+      <entry key="M2" value="30.78606150762916" />
+      <entry key="M5" value="49.26797714884775" />
+      <entry key="M10" value="70.59810705314281" />
+      <entry key="M15" value="88.13260269376937" />
+      <entry key="M30" value="139.13627417955058" />
+      <entry key="H1" value="231.2446131789399" />
+      <entry key="H2" value="377.50397442502225" />
+      <entry key="H4" value="588.8251003292019" />
+      <entry key="D1" value="2904.1631695584024" />
+      <entry key="W1" value="10306.821914431423" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -201,7 +218,7 @@
     &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
     &quot;git-widget-placeholder&quot;: &quot;main&quot;,
     &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/home/amir/RustroverProjects/cMVBT/src/mv_page_model&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/home/amir/RustroverProjects/cMVBT/comparison_results&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.jshint&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
@@ -221,11 +238,11 @@
 }</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/comparison_results" />
       <recent name="$PROJECT_DIR$/src/mv_page_model" />
       <recent name="$PROJECT_DIR$/src/mv_gc" />
       <recent name="$PROJECT_DIR$/src/mv_utils" />
       <recent name="$PROJECT_DIR$/src/mv_sync" />
-      <recent name="$PROJECT_DIR$/src/mv_query" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/src/mv_test" />
@@ -242,28 +259,10 @@
       <command value="cargo clean" />
     </option>
   </component>
-  <component name="RunManager" selected="Cargo.Run cMVBT">
+  <component name="RunManager" selected="Python.compare_engines">
     <configuration name="Generate" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
       <option name="buildProfileId" value="dev" />
       <option name="command" value="run --package cMVBT --bin cMVBT -- generate 1mio_inserts.dat 10000 1000 1000 0 0 0" />
-      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
-      <envs />
-      <option name="emulateTerminal" value="true" />
-      <option name="channel" value="DEFAULT" />
-      <option name="requiredFeatures" value="true" />
-      <option name="allFeatures" value="false" />
-      <option name="withSudo" value="false" />
-      <option name="buildTarget" value="REMOTE" />
-      <option name="backtrace" value="SHORT" />
-      <option name="isRedirectInput" value="false" />
-      <option name="redirectInputPath" value="" />
-      <method v="2">
-        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
-      </method>
-    </configuration>
-    <configuration name="Run cMVBT" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="buildProfileId" value="dev" />
-      <option name="command" value="run --package cMVBT --bin cMVBT" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -335,23 +334,6 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot --exact" />
-      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
-      <envs />
-      <option name="emulateTerminal" value="true" />
-      <option name="channel" value="DEFAULT" />
-      <option name="requiredFeatures" value="true" />
-      <option name="allFeatures" value="false" />
-      <option name="withSudo" value="false" />
-      <option name="buildTarget" value="REMOTE" />
-      <option name="backtrace" value="SHORT" />
-      <option name="isRedirectInput" value="false" />
-      <option name="redirectInputPath" value="" />
-      <method v="2">
-        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
-      </method>
-    </configuration>
     <configuration name="Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
       <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert --exact" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
@@ -403,22 +385,70 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
+    <configuration name="compare_engines" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="cMVBT" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/scripts" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="false" />
+      <option name="RUN_TOOL" value="" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/scripts/compare_engines.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="plot_suite" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="cMVBT" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/scripts" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="false" />
+      <option name="RUN_TOOL" value="" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/scripts/plot_suite.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
     <list>
       <item itemvalue="Cargo.Generate" />
       <item itemvalue="Cargo.Run" />
-      <item itemvalue="Cargo.Run cMVBT" />
-      <item itemvalue="Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot" />
       <item itemvalue="Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" />
       <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
       <item itemvalue="Cargo.Test tx_context::tests" />
+      <item itemvalue="Python.compare_engines" />
+      <item itemvalue="Python.plot_suite" />
     </list>
     <recent_temporary>
       <list>
+        <item itemvalue="Python.compare_engines" />
+        <item itemvalue="Python.plot_suite" />
         <item itemvalue="Cargo.Test tx_context::tests" />
         <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
         <item itemvalue="Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" />
-        <item itemvalue="Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot" />
-        <item itemvalue="Cargo.Run cMVBT" />
       </list>
     </recent_temporary>
   </component>
@@ -1355,15 +1385,15 @@
       <workItem from="1784721132716" duration="688000" />
       <workItem from="1784725777534" duration="5643000" />
       <workItem from="1784799108558" duration="450000" />
-      <workItem from="1784799699806" duration="784000" />
-    </task>
-    <task id="LOCAL-00148" summary="Clock now allocates correctly for extended threads.">
-      <option name="closed" value="true" />
-      <created>1767909556274</created>
-      <option name="number" value="00148" />
-      <option name="presentableId" value="LOCAL-00148" />
-      <option name="project" value="LOCAL" />
-      <updated>1767909556274</updated>
+      <workItem from="1784799699806" duration="3319000" />
+      <workItem from="1784806270372" duration="3826000" />
+      <workItem from="1784813073826" duration="2015000" />
+      <workItem from="1784822792980" duration="102000" />
+      <workItem from="1784832026848" duration="4414000" />
+      <workItem from="1784838414603" duration="487000" />
+      <workItem from="1784894347100" duration="8185000" />
+      <workItem from="1784907066928" duration="243000" />
+      <workItem from="1785058941813" duration="3893000" />
     </task>
     <task id="LOCAL-00149" summary="Clock now allocates correctly for extended threads.">
       <option name="closed" value="true" />
@@ -1749,7 +1779,15 @@
       <option name="project" value="LOCAL" />
       <updated>1784670357373</updated>
     </task>
-    <option name="localTasksCounter" value="197" />
+    <task id="LOCAL-00197" summary="GC prefers own shard access first, and only steals (RoundRobin) on-demand instead">
+      <option name="closed" value="true" />
+      <created>1784800756291</created>
+      <option name="number" value="00197" />
+      <option name="presentableId" value="LOCAL-00197" />
+      <option name="project" value="LOCAL" />
+      <updated>1784800756291</updated>
+    </task>
+    <option name="localTasksCounter" value="198" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1767,7 +1805,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Correct root* count" />
     <MESSAGE value="Remove free cell" />
     <MESSAGE value="Addressing memory optimizations" />
     <MESSAGE value="Readme" />
@@ -1792,7 +1829,8 @@
     <MESSAGE value="Stabilize GC and liveness is nodes, now re-added the obsolete/retired mark explicitly" />
     <MESSAGE value="Added user abort logic for transactions" />
     <MESSAGE value="Remove conservitive child latch. Updated scripts" />
-    <option name="LAST_COMMIT_MESSAGE" value="Remove conservitive child latch. Updated scripts" />
+    <MESSAGE value="GC prefers own shard access first, and only steals (RoundRobin) on-demand instead" />
+    <option name="LAST_COMMIT_MESSAGE" value="GC prefers own shard access first, and only steals (RoundRobin) on-demand instead" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

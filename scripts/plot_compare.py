@@ -55,10 +55,9 @@ def _engine_sort_key(name: str):
 def _save(fig, out_dir: Path, name: str):
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
-    for ext in ("pdf", "svg"):
-        path = out_dir / f"{name}.{ext}"
-        fig.savefig(path)
-        print(f"Wrote {path}")
+    path = out_dir / f"{name}.svg"
+    fig.savefig(path)
+    print(f"Wrote {path}")
     plt.close(fig)
 
 

@@ -598,6 +598,47 @@ impl<const FAN_OUT: usize,
         Ok(mufasa)
     }
 
+    /// Whether a record must be carried forward by a version-split/merge's
+    /// GC compaction — `is_live()` plus one more case: a record that's
+    /// *deleted* (not invalidated) by a transaction whose `ts_start` is
+    /// still registered as in-flight (`TxContext::is_snapshot_live`) is not
+    /// safe to discard yet, even though `is_live()` already reports it
+    /// dead. `is_deleted()`/`is_live()` are pure local bookkeeping with no
+    /// notion of commit status — OSIC's "instant commit" model means
+    /// `delete()` marks a record dead the moment `DbTransaction::update`/
+    /// `delete` calls it, well before (and regardless of whether) that
+    /// transaction ever actually commits. If it aborts instead (dropped
+    /// without `commit()` — e.g. New-Order's own ~1%-of-transactions
+    /// business-logic rollback, `mv_bench::tpcc_txn::new_order`, which can
+    /// abort *after* having already updated `District`), reversing that
+    /// delete (`LeafPage::apply_invalidate`/`apply_undelete`) requires the
+    /// predecessor record to still be physically present to undelete. A
+    /// version-split/merge racing in between — reading `is_deleted()` as
+    /// `true` and discarding the record, exactly as it should for a
+    /// *committed* delete — makes that reversal silently impossible
+    /// instead, permanently losing the key: confirmed empirically as the
+    /// root cause of `mv_bench::tpcc_txn`'s District
+    /// `ZeroAffected(KeyDoesNotExist)` panic under `gc=on` at high thread
+    /// counts.
+    ///
+    /// Deliberately does *not* extend the same protection to an invalidated
+    /// `insert_stamp` (an aborted `Insert`/the new half of an `Update`):
+    /// invalidation only ever happens as part of that same abort-reversal
+    /// (never speculatively ahead of it, unlike a plain `delete()`), so by
+    /// the time a record is invalid its owning transaction has already
+    /// fully resolved — there's no future "undo" that still needs it kept
+    /// around.
+    #[inline]
+    pub(crate) fn record_survives_gc(&self, version: &crate::mv_record_model::version_info::VersionInfo) -> bool {
+        if version.is_live() {
+            return true;
+        }
+
+        !version.insert_stamp.is_invalid()
+            && version.deletion_stamp()
+                .is_some_and(|del| self.ctx.is_snapshot_live(del.ts_start()))
+    }
+
     pub(crate) fn merge<'a>(
         &self,
         mufasa: &'a Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -734,12 +775,12 @@ impl<const FAN_OUT: usize,
                         .bulk_push(simba
                             .as_records()
                             .iter()
-                            .filter(|r| r.version().is_live())
+                            .filter(|r| self.record_survives_gc(r.version()))
                             .merge_by(candidate_cell
                                           .deref()
                                           .as_records()
                                           .iter()
-                                          .filter(|r| r.version().is_live()),
+                                          .filter(|r| self.record_survives_gc(r.version())),
                                       |f, s|
                                           f.version().insertion_stamp().ts_start() <= s.version().insertion_stamp().ts_start())
                             .collect_vec());
@@ -768,11 +809,11 @@ impl<const FAN_OUT: usize,
 
                     let mut joined = candidate_records
                         .iter()
-                        .filter(|r| r.version().is_live())
+                        .filter(|r| self.record_survives_gc(r.version()))
                         .sorted_by_key(|r| r.key)
                         .merge_by(simba_records
                                       .iter()
-                                      .filter(|r| r.version().is_live())
+                                      .filter(|r| self.record_survives_gc(r.version()))
                                       .sorted_by_key(|r| r.key),
                                   |f, s|
                                       f.key() <= s.key())
@@ -790,11 +831,29 @@ impl<const FAN_OUT: usize,
                         second.get_unchecked(0).key(),
                         candidate_fence.upper.max(simba_fence.upper));
 
-                    first.sort_by_key(|r|
-                        r.version().insertion_stamp().ts_start());
-
-                    second.sort_by_key(|r|
-                        r.version().insertion_stamp().ts_start());
+                    // No re-sort by `insertion_stamp().ts_start()` here (there
+                    // used to be one for each half): `joined` is already in
+                    // true chain order — each half's own physical write
+                    // order, established purely by that write's exclusive-
+                    // lock timing — via the stable `sorted_by_key(|r| r.key)`
+                    // + `merge_by` above. OSIC lets a transaction's real
+                    // write land arbitrarily later than the `ts_start` it
+                    // drew at `begin()`, so "physically later" and "larger
+                    // `ts_start`" are not the same thing — but every
+                    // `rfind`/`is_live_lineage` search downstream depends on
+                    // "physically later = actually supersedes". Re-sorting
+                    // by `ts_start` here could silently reorder a key's live
+                    // record ahead of a dead predecessor with a numerically
+                    // larger `ts_start`, so `rfind` (which only ever looks at
+                    // physical position) would find the stale dead entry
+                    // instead of the live current one — confirmed
+                    // empirically as the root cause of
+                    // `mv_bench::tpcc_txn`'s Delivery `OrderLine`
+                    // `ZeroAffected(KeyAlreadyDeleted)` panic (a diagnostic
+                    // dump of the leaf at the panic site showed exactly this
+                    // shape: an older, still-live entry sitting before a
+                    // newer entry already marked dead by a still-later
+                    // write).
 
                     let combined_block_0 = self.block_manager
                         .new_empty_leaf(&self.ctx);
@@ -934,7 +993,7 @@ impl<const FAN_OUT: usize,
 
                     let mut sorted_block = block_records
                         .iter()
-                        .filter(|r| r.version().is_live())
+                        .filter(|r| self.record_survives_gc(r.version()))
                         .sorted_by_key(|r| r.key())
                         .collect_vec();
 
@@ -946,8 +1005,18 @@ impl<const FAN_OUT: usize,
                         fence.lower,
                         (self.dec_key)(second.get_unchecked(0).key));
 
+                    // No re-sort by `insertion_stamp().ts_start()` here (there
+                    // used to be one for each half) — see `merge`'s identical
+                    // KeySplit leaf branch for why: `sorted_block` is already
+                    // in true chain order via the stable
+                    // `sorted_by_key(|r| r.key())` above, and re-sorting by
+                    // `ts_start` can silently reorder a live record ahead of
+                    // a dead predecessor with a numerically larger
+                    // `ts_start`, corrupting the physical-order invariant
+                    // `rfind`/`is_live_lineage` depend on. Confirmed as the
+                    // root cause of the Delivery `OrderLine`
+                    // `ZeroAffected(KeyAlreadyDeleted)` panic.
                     if let PageType::LeafMut(leaf_page) = left.unsafe_borrow_mut().as_page_mut() {
-                        first.sort_by_key(|r| r.version().insertion_stamp().ts_start());
                         leaf_page.bulk_push_from_slice_ref(first);
                     }
 
@@ -956,7 +1025,6 @@ impl<const FAN_OUT: usize,
                         fence.upper);
 
                     if let PageType::LeafMut(leaf_page) = right.unsafe_borrow_mut().as_page_mut() {
-                        second.sort_by_key(|r| r.version().insertion_stamp().ts_start());
                         leaf_page.bulk_push_from_slice_ref(second)
                     }
 
@@ -1035,7 +1103,7 @@ impl<const FAN_OUT: usize,
 
                     let active_records = block_records
                         .iter()
-                        .filter(|record| record.version().is_live())
+                        .filter(|record| self.record_survives_gc(record.version()))
                         .collect_vec();
 
                     // debug_assert!(active_records.len() >= block.filling_40_percent(),
@@ -1125,26 +1193,22 @@ impl<const FAN_OUT: usize,
 
         // `merge_root` was reached because `unsafe_degree_root()` observed
         // exactly 1 active child — but that check happened before
-        // `master_guard`'s own upgrade, and `root_guard` itself is still
-        // just a `Reader` at this point. If a *different* thread
-        // concurrently treats this same root as mufasa for one of its
-        // children (splitting or merging it — root's own write lock is
-        // entirely free for that until now), root's content can change
-        // between that original check and the `last_child()` read below.
-        // See `on_overflow_node`'s matching comment for why a version check
-        // can't substitute for actually excluding writers here.
-        // if !root_guard.upgrade_write_lock() {
-        //     return Err(());
-        // }
+        // `master_guard`'s own upgrade, and unlike `split_root` (which
+        // retires `root_guard` itself), `merge_root` never retires
+        // `root_guard`: it only reads `last_child()` off it below. The
+        // caller (`retrieve_root_write_internal_olc`'s `ActiveUnderflow`
+        // arm) already does `root_guard.upgrade_write_lock()` before
+        // calling here — see that arm's doc for why this read genuinely
+        // needs it (a concurrent overflow of this same single active child
+        // can otherwise push a second one into root, in between the degree
+        // check and this read, without ever needing root's lock itself).
+        // This is the only caller `root_guard` has, so no repeat upgrade is
+        // needed in this function.
 
         let child_ref = root_guard
             .as_internal_page_ref()
             .last_child();
 
-        // Left as a plain `Reader` — `split_root` now excludes it itself
-        // via `try_retire()` (see that function's doc), rather than this
-        // caller pre-upgrading it to a `Writer` that `split_root` would
-        // then just retire anyway.
         let child_guard = child_ref
             .borrow_read();
 
