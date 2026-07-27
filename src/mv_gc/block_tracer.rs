@@ -14,7 +14,20 @@ pub(crate) type DeadPageValue<const FAN_OUT: usize, const NUM_RECORDS: usize, Ke
 type BlockTracerIndex<const FAN_OUT: usize, const NUM_RECORDS: usize, Key, Payload>
 = SkipMap<DeadPageKey, DeadPageValue<FAN_OUT, NUM_RECORDS, Key, Payload>>;
 
-pub(crate) type DeadPageKey = Version;
+/// `(death version, block's own address)`. The address only exists to make
+/// this unique — reclaim-eligibility ordering only ever looks at the first
+/// element. Needed because a merge's two retiring blocks (`simba`/
+/// `candidate`) deliberately share the *same* death version (the new
+/// replacement's birth version — see `MVBTSt::merge`'s callers in
+/// `mv_tree::smo`), and `SkipMap::insert` on a duplicate key removes the
+/// existing entry before inserting the new one (its own doc says so): a
+/// bare `Version` key here silently displaced one of the two from
+/// `dead_blocks` on every such merge — retired (so never write-lockable
+/// again) but no longer tracked for reclaim, i.e. permanently leaked from
+/// the reuse pool. Confirmed via `mv_tree::smo`'s two `register_dead_col`
+/// call sites, which pass the identical `version` for both entries of the
+/// pair.
+pub(crate) type DeadPageKey = (Version, usize);
 
 /// Sharded by worker: death versions come from one global clock
 /// (`MVBTSt::start_tx_commit`), so concurrent SMOs across every worker insert
@@ -69,7 +82,8 @@ impl<const P_F: usize,
     #[inline(always)]
     pub(crate) fn register_died_page(&self, worker_id: WorkerId, page_version: Version, page: DeadPageValue<P_F, P_N, Key, Payload>) {
         let shard = self.shard_for(worker_id);
-        let _ = self.shards[shard].insert(page_version, page);
+        let key: DeadPageKey = (page_version, page.0 as usize);
+        let _ = self.shards[shard].insert(key, page);
     }
 
     #[inline(always)]
@@ -81,10 +95,12 @@ impl<const P_F: usize,
 
     /// Reinserts an entry `free_block` popped but found not yet eligible,
     /// back into the exact shard it came from (not re-sharded by worker —
-    /// there's no reader here to attribute it to).
+    /// there's no reader here to attribute it to). Reuses the exact `key`
+    /// `pop_min_at` returned rather than rebuilding one, so this can never
+    /// collide with whatever else has since been inserted at this shard.
     #[inline(always)]
-    fn reinsert_at(&self, shard: usize, page_version: Version, page: DeadPageValue<P_F, P_N, Key, Payload>) {
-        let _ = self.shards[shard].insert(page_version, page);
+    fn reinsert_at(&self, shard: usize, key: DeadPageKey, page: DeadPageValue<P_F, P_N, Key, Payload>) {
+        let _ = self.shards[shard].insert(key, page);
     }
 
     #[inline(always)]

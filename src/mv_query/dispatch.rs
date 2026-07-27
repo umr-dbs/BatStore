@@ -52,14 +52,14 @@ impl<
                 .as_records()
                 .iter()
                 .rfind(|r| r.key() == key)
-                .map(|record| record.version.insert_stamp.ts_start() > newest_si
-                    && !record.version.insert_stamp.is_invalid())
+                .map(|record| record.version.insertion_stamp().ts_start() > newest_si
+                    && !record.version.insertion_stamp().is_invalid())
                 .unwrap_or(false),
             None => leaf_page // empty live index: No readers; e.g., only updates!
                 .as_records()
                 .iter()
                 .rfind(|r| r.key() == key)
-                .map(|record| !record.version.insert_stamp.is_invalid())
+                .map(|record| !record.version.insertion_stamp().is_invalid())
                 .unwrap_or(false),
         }
     }

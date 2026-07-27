@@ -40,6 +40,52 @@ fn diag_thread_hash() -> u64 {
     hasher.finish()
 }
 
+/// Nearest index to `target` in `[1, items.len() - 1]` at which `key_of`
+/// changes between `items[i - 1]` and `items[i]`, given `items` is already
+/// key-sorted so one key's own entries are contiguous. A raw `len / 2` cut
+/// can otherwise land inside a single key's own multi-entry chain (e.g. a
+/// dead-but-abortable predecessor next to its live successor, the exact
+/// shape `record_survives_gc` preserves) and tear it across the two
+/// resulting sibling blocks — whose fences are disjoint by construction —
+/// making the torn-off half unreachable by any fence-routed lookup. Falls
+/// back to `target` only when every entry shares one key (the whole slice
+/// is one key's chain): tearing is then unavoidable without duplicate-key
+/// sibling support, a pre-existing structural limit this doesn't attempt
+/// to fix.
+fn nearest_key_boundary<T, K: PartialEq>(
+    items: &[T],
+    target: usize,
+    key_of: impl Fn(&T) -> K,
+) -> usize {
+    let len = items.len();
+    debug_assert!(len >= 2);
+    let target = target.clamp(1, len - 1);
+    let is_boundary = |i: usize| key_of(&items[i - 1]) != key_of(&items[i]);
+
+    if is_boundary(target) {
+        return target;
+    }
+
+    let mut lo = target;
+    while lo > 1 && !is_boundary(lo) {
+        lo -= 1;
+    }
+    let found_lo = is_boundary(lo).then_some(lo);
+
+    let mut hi = target;
+    while hi < len - 1 && !is_boundary(hi) {
+        hi += 1;
+    }
+    let found_hi = is_boundary(hi).then_some(hi);
+
+    match (found_lo, found_hi) {
+        (Some(l), Some(h)) => if target - l <= h - target { l } else { h },
+        (Some(l), None) => l,
+        (None, Some(h)) => h,
+        (None, None) => target,
+    }
+}
+
 #[repr(u8)]
 pub enum BlockUnsafeDegree {
     Ok,
@@ -634,7 +680,7 @@ impl<const FAN_OUT: usize,
             return true;
         }
 
-        !version.insert_stamp.is_invalid()
+        !version.insertion_stamp().is_invalid()
             && version.deletion_stamp()
                 .is_some_and(|del| self.ctx.is_snapshot_live(del.ts_start()))
     }
@@ -820,8 +866,9 @@ impl<const FAN_OUT: usize,
                         .collect_vec();
 
                     let joined_len = joined.len();
+                    let middle = nearest_key_boundary(&joined, joined_len / 2, |r| r.key());
                     let (first, second)
-                        = joined.split_at_mut(joined_len / 2);
+                        = joined.split_at_mut(middle);
 
                     let left_interval = Interval::new(
                         candidate_fence.lower.min(simba_fence.lower),
@@ -997,7 +1044,7 @@ impl<const FAN_OUT: usize,
                         .sorted_by_key(|r| r.key())
                         .collect_vec();
 
-                    let middle = sorted_block.len() / 2;
+                    let middle = nearest_key_boundary(&sorted_block, sorted_block.len() / 2, |r| r.key());
                     let (first, second) = sorted_block
                         .split_at_mut(middle);
 

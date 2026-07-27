@@ -222,7 +222,7 @@ impl<
             .rfind(|r| r.key() == key)
         {
             Some(record) =>
-                if tree.is_visible_stamp(self.worker_id, self.ts_start, record.version.insert_stamp) {
+                if tree.is_visible_stamp(self.worker_id, self.ts_start, record.version.insertion_stamp()) {
                     let stamp
                         = TxStamp::new(self.worker_id, self.ts_start);
 
@@ -239,6 +239,7 @@ impl<
                         current_len);
 
                     leaf_page.commit_delta(0, 1);
+
                     self.written.borrow_mut().push((table, key));
                     CRUDOperationResult::Updated(stamp.ts_start())
                 }
@@ -267,7 +268,7 @@ impl<
             Some(record) => if tree.is_visible_stamp(
                 self.worker_id,
                 self.ts_start,
-                record.version.insert_stamp)
+                record.version.insertion_stamp())
             {
                 let stamp = TxStamp::new(self.worker_id, self.ts_start);
                 tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));

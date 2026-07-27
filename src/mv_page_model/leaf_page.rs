@@ -150,9 +150,9 @@ impl<const NUM_RECORDS: usize,
     pub fn active_dead_invalid(&self) -> (PageLenPrimitive, Active, Dead) {
         self.as_records().iter().fold((0,0,0),
         |(active, dead, invalid), record| {
-            if !record.version.is_deleted() && !record.version.insert_stamp.is_invalid() {
+            if !record.version.is_deleted() && !record.version.insertion_stamp().is_invalid() {
                 (active + 1, dead, invalid)
-            } else if record.version.is_deleted() && !record.version.insert_stamp.is_invalid() {
+            } else if record.version.is_deleted() && !record.version.insertion_stamp().is_invalid() {
                 (active, dead + 1, invalid)
             } else {
                 (active, dead, invalid + 1)
