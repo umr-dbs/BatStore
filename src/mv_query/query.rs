@@ -219,7 +219,7 @@ impl<const FAN_OUT: usize,
                 .as_records()
                 .iter()
                 .rev()
-                .skip_while(|r| r.version.insert_stamp.ts_start() > reader_ts_start)
+                .skip_while(|r| r.version.insertion_stamp().ts_start() > reader_ts_start)
                 .find(|r|
                     r.key() == key && r.version().matches(is_visible))
             {
@@ -252,7 +252,7 @@ impl<const FAN_OUT: usize,
 
                 let start_pos_si = records.len() -
                     records.binary_search_by(|r|
-                        r.version.insert_stamp.ts_start().cmp(&reader_ts_start)
+                        r.version.insertion_stamp().ts_start().cmp(&reader_ts_start)
                     ).unwrap_or_else(|pos| pos);
 
                self.with_visibility_checker(reader_worker, reader_ts_start, |is_visible| {
