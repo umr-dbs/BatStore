@@ -135,9 +135,14 @@ pub fn pick_op(mix: &YcsbMix) -> YcsbOpType {
 }
 
 pub fn random_row(cfg: &YcsbConfig) -> YcsbRow {
-    YcsbRow {
-        fields: (0..cfg.field_count).map(|_| rnd_astring(cfg.field_length, cfg.field_length)).collect(),
+    // `rnd_astring` draws from `Alphanumeric`, always 1 byte/char, so a
+    // `min == max` draw is exactly `field_length` bytes - safe to concat
+    // straight into the flat buffer with no per-field boundary bookkeeping.
+    let mut data = Vec::with_capacity(cfg.field_count * cfg.field_length);
+    for _ in 0..cfg.field_count {
+        data.extend_from_slice(rnd_astring(cfg.field_length, cfg.field_length).as_bytes());
     }
+    YcsbRow::from_bytes(&data)
 }
 
 /// Scan length, uniform in `[1, max_scan_length]` (YCSB `maxscanlength`).

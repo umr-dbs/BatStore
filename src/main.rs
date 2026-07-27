@@ -13,6 +13,7 @@ use crate::mv_tree::mvbt::Payload;
 use crate::mv_tree::mvbt::{FAN_OUT, MVBT};
 use crate::mv_bench::tpcc_schema::TPCC_FAN_OUT;
 use crate::mv_bench::tpcc_schema::TPCC_NUM_RECORDS;
+use crate::mv_bench::ycsb_schema::{YcsbKey, YcsbRow, YCSB_FAN_OUT, YCSB_NUM_RECORDS};
 
 mod mv_bench;
 mod mv_block;
@@ -204,6 +205,24 @@ fn startup() {
         (cell_sz + size_of::<usize>() * 2) as f32 / 1024f32
     );
     println!("*****************************************************");
+    let block_size = size_of::<Block<YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow>>();
+    let b_kb = block_size as f32 / 1024f32;
+
+    let cell_sz = size_of::<OptCell<Block<YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow>>>();
+    let cell_kb = cell_sz as f32 / 1024f32;
+    println!(
+        "\
+           >>YCSB: FAN_OUT: \t\t{YCSB_FAN_OUT}\n\
+           >>YCSB: NUM_RECORDS: \t\t{YCSB_NUM_RECORDS}\n\
+           >>YCSB: size_of(BLOCK): \t{} bytes; {b_kb} kb\n\
+           >>YCSB: size_of(CELL): \t{} bytes; {cell_kb} kb\n\
+           >>YCSB: size_of(REF): \t\t{} bytes; {} kb",
+        block_size,
+        cell_sz,
+        cell_sz + size_of::<usize>() * 2,
+        (cell_sz + size_of::<usize>() * 2) as f32 / 1024f32
+    );
+    println!("*****************************************************");
     println!("*****************************************************");
 }
 
@@ -218,3 +237,4 @@ pub fn hle() -> &'static str {
         "OFF   "
     }
 }
+

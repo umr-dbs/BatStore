@@ -50,14 +50,27 @@ use triomphe::Arc;
 
 pub type TpccKey = u64;
 
-/// A single table's tree. Reuses the base tree's `FAN_OUT` for consistency
-/// with the rest of the codebase, but `NUM_RECORDS` is recomputed
-/// separately: `RecordPoint<TpccKey, TpccRow>` is 40B (`TpccRow` is bigger
-/// than the base tree's `u64` payload), so it targets the same ~4000B leaf
-/// record-array budget `FAN_OUT`'s internal-node arrays and the base tree's
-/// `NUM_RECORDS` use, not the base tree's own record count.
+/// A single table's tree. Reuses the base tree's `FAN_OUT` (internal-node
+/// arrays only ever hold `Key`/`Version`/`BlockRef`, never `Payload` - see
+/// `InternalPage` - so they're identically sized for every payload type as
+/// long as `Key = u64`).
+///
+/// `NUM_RECORDS` also reuses the base tree's value rather than being
+/// recomputed for `TpccRow`'s size: `RecordPoint::payload` is a
+/// `PayloadSlot<Payload>`, which is always exactly one `usize` (8B) - it
+/// inlines `Payload` bitwise only when `Payload` is itself exactly
+/// `usize`-sized/aligned (true for the base tree's `u64` payload), and
+/// otherwise heap-boxes it behind that one word (true for `TpccRow`, an
+/// enum far bigger than 8B). Either way, `RecordPoint<TpccKey, TpccRow>` is
+/// 32B, same as `RecordPoint<u64, u64>` - so the leaf's 4KB record-array
+/// budget fits exactly `NUM_RECORDS` (125) records regardless of payload
+/// type. (Measured: `size_of::<LeafPage<125, TpccKey, TpccRow>>()` = 4008B,
+/// identical to the base tree's own leaf and to `InternalPage<125, ..>` -
+/// the previous `100` here left ~800B/leaf-page (25 record slots) unused
+/// for free, since the block's total size is already capped by the
+/// internal-page union arm at this `FAN_OUT`.)
 pub const TPCC_FAN_OUT: usize       = FAN_OUT;
-pub const TPCC_NUM_RECORDS: usize   = 100;
+pub const TPCC_NUM_RECORDS: usize   = crate::mv_tree::mvbt::NUM_RECORDS;
 
 pub type TpccTree = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 

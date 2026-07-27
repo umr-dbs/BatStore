@@ -16,30 +16,13 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="GC prefers own shard access first, and only steals (RoundRobin) on-demand instead">
-      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Update benchmark scripts to include patches">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/compare_engines.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/compare_engines.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/engines/vweaver_ermia.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/vweaver_ermia.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/plot_compare.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/plot_compare.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/plot_suite.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/plot_suite.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/setup_environment.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/setup_environment.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_db/transaction.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_db/transaction.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_gc/query_tracer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/query_tracer.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tx_tests/benchbase/pom.xml" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/benchbase/pom.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/backend/leanstore/profiling/counters/WorkerCounters.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/backend/leanstore/profiling/counters/WorkerCounters.hpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/backend/leanstore/profiling/tables/CRTable.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/backend/leanstore/profiling/tables/CRTable.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/shared/Schema.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/shared/Schema.hpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/TPCCWorkload.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/TPCCWorkload.hpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/tpcc.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/tpcc.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/wiredtiger_tpcc.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/tpc-c/wiredtiger_tpcc.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/ycsb/wiredtiger_ycsb.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/ycsb/wiredtiger_ycsb.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tx_tests/leanstore/frontend/ycsb/ycsb.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/leanstore/frontend/ycsb/ycsb.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tx_tests/vWeaver_ermia/benchmarks/bench.cc" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/vWeaver_ermia/benchmarks/bench.cc" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_schema.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_schema.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/ycsb_random.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/ycsb_random.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/ycsb_schema.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/ycsb_schema.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -50,10 +33,10 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="14677" />
+    <option name="cachedIndexableFilesCount" value="14676" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
-  <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
+  <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:test" />
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
       <list>
@@ -68,6 +51,7 @@
       </map>
     </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+    <option name="ROOT_SYNC" value="DONT_SYNC" />
   </component>
   <component name="GitHubPullRequestSearchHistory">{
   &quot;lastFilter&quot;: {
@@ -94,60 +78,60 @@
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
       <entry key="MS100" value="1.0" />
-      <entry key="MS500" value="1.0000001218340628" />
-      <entry key="S2" value="1.0314025801379239" />
-      <entry key="S5" value="1.3814976488846247" />
-      <entry key="S10" value="2.0395647056133384" />
-      <entry key="S30" value="8.198448420966916" />
-      <entry key="S60" value="17.87320949012496" />
-      <entry key="M2" value="29.117569173402433" />
-      <entry key="M5" value="47.19703489165253" />
-      <entry key="M10" value="67.60452327950406" />
-      <entry key="M15" value="84.20542551595712" />
-      <entry key="M30" value="132.31702796667489" />
-      <entry key="H1" value="218.08168584222497" />
-      <entry key="H2" value="346.9508420390637" />
-      <entry key="H4" value="523.9766033208145" />
-      <entry key="D1" value="2590.7966837749973" />
-      <entry key="W1" value="9292.736098488043" />
+      <entry key="MS500" value="1.0" />
+      <entry key="S2" value="1.0" />
+      <entry key="S5" value="1.0" />
+      <entry key="S10" value="1.0" />
+      <entry key="S30" value="1.0" />
+      <entry key="S60" value="1.0" />
+      <entry key="M2" value="1.0000000212815088" />
+      <entry key="M5" value="1.012720296224673" />
+      <entry key="M10" value="2.2502403143149747" />
+      <entry key="M15" value="7.251343166007261" />
+      <entry key="M30" value="38.97696768853838" />
+      <entry key="H1" value="121.02672380114639" />
+      <entry key="H2" value="263.3035278531406" />
+      <entry key="H4" value="463.3050280351095" />
+      <entry key="D1" value="2544.1159012376224" />
+      <entry key="W1" value="9284.234692912474" />
     </decayedCancelled>
     <decayedSelected>
-      <entry key="MS100" value="2.0492063017873738E-13" />
-      <entry key="MS500" value="0.002899460098884861" />
-      <entry key="S2" value="0.23204890338609585" />
-      <entry key="S5" value="0.5592227439353462" />
-      <entry key="S10" value="0.7883568420214846" />
-      <entry key="S30" value="1.2540024912637042" />
-      <entry key="S60" value="1.5413691482401204" />
-      <entry key="M2" value="1.745334626818316" />
-      <entry key="M5" value="2.1078214238908437" />
-      <entry key="M10" value="3.015308844663561" />
-      <entry key="M15" value="3.943672129315037" />
-      <entry key="M30" value="6.831219789482452" />
-      <entry key="H1" value="13.173413618183933" />
-      <entry key="H2" value="30.564247183537233" />
-      <entry key="H4" value="64.85995748014598" />
-      <entry key="D1" value="313.3754818105153" />
-      <entry key="W1" value="1014.0898653493584" />
+      <entry key="MS100" value="0.0" />
+      <entry key="MS500" value="0.0" />
+      <entry key="S2" value="0.0" />
+      <entry key="S5" value="1.1075936376175572E-229" />
+      <entry key="S10" value="3.5084933221839305E-115" />
+      <entry key="S30" value="9.574093629296652E-39" />
+      <entry key="S60" value="1.3468098919377953E-19" />
+      <entry key="M2" value="5.159154369264438E-10" />
+      <entry key="M5" value="3.2517244870775415E-4" />
+      <entry key="M10" value="0.037451719770987275" />
+      <entry key="M15" value="0.21150831410768042" />
+      <entry key="M30" value="1.5820185803326143" />
+      <entry key="H1" value="6.3394997432194495" />
+      <entry key="H2" value="21.202742235748065" />
+      <entry key="H4" value="54.021398725473325" />
+      <entry key="D1" value="303.96940651368266" />
+      <entry key="W1" value="1009.684544155687" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="1.3523089321341144E-8" />
-      <entry key="MS500" value="0.027314695384840104" />
-      <entry key="S2" value="0.5932130092531195" />
-      <entry key="S5" value="1.5519066780671362" />
-      <entry key="S10" value="2.5778106379300842" />
-      <entry key="S30" value="9.279984722186546" />
-      <entry key="S60" value="19.290592961767842" />
-      <entry key="M2" value="30.78606150762916" />
-      <entry key="M5" value="49.26797714884775" />
-      <entry key="M10" value="70.59810705314281" />
-      <entry key="M15" value="88.13260269376937" />
-      <entry key="M30" value="139.13627417955058" />
-      <entry key="H1" value="231.2446131789399" />
-      <entry key="H2" value="377.50397442502225" />
-      <entry key="H4" value="588.8251003292019" />
-      <entry key="D1" value="2904.1631695584024" />
-      <entry key="W1" value="10306.821914431423" />
+      <entry key="MS100" value="0.05831456197105047" />
+      <entry key="MS500" value="0.5664419426478993" />
+      <entry key="S2" value="0.8675386871520679" />
+      <entry key="S5" value="0.9447470409972062" />
+      <entry key="S10" value="0.9719809879813525" />
+      <entry key="S30" value="0.990571716158951" />
+      <entry key="S60" value="0.9952746938202292" />
+      <entry key="M2" value="0.9976345710047164" />
+      <entry key="M5" value="1.0120926506382049" />
+      <entry key="M10" value="2.2869378359050687" />
+      <entry key="M15" value="7.4616202145114565" />
+      <entry key="M30" value="40.55598936863736" />
+      <entry key="H1" value="127.36102985220495" />
+      <entry key="H2" value="284.49847097512094" />
+      <entry key="H4" value="517.316832181044" />
+      <entry key="D1" value="2848.076572733287" />
+      <entry key="W1" value="10293.91520394464" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -161,81 +145,82 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;Cargo.Build --release.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Build `Generate`.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Check.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Generate.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Run MV-BPlusTree.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Run cMVBT.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Run.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test gc_query_tracer_tests.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test leaf_page_abort_tests.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1).executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_test::smo_race_investigation_tests::sequential_workload_never_violates_the_split_invariant.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_test::smo_race_investigation_tests::serialized_concurrent_workload_never_violates_the_split_invariant.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_wal::integration_tests::crash_recovery_round_trip.executor&quot;: &quot;Valgrind&quot;,
-    &quot;Cargo.Test mv_wal::integration_tests::torn_write_stops_cleanly.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_wal::record::tests::detects_corrupted_body.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_wal::record::tests::detects_truncated_frame.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_wal::record::tests::round_trips_all_variants.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test mv_wal::writer::tests::group_commit_flushes_and_wait_unblocks.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test query_dispatch_tests.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test smo_race_investigation_tests.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test tx_context::tests.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test wal_record_tests.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test wal_writer_tests.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test wal_writer_tests::group_commit_flushes_and_wait_unblocks.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test writer::tests (1).executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Test writer::tests.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.Tests in 'tests'.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.build.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.check.executor&quot;: &quot;Run&quot;,
-    &quot;Cargo.clean.executor&quot;: &quot;Run&quot;,
-    &quot;CidrDebugProfileConversion&quot;: &quot;true&quot;,
-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.MCP Project settings loaded&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.OpenProjectViewOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.cidr.known.project.marker&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.readMode.enableVisualFormatting&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.rust.reset.selective.auto.import&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
-    &quot;SHELLCHECK.PATH&quot;: &quot;/home/amir/.local/share/JetBrains/RustRover2026.2/Shell Script/shellcheck&quot;,
-    &quot;cf.first.check.clang-format&quot;: &quot;false&quot;,
-    &quot;cidr.known.project.marker&quot;: &quot;true&quot;,
-    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
-    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/home/amir/RustroverProjects/cMVBT/comparison_results&quot;,
-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
-    &quot;node.js.detected.package.jshint&quot;: &quot;true&quot;,
-    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
-    &quot;node.js.selected.package.jshint&quot;: &quot;&quot;,
-    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;org.rust.cargo.project.model.PROJECT_DISCOVERY&quot;: &quot;true&quot;,
-    &quot;org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon&quot;: &quot;&quot;,
-    &quot;org.rust.first.attach.projects&quot;: &quot;true&quot;,
-    &quot;org.rust.first.attach.projects.stats&quot;: &quot;true&quot;,
-    &quot;run.code.analysis.last.selected.profile&quot;: &quot;pProject Default&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;reference.settingsdialog.project.grazie&quot;,
-    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;,
-    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "Cargo.Build --release.executor": "Run",
+    "Cargo.Build `Generate`.executor": "Run",
+    "Cargo.Check.executor": "Run",
+    "Cargo.Generate.executor": "Run",
+    "Cargo.Run MV-BPlusTree.executor": "Run",
+    "Cargo.Run cMVBT.executor": "Run",
+    "Cargo.Run.executor": "Run",
+    "Cargo.Test gc_query_tracer_tests.executor": "Run",
+    "Cargo.Test leaf_page_abort_tests.executor": "Run",
+    "Cargo.Test mv_sync::tx_context::tests::in_flight_registration_is_immediately_visible_to_live_min_snapshot.executor": "Run",
+    "Cargo.Test mv_test::bench_tpcc_txn_tests::cross_table_transaction_is_atomic_across_tables.executor": "Run",
+    "Cargo.Test mv_test::db_integration_tests::db_cross_table_transaction_is_atomic_across_tables.executor": "Run",
+    "Cargo.Test mv_test::db_integration_tests::db_dropped_transaction_reverts_writes_across_tables_on_conflict.executor": "Run",
+    "Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert.executor": "Run",
+    "Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure (1).executor": "Run",
+    "Cargo.Test mv_test::smo_race_investigation_tests::concurrent_unsynchronized_workload_reproduces_the_failure.executor": "Run",
+    "Cargo.Test mv_test::smo_race_investigation_tests::sequential_workload_never_violates_the_split_invariant.executor": "Run",
+    "Cargo.Test mv_test::smo_race_investigation_tests::serialized_concurrent_workload_never_violates_the_split_invariant.executor": "Run",
+    "Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures.executor": "Run",
+    "Cargo.Test mv_tx::transaction::tests::multi_op_transaction_sees_own_writes_and_isolates_others.executor": "Run",
+    "Cargo.Test mv_wal::integration_tests::concurrent_writers_crash_recovery_round_trip.executor": "Run",
+    "Cargo.Test mv_wal::integration_tests::crash_recovery_round_trip.executor": "Valgrind",
+    "Cargo.Test mv_wal::integration_tests::torn_write_stops_cleanly.executor": "Run",
+    "Cargo.Test mv_wal::record::tests::detects_corrupted_body.executor": "Run",
+    "Cargo.Test mv_wal::record::tests::detects_truncated_frame.executor": "Run",
+    "Cargo.Test mv_wal::record::tests::round_trips_all_variants.executor": "Run",
+    "Cargo.Test mv_wal::writer::tests::group_commit_flushes_and_wait_unblocks.executor": "Run",
+    "Cargo.Test query_dispatch_tests.executor": "Run",
+    "Cargo.Test smo_race_investigation_tests.executor": "Run",
+    "Cargo.Test tx_context::tests.executor": "Run",
+    "Cargo.Test wal_record_tests.executor": "Run",
+    "Cargo.Test wal_writer_tests.executor": "Run",
+    "Cargo.Test wal_writer_tests::group_commit_flushes_and_wait_unblocks.executor": "Run",
+    "Cargo.Test writer::tests (1).executor": "Run",
+    "Cargo.Test writer::tests.executor": "Run",
+    "Cargo.Test ycsb_schema::tests.executor": "Run",
+    "Cargo.Tests in 'tests'.executor": "Run",
+    "Cargo.build.executor": "Run",
+    "Cargo.check.executor": "Run",
+    "Cargo.clean.executor": "Run",
+    "CidrDebugProfileConversion": "true",
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.MCP Project settings loaded": "true",
+    "RunOnceActivity.OpenProjectViewOnStart": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.cidr.known.project.marker": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.readMode.enableVisualFormatting": "true",
+    "RunOnceActivity.rust.reset.selective.auto.import": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "SHELLCHECK.PATH": "/home/amir/.local/share/JetBrains/RustRover2026.2/Shell Script/shellcheck",
+    "cf.first.check.clang-format": "false",
+    "cidr.known.project.marker": "true",
+    "codeWithMe.voiceChat.enabledByDefault": "false",
+    "git-widget-placeholder": "main",
+    "junie.onboarding.icon.badge.shown": "true",
+    "last_opened_file_path": "/home/amir/RustroverProjects/cMVBT/comparison_results",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.jshint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.jshint": "",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "org.rust.cargo.project.model.PROJECT_DISCOVERY": "true",
+    "org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon": "",
+    "org.rust.first.attach.projects": "true",
+    "org.rust.first.attach.projects.stats": "true",
+    "run.code.analysis.last.selected.profile": "pProject Default",
+    "settings.editor.selected.configurable": "ml.llm.LLMConfigurable",
+    "to.speed.mode.migration.done": "true",
+    "vue.rearranger.settings.migration": "true"
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/comparison_results" />
@@ -259,7 +244,7 @@
       <command value="cargo clean" />
     </option>
   </component>
-  <component name="RunManager" selected="Python.compare_engines">
+  <component name="RunManager" selected="Cargo.Test ycsb_schema::tests">
     <configuration name="Generate" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
       <option name="buildProfileId" value="dev" />
       <option name="command" value="run --package cMVBT --bin cMVBT -- generate 1mio_inserts.dat 10000 1000 1000 0 0 0" />
@@ -334,23 +319,6 @@
         <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
-      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert --exact" />
-      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
-      <envs />
-      <option name="emulateTerminal" value="true" />
-      <option name="channel" value="DEFAULT" />
-      <option name="requiredFeatures" value="true" />
-      <option name="allFeatures" value="false" />
-      <option name="withSudo" value="false" />
-      <option name="buildTarget" value="REMOTE" />
-      <option name="backtrace" value="SHORT" />
-      <option name="isRedirectInput" value="false" />
-      <option name="redirectInputPath" value="" />
-      <method v="2">
-        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
-      </method>
-    </configuration>
     <configuration name="Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
       <option name="command" value="test --package cMVBT --bin cMVBT -- mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures --exact" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
@@ -370,6 +338,24 @@
     </configuration>
     <configuration name="Test tx_context::tests" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
       <option name="command" value="test --package cMVBT --bin cMVBT -- mv_sync::tx_context::tests" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Test ycsb_schema::tests" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="buildProfileId" value="test" />
+      <option name="command" value="test --package cMVBT --bin cMVBT -- mv_bench::ycsb_schema::tests" />
       <option name="workingDirectory" value="file://$PROJECT_DIR$" />
       <envs />
       <option name="emulateTerminal" value="true" />
@@ -436,7 +422,7 @@
     <list>
       <item itemvalue="Cargo.Generate" />
       <item itemvalue="Cargo.Run" />
-      <item itemvalue="Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" />
+      <item itemvalue="Cargo.Test ycsb_schema::tests" />
       <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
       <item itemvalue="Cargo.Test tx_context::tests" />
       <item itemvalue="Python.compare_engines" />
@@ -444,11 +430,11 @@
     </list>
     <recent_temporary>
       <list>
+        <item itemvalue="Cargo.Test ycsb_schema::tests" />
         <item itemvalue="Python.compare_engines" />
         <item itemvalue="Python.plot_suite" />
         <item itemvalue="Cargo.Test tx_context::tests" />
         <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
-        <item itemvalue="Cargo.Test mv_test::leaf_page_abort_tests::abort_write_reverts_a_plain_insert" />
       </list>
     </recent_temporary>
   </component>
@@ -1394,14 +1380,9 @@
       <workItem from="1784894347100" duration="8185000" />
       <workItem from="1784907066928" duration="243000" />
       <workItem from="1785058941813" duration="3893000" />
-    </task>
-    <task id="LOCAL-00149" summary="Clock now allocates correctly for extended threads.">
-      <option name="closed" value="true" />
-      <created>1767909955930</created>
-      <option name="number" value="00149" />
-      <option name="presentableId" value="LOCAL-00149" />
-      <option name="project" value="LOCAL" />
-      <updated>1767909955930</updated>
+      <workItem from="1785097719228" duration="979000" />
+      <workItem from="1785138695423" duration="3237000" />
+      <workItem from="1785144327202" duration="3722000" />
     </task>
     <task id="LOCAL-00150" summary="Added clock tid allocation for query tracer">
       <option name="closed" value="true" />
@@ -1787,11 +1768,22 @@
       <option name="project" value="LOCAL" />
       <updated>1784800756291</updated>
     </task>
-    <option name="localTasksCounter" value="198" />
+    <task id="LOCAL-00198" summary="Update benchmark scripts to include patches">
+      <option name="closed" value="true" />
+      <created>1785098023585</created>
+      <option name="number" value="00198" />
+      <option name="presentableId" value="LOCAL-00198" />
+      <option name="project" value="LOCAL" />
+      <updated>1785098023586</updated>
+    </task>
+    <option name="localTasksCounter" value="199" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
+  </component>
+  <component name="UnknownFeatures">
+    <option featureType="com.intellij.configurationType" implementationName="Application" />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
     <option name="TAB_STATES">
@@ -1805,7 +1797,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Remove free cell" />
     <MESSAGE value="Addressing memory optimizations" />
     <MESSAGE value="Readme" />
     <MESSAGE value="Updated overflow count, was set too eager. Its enough to trigger at &lt;= 1 slot left for keys, not &lt;= 3" />
@@ -1830,7 +1821,8 @@
     <MESSAGE value="Added user abort logic for transactions" />
     <MESSAGE value="Remove conservitive child latch. Updated scripts" />
     <MESSAGE value="GC prefers own shard access first, and only steals (RoundRobin) on-demand instead" />
-    <option name="LAST_COMMIT_MESSAGE" value="GC prefers own shard access first, and only steals (RoundRobin) on-demand instead" />
+    <MESSAGE value="Update benchmark scripts to include patches" />
+    <option name="LAST_COMMIT_MESSAGE" value="Update benchmark scripts to include patches" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
