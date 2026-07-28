@@ -15,6 +15,7 @@ use std::collections::VecDeque;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::Deref;
+use std::sync::atomic::Ordering::Acquire;
 
 impl<const FAN_OUT: usize,
     const NUM_RECORDS: usize,
@@ -73,36 +74,27 @@ impl<const FAN_OUT: usize,
     /// the tree (a split/merge always builds an entirely new page for any
     /// new content — see `MVBTSt::split`/`merge` — never mutates an existing
     /// child's own records in place), so simply holding a `BlockRef` to a
-    /// child is not, by itself, the problem. The actual race is one level
-    /// up, in the *parent*: `on_overflow_node`/`on_underflow_node` extend an
-    /// existing parent page in place (`push_uncommitted` writes the new
-    /// entry, then `commit_delta` bumps `len` to publish it), and every step
-    /// of that — the length field, and the getters that read it
-    /// (`sum_len`/`active_len`/`keys_versions`/...) — uses `Relaxed`
-    /// ordering with no acquire/release fence pairing them (several
-    /// `fence(Release)`/`fence(Acquire)` call sites are present in the
-    /// source but commented out). Without that fence, a reader on another
-    /// core can observe the bumped `len` before it's guaranteed to observe
-    /// the entry data the writer wrote just before bumping it — i.e. an
-    /// unsynchronized, not just stale, view of the parent. This is a
-    /// genuine, still-open gap independent of GC: it just happens to be
-    /// silent without GC (the worst it can do there is follow an old
-    /// pointer that's still a fully valid, if superseded, page — see above),
-    /// and loud with GC (that same old child may by then be a block GC has
-    /// already reclaimed and reset for something else, so this exact loop
-    /// finds it unexpectedly empty).
+    /// child is not, by itself, the problem. The actual race used to be one
+    /// level up, in the *parent*: `InternalPage::mark_version_obsolete`
+    /// flags a superseded child in place, and this loop's version check
+    /// below reads that exact flag. Both sides now pair `Release`/`Acquire`
+    /// (see `mark_version_obsolete`'s doc) — previously both were `Relaxed`,
+    /// so a reader on another core could observe a child as still-active
+    /// for an unbounded time after it had already been marked obsolete (and,
+    /// under GC, after the block behind it had already been reclaimed and
+    /// reset for something else) — silent without GC, loud with it. This was
+    /// confirmed as the actual mechanism behind the crash this investigation
+    /// started from: a reader whose own registered snapshot was *newer*
+    /// than the block's death version (so it never legitimately needed the
+    /// block at all, by MVCC visibility rules) still ended up dereferencing
+    /// it, because the staleness was about memory visibility, not snapshot
+    /// age.
     ///
-    /// Confirmed empirically, not just by argument: with the `register_dead`
-    /// version fix (`mv_tree::smo`, correcting *which* version a superseded
-    /// entry's old child dies at) applied but this retry removed, the
-    /// under-GC crash this whole investigation started from still
-    /// reproduced in 3/3 heavily concurrent runs — so that fix alone does
-    /// not close the gap. Restarting from the root on a miss does: a fresh
-    /// read of the actually-current tree either finds the right entry
-    /// immediately, or (if it races again) just retries — the same
-    /// recovery already trusted for the identical class of race on the
-    /// write path, and re-verified clean across repeated heavy-concurrency
-    /// stress runs with GC on.
+    /// The `'restart` loop below is kept as defense in depth, not as the
+    /// primary fix: it mirrors the identical "no matching child -> restart
+    /// from the root" recovery already trusted on the write path
+    /// (`traversal_write_internal_olc`) for other, unrelated causes of a
+    /// transient miss (e.g. racing a concurrent split still mid-flight).
     /// `root` is taken by reference purely to avoid an unnecessary refcount
     /// bump at the call boundary — it is no longer load-bearing for
     /// soundness. `SmartCell::borrow_read` used to hand back a
@@ -140,7 +132,7 @@ impl<const FAN_OUT: usize,
                     .zip(keys_page)
                     .enumerate()
                     .rfind(|(_, (v, range))|
-                        v.matched(lookup_version) && range.contains(key))
+                        v.load(Acquire).matched(lookup_version) && range.contains(key))
                     .map(|(pos, _)| internal_page.get_pointer(pos).borrow_read())
                 {
                     Some(c) => c,
@@ -179,7 +171,7 @@ impl<const FAN_OUT: usize,
                         .keys_versions();
 
                     let start_pos_si = versions_page.len() -
-                        versions_page.binary_search_by(|v| v.into_cmp().cmp(&lookup_version))
+                        versions_page.binary_search_by(|v| v.load(Acquire).into_cmp().cmp(&lookup_version))
                             .unwrap_or_else(|pos| pos);
 
                     versions_page
@@ -189,7 +181,7 @@ impl<const FAN_OUT: usize,
                         .rev()
                         .skip(start_pos_si)
                         .filter(|((.., v), range)| //v.matched(lookup_version) &&
-                            v.matched(lookup_version) && lookup_range.overlap(range))
+                            v.load(Acquire).matched(lookup_version) && lookup_range.overlap(range))
                         .unique_by(|(.., range)| range.lower())
                         .unique_by(|(.., range)| range.upper())
                         .for_each(|((pos, ..), ..)|

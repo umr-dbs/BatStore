@@ -313,7 +313,7 @@ impl<'a,
             // tree.
             CRUDOperation::RangeIterSi(key) =>
                 CRUDOperationResult::MatchedRecordIter(self.draw_snapshot_version_with(|version| {
-                    RangeQueryIter::new(self, version, key, false, self.worker_id())
+                    RangeQueryIter::new(self, version, key, true, self.worker_id())
                 })),
             // `*Rand` operations are used purely for benchmark/data-generation
             // workloads (see mv_test.rs) — irrelevant to the actual running

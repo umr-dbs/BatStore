@@ -3,7 +3,7 @@ use crate::mv_page_model::internal_page::InternalPage;
 use crate::mv_page_model::leaf_page::LeafPage;
 use crate::mv_query::interval::Interval;
 use crate::mv_record_model::record_point::RecordPoint;
-use crate::mv_record_model::version_info::Version;
+use crate::mv_record_model::version_info::{AtomicVersion, Version};
 use crate::mv_sync::safe_cell::SafeCell;
 use itertools::Itertools;
 use std::fmt::{Display, Formatter};
@@ -215,7 +215,7 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline(always)]
-    pub fn keys_versions_pointers(&self) -> (&[Interval<Key>], &[Version], &[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>]) {
+    pub fn keys_versions_pointers(&self) -> (&[Interval<Key>], &[AtomicVersion], &[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>]) {
         match self.m_type()  {
             PAGE_TYPE_INTERNAL => unsafe {
                 let deref
@@ -417,7 +417,7 @@ impl<const FAN_OUT: usize,
             }
             PageType::IndexRef(internal) => {
                 format!("keys: {}\nversions: {}", internal.keys().iter().join(","),
-                        internal.versions().iter().join(","))
+                        internal.versions().iter().map(|v| v.load(Relaxed)).join(","))
             }
             _ => { "".to_string() }
         })

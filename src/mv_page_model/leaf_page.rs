@@ -162,7 +162,15 @@ impl<const NUM_RECORDS: usize,
 
     #[inline]
     pub fn push_uncommitted(&mut self, record: RecordPoint<Key, Payload>, index: usize) {
-        debug_assert!(index < NUM_RECORDS, "LeafPage::push_uncommitted: index {index} out of bounds for NUM_RECORDS={NUM_RECORDS}");
+        // A real `assert!`, not `debug_assert!` (this profile has
+        // `debug-assertions = false`, so that never actually ran) — same
+        // fix `InternalPage::push_uncommitted` already has for the
+        // identical hazard: without it, `index == NUM_RECORDS` writes past
+        // the end of `record_data` via a raw, unchecked pointer store,
+        // landing in whatever's next in `OptCell`'s own layout
+        // (`cell_version`, immediately after this whole block — see
+        // `RETIRED_FLAG_VERSION`'s doc) instead of failing loudly here.
+        assert!(index < NUM_RECORDS, "LeafPage::push_uncommitted: index {index} out of bounds for NUM_RECORDS={NUM_RECORDS}");
         unsafe {
             self.record_data
                 .as_mut_ptr()
@@ -176,14 +184,14 @@ impl<const NUM_RECORDS: usize,
         let len= self.len.load(Relaxed);
         let active = active_len(len) as i32 + active_delta;
         let dead = dead_len(len) as i32 + dead_delta;
-        
-        debug_assert!(active >= 0, 
+
+        debug_assert!(active >= 0,
                       "LeafPage active count went negative: len={len}, active_delta={active_delta}");
         debug_assert!(dead >= 0,
                       "LeafPage dead count went negative: len={len}, dead_delta={dead_delta}");
         // let active = active.max(0);
         // let dead = dead.max(0) as u32;
-        
+
         self.len.store(from_active_dead(active as Active, dead as Dead), Release)
     }
 
@@ -219,6 +227,16 @@ impl<const NUM_RECORDS: usize,
         let n_records_len
             = records.len();
 
+        // A real `assert!`, not `debug_assert!` — see `push_uncommitted`'s
+        // matching one. A split/merge whose "one side" ends up with more
+        // than `NUM_RECORDS` live entries (e.g. heavy duplicate-key
+        // clustering skewing `nearest_key_boundary`'s split point) would
+        // otherwise write past `record_data` here via a raw, unchecked
+        // pointer store, landing in `OptCell`'s own `cell_version` field
+        // right after this whole block instead of failing loudly here.
+        assert!(len + n_records_len <= NUM_RECORDS,
+                "LeafPage::bulk_push: {n_records_len} records pushed at len={len} overflow NUM_RECORDS={NUM_RECORDS}");
+
         unsafe {
             records.into_iter().enumerate().for_each(|(index, record)| {
                 self.record_data
@@ -241,6 +259,10 @@ impl<const NUM_RECORDS: usize,
             = self.len();
 
         debug_assert_eq!(len, 0);
+        // See `bulk_push`'s matching assert.
+        assert!(len + records.len() <= NUM_RECORDS,
+                "LeafPage::bulk_push_from_slice_ref: {} records pushed at len={len} overflow NUM_RECORDS={NUM_RECORDS}",
+                records.len());
         unsafe {
             records.into_iter().enumerate().for_each(|(index, record)| {
                 self.record_data

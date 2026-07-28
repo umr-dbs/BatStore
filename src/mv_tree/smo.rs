@@ -12,6 +12,7 @@ use itertools::Itertools;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::Deref;
+use std::sync::atomic::Ordering::Relaxed;
 
 
 // TEMPORARY diagnostic: traces every leaf-level split/merge's source(s) and
@@ -720,7 +721,7 @@ impl<const FAN_OUT: usize,
             .zip(mufasa_internal_page.keys())
             .filter(|(((index, ..), ..), ..)|
                 *index != simba_index)
-            .filter(|((.., version), ..)| version.is_active())
+            .filter(|((.., version), ..)| version.load(Relaxed).is_active())
             .sorted_by_key(|(.., fence)| fence.lower())
             .map(|(((index, bro), ..), fence)|
                 (index, bro, fence))
@@ -778,7 +779,43 @@ impl<const FAN_OUT: usize,
         let candidate_active_count
             = candidate_active_count as usize;
 
-        if candidate_active_count + simba_active_count <= ((4 * simba_max_units) / 5) { // <= 80% ok merge
+        // Leaf-only: the records a "merge into one combined leaf" below
+        // actually pushes are everything `record_survives_gc` keeps —
+        // every active record *and* any dead-but-still-snapshot-protected
+        // one (see that fn's doc) — which can run well ahead of
+        // `active_count` alone under heavy concurrent load (long-lived
+        // readers/transactions keeping old deleted versions alive). The
+        // 80%-active-count threshold below only bounds the *active* total,
+        // so two leaves that each individually pass it can still jointly
+        // overflow `NUM_RECORDS` once their protected-dead records are
+        // combined — confirmed as a real, repeatable crash (`LeafPage::
+        // bulk_push` panicking with 126-134 records for `NUM_RECORDS=125`)
+        // under a multi-table TPC-C workload with sustained transactions
+        // and OLAP scans holding snapshots open long enough to accumulate
+        // exactly this. Falling through to the `KeySplit` branch instead is
+        // always safe here: it already computes the real survivor count
+        // (same `record_survives_gc` filter) and correctly spreads it
+        // across *two* leaves via `nearest_key_boundary`, so routing there
+        // whenever the single-leaf merge wouldn't fit costs nothing extra
+        // in the common case (this closure only runs when `is_simba_leaf`)
+        // and cannot itself overflow.
+        let leaf_merge_would_overflow = is_simba_leaf && {
+            let simba_survivors = simba.as_records()
+                .iter()
+                .filter(|r| self.record_survives_gc(r.version()))
+                .count();
+
+            let candidate_survivors = candidate_cell
+                .deref()
+                .as_records()
+                .iter()
+                .filter(|r| self.record_survives_gc(r.version()))
+                .count();
+
+            simba_survivors + candidate_survivors > simba_max_units
+        };
+
+        if !leaf_merge_would_overflow && candidate_active_count + simba_active_count <= ((4 * simba_max_units) / 5) { // <= 80% ok merge
             let combined_block = match is_simba_leaf {
                 false => {
                     let combined_block = self.block_manager
@@ -794,11 +831,11 @@ impl<const FAN_OUT: usize,
 
                     let shadow_copy = keys
                         .iter()
-                        .zip(versions.iter())
+                        .zip(versions.iter().map(|v| v.load(Relaxed)))
                         .zip(pointers.iter())
                         .filter(|((.., version), ..)| version.is_active())
                         .merge_by(c_keys.iter()
-                                      .zip(c_versions.iter())
+                                      .zip(c_versions.iter().map(|v| v.load(Relaxed)))
                                       .zip(c_pointers.iter())
                                       .filter(|((.., version), ..)| version.is_active()),
                                   |((.., v0), ..), ((.., v1), ..)| v0 <= v1)
@@ -953,12 +990,12 @@ impl<const FAN_OUT: usize,
 
                     let mut joined = c_keys
                         .iter()
-                        .zip(c_versions.iter())
+                        .zip(c_versions.iter().map(|v| v.load(Relaxed)))
                         .zip(c_children.iter())
                         .filter(|((.., v), ..)| v.is_active())
                         .sorted_by_key(|((k, ..), ..)| k.lower)
                         .merge_by(s_keys.iter()
-                                      .zip(s_version.iter())
+                                      .zip(s_version.iter().map(|v| v.load(Relaxed)))
                                       .zip(s_children.iter())
                                       .filter(|((.., v), ..)| v.is_active())
                                       .sorted_by_key(|((k, ..), ..)| k.lower),
@@ -978,8 +1015,8 @@ impl<const FAN_OUT: usize,
                         second.get_unchecked(0).0.0.lower,
                         candidate_fence.upper.max(simba_fence.upper));
 
-                    first.sort_by_key(|((.., v), ..)| **v);
-                    second.sort_by_key(|((.., v), ..)| **v);
+                    first.sort_by_key(|((.., v), ..)| *v);
+                    second.sort_by_key(|((.., v), ..)| *v);
 
                     let combined_block_0 = self.block_manager
                         .new_empty_index_block(&self.ctx);
@@ -1103,7 +1140,7 @@ impl<const FAN_OUT: usize,
 
                     let mut filtered = key_intervals
                         .iter()
-                        .zip(versions.iter())
+                        .zip(versions.iter().map(|v| v.load(Relaxed)))
                         .zip(pointers.iter())
                         .filter(|((.., v), ..)| v.is_active())
                         .sorted_by_key(|((i, ..), ..)| i.lower)
@@ -1120,7 +1157,7 @@ impl<const FAN_OUT: usize,
                         (self.dec_key)(second.get_unchecked(0).0.0.lower));
 
                     if let PageType::IndexMut(internal_page) = left.unsafe_borrow_mut().as_page_mut() {
-                        first.sort_by_key(|((.., v), ..)| **v);
+                        first.sort_by_key(|((.., v), ..)| *v);
                         internal_page.bulk_push_from_slice(first)
                     }
 
@@ -1129,7 +1166,7 @@ impl<const FAN_OUT: usize,
                         fence.upper);
 
                     if let PageType::IndexMut(internal_page) = right.unsafe_borrow_mut().as_page_mut() {
-                        second.sort_by_key(|((.., v), ..)| **v);
+                        second.sort_by_key(|((.., v), ..)| *v);
                         internal_page.bulk_push_from_slice(second)
                     }
 
@@ -1194,7 +1231,7 @@ impl<const FAN_OUT: usize,
 
                     let active_entries = key_intervals
                         .iter()
-                        .zip(versions.iter())
+                        .zip(versions.iter().map(|v| v.load(Relaxed)))
                         .zip(pointers.iter())
                         .filter(|((.., v), ..)| v.is_active())
                         .collect_vec();

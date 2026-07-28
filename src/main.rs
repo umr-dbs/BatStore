@@ -30,9 +30,13 @@ mod mv_wal;
 mod mv_db;
 
 use crate::mv_sync::smart_cell::OptCell;
+#[cfg(not(miri))]
 use jemallocator::Jemalloc;
 use crate::mv_bench::tpcc_schema::{TpccKey, TpccRow};
 
+// Miri interprets pure Rust/LLVM IR only — it can't run jemalloc's FFI'd C,
+// so this swaps in the default (System) allocator under `cargo miri`.
+#[cfg(not(miri))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
@@ -45,6 +49,7 @@ fn main() {
     if parms.len() > 1  {
         match parms[1].as_str() {
             "" | "test" => test(),
+            "minimal_repro" => minimal_repro(),
             "generate" => main_generate(parms),
             "append" => main_append(parms),
             "load" => main_load(parms),
@@ -88,6 +93,88 @@ fn main() {
     //     .enumerate()
     //     .map(|(i, count)| format!("{i}: {}", count.load(SeqCst)))
     //     .join("\n"))
+}
+
+/// Minimal, TPCC-free regression repro for the `RangeIterSi`
+/// `register_reader_si` bug (see `dispatch.rs`'s `CRUDOperation::RangeIterSi`
+/// arm): many concurrent inserts forcing heavy split churn on one plain
+/// tree, racing concurrent deletes and concurrent `RangeSi` scans, while GC
+/// block-reclaim is on. Before the fix this reliably crashed (a block a
+/// scan was still traversing got reclaimed and repopulated mid-read,
+/// exposing a torn/never-written record slot) within seconds; after the
+/// fix it should run clean for the full duration.
+fn minimal_repro() {
+    use crate::mv_bench::tpcc_schema::{OrderLine, TpccRow, TpccTree};
+    use crate::mv_crud_model::crud_operation::TxAtomicOperation;
+    use crate::mv_crud_model::crud_operation_result::AtomicTxResult;
+    use crate::mv_query::interval::Interval;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn line(i_id: u32) -> TpccRow {
+        TpccRow::OrderLine(Box::new(OrderLine {
+            ol_i_id: i_id,
+            ol_supply_w_id: 1,
+            ol_delivery_d: None,
+            ol_quantity: 5,
+            ol_amount: 3.14,
+            ol_dist_info: "s".repeat(24),
+        }))
+    }
+
+    let tree = Arc::new(TpccTree::default());
+    tree.enable_gc(false);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let next_key = Arc::new(AtomicU64::new(0));
+    let mut handles = vec![];
+
+    for _ in 0..4 {
+        let tree = tree.clone();
+        let stop = stop.clone();
+        let next_key = next_key.clone();
+        handles.push(std::thread::spawn(move || {
+            while !stop.load(Relaxed) {
+                let key = next_key.fetch_add(1, Relaxed);
+                let _ = tree.dispatch_atomic_transaction(TxAtomicOperation::Insert(key, line(key as u32)));
+            }
+        }));
+    }
+
+    for _ in 0..2 {
+        let tree = tree.clone();
+        let stop = stop.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut k = 0u64;
+            while !stop.load(Relaxed) {
+                let _ = tree.dispatch_atomic_transaction(TxAtomicOperation::Delete(k));
+                k = k.wrapping_add(1);
+            }
+        }));
+    }
+
+    for _ in 0..2 {
+        let tree = tree.clone();
+        let stop = stop.clone();
+        handles.push(std::thread::spawn(move || {
+            while !stop.load(Relaxed) {
+                if let AtomicTxResult::MatchedRecords(records) =
+                    tree.dispatch_atomic_transaction(TxAtomicOperation::RangeSi(Interval::new(0, u64::MAX)))
+                {
+                    let _ = records.len();
+                }
+            }
+        }));
+    }
+
+    let secs: u64 = env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+    std::thread::sleep(Duration::from_secs(secs));
+    stop.store(true, Relaxed);
+    for h in handles {
+        let _ = h.join();
+    }
+    println!("minimal_repro: completed without corruption detected");
 }
 
 fn test() {
@@ -178,14 +265,11 @@ fn startup() {
            >>u64: FAN_OUT: \t\t{FAN_OUT}\n\
            >>u64: NUM_RECORDS: \t\t{NUM_RECORDS}\n\
            >>u64: size_of(BLOCK): \t\t{} bytes; {b_kb} kb\n\
-           >>u64: size_of(CELL): \t\t{} bytes; {cell_kb} kb\n\
-           >>u64: size_of(REF): \t\t{} bytes; {} kb",
+           >>u64: size_of(CELL): \t\t{} bytes; {cell_kb} kb\n",
         block_size,
         cell_sz,
-        cell_sz + size_of::<usize>() * 2,
-        (cell_sz + size_of::<usize>() * 2) as f32 / 1024f32
     );
-    println!();
+
     println!("*****************************************************");
     let block_size = size_of::<Block<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>>();
     let b_kb = block_size as f32 / 1024f32;
@@ -197,12 +281,9 @@ fn startup() {
            >>TPC-C: FAN_OUT: \t\t{TPCC_FAN_OUT}\n\
            >>TPC-C: NUM_RECORDS: \t\t{TPCC_NUM_RECORDS}\n\
            >>TPC-C: size_of(BLOCK): \t{} bytes; {b_kb} kb\n\
-           >>TPC-C: size_of(CELL): \t{} bytes; {cell_kb} kb\n\
-           >>TPC-C: size_of(REF): \t\t{} bytes; {} kb",
+           >>TPC-C: size_of(CELL): \t{} bytes; {cell_kb} kb\n",
         block_size,
         cell_sz,
-        cell_sz + size_of::<usize>() * 2,
-        (cell_sz + size_of::<usize>() * 2) as f32 / 1024f32
     );
     println!("*****************************************************");
     let block_size = size_of::<Block<YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow>>();
@@ -215,12 +296,9 @@ fn startup() {
            >>YCSB: FAN_OUT: \t\t{YCSB_FAN_OUT}\n\
            >>YCSB: NUM_RECORDS: \t\t{YCSB_NUM_RECORDS}\n\
            >>YCSB: size_of(BLOCK): \t{} bytes; {b_kb} kb\n\
-           >>YCSB: size_of(CELL): \t{} bytes; {cell_kb} kb\n\
-           >>YCSB: size_of(REF): \t\t{} bytes; {} kb",
+           >>YCSB: size_of(CELL): \t\t{} bytes; {cell_kb} kb\n",
         block_size,
         cell_sz,
-        cell_sz + size_of::<usize>() * 2,
-        (cell_sz + size_of::<usize>() * 2) as f32 / 1024f32
     );
     println!("*****************************************************");
     println!("*****************************************************");

@@ -16,16 +16,18 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Update benchmark scripts to include patches">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Fix issues GC related and stabilize SMO with racey stamps">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_db/transaction.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_db/transaction.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/mem_stats.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/mem_stats.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/node.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/node.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/iter_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/iter_query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_record_model/version_info.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_record_model/version_info.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/rand_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/rand_query.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -37,10 +39,10 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="14676" />
+    <option name="cachedIndexableFilesCount" value="14679" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
-  <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:test" />
+  <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
       <list>
@@ -81,23 +83,23 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0" />
-      <entry key="MS500" value="1.0" />
-      <entry key="S2" value="1.0" />
-      <entry key="S5" value="1.0" />
-      <entry key="S10" value="1.0" />
-      <entry key="S30" value="1.0" />
-      <entry key="S60" value="1.0" />
-      <entry key="M2" value="1.0" />
-      <entry key="M5" value="1.0000000000000002" />
-      <entry key="M10" value="1.000000029065388" />
-      <entry key="M15" value="1.000039919332951" />
-      <entry key="M30" value="1.0914514209231552" />
-      <entry key="H1" value="6.862359959603383" />
-      <entry key="H2" value="58.94984519820665" />
-      <entry key="H4" value="218.35258741845644" />
-      <entry key="D1" value="2243.6070989915097" />
-      <entry key="W1" value="9119.425779618436" />
+      <entry key="MS100" value="1.1704024431112832" />
+      <entry key="MS500" value="1.97504157686974" />
+      <entry key="S2" value="4.03749653241322" />
+      <entry key="S5" value="7.658739153392243" />
+      <entry key="S10" value="12.317443823506036" />
+      <entry key="S30" value="22.571062161788632" />
+      <entry key="S60" value="28.04737864514887" />
+      <entry key="M2" value="31.643998212467466" />
+      <entry key="M5" value="34.155510317713016" />
+      <entry key="M10" value="35.05972816276406" />
+      <entry key="M15" value="35.36910554499034" />
+      <entry key="M30" value="35.77202574429491" />
+      <entry key="H1" value="41.64196160403075" />
+      <entry key="H2" value="93.56722102493309" />
+      <entry key="H4" value="252.74397106123257" />
+      <entry key="D1" value="2277.6214192728266" />
+      <entry key="W1" value="9153.856050952478" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
@@ -105,37 +107,37 @@
       <entry key="S2" value="0.0" />
       <entry key="S5" value="0.0" />
       <entry key="S10" value="0.0" />
-      <entry key="S30" value="1.5997134217848197E-196" />
-      <entry key="S60" value="1.7409189660644456E-98" />
-      <entry key="M2" value="1.8548750192625092E-49" />
-      <entry key="M5" value="5.425105564112113E-20" />
-      <entry key="M10" value="4.837477867833352E-10" />
-      <entry key="M15" value="1.1643733608332684E-6" />
-      <entry key="M30" value="0.003711880520166641" />
-      <entry key="H1" value="0.3070762249140021" />
-      <entry key="H2" value="4.666460948538418" />
-      <entry key="H4" value="25.343326919508286" />
-      <entry key="D1" value="267.94531986227736" />
-      <entry key="W1" value="991.6523958339686" />
+      <entry key="S30" value="4.5487650112855604E-197" />
+      <entry key="S60" value="9.283339071568701E-99" />
+      <entry key="M2" value="1.3544952321548055E-49" />
+      <entry key="M5" value="4.7840237235942656E-20" />
+      <entry key="M10" value="4.5426738479503096E-10" />
+      <entry key="M15" value="1.1165734697731897E-6" />
+      <entry key="M30" value="0.0036348919895872493" />
+      <entry key="H1" value="0.303874987403703" />
+      <entry key="H2" value="4.642073539443241" />
+      <entry key="H4" value="25.27701674203768" />
+      <entry key="D1" value="267.82834690860363" />
+      <entry key="W1" value="991.5905398136726" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.3922920489483754" />
-      <entry key="MS500" value="0.8293195458144417" />
-      <entry key="S2" value="0.9542902250321851" />
-      <entry key="S5" value="0.9814590638534793" />
-      <entry key="S10" value="0.9906861581012825" />
-      <entry key="S30" value="0.9968856972203758" />
-      <entry key="S60" value="0.9984416343584516" />
-      <entry key="M2" value="0.99922051337953" />
-      <entry key="M5" value="0.9996881324095584" />
-      <entry key="M10" value="0.9998440835846029" />
-      <entry key="M15" value="0.9999371102559026" />
-      <entry key="M30" value="1.0951042851473398" />
-      <entry key="H1" value="7.169158616877853" />
-      <entry key="H2" value="63.61457666197957" />
-      <entry key="H4" value="243.69140668700922" />
-      <entry key="D1" value="2511.5447179590315" />
-      <entry key="W1" value="10111.074214202483" />
+      <entry key="MS100" value="0.45324175809489825" />
+      <entry key="MS500" value="1.7500495296460574" />
+      <entry key="S2" value="3.9739267823275184" />
+      <entry key="S5" value="7.631225429477956" />
+      <entry key="S10" value="12.302151106525804" />
+      <entry key="S30" value="22.564207648946955" />
+      <entry key="S60" value="28.043321232609465" />
+      <entry key="M2" value="31.641737655704546" />
+      <entry key="M5" value="34.15453714406616" />
+      <entry key="M10" value="35.0592287679304" />
+      <entry key="M15" value="35.36877077252896" />
+      <entry key="M30" value="35.77548430569507" />
+      <entry key="H1" value="41.94550253559919" />
+      <entry key="H2" value="98.20754439888559" />
+      <entry key="H4" value="278.01647707978594" />
+      <entry key="D1" value="2545.442066169775" />
+      <entry key="W1" value="10145.442629409177" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -248,7 +250,7 @@
       <command value="cargo clean" />
     </option>
   </component>
-  <component name="RunManager" selected="Cargo.Test ycsb_schema::tests">
+  <component name="RunManager" selected="Cargo.Run">
     <configuration name="Generate" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
       <option name="buildProfileId" value="dev" />
       <option name="command" value="run --package cMVBT --bin cMVBT -- generate 1mio_inserts.dat 10000 1000 1000 0 0 0" />
@@ -435,8 +437,8 @@
     <recent_temporary>
       <list>
         <item itemvalue="Cargo.Test ycsb_schema::tests" />
-        <item itemvalue="Python.compare_engines" />
         <item itemvalue="Python.plot_suite" />
+        <item itemvalue="Python.compare_engines" />
         <item itemvalue="Cargo.Test tx_context::tests" />
         <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
       </list>
@@ -1387,14 +1389,9 @@
       <workItem from="1785097719228" duration="979000" />
       <workItem from="1785138695423" duration="3237000" />
       <workItem from="1785144327202" duration="3722000" />
-    </task>
-    <task id="LOCAL-00150" summary="Added clock tid allocation for query tracer">
-      <option name="closed" value="true" />
-      <created>1769013261843</created>
-      <option name="number" value="00150" />
-      <option name="presentableId" value="LOCAL-00150" />
-      <option name="project" value="LOCAL" />
-      <updated>1769013261843</updated>
+      <workItem from="1785224747779" duration="1101000" />
+      <workItem from="1785225856019" duration="16198000" />
+      <workItem from="1785247073626" duration="4564000" />
     </task>
     <task id="LOCAL-00151" summary="Fixed log">
       <option name="closed" value="true" />
@@ -1780,7 +1777,15 @@
       <option name="project" value="LOCAL" />
       <updated>1785098023586</updated>
     </task>
-    <option name="localTasksCounter" value="199" />
+    <task id="LOCAL-00199" summary="Fix issues GC related and stabilize SMO with racey stamps">
+      <option name="closed" value="true" />
+      <created>1785168920065</created>
+      <option name="number" value="00199" />
+      <option name="presentableId" value="LOCAL-00199" />
+      <option name="project" value="LOCAL" />
+      <updated>1785168920065</updated>
+    </task>
+    <option name="localTasksCounter" value="200" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1801,7 +1806,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Addressing memory optimizations" />
     <MESSAGE value="Readme" />
     <MESSAGE value="Updated overflow count, was set too eager. Its enough to trigger at &lt;= 1 slot left for keys, not &lt;= 3" />
     <MESSAGE value="Rust 2021 -&gt; Rust 2024. Moved page soft commits from Release to Relaxed semanstics, since they always follow by a Release store from the latch." />
@@ -1826,7 +1830,8 @@
     <MESSAGE value="Remove conservitive child latch. Updated scripts" />
     <MESSAGE value="GC prefers own shard access first, and only steals (RoundRobin) on-demand instead" />
     <MESSAGE value="Update benchmark scripts to include patches" />
-    <option name="LAST_COMMIT_MESSAGE" value="Update benchmark scripts to include patches" />
+    <MESSAGE value="Fix issues GC related and stabilize SMO with racey stamps" />
+    <option name="LAST_COMMIT_MESSAGE" value="Fix issues GC related and stabilize SMO with racey stamps" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
