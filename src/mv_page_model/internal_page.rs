@@ -410,6 +410,24 @@ impl<const FAN_OUT: usize,
             .collect()
     }
 
+    // tight loops; no slices etc
+    // pub fn live_mask(&self) -> Vec<bool> {
+    //     let keys = self.keys();
+    //     let n = keys.len();
+    //     let mut result = vec![true; n];
+    //
+    //     for i in 0..n {
+    //         let ki = &keys[i];
+    //         for j in i + 1..n {
+    //             if keys[j].overlap(ki) {
+    //                 result[i] = false;
+    //                 break;
+    //             }
+    //         }
+    //     }
+    //
+    //     result
+    // }
     #[inline(always)]
     pub fn children(&self) -> &[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>] {
         let len
