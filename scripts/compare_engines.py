@@ -199,7 +199,18 @@ def main() -> None:
             # postgres_benchbase.run()'s `reload` docstring. Every other engine ignores it.
             first_call = True
             for threads in thread_list:
-                scale_variant = dataclasses.replace(scale, tpcc_terminals=threads, ycsb_threads=threads)
+                # TPC-C spec sizes populations at ~10 terminals per warehouse; a fixed
+                # warehouse count while terminals sweep up to 128 would push the
+                # terminals/warehouse ratio to 16:1 at the top end - far more contention
+                # than the spec's intended range, and a likely contributor to cMVBT's
+                # observed panic at threads=128 (see task_89ebda8a). Scaling warehouses
+                # with threads keeps contention roughly constant across the sweep, so it
+                # measures throughput vs. concurrency without confounding it with
+                # ever-increasing contention.
+                tpcc_warehouses = max(scale.tpcc_warehouses, -(-threads // 10))
+                scale_variant = dataclasses.replace(
+                    scale, tpcc_terminals=threads, tpcc_warehouses=tpcc_warehouses, ycsb_threads=threads,
+                )
                 for gc_variant in gc_variants:
                     # gc_variant is the literal string "n/a" for engines without a GC
                     # toggle - the "/" is a path separator, so f"gc_{gc_variant}" used

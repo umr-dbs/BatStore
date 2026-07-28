@@ -16,16 +16,10 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Fix GC block reuse in merges; Now correctly calculates the live number">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Remove version_region atomic need; Changed SMO Liveness, now only checks overlap without actual need to obsolete mark">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/compare_engines.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/compare_engines.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_page_model/node.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/node.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/iter_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/iter_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/rand_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/rand_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -80,23 +74,23 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0290270183633061" />
-      <entry key="MS500" value="2.0908917715706554" />
-      <entry key="S2" value="6.289340960016443" />
-      <entry key="S5" value="12.64281194934346" />
-      <entry key="S10" value="20.710526211302977" />
-      <entry key="S30" value="38.185046685042984" />
-      <entry key="S60" value="48.222824933862114" />
-      <entry key="M2" value="55.1788466089974" />
-      <entry key="M5" value="60.21179995057022" />
-      <entry key="M10" value="62.0591736815459" />
-      <entry key="M15" value="62.69549750164741" />
-      <entry key="M30" value="63.43124599992157" />
-      <entry key="H1" value="69.4502633316878" />
-      <entry key="H2" value="121.37818778276333" />
-      <entry key="H4" value="280.50664275273846" />
-      <entry key="D1" value="2305.279039821819" />
-      <entry key="W1" value="9181.660226178668" />
+      <entry key="MS100" value="1.3064573330888543" />
+      <entry key="MS500" value="3.556042612878826" />
+      <entry key="S2" value="9.085130748206275" />
+      <entry key="S5" value="13.73031982713223" />
+      <entry key="S10" value="16.87119060547422" />
+      <entry key="S30" value="19.98472536349825" />
+      <entry key="S60" value="21.24113471390968" />
+      <entry key="M2" value="24.628344114033084" />
+      <entry key="M5" value="34.934901470640916" />
+      <entry key="M10" value="43.04022977311894" />
+      <entry key="M15" value="46.793891483548265" />
+      <entry key="M30" value="53.443767589042025" />
+      <entry key="H1" value="67.06702854481057" />
+      <entry key="H2" value="108.52749880211496" />
+      <entry key="H4" value="242.17791484964835" />
+      <entry key="D1" value="2210.2293807632136" />
+      <entry key="W1" value="9149.251132647049" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
@@ -104,37 +98,37 @@
       <entry key="S2" value="0.0" />
       <entry key="S5" value="0.0" />
       <entry key="S10" value="0.0" />
-      <entry key="S30" value="2.956878384517411E-197" />
-      <entry key="S60" value="7.484696481587648E-99" />
-      <entry key="M2" value="1.2162209240850713E-49" />
-      <entry key="M5" value="4.5823401150091117E-20" />
-      <entry key="M10" value="4.445888378077163E-10" />
-      <entry key="M15" value="1.1006569239952968E-6" />
-      <entry key="M30" value="0.0036088916470933367" />
-      <entry key="H1" value="0.30278622971726804" />
-      <entry key="H2" value="4.633750003977442" />
-      <entry key="H4" value="25.254344918688663" />
-      <entry key="D1" value="267.7882945323149" />
-      <entry key="W1" value="991.5693545478563" />
+      <entry key="S30" value="5.9346500989280915E-282" />
+      <entry key="S60" value="3.3531657503584355E-141" />
+      <entry key="M2" value="8.140533817988113E-71" />
+      <entry key="M5" value="1.5536152884404224E-28" />
+      <entry key="M10" value="2.5887292901951934E-14" />
+      <entry key="M15" value="1.6534993372763408E-9" />
+      <entry key="M30" value="1.3987814705863945E-4" />
+      <entry key="H1" value="0.05961068795827897" />
+      <entry key="H2" value="2.0560165504712637" />
+      <entry key="H4" value="16.82221236050458" />
+      <entry key="D1" value="250.2549961553113" />
+      <entry key="W1" value="982.0233948868022" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="1.0080418137027494" />
-      <entry key="MS500" value="2.08288698282825" />
-      <entry key="S2" value="6.282768415590639" />
-      <entry key="S5" value="12.63441833276091" />
-      <entry key="S10" value="20.70049789702066" />
-      <entry key="S30" value="38.17726829083475" />
-      <entry key="S60" value="48.21762447986075" />
-      <entry key="M2" value="55.17577519208994" />
-      <entry key="M5" value="60.21043120450258" />
-      <entry key="M10" value="62.05846317381099" />
-      <entry key="M15" value="62.69501888879587" />
-      <entry key="M30" value="63.43460512492033" />
-      <entry key="H1" value="69.75267925554603" />
-      <entry key="H2" value="126.01017201133138" />
-      <entry key="H4" value="305.75647161356443" />
-      <entry key="D1" value="2573.059633929753" />
-      <entry key="W1" value="10173.225619230709" />
+      <entry key="MS100" value="1.1410578696113371" />
+      <entry key="MS500" value="3.4639048347382366" />
+      <entry key="S2" value="9.028007443636328" />
+      <entry key="S5" value="13.694440669965914" />
+      <entry key="S10" value="16.84847063870595" />
+      <entry key="S30" value="19.97550979670861" />
+      <entry key="S60" value="21.236257015423828" />
+      <entry key="M2" value="24.625781635821866" />
+      <entry key="M5" value="34.93378382491339" />
+      <entry key="M10" value="43.03963779039138" />
+      <entry key="M15" value="46.79348634731688" />
+      <entry key="M30" value="53.4436898972077" />
+      <entry key="H1" value="67.12646079649413" />
+      <entry key="H2" value="110.5826786833613" />
+      <entry key="H4" value="258.99709231034547" />
+      <entry key="D1" value="2460.4771762099263" />
+      <entry key="W1" value="10131.270603537547" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -1388,15 +1382,7 @@
       <workItem from="1785144327202" duration="3722000" />
       <workItem from="1785224747779" duration="1101000" />
       <workItem from="1785225856019" duration="16198000" />
-      <workItem from="1785247073626" duration="6278000" />
-    </task>
-    <task id="LOCAL-00152" summary="Fixed log">
-      <option name="closed" value="true" />
-      <created>1769769576110</created>
-      <option name="number" value="00152" />
-      <option name="presentableId" value="LOCAL-00152" />
-      <option name="project" value="LOCAL" />
-      <updated>1769769576110</updated>
+      <workItem from="1785247073626" duration="9234000" />
     </task>
     <task id="LOCAL-00153" summary="Enabled GC setting for loader.">
       <option name="closed" value="true" />
@@ -1782,7 +1768,15 @@
       <option name="project" value="LOCAL" />
       <updated>1785253503611</updated>
     </task>
-    <option name="localTasksCounter" value="201" />
+    <task id="LOCAL-00201" summary="Remove version_region atomic need; Changed SMO Liveness, now only checks overlap without actual need to obsolete mark">
+      <option name="closed" value="true" />
+      <created>1785261549638</created>
+      <option name="number" value="00201" />
+      <option name="presentableId" value="LOCAL-00201" />
+      <option name="project" value="LOCAL" />
+      <updated>1785261549638</updated>
+    </task>
+    <option name="localTasksCounter" value="202" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1803,7 +1797,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Updated overflow count, was set too eager. Its enough to trigger at &lt;= 1 slot left for keys, not &lt;= 3" />
     <MESSAGE value="Rust 2021 -&gt; Rust 2024. Moved page soft commits from Release to Relaxed semanstics, since they always follow by a Release store from the latch." />
     <MESSAGE value="Experimental: Compact meta cell version" />
     <MESSAGE value="Correct cargo btree version to 0.0.122" />
@@ -1828,7 +1821,8 @@
     <MESSAGE value="Update benchmark scripts to include patches" />
     <MESSAGE value="Fix issues GC related and stabilize SMO with racey stamps" />
     <MESSAGE value="Fix GC block reuse in merges; Now correctly calculates the live number" />
-    <option name="LAST_COMMIT_MESSAGE" value="Fix GC block reuse in merges; Now correctly calculates the live number" />
+    <MESSAGE value="Remove version_region atomic need; Changed SMO Liveness, now only checks overlap without actual need to obsolete mark" />
+    <option name="LAST_COMMIT_MESSAGE" value="Remove version_region atomic need; Changed SMO Liveness, now only checks overlap without actual need to obsolete mark" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
