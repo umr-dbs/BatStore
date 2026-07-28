@@ -50,6 +50,13 @@ struct JemallocStats {
 }
 
 fn read_jemalloc_stats() -> Option<JemallocStats> {
+    // Miri interprets pure Rust/LLVM IR only — it can't call into jemalloc's
+    // FFI'd C, and `main.rs` already swaps the global allocator out for
+    // Miri builds, so there's no real jemalloc to query anyway.
+    #[cfg(miri)]
+    return None;
+    #[cfg(not(miri))]
+    {
     jemalloc_ctl::epoch::advance().ok()?;
     Some(JemallocStats {
         allocated: jemalloc_ctl::stats::allocated::read().ok()? as u64,
@@ -57,6 +64,7 @@ fn read_jemalloc_stats() -> Option<JemallocStats> {
         resident: jemalloc_ctl::stats::resident::read().ok()? as u64,
         mapped: jemalloc_ctl::stats::mapped::read().ok()? as u64,
     })
+    }
 }
 
 /// Background sampler: append one CSV row per tick to `csv_path` until

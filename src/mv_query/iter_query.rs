@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::hash::Hash;
+use std::sync::atomic::Ordering::Acquire;
 
 use crate::mv_page_model::BlockRef;
 
@@ -152,7 +153,7 @@ impl<'a,
                         .enumerate()
                         .rev()
                         .find_map(|(pos, (v, range))|
-                            if range.contains(self.range.lower) && v.matched(si){
+                            if range.contains(self.range.lower) && v.load(Acquire).matched(si){
                                 Some((*range, internal_page.get_pointer(pos)))
                             } else {
                                 None

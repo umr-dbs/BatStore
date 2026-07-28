@@ -1,6 +1,7 @@
 use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::Deref;
+use std::sync::atomic::Ordering::Acquire;
 
 use crate::mv_block::block::BlockGuard;
 use crate::mv_page_model::Attempts;
@@ -23,10 +24,15 @@ impl<const FAN_OUT: usize,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     /// See `olc_query::traversal_write_olc`'s matching doc — same
-    /// GC-reclaim-registration gap, same fix.
+    /// GC-reclaim-registration gap, same fix. The `begin_snapshot`/
+    /// `end_snapshot` bracketing below used to be commented out here (the
+    /// only traversal entry point missing it) — restored, since nothing
+    /// about a random-key write traversal makes it exempt from the same
+    /// "GC's reclaim decision was previously blind to write-path
+    /// traversals" gap `traversal_write_olc`'s doc describes.
     #[inline]
     pub(crate) fn traversal_write_rand_query(&self) -> (Fence<Key>, BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>) {
-        // let ts_start = self.begin_snapshot();
+        let ts_start = self.begin_snapshot();
 
         let mut attempt = 0;
 
@@ -41,7 +47,7 @@ impl<const FAN_OUT: usize,
             }
         };
 
-        // self.end_snapshot(ts_start);
+        self.end_snapshot(ts_start);
 
         result
     }
@@ -78,7 +84,7 @@ impl<const FAN_OUT: usize,
             match curr_guard_result.as_page_ref() {
                 PageType::IndexRef(internal_page) => {
                     for (k, version) in internal_page.versions().iter().enumerate() {
-                        if version.is_active() {
+                        if version.load(Acquire).is_active() {
                             if index == 0 {
                                 index = k;
                                 break

@@ -2,6 +2,7 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::mem;
 use std::ops::Deref;
+use std::sync::atomic::Ordering::Acquire;
 
 use crate::mv_block::block::BlockGuard;
 use crate::mv_page_model::{Attempts, BlockRef};
@@ -221,7 +222,7 @@ impl<const FAN_OUT: usize,
                         .iter()
                         .enumerate()
                         .rfind(|(pos, range)|
-                            versions_page.get_unchecked(*pos).is_active() &&
+                            versions_page.get_unchecked(*pos).load(Acquire).is_active() &&
                                 range.contains(key))
                         .map(|(pos, ..)| pos);
 
