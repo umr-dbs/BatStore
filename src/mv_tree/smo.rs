@@ -1,7 +1,6 @@
 use crate::mv_block::block::{Block, BlockGuard};
 use crate::mv_block::block_handle::BlockAllocManager;
 use crate::mv_page_model::node::PageType;
-use crate::mv_page_model::time_matcher::TimeMatcher;
 use crate::mv_page_model::{BlockRef, Height};
 use crate::mv_query::interval::Interval;
 use crate::mv_root::index_root::RootIndexGuard;
@@ -12,7 +11,6 @@ use itertools::Itertools;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::Deref;
-use std::sync::atomic::Ordering::Relaxed;
 
 
 // TEMPORARY diagnostic: traces every leaf-level split/merge's source(s) and
@@ -347,8 +345,8 @@ impl<const FAN_OUT: usize,
             = internal_page.sum_len();
 
         if DIAG && format!("{}", fence.upper) == "18446744073709551615" {
-            eprintln!("DIAG on_overflow_node ENTER thread={:#x} page={:p} child_index={child_index} current_len={current_len} fence=[{},{}] sum_len_before={} already_obsolete={}",
-                diag_thread_hash(), internal_page as *const _, fence.lower, fence.upper, internal_page.sum_len(), !internal_page.get_version(child_index).is_active());
+            eprintln!("DIAG on_overflow_node ENTER thread={:#x} page={:p} child_index={child_index} current_len={current_len} fence=[{},{}] sum_len_before={}",
+                diag_thread_hash(), internal_page as *const _, fence.lower, fence.upper, internal_page.sum_len());
         }
 
         // `simba`'s content is fully consumed here (copied into `left`/
@@ -402,9 +400,8 @@ impl<const FAN_OUT: usize,
                     current_len + 1);
 
                 internal_page.commit_delta(1, 1);
-                internal_page.mark_version_obsolete(child_index);
                 if DIAG && format!("{}", right_fence.upper) == "18446744073709551615" {
-                    eprintln!("DIAG on_overflow_node ByKey thread={:#x} page={:p} child_index={child_index} obsoleted, pushed left=[{},{}]@{current_len} right=[{},{}]@{}",
+                    eprintln!("DIAG on_overflow_node ByKey thread={:#x} page={:p} child_index={child_index} superseded, pushed left=[{},{}]@{current_len} right=[{},{}]@{}",
                         diag_thread_hash(), internal_page as *const _, left_fence.lower, left_fence.upper, right_fence.lower, right_fence.upper, current_len + 1);
                 }
                 version
@@ -420,9 +417,8 @@ impl<const FAN_OUT: usize,
                     current_len);
 
                 internal_page.commit_delta(0, 1);
-                internal_page.mark_version_obsolete(child_index);
                 if DIAG && format!("{}", fence.upper) == "18446744073709551615" {
-                    eprintln!("DIAG on_overflow_node ByVersion thread={:#x} page={:p} child_index={child_index} obsoleted, pushed fence=[{},{}]@{current_len}",
+                    eprintln!("DIAG on_overflow_node ByVersion thread={:#x} page={:p} child_index={child_index} superseded, pushed fence=[{},{}]@{current_len}",
                         diag_thread_hash(), internal_page as *const _, fence.lower, fence.upper);
                 }
                 version
@@ -539,14 +535,8 @@ impl<const FAN_OUT: usize,
                 mufasa_internal_page
                     .commit_delta(-1, 2);
 
-                mufasa_internal_page
-                    .mark_version_obsolete(index_sibling);
-
-                mufasa_internal_page
-                    .mark_version_obsolete(index_simba);
-
                 if DIAG && format!("{}", merged_fence.upper) == "18446744073709551615" {
-                    eprintln!("DIAG on_underflow_node Merged thread={:#x} page={:p} index_simba={index_simba} index_sibling={index_sibling} obsoleted, pushed merged=[{},{}]@{mufasa_len}",
+                    eprintln!("DIAG on_underflow_node Merged thread={:#x} page={:p} index_simba={index_simba} index_sibling={index_sibling} superseded, pushed merged=[{},{}]@{mufasa_len}",
                         diag_thread_hash(), mufasa_internal_page as *const _, merged_fence.lower, merged_fence.upper);
                 }
 
@@ -611,14 +601,8 @@ impl<const FAN_OUT: usize,
                 mufasa_internal_page
                     .commit_delta(0, 2);
 
-                mufasa_internal_page
-                    .mark_version_obsolete(index_sibling);
-
-                mufasa_internal_page
-                    .mark_version_obsolete(index_simba);
-
                 if DIAG && format!("{}", right_interval.upper) == "18446744073709551615" {
-                    eprintln!("DIAG on_underflow_node KeySplit thread={:#x} page={:p} index_simba={index_simba} index_sibling={index_sibling} obsoleted, pushed left=[{},{}]@{mufasa_len} right=[{},{}]@{}",
+                    eprintln!("DIAG on_underflow_node KeySplit thread={:#x} page={:p} index_simba={index_simba} index_sibling={index_sibling} superseded, pushed left=[{},{}]@{mufasa_len} right=[{},{}]@{}",
                         diag_thread_hash(), mufasa_internal_page as *const _, left_interval.lower, left_interval.upper, right_interval.lower, right_interval.upper, mufasa_len + 1);
                 }
 
@@ -714,6 +698,9 @@ impl<const FAN_OUT: usize,
         let mufasa_children
             = mufasa_internal_page.children();
 
+        let live
+            = mufasa_internal_page.live_mask();
+
         let mut all_candidates = mufasa_children
             .iter()
             .enumerate()
@@ -721,7 +708,7 @@ impl<const FAN_OUT: usize,
             .zip(mufasa_internal_page.keys())
             .filter(|(((index, ..), ..), ..)|
                 *index != simba_index)
-            .filter(|((.., version), ..)| version.load(Relaxed).is_active())
+            .filter(|(((index, ..), ..), ..)| live[*index])
             .sorted_by_key(|(.., fence)| fence.lower())
             .map(|(((index, bro), ..), fence)|
                 (index, bro, fence))
@@ -824,20 +811,32 @@ impl<const FAN_OUT: usize,
                     let (keys, versions, pointers)
                         = simba.as_internal_page_ref().keys_versions_pointers();
 
+                    let simba_live
+                        = simba.as_internal_page_ref().live_mask();
+
                     let (c_keys, c_versions, c_pointers) = candidate_cell
                         .deref()
                         .as_internal_page_ref()
                         .keys_versions_pointers();
 
+                    let candidate_live = candidate_cell
+                        .deref()
+                        .as_internal_page_ref()
+                        .live_mask();
+
                     let shadow_copy = keys
                         .iter()
-                        .zip(versions.iter().map(|v| v.load(Relaxed)))
+                        .zip(versions.iter().copied())
                         .zip(pointers.iter())
-                        .filter(|((.., version), ..)| version.is_active())
+                        .enumerate()
+                        .filter(|(index, ..)| simba_live[*index])
+                        .map(|(_, rest)| rest)
                         .merge_by(c_keys.iter()
-                                      .zip(c_versions.iter().map(|v| v.load(Relaxed)))
+                                      .zip(c_versions.iter().copied())
                                       .zip(c_pointers.iter())
-                                      .filter(|((.., version), ..)| version.is_active()),
+                                      .enumerate()
+                                      .filter(|(index, ..)| candidate_live[*index])
+                                      .map(|(_, rest)| rest),
                                   |((.., v0), ..), ((.., v1), ..)| v0 <= v1)
                         .collect_vec();
 
@@ -985,19 +984,29 @@ impl<const FAN_OUT: usize,
                     let (c_keys, c_versions, c_children)
                         = candidate_internal_page.keys_versions_pointers();
 
+                    let candidate_live
+                        = candidate_internal_page.live_mask();
+
                     let (s_keys, s_version, s_children)
                         = simba.keys_versions_pointers();
 
+                    let simba_live
+                        = simba.as_internal_page_ref().live_mask();
+
                     let mut joined = c_keys
                         .iter()
-                        .zip(c_versions.iter().map(|v| v.load(Relaxed)))
+                        .zip(c_versions.iter().copied())
                         .zip(c_children.iter())
-                        .filter(|((.., v), ..)| v.is_active())
+                        .enumerate()
+                        .filter(|(index, ..)| candidate_live[*index])
+                        .map(|(_, rest)| rest)
                         .sorted_by_key(|((k, ..), ..)| k.lower)
                         .merge_by(s_keys.iter()
-                                      .zip(s_version.iter().map(|v| v.load(Relaxed)))
+                                      .zip(s_version.iter().copied())
                                       .zip(s_children.iter())
-                                      .filter(|((.., v), ..)| v.is_active())
+                                      .enumerate()
+                                      .filter(|(index, ..)| simba_live[*index])
+                                      .map(|(_, rest)| rest)
                                       .sorted_by_key(|((k, ..), ..)| k.lower),
                                   |((f, ..), ..), ((s, ..), ..)|
                                       f.lower < s.lower)
@@ -1138,11 +1147,16 @@ impl<const FAN_OUT: usize,
                     let (key_intervals, versions, pointers) = block
                         .keys_versions_pointers();
 
+                    let live
+                        = block.as_internal_page_ref().live_mask();
+
                     let mut filtered = key_intervals
                         .iter()
-                        .zip(versions.iter().map(|v| v.load(Relaxed)))
+                        .zip(versions.iter().copied())
                         .zip(pointers.iter())
-                        .filter(|((.., v), ..)| v.is_active())
+                        .enumerate()
+                        .filter(|(index, ..)| live[*index])
+                        .map(|(_, rest)| rest)
                         .sorted_by_key(|((i, ..), ..)| i.lower)
                         .collect_vec();
 
@@ -1229,11 +1243,16 @@ impl<const FAN_OUT: usize,
                     let (key_intervals, versions, pointers) = block
                         .keys_versions_pointers();
 
+                    let live
+                        = block.as_internal_page_ref().live_mask();
+
                     let active_entries = key_intervals
                         .iter()
-                        .zip(versions.iter().map(|v| v.load(Relaxed)))
+                        .zip(versions.iter().copied())
                         .zip(pointers.iter())
-                        .filter(|((.., v), ..)| v.is_active())
+                        .enumerate()
+                        .filter(|(index, ..)| live[*index])
+                        .map(|(_, rest)| rest)
                         .collect_vec();
 
                     if VERBOSE {

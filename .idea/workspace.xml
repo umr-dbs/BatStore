@@ -16,18 +16,15 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Fix issues GC related and stabilize SMO with racey stamps">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Fix GC block reuse in merges; Now correctly calculates the live number">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_bench/mem_stats.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/mem_stats.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_page_model/node.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/node.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/iter_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/iter_query.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/query.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/rand_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/rand_query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/smart_cell.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -83,23 +80,23 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.1704024431112832" />
-      <entry key="MS500" value="1.97504157686974" />
-      <entry key="S2" value="4.03749653241322" />
-      <entry key="S5" value="7.658739153392243" />
-      <entry key="S10" value="12.317443823506036" />
-      <entry key="S30" value="22.571062161788632" />
-      <entry key="S60" value="28.04737864514887" />
-      <entry key="M2" value="31.643998212467466" />
-      <entry key="M5" value="34.155510317713016" />
-      <entry key="M10" value="35.05972816276406" />
-      <entry key="M15" value="35.36910554499034" />
-      <entry key="M30" value="35.77202574429491" />
-      <entry key="H1" value="41.64196160403075" />
-      <entry key="H2" value="93.56722102493309" />
-      <entry key="H4" value="252.74397106123257" />
-      <entry key="D1" value="2277.6214192728266" />
-      <entry key="W1" value="9153.856050952478" />
+      <entry key="MS100" value="1.0290270183633061" />
+      <entry key="MS500" value="2.0908917715706554" />
+      <entry key="S2" value="6.289340960016443" />
+      <entry key="S5" value="12.64281194934346" />
+      <entry key="S10" value="20.710526211302977" />
+      <entry key="S30" value="38.185046685042984" />
+      <entry key="S60" value="48.222824933862114" />
+      <entry key="M2" value="55.1788466089974" />
+      <entry key="M5" value="60.21179995057022" />
+      <entry key="M10" value="62.0591736815459" />
+      <entry key="M15" value="62.69549750164741" />
+      <entry key="M30" value="63.43124599992157" />
+      <entry key="H1" value="69.4502633316878" />
+      <entry key="H2" value="121.37818778276333" />
+      <entry key="H4" value="280.50664275273846" />
+      <entry key="D1" value="2305.279039821819" />
+      <entry key="W1" value="9181.660226178668" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
@@ -107,37 +104,37 @@
       <entry key="S2" value="0.0" />
       <entry key="S5" value="0.0" />
       <entry key="S10" value="0.0" />
-      <entry key="S30" value="4.5487650112855604E-197" />
-      <entry key="S60" value="9.283339071568701E-99" />
-      <entry key="M2" value="1.3544952321548055E-49" />
-      <entry key="M5" value="4.7840237235942656E-20" />
-      <entry key="M10" value="4.5426738479503096E-10" />
-      <entry key="M15" value="1.1165734697731897E-6" />
-      <entry key="M30" value="0.0036348919895872493" />
-      <entry key="H1" value="0.303874987403703" />
-      <entry key="H2" value="4.642073539443241" />
-      <entry key="H4" value="25.27701674203768" />
-      <entry key="D1" value="267.82834690860363" />
-      <entry key="W1" value="991.5905398136726" />
+      <entry key="S30" value="2.956878384517411E-197" />
+      <entry key="S60" value="7.484696481587648E-99" />
+      <entry key="M2" value="1.2162209240850713E-49" />
+      <entry key="M5" value="4.5823401150091117E-20" />
+      <entry key="M10" value="4.445888378077163E-10" />
+      <entry key="M15" value="1.1006569239952968E-6" />
+      <entry key="M30" value="0.0036088916470933367" />
+      <entry key="H1" value="0.30278622971726804" />
+      <entry key="H2" value="4.633750003977442" />
+      <entry key="H4" value="25.254344918688663" />
+      <entry key="D1" value="267.7882945323149" />
+      <entry key="W1" value="991.5693545478563" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.45324175809489825" />
-      <entry key="MS500" value="1.7500495296460574" />
-      <entry key="S2" value="3.9739267823275184" />
-      <entry key="S5" value="7.631225429477956" />
-      <entry key="S10" value="12.302151106525804" />
-      <entry key="S30" value="22.564207648946955" />
-      <entry key="S60" value="28.043321232609465" />
-      <entry key="M2" value="31.641737655704546" />
-      <entry key="M5" value="34.15453714406616" />
-      <entry key="M10" value="35.0592287679304" />
-      <entry key="M15" value="35.36877077252896" />
-      <entry key="M30" value="35.77548430569507" />
-      <entry key="H1" value="41.94550253559919" />
-      <entry key="H2" value="98.20754439888559" />
-      <entry key="H4" value="278.01647707978594" />
-      <entry key="D1" value="2545.442066169775" />
-      <entry key="W1" value="10145.442629409177" />
+      <entry key="MS100" value="1.0080418137027494" />
+      <entry key="MS500" value="2.08288698282825" />
+      <entry key="S2" value="6.282768415590639" />
+      <entry key="S5" value="12.63441833276091" />
+      <entry key="S10" value="20.70049789702066" />
+      <entry key="S30" value="38.17726829083475" />
+      <entry key="S60" value="48.21762447986075" />
+      <entry key="M2" value="55.17577519208994" />
+      <entry key="M5" value="60.21043120450258" />
+      <entry key="M10" value="62.05846317381099" />
+      <entry key="M15" value="62.69501888879587" />
+      <entry key="M30" value="63.43460512492033" />
+      <entry key="H1" value="69.75267925554603" />
+      <entry key="H2" value="126.01017201133138" />
+      <entry key="H4" value="305.75647161356443" />
+      <entry key="D1" value="2573.059633929753" />
+      <entry key="W1" value="10173.225619230709" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -1391,15 +1388,7 @@
       <workItem from="1785144327202" duration="3722000" />
       <workItem from="1785224747779" duration="1101000" />
       <workItem from="1785225856019" duration="16198000" />
-      <workItem from="1785247073626" duration="4564000" />
-    </task>
-    <task id="LOCAL-00151" summary="Fixed log">
-      <option name="closed" value="true" />
-      <created>1769769120593</created>
-      <option name="number" value="00151" />
-      <option name="presentableId" value="LOCAL-00151" />
-      <option name="project" value="LOCAL" />
-      <updated>1769769120593</updated>
+      <workItem from="1785247073626" duration="6278000" />
     </task>
     <task id="LOCAL-00152" summary="Fixed log">
       <option name="closed" value="true" />
@@ -1785,7 +1774,15 @@
       <option name="project" value="LOCAL" />
       <updated>1785168920065</updated>
     </task>
-    <option name="localTasksCounter" value="200" />
+    <task id="LOCAL-00200" summary="Fix GC block reuse in merges; Now correctly calculates the live number">
+      <option name="closed" value="true" />
+      <created>1785253503610</created>
+      <option name="number" value="00200" />
+      <option name="presentableId" value="LOCAL-00200" />
+      <option name="project" value="LOCAL" />
+      <updated>1785253503611</updated>
+    </task>
+    <option name="localTasksCounter" value="201" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1806,7 +1803,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Readme" />
     <MESSAGE value="Updated overflow count, was set too eager. Its enough to trigger at &lt;= 1 slot left for keys, not &lt;= 3" />
     <MESSAGE value="Rust 2021 -&gt; Rust 2024. Moved page soft commits from Release to Relaxed semanstics, since they always follow by a Release store from the latch." />
     <MESSAGE value="Experimental: Compact meta cell version" />
@@ -1831,7 +1827,8 @@
     <MESSAGE value="GC prefers own shard access first, and only steals (RoundRobin) on-demand instead" />
     <MESSAGE value="Update benchmark scripts to include patches" />
     <MESSAGE value="Fix issues GC related and stabilize SMO with racey stamps" />
-    <option name="LAST_COMMIT_MESSAGE" value="Fix issues GC related and stabilize SMO with racey stamps" />
+    <MESSAGE value="Fix GC block reuse in merges; Now correctly calculates the live number" />
+    <option name="LAST_COMMIT_MESSAGE" value="Fix GC block reuse in merges; Now correctly calculates the live number" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
