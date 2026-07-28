@@ -5,7 +5,6 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use CCBPlusTree::locking::locking_strategy::LockingStrategy;
 use crate::mv_page_model::Attempts;
-use crate::mv_page_model::time_matcher::OBSOLETE_VERSION_MARK;
 use crate::mv_record_model::AtomicVersion;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::safe_cell::SafeCell;
@@ -17,11 +16,11 @@ const WRITE_PIN_FLAG_VERSION: LatchVersion = 0x6_000000000000000;
 const WRITE_PIN_OBSOLETE_FLAG_VERSION: LatchVersion = 0xE_000000000000000;
 
 /// Set once, permanently, the moment a cell stops being anyone's live child —
-/// i.e. exactly when its *parent's* corresponding entry is
-/// `mark_version_obsolete`'d (see `TrackerHandleSt::register_died_page`/
-/// `register_died_page_col`, called from the same `on_overflow_node`/
-/// `on_underflow_node`/`split_root`/`merge_root` sites that do the
-/// obsoleting). Closes a gap the version-CAS alone can't: a `Reader` that
+/// i.e. exactly when its *parent's* corresponding slot is superseded by a
+/// fresh entry during the same split/merge (see `TrackerHandleSt::
+/// register_died_page`/`register_died_page_col`, called from the same
+/// `on_overflow_node`/`on_underflow_node`/`split_root`/`merge_root` sites
+/// that supersede it). Closes a gap the version-CAS alone can't: a `Reader` that
 /// obtained this cell as a *child pointer* before it was retired keeps
 /// re-validating cleanly forever afterward — nothing ever mutates a retired
 /// cell's content again, so a before/after `cell_version` comparison
@@ -431,9 +430,9 @@ impl<E: Default + 'static> SmartGuard<E> {
     /// version — a mismatch means some writer acquired and released this
     /// cell's write lock in between, entirely unbeknownst to whoever is
     /// still holding this stale `Reader`. Used to check whether `simba`
-    /// (read once for `split()`/`merge()`, then unconditionally retired via
-    /// `mark_version_obsolete` with no re-validation at all) ever actually
-    /// changes out from under a split in practice, not just in theory.
+    /// (read once for `split()`/`merge()`, then unconditionally retired with
+    /// no re-validation at all) ever actually changes out from under a split
+    /// in practice, not just in theory.
     /// Always `false` for a `Writer` (nothing else could have touched it).
     #[inline(always)]
     pub fn changed_since_snapshot(&self) -> bool {

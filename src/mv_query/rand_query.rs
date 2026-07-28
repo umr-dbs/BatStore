@@ -1,13 +1,11 @@
 use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::Deref;
-use std::sync::atomic::Ordering::Acquire;
 
 use crate::mv_block::block::BlockGuard;
 use crate::mv_page_model::Attempts;
 use crate::mv_page_model::internal_page::Fence;
 use crate::mv_page_model::node::PageType;
-use crate::mv_page_model::time_matcher::TimeMatcher;
 use crate::mv_test;
 use crate::mv_test::{LOG_REORG, VERBOSE};
 use crate::mv_tree::mvbt::MVBTSt;
@@ -67,37 +65,39 @@ impl<const FAN_OUT: usize,
             let curr_guard_result
                 = curr_guard.deref();
 
-            let curr_page_ref
-                = curr_guard_result;
-
-            let (live_n, _dead_n)
-                = curr_page_ref.active_dead_count();
-
-            let mut index
-                = if live_n == 0 { 0 } else { rand::random_range(0..live_n as usize) };
-
-            if VERBOSE {
-                println!("traversal_write_internal_olc: Loop: {traversal_loops}, attempts {attempts}, live_index: {index}");
-                traversal_loops += 1;
-            }
-
             match curr_guard_result.as_page_ref() {
                 PageType::IndexRef(internal_page) => {
-                    for (k, version) in internal_page.versions().iter().enumerate() {
-                        if version.load(Acquire).is_active() {
-                            if index == 0 {
-                                index = k;
-                                break
-                            }
-                            index -= 1;
-                        }
+                    let sum_len
+                        = internal_page.sum_len();
+
+                    let raw_index
+                        = if sum_len == 0 { 0 } else { rand::random_range(0..sum_len) };
+
+                    // Picks a uniformly random *slot* (live or not), then
+                    // resolves it to whichever slot currently owns that
+                    // slot's own key — mimics the old per-slot `is_active()`
+                    // filter without needing a flag at all: the highest-
+                    // index slot whose interval contains a given key is
+                    // always the live one (see `InternalPage::live_mask`'s
+                    // doc for why). A slot that's since been split into
+                    // several still-live descendants is proportionally more
+                    // likely to be reached this way than a slot that hasn't
+                    // — unlike the old "uniform over currently-live slots"
+                    // sampling — which is fine for this random stress walk.
+                    let probe_key
+                        = internal_page.get_key(raw_index).lower;
+
+                    let index = internal_page.keys()
+                        .iter()
+                        .enumerate()
+                        .rfind(|(_, range)| range.contains(probe_key))
+                        .map(|(pos, ..)| pos)
+                        .unwrap();
+
+                    if VERBOSE {
+                        println!("traversal_write_internal_olc: Loop: {traversal_loops}, attempts {attempts}, live_index: {index}");
+                        traversal_loops += 1;
                     }
-                    // if index >= 127 {
-                    //     return self.traversal_write_internal_rand(attempts);
-                    // }
-                    assert!(index < _dead_n as usize + live_n as usize);
-                    assert!(!internal_page.get_version(index).is_obsolete(),
-                            "Accessed obsolete version!");
 
                     curr_fence = internal_page.get_key(index).clone();
                     let next_curr_block = internal_page

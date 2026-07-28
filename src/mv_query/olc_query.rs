@@ -2,13 +2,11 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::mem;
 use std::ops::Deref;
-use std::sync::atomic::Ordering::Acquire;
 
 use crate::mv_block::block::BlockGuard;
 use crate::mv_page_model::{Attempts, BlockRef};
 
 use crate::mv_page_model::node::PageType;
-use crate::mv_page_model::time_matcher::TimeMatcher;
 use crate::mv_test;
 use crate::mv_test::{LOG_REORG, VERBOSE};
 use crate::mv_tree::mvbt::MVBTSt;
@@ -186,11 +184,12 @@ impl<const FAN_OUT: usize,
                     // block as `mufasa` for one of its *other* children.
                     // Bracket the read with a lock-free/unchanged check so a
                     // torn read (this project confirmed one in practice: a
-                    // `keys_versions()` slice observed with a different
-                    // `is_active()` value microseconds apart, on the exact
-                    // same memory) forces a retry instead of silently
-                    // computing a wrong `index` and confidently descending
-                    // into it. Skipped when `curr_guard` is already *our
+                    // `keys_versions()` slice observed with different content
+                    // microseconds apart, on the exact same memory, while
+                    // this same page was mid-SMO on another thread) forces a
+                    // retry instead of silently computing a wrong `index` and
+                    // confidently descending into it. Skipped when
+                    // `curr_guard` is already *our
                     // own* `Writer` from earlier in this traversal — that
                     // exclusion already makes its content stable.
                     //
@@ -215,15 +214,22 @@ impl<const FAN_OUT: usize,
                         None => return Err(attempts + 1),
                     };
 
-                    let (keys_page, versions_page) = internal_page
-                        .keys_versions();
+                    let keys_page = internal_page
+                        .keys();
 
+                    // No liveness check needed here: appends within a page
+                    // are strictly index-ordered by recency, and a split/
+                    // merge's new entries always exactly re-cover the old
+                    // entry's key-interval they supersede — so the
+                    // *highest*-index entry whose interval contains `key` is
+                    // always the live one, whether or not anything has
+                    // superseded a lower-index entry that also happens to
+                    // contain `key`. See `InternalPage::live_mask`'s doc for
+                    // the general form of this argument.
                     let index = keys_page
                         .iter()
                         .enumerate()
-                        .rfind(|(pos, range)|
-                            versions_page.get_unchecked(*pos).load(Acquire).is_active() &&
-                                range.contains(key))
+                        .rfind(|(_, range)| range.contains(key))
                         .map(|(pos, ..)| pos);
 
                     if let None = index {

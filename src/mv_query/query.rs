@@ -15,7 +15,6 @@ use std::collections::VecDeque;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::Deref;
-use std::sync::atomic::Ordering::Acquire;
 
 impl<const FAN_OUT: usize,
     const NUM_RECORDS: usize,
@@ -75,20 +74,25 @@ impl<const FAN_OUT: usize,
     /// new content — see `MVBTSt::split`/`merge` — never mutates an existing
     /// child's own records in place), so simply holding a `BlockRef` to a
     /// child is not, by itself, the problem. The actual race used to be one
-    /// level up, in the *parent*: `InternalPage::mark_version_obsolete`
-    /// flags a superseded child in place, and this loop's version check
-    /// below reads that exact flag. Both sides now pair `Release`/`Acquire`
-    /// (see `mark_version_obsolete`'s doc) — previously both were `Relaxed`,
-    /// so a reader on another core could observe a child as still-active
-    /// for an unbounded time after it had already been marked obsolete (and,
-    /// under GC, after the block behind it had already been reclaimed and
-    /// reset for something else) — silent without GC, loud with it. This was
-    /// confirmed as the actual mechanism behind the crash this investigation
-    /// started from: a reader whose own registered snapshot was *newer*
-    /// than the block's death version (so it never legitimately needed the
-    /// block at all, by MVCC visibility rules) still ended up dereferencing
-    /// it, because the staleness was about memory visibility, not snapshot
-    /// age.
+    /// level up, in the *parent*: `InternalPage::mark_version_obsolete` used
+    /// to flag a superseded child in place — an in-place mutation of a slot
+    /// this loop's version check below also reads with no lock at all — and
+    /// getting that flag's `Release`/`Acquire` pairing wrong (it used to be
+    /// bare `Relaxed` on both sides) let a reader on another core observe a
+    /// child as still-active for an unbounded time after it had already been
+    /// superseded (and, under GC, after the block behind it had already been
+    /// reclaimed and reset for something else) — silent without GC, loud
+    /// with it. This was confirmed as the actual mechanism behind the crash
+    /// this investigation started from: a reader whose own registered
+    /// snapshot was *newer* than the block's death version (so it never
+    /// legitimately needed the block at all, by MVCC visibility rules) still
+    /// ended up dereferencing it, because the staleness was about memory
+    /// visibility, not snapshot age. `mark_version_obsolete` is gone now
+    /// (see `InternalPage::live_mask`'s doc): liveness no longer needs a
+    /// per-slot flag at all, so there's no longer a write to race against —
+    /// this loop's `matched(lookup_version)` check below only ever reads a
+    /// slot's birth version, written once before publication and never
+    /// touched again.
     ///
     /// The `'restart` loop below is kept as defense in depth, not as the
     /// primary fix: it mirrors the identical "no matching child -> restart
@@ -132,7 +136,7 @@ impl<const FAN_OUT: usize,
                     .zip(keys_page)
                     .enumerate()
                     .rfind(|(_, (v, range))|
-                        v.load(Acquire).matched(lookup_version) && range.contains(key))
+                        v.matched(lookup_version) && range.contains(key))
                     .map(|(pos, _)| internal_page.get_pointer(pos).borrow_read())
                 {
                     Some(c) => c,
@@ -171,7 +175,7 @@ impl<const FAN_OUT: usize,
                         .keys_versions();
 
                     let start_pos_si = versions_page.len() -
-                        versions_page.binary_search_by(|v| v.load(Acquire).into_cmp().cmp(&lookup_version))
+                        versions_page.binary_search_by(|v| v.into_cmp().cmp(&lookup_version))
                             .unwrap_or_else(|pos| pos);
 
                     versions_page
@@ -181,7 +185,7 @@ impl<const FAN_OUT: usize,
                         .rev()
                         .skip(start_pos_si)
                         .filter(|((.., v), range)| //v.matched(lookup_version) &&
-                            v.load(Acquire).matched(lookup_version) && lookup_range.overlap(range))
+                            v.matched(lookup_version) && lookup_range.overlap(range))
                         .unique_by(|(.., range)| range.lower())
                         .unique_by(|(.., range)| range.upper())
                         .for_each(|((pos, ..), ..)|

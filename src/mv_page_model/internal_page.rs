@@ -1,9 +1,8 @@
 use crate::mv_block::block::Block;
 use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::node::{Active, Dead, PageLenField, PageLenPrimitive, active_len, dead_len, from_active_dead, from_len, from_len_sum};
-use crate::mv_page_model::time_matcher::OBSOLETE_VERSION_MARK;
 use crate::mv_query::interval::Interval;
-use crate::mv_record_model::version_info::{AtomicVersion, Version};
+use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::smart_cell::{OptCell, SmartCell};
 use std::fmt::Display;
 use std::hash::Hash;
@@ -25,16 +24,19 @@ pub struct InternalPage<
 > {
     pub(crate) len: PageLenField,
     key_interval_region: [MaybeUninit<Interval<Key>>; FAN_OUT],
-    // `AtomicVersion`, not plain `Version`: `mark_version_obsolete` mutates
-    // an *already-published* slot in place (OR-ing in `OBSOLETE_VERSION_MARK`
-    // after a split/merge supersedes it) while concurrent OLC readers
-    // (`keys_versions`/`versions`/`get_version`) may be reading that exact
-    // slot with no lock at all — the same in-place-mutation-of-a-visible-
-    // value hazard `VersionInfo`'s own doc describes, confirmed here too via
-    // ThreadSanitizer: `InternalPage::mark_version_obsolete`'s plain
-    // `ptr.write()` racing a concurrent `RangeQueryIter::next`'s plain read
-    // of the same slot, both non-atomic on the same word.
-    version_region: [MaybeUninit<AtomicVersion>; FAN_OUT],
+    // Plain `Version`, not `AtomicVersion`: a slot is written exactly once,
+    // by `push_uncommitted`/`bulk_push*`, strictly before the `len` bump
+    // that publishes it (see this struct's own doc on `pointer_region`) —
+    // nothing ever mutates it again afterward. There used to be a second
+    // writer (`mark_version_obsolete`, OR-ing an "obsolete" bit into an
+    // already-published slot for a concurrent OLC reader to observe) which
+    // needed `AtomicVersion` to avoid racing that in-place mutation against
+    // a lock-free reader; it's gone now — see `InternalPage::live_mask`'s
+    // doc for why liveness no longer needs a per-slot flag at all — so this
+    // rides the exact same `len`-Acquire/Release happens-before edge
+    // `pointer_region` already relies on, no atomicity needed on the slot
+    // itself.
+    version_region: [MaybeUninit<Version>; FAN_OUT],
     // A slot holds either `null` (never written this "life" of the page) or
     // a genuinely raw pointer to a `Block`'s `OptCell`, wrapped in the same
     // `BlockRef`/`SmartCell` every other alias of that block uses — not an
@@ -92,7 +94,7 @@ impl<const FAN_OUT: usize,
                     new_page.version_region
                         .as_mut_ptr()
                         .add(index)
-                        .write(MaybeUninit::new(AtomicVersion::new(version.load(Relaxed))));
+                        .write(MaybeUninit::new(*version));
                 }
 
                 // Fresh page, never-written slot: no concurrent reader of
@@ -124,7 +126,7 @@ impl<const FAN_OUT: usize,
             // Each slot is only ever read after `push_uncommitted`/
             // `bulk_push*` wrote it (gated by `sum_len()`'s `Acquire` load —
             // see this struct's own doc), so a genuinely uninitialized
-            // `MaybeUninit<AtomicVersion>` here is never observed as-is.
+            // `MaybeUninit<Version>` here is never observed as-is.
             pointer_region: [SmartCell(ptr::null()); FAN_OUT],
             _marker: PhantomData,
         }
@@ -154,7 +156,7 @@ impl<const FAN_OUT: usize,
             self.version_region
                 .as_mut_ptr()
                 .add(index)
-                .write(MaybeUninit::new(AtomicVersion::new(version)));
+                .write(MaybeUninit::new(version));
         }
 
         // Fresh slot (never written this "life" of the page): there's no
@@ -240,9 +242,9 @@ impl<const FAN_OUT: usize,
                         .write(key.clone());
 
                     (self.version_region
-                        .as_ptr() as *mut AtomicVersion)
+                        .as_ptr() as *mut Version)
                         .add(index + len)
-                        .write(AtomicVersion::new(version));
+                        .write(version);
                 }
 
                 unsafe {
@@ -284,7 +286,7 @@ impl<const FAN_OUT: usize,
                     self.version_region
                         .as_mut_ptr()
                         .add(index + len)
-                        .write(MaybeUninit::new(AtomicVersion::new(*version)));
+                        .write(MaybeUninit::new(*version));
                 }
 
                 unsafe {
@@ -326,7 +328,7 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline(always)]
-    pub fn keys_versions(&self) -> (&[Interval<Key>], &[AtomicVersion]) {
+    pub fn keys_versions(&self) -> (&[Interval<Key>], &[Version]) {
         let len
             = self.sum_len();
 
@@ -342,7 +344,7 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline(always)]
-    pub fn keys_versions_pointers(&self) -> (&[Interval<Key>], &[AtomicVersion], &[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>]) {
+    pub fn keys_versions_pointers(&self) -> (&[Interval<Key>], &[Version], &[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>]) {
         let len
             = self.sum_len();
 
@@ -364,13 +366,48 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline(always)]
-    pub fn versions(&self) -> &[AtomicVersion] {
+    pub fn versions(&self) -> &[Version] {
         unsafe { std::slice::from_raw_parts(self.version_region.as_ptr() as _, self.sum_len()) }
     }
 
     #[inline(always)]
     pub fn get_version(&self, index: usize) -> Version {
-        unsafe { (*(self.version_region.as_ptr().add(index) as *const AtomicVersion)).load(Acquire) }
+        unsafe { *(self.version_region.as_ptr().add(index) as *const Version) }
+    }
+
+    /// Which of this page's own slots are still live, computed with no
+    /// per-slot flag at all — just this page's own key-intervals.
+    ///
+    /// Live sibling entries within one page are always pairwise disjoint
+    /// (children partition their parent's key range), and a slot, once
+    /// superseded, stays superseded forever (append-only, no
+    /// "un-obsoleting"). So slot `i` is dead **iff** some later slot `j > i`
+    /// overlaps it at all: two entries that were *simultaneously* live could
+    /// never overlap, so a later overlapping entry can only be a descendant
+    /// that (directly, or via its own further descendants) superseded `i`.
+    /// This holds even for a split, where *no single* later child covers the
+    /// old entry's full interval on its own (e.g. `i=[0,10)` replaced by
+    /// `left=[0,5)`/`right=[5,10)`) — each still individually overlaps `i`,
+    /// which is exactly what plain `Interval::overlap` (not `covers`) is
+    /// for, so no separate interval-subtraction bookkeeping is needed.
+    ///
+    /// This is what let `mark_version_obsolete` — an in-place mutation of an
+    /// already-published, concurrently-read slot, the actual ThreadSanitizer-
+    /// confirmed race this replaced — be deleted rather than merely
+    /// re-ordered: once nothing reads a per-slot obsolete flag either, there
+    /// is no longer any writer *or* reader of that word after publication,
+    /// so the race doesn't just get fenced correctly, it stops being
+    /// possible.
+    ///
+    /// `O(FAN_OUT²)` worst case, all plain integer comparisons — this only
+    /// ever runs on the split/merge (SMO) cold path, never routing, so the
+    /// complexity trade against the removed per-slot atomic is a clear win.
+    #[inline]
+    pub fn live_mask(&self) -> Vec<bool> {
+        let keys = self.keys();
+        (0..keys.len())
+            .map(|i| !keys[i + 1..].iter().any(|later| later.overlap(&keys[i])))
+            .collect()
     }
 
     #[inline(always)]
@@ -402,37 +439,4 @@ impl<const FAN_OUT: usize,
         // cell
     }
 
-    /// `&self`, not `&mut self`: the caller always already holds this page's
-    /// own exclusive write lock (so no lost-update risk from the plain
-    /// load-then-store below), but the store itself must stay atomic so a
-    /// concurrent *reader* (OLC traversal takes no lock at all) can't
-    /// observe a torn value — see `version_region`'s own doc.
-    ///
-    /// `Release`, paired with every lock-free reader's `Acquire` load of this
-    /// same slot (`keys_versions`/`versions`/`get_version` and every
-    /// `.load(Acquire)` call site over their result): a bare `Relaxed`
-    /// fetch_or here (as this used to be) gave no happens-before edge at
-    /// all between this mark and a concurrent reader's own observation of
-    /// it, so a reader could see this child as still-active for an
-    /// unbounded time after this call returned. `register_dead` (which
-    /// makes the superseded block eligible for GC reclaim once every *live*
-    /// snapshot has moved past its death version — see that fn's doc) is
-    /// always called strictly after this in program order on this same
-    /// thread; without this `Release`, that ordering was invisible to other
-    /// threads, letting a reader that should have observed "obsolete" here
-    /// instead descend into a block GC had already handed out for reuse.
-    /// Confirmed as the mechanism behind a real crash: a reader whose own
-    /// registered snapshot was *newer* than the block's death version (so,
-    /// by MVCC visibility rules, it never legitimately needed this block at
-    /// all) still ended up dereferencing it, because the staleness here is
-    /// about memory visibility, not snapshot age.
-    #[inline(always)]
-    pub fn mark_version_obsolete(&self, index: usize) {
-        unsafe {
-            let slot
-                = &*(self.version_region.as_ptr().add(index) as *const AtomicVersion);
-
-            slot.fetch_or(OBSOLETE_VERSION_MARK, Release);
-        }
-    }
 }
