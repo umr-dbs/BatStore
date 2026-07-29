@@ -387,9 +387,9 @@ pub(crate) fn main_test(parms: Vec<String>) {
         (0..1_00).for_each(|o| {
             match tree.dispatch_crud(CRUDOperation::Point(*k, *v + o)) {
                 CRUDOperationResult::MatchedRecords(r) =>
-                    if r.len() == 1 && r[0].payload <= *v + o {} else {
+                    if r.len() == 1 && *r[0].payload <= *v + o {} else {
                         println!("Found Version = {}\nQuery Version = {}",
-                                 r[0].payload,
+                                 *r[0].payload,
                                  *v + o);
                     }
                 _ => panic!()
@@ -1357,9 +1357,6 @@ mod iter_query_tests;
 #[cfg(test)]
 #[path = "../../tests/leaf_page_abort_tests.rs"]
 mod leaf_page_abort_tests;
-#[cfg(test)]
-#[path = "../../tests/gc_query_tracer_tests.rs"]
-mod gc_query_tracer_tests;
 #[cfg(test)]
 #[path = "../../tests/sync_commit_log_tests.rs"]
 mod sync_commit_log_tests;

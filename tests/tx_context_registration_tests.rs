@@ -47,6 +47,18 @@ use super::*;
 /// That's a test-structure bug, not a soundness one: real callers (a fixed
 /// benchmark worker pool) never rotate threads per transaction the way that
 /// pattern did.
+///
+/// The reader thread — not the main/observer thread — calls `end_snapshot`
+/// for its own registration (via the `proceed` handshake below): `live_tx`'s
+/// per-worker-slot design resolves *which* slot `on_tx_completed` touches
+/// from the calling thread's own `WorkerId`, exactly like `on_tx_start`
+/// already did — so, like every real caller (`DbTransaction`, `traversal_
+/// write_olc`), begin and end must happen on the same thread. An earlier
+/// version of this test had the main thread call `ctx.end_snapshot(v)`
+/// directly, which — having never registered a `WorkerId` against this
+/// `TxContext` itself — tried to acquire a second one against `max_workers
+/// == 1` and panicked; not a soundness bug, just this test doing something
+/// no real caller does.
 #[test]
 fn in_flight_registration_is_immediately_visible_to_live_min_snapshot() {
     let ctx = TxContext::new(1);
@@ -54,15 +66,17 @@ fn in_flight_registration_is_immediately_visible_to_live_min_snapshot() {
 
     let registering = AtomicBool::new(false);
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<Version>();
+    let (registered_tx, registered_rx) = std::sync::mpsc::channel::<Version>();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel::<()>();
 
     std::thread::scope(|scope| {
         let ctx_ref = &ctx;
         let registering_ref = &registering;
-        // `move`: `go_rx`/`done_tx` (single-consumer channel ends, only ever
-        // used by this thread) are owned by the closure; `ctx_ref`/
-        // `registering_ref` are `&_` (Copy), so moving *them* just copies
-        // the reference, leaving the outer bindings usable below.
+        // `move`: `go_rx`/`registered_tx`/`proceed_rx` (single-consumer/
+        // producer channel ends, only ever used by this thread) are owned by
+        // the closure; `ctx_ref`/`registering_ref` are `&_` (Copy), so moving
+        // *them* just copies the reference, leaving the outer bindings usable
+        // below.
         let reader = scope.spawn(move || {
             for _ in go_rx.iter() {
                 let v = ctx_ref.draw_snapshot_version_with(|ts_start| {
@@ -70,7 +84,9 @@ fn in_flight_registration_is_immediately_visible_to_live_min_snapshot() {
                     ctx_ref.on_tx_start(ts_start);
                     ts_start
                 });
-                done_tx.send(v).unwrap();
+                registered_tx.send(v).unwrap();
+                proceed_rx.recv().unwrap();
+                ctx_ref.end_snapshot(v);
             }
         });
 
@@ -82,7 +98,7 @@ fn in_flight_registration_is_immediately_visible_to_live_min_snapshot() {
                 std::thread::yield_now();
             }
             let min = ctx.live_min_snapshot();
-            let v = done_rx.recv().unwrap();
+            let v = registered_rx.recv().unwrap();
 
             assert!(
                 matches!(min, Some(m) if m <= v),
@@ -90,10 +106,67 @@ fn in_flight_registration_is_immediately_visible_to_live_min_snapshot() {
                  whose registration was already under way"
             );
 
-            ctx.end_snapshot(v);
+            proceed_tx.send(()).unwrap();
         }
 
         drop(go_tx);
         reader.join().unwrap();
     });
+}
+
+/// `live_tx`'s replacement for the old `mv_gc::query_tracer::TransactionTrace`
+/// (a shared, contended `SkipMap`) is one slot per worker: a plain start/end
+/// pair must publish while live and clear once completed.
+#[test]
+fn on_tx_start_then_completed_leaves_no_live_registration() {
+    let ctx = TxContext::new(1);
+    ctx.block_reclaim_enabled.store(true, Relaxed);
+
+    assert_eq!(ctx.live_min_snapshot(), None);
+    let ts = ctx.draw_snapshot_version_with(|ts_start| {
+        ctx.on_tx_start(ts_start);
+        ts_start
+    });
+    assert_eq!(ctx.live_min_snapshot(), Some(ts));
+
+    ctx.end_snapshot(ts);
+    assert_eq!(ctx.live_min_snapshot(), None);
+}
+
+/// `mv_query::olc_query::traversal_write_olc` registers its own throwaway
+/// snapshot on every insert/update/delete traversal, nested inside an
+/// already-registered `DbTransaction`'s own live one — deliberately, per
+/// that function's doc. The per-worker slot must keep publishing the
+/// *outer* registration throughout, not get clobbered by the nested one,
+/// and must not clear early when only the inner one completes.
+#[test]
+fn nested_registration_on_the_same_worker_keeps_the_outer_one_published() {
+    let ctx = TxContext::new(1);
+    ctx.block_reclaim_enabled.store(true, Relaxed);
+
+    let outer = ctx.draw_snapshot_version_with(|ts_start| {
+        ctx.on_tx_start(ts_start);
+        ts_start
+    });
+    assert_eq!(ctx.live_min_snapshot(), Some(outer));
+
+    let inner = ctx.draw_snapshot_version_with(|ts_start| {
+        ctx.on_tx_start(ts_start);
+        ts_start
+    });
+    assert!(inner > outer, "the global clock is monotonic, so the nested draw must be strictly newer");
+    assert_eq!(
+        ctx.live_min_snapshot(), Some(outer),
+        "the outer (still-running) transaction's snapshot must stay published, \
+         not get overwritten by the nested traversal's throwaway one"
+    );
+
+    ctx.end_snapshot(inner);
+    assert_eq!(
+        ctx.live_min_snapshot(), Some(outer),
+        "completing the nested registration must not clear the still-live outer one"
+    );
+
+    ctx.end_snapshot(outer);
+    assert_eq!(ctx.live_min_snapshot(), None);
 }

@@ -35,11 +35,13 @@ impl<const FAN_OUT: usize,
     /// `dispatch.rs`, covers all of them for free and scopes the
     /// registration tightly to just the traversal, not the write that
     /// follows it. Nesting inside an already-registered `DbTransaction` is
-    /// fine — concurrent registrations for the same value are explicitly
-    /// designed to stack (`TransactionTrace`'s doc). A no-op with zero
-    /// overhead when block reclaim (GC) is disabled — the default here —
-    /// since `TxContext::on_tx_start`/`on_tx_completed` short-circuit on
-    /// that flag.
+    /// fine — deliberately so, see `TxContext::live_tx`'s doc: nested
+    /// `begin_snapshot`/`end_snapshot` pairs for the same worker are cheap
+    /// (a reentrancy-depth bump, no shared state touched) and correctly
+    /// leave the outer registration's protection in place throughout. A
+    /// no-op with zero overhead when block reclaim (GC) is disabled — the
+    /// default here — since `TxContext::on_tx_start`/`on_tx_completed`
+    /// short-circuit on that flag.
     #[inline]
     pub(crate) fn traversal_write_olc(&self, key: Key) -> BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let ts_start = self.begin_snapshot();

@@ -146,7 +146,7 @@ impl<'a,
                         .iter_mut()
                         .rfind(|r| r.key() == key)
                     {
-                        *record.payload_mut() = payload;
+                        record.set_payload(payload);
                         if record.version.is_deleted() {
                             record.version_mut().undelete();
 
@@ -357,7 +357,7 @@ impl<'a,
                         .rfind(|r| r.key() == key)
                     {
                         record.version_mut().undelete();
-                        *record.payload_mut() = payload;
+                        record.set_payload(payload);
                         leaf_page.commit_delta(1, -1);
 
                         return CRUDOperationResult::UpdatedRand(key, self.current_version())

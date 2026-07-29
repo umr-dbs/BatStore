@@ -16,10 +16,22 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Remove version_region atomic need; Changed SMO Liveness, now only checks overlap without actual need to obsolete mark">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Update script tpcc">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/compare_engines.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/compare_engines.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_txn.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_txn.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_gc/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_gc/query_tracer.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_record_model/record_point.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_record_model/record_point.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_test/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/gc_query_tracer_tests.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/iter_query_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/iter_query_tests.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/tree_wal_consistency_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/tree_wal_consistency_tests.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/tx_context_registration_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/tx_context_registration_tests.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/wal_integration_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/wal_integration_tests.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -30,7 +42,7 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="14679" />
+    <option name="cachedIndexableFilesCount" value="14681" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
@@ -74,61 +86,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.3064573330888543" />
-      <entry key="MS500" value="3.556042612878826" />
-      <entry key="S2" value="9.085130748206275" />
-      <entry key="S5" value="13.73031982713223" />
-      <entry key="S10" value="16.87119060547422" />
-      <entry key="S30" value="19.98472536349825" />
-      <entry key="S60" value="21.24113471390968" />
-      <entry key="M2" value="24.628344114033084" />
-      <entry key="M5" value="34.934901470640916" />
-      <entry key="M10" value="43.04022977311894" />
-      <entry key="M15" value="46.793891483548265" />
-      <entry key="M30" value="53.443767589042025" />
-      <entry key="H1" value="67.06702854481057" />
-      <entry key="H2" value="108.52749880211496" />
-      <entry key="H4" value="242.17791484964835" />
-      <entry key="D1" value="2210.2293807632136" />
-      <entry key="W1" value="9149.251132647049" />
+      <entry key="MS100" value="0.0" />
+      <entry key="MS500" value="3.47868103122212E-215" />
+      <entry key="S2" value="2.428586923462849E-54" />
+      <entry key="S5" value="3.5821309733926123E-22" />
+      <entry key="S10" value="1.892651836285301E-11" />
+      <entry key="S30" value="2.6652869020588586E-4" />
+      <entry key="S60" value="0.016639162256008356" />
+      <entry key="M2" value="0.15848239925691027" />
+      <entry key="M5" value="0.9190679498254559" />
+      <entry key="M10" value="1.8631998780547452" />
+      <entry key="M15" value="2.4104434260679577" />
+      <entry key="M30" value="4.162916143511884" />
+      <entry key="H1" value="13.115110415696321" />
+      <entry key="H2" value="44.83585838037253" />
+      <entry key="H4" value="151.77561839439682" />
+      <entry key="D1" value="2035.4840714932664" />
+      <entry key="W1" value="9046.467334422336" />
     </decayedCancelled>
     <decayedSelected>
-      <entry key="MS100" value="0.0" />
-      <entry key="MS500" value="0.0" />
-      <entry key="S2" value="0.0" />
-      <entry key="S5" value="0.0" />
-      <entry key="S10" value="0.0" />
-      <entry key="S30" value="5.9346500989280915E-282" />
-      <entry key="S60" value="3.3531657503584355E-141" />
-      <entry key="M2" value="8.140533817988113E-71" />
-      <entry key="M5" value="1.5536152884404224E-28" />
-      <entry key="M10" value="2.5887292901951934E-14" />
-      <entry key="M15" value="1.6534993372763408E-9" />
-      <entry key="M30" value="1.3987814705863945E-4" />
-      <entry key="H1" value="0.05961068795827897" />
-      <entry key="H2" value="2.0560165504712637" />
-      <entry key="H4" value="16.82221236050458" />
-      <entry key="D1" value="250.2549961553113" />
-      <entry key="W1" value="982.0233948868022" />
+      <entry key="MS100" value="1.0000333951935199" />
+      <entry key="MS500" value="1.1272731499705775" />
+      <entry key="S2" value="1.5972885621117063" />
+      <entry key="S5" value="1.813717543382913" />
+      <entry key="S10" value="1.9020629375952174" />
+      <entry key="S30" value="1.9662265163542014" />
+      <entry key="S60" value="1.9830757618454409" />
+      <entry key="M2" value="2.0018181824587833" />
+      <entry key="M5" value="2.1573836479923636" />
+      <entry key="M10" value="2.3992991510989317" />
+      <entry key="M15" value="2.54265741138249" />
+      <entry key="M30" value="2.736858951398161" />
+      <entry key="H1" value="2.8657423254534726" />
+      <entry key="H2" value="3.645612902066309" />
+      <entry key="H4" value="12.911057574545469" />
+      <entry key="D1" value="232.27132300300383" />
+      <entry key="W1" value="972.8171371478643" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="1.1410578696113371" />
-      <entry key="MS500" value="3.4639048347382366" />
-      <entry key="S2" value="9.028007443636328" />
-      <entry key="S5" value="13.694440669965914" />
-      <entry key="S10" value="16.84847063870595" />
-      <entry key="S30" value="19.97550979670861" />
-      <entry key="S60" value="21.236257015423828" />
-      <entry key="M2" value="24.625781635821866" />
-      <entry key="M5" value="34.93378382491339" />
-      <entry key="M10" value="43.03963779039138" />
-      <entry key="M15" value="46.79348634731688" />
-      <entry key="M30" value="53.4436898972077" />
-      <entry key="H1" value="67.12646079649413" />
-      <entry key="H2" value="110.5826786833613" />
-      <entry key="H4" value="258.99709231034547" />
-      <entry key="D1" value="2460.4771762099263" />
-      <entry key="W1" value="10131.270603537547" />
+      <entry key="MS100" value="4.4011931554671847E-4" />
+      <entry key="MS500" value="0.24856134435748284" />
+      <entry key="S2" value="1.1132479343827621" />
+      <entry key="S5" value="1.5727663253691415" />
+      <entry key="S10" value="1.7717837663113791" />
+      <entry key="S30" value="1.9206702979084471" />
+      <entry key="S60" value="1.976416346943253" />
+      <entry key="M2" value="2.1482300496666373" />
+      <entry key="M5" value="3.070775644609102" />
+      <entry key="M10" value="4.259117094371502" />
+      <entry key="M15" value="4.950640148074226" />
+      <entry key="M30" value="6.898389074713389" />
+      <entry key="H1" value="15.980062738200568" />
+      <entry key="H2" value="48.48075600010445" />
+      <entry key="H4" value="164.68465470168286" />
+      <entry key="D1" value="2267.7487567802623" />
+      <entry key="W1" value="10019.280590461984" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -1382,15 +1394,8 @@
       <workItem from="1785144327202" duration="3722000" />
       <workItem from="1785224747779" duration="1101000" />
       <workItem from="1785225856019" duration="16198000" />
-      <workItem from="1785247073626" duration="9234000" />
-    </task>
-    <task id="LOCAL-00153" summary="Enabled GC setting for loader.">
-      <option name="closed" value="true" />
-      <created>1770025300952</created>
-      <option name="number" value="00153" />
-      <option name="presentableId" value="LOCAL-00153" />
-      <option name="project" value="LOCAL" />
-      <updated>1770025300953</updated>
+      <workItem from="1785247073626" duration="9292000" />
+      <workItem from="1785308485751" duration="13496000" />
     </task>
     <task id="LOCAL-00154" summary="Enabled update-in-place setting">
       <option name="closed" value="true" />
@@ -1776,7 +1781,15 @@
       <option name="project" value="LOCAL" />
       <updated>1785261549638</updated>
     </task>
-    <option name="localTasksCounter" value="202" />
+    <task id="LOCAL-00202" summary="Update script tpcc">
+      <option name="closed" value="true" />
+      <created>1785264505428</created>
+      <option name="number" value="00202" />
+      <option name="presentableId" value="LOCAL-00202" />
+      <option name="project" value="LOCAL" />
+      <updated>1785264505428</updated>
+    </task>
+    <option name="localTasksCounter" value="203" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1797,7 +1810,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Rust 2021 -&gt; Rust 2024. Moved page soft commits from Release to Relaxed semanstics, since they always follow by a Release store from the latch." />
     <MESSAGE value="Experimental: Compact meta cell version" />
     <MESSAGE value="Correct cargo btree version to 0.0.122" />
     <MESSAGE value="Add explicit padding" />
@@ -1822,7 +1834,8 @@
     <MESSAGE value="Fix issues GC related and stabilize SMO with racey stamps" />
     <MESSAGE value="Fix GC block reuse in merges; Now correctly calculates the live number" />
     <MESSAGE value="Remove version_region atomic need; Changed SMO Liveness, now only checks overlap without actual need to obsolete mark" />
-    <option name="LAST_COMMIT_MESSAGE" value="Remove version_region atomic need; Changed SMO Liveness, now only checks overlap without actual need to obsolete mark" />
+    <MESSAGE value="Update script tpcc" />
+    <option name="LAST_COMMIT_MESSAGE" value="Update script tpcc" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

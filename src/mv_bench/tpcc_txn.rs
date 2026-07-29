@@ -432,7 +432,7 @@ fn deliver_one_district(db: &TpccDatabase, w_id: u32, d_id: u8, carrier_id: u32)
     // Ascending key == ascending o_id within a fixed (w_id,d_id) prefix.
     queued.sort_by_key(|r| r.key);
     let oldest = &queued[0];
-    let o_id = match &oldest.payload {
+    let o_id = match &*oldest.payload {
         TpccRow::NewOrder(m) => m.no_o_id,
         _ => unreachable!("NEW_ORDER-range scan returned a non-NewOrder row"),
     };

@@ -455,7 +455,7 @@ fn contended_concurrent_transactions_tree_and_wal_agree_despite_conflicts() {
     let mut tree_state = HashMap::new();
     for k in 0..KEYS {
         match db.table(t).unwrap().dispatch_crud(CRUDOperation::Point(k, version)) {
-            CRUDOperationResult::MatchedRecords(r) if r.len() == 1 => { tree_state.insert((t, k), r[0].payload); }
+            CRUDOperationResult::MatchedRecords(r) if r.len() == 1 => { tree_state.insert((t, k), *r[0].payload); }
             other => panic!("key {k} missing from tree: {other}"),
         }
     }
