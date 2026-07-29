@@ -42,6 +42,11 @@ hardware-lock-elision = []
 # optional since it's a second, independent storage backend (path-copying/copy-on-write
 # B+Tree via libmdbx) alongside this crate's own MVBTree, not something every build needs.
 mdbx-backend = ["dep:libmdbx"]
+# Gates `src/mv_viz` (structural tree/root* dump -> JSON for the standalone
+# `tools/tree_visualizer.html` viewer) - a debug/inspection tool, not
+# anything the benchmark/paper path needs, so its `serde`/`serde_json` deps
+# stay out of the default build.
+tree-viz = ["dep:serde", "dep:serde_json"]
 
 #[lib]
 #name = "cmvbt"
@@ -61,6 +66,8 @@ parking_lot = { version = "0.12.5", features = ["hardware-lock-elision", "arc_lo
 arc-swap = "1.9.2"
 smallvec = "1.15.2"
 libmdbx = { version = "0.6.6", optional = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.186"
 num_cpus = "1.17"

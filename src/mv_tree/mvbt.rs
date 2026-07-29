@@ -317,3 +317,23 @@ impl<const FAN_OUT: usize,
         self.wal.store(None);
     }
 }
+
+/// Split out purely because `mv_viz::dump::dump_tree_to_file` needs `Key:
+/// 'static` restated explicitly (the struct definition above already implies
+/// it, but individual `impl` blocks only get what they themselves declare) —
+/// every other method on `MVBTSt` stays available without it.
+#[cfg(feature = "tree-viz")]
+impl<const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static
+> MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+    /// Dumps this tree's full root* list and the (de-duplicated) block graph
+    /// they reach to a JSON file at `path` for `tools/tree_visualizer.html` —
+    /// see `mv_viz::dump::dump_tree_to_file`'s doc for the format and the
+    /// quiescent-read-only caveat.
+    pub fn dump_to_file(&self, path: impl AsRef<std::path::Path>, max_depth: Option<usize>) -> std::io::Result<()> {
+        crate::mv_viz::dump::dump_tree_to_file(self, path, max_depth)
+    }
+}

@@ -1322,6 +1322,51 @@ pub fn format_insertions(mut i: usize) -> String {
         parts.join(" + ")
     }
 }
+
+/// Builds a small demo `MVBT` (plain `u64` keys/payloads) with enough
+/// inserts to force a couple of root* splits, deletes a sub-range so leaf
+/// pages show a realistic active/dead mix, then dumps its full root* list +
+/// block graph via `mv_viz::dump::dump_tree_to_file` - a quick way to get a
+/// file `tools/tree_visualizer.html` can load without wiring up a real
+/// benchmark. Usage: `viz_demo [out.json] [num_keys] [max_depth]`.
+#[cfg(feature = "tree-viz")]
+pub(crate) fn main_viz_demo(parms: Vec<String>) {
+    use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
+    use crate::mv_crud_model::crud_operation::TxAtomicOperation;
+    use crate::mv_crud_model::crud_operation_result::AtomicTxResult;
+    use crate::mv_tree::mvbt::MVBT;
+    use crate::mv_viz::dump::dump_tree_to_file;
+
+    let out_path = parms.get(2).map(String::as_str).unwrap_or("tree_dump.json");
+    let num_keys: u64 = parms.get(3).and_then(|s| s.parse().ok()).unwrap_or(15_000);
+    let max_depth: Option<usize> = parms.get(4).and_then(|s| s.parse().ok());
+
+    println!("Building demo tree: {num_keys} inserts (+ some deletes), dumping to '{out_path}'...");
+
+    let tree = MVBT::default();
+
+    for key in 0..num_keys {
+        match tree.dispatch_atomic_transaction(TxAtomicOperation::Insert(key, key)) {
+            AtomicTxResult::Inserted(..) => {}
+            other => panic!("insert failed for key {key}: {other}"),
+        }
+    }
+
+    for key in (0..num_keys / 4).step_by(7) {
+        match tree.dispatch_atomic_transaction(TxAtomicOperation::Delete(key)) {
+            AtomicTxResult::Deleted(..) => {}
+            other => panic!("delete failed for key {key}: {other}"),
+        }
+    }
+
+    dump_tree_to_file(&tree, out_path, max_depth).expect("failed to write tree dump");
+
+    println!(
+        "Wrote '{out_path}' - {} root* version(s). Open tools/tree_visualizer.html and load this file.",
+        tree.count_roots()
+    );
+}
+
 // Test files physically live in `tests/` (not `src/mv_test/`) so all of the
 // project's tests are collected in one place; `#[path]` keeps them wired in
 // as unit tests compiled into the bin crate, since none of this is reachable

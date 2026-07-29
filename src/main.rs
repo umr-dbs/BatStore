@@ -28,6 +28,8 @@ mod mv_root;
 mod mv_sync;
 mod mv_wal;
 mod mv_db;
+#[cfg(feature = "tree-viz")]
+mod mv_viz;
 
 use crate::mv_sync::smart_cell::OptCell;
 #[cfg(not(miri))]
@@ -64,6 +66,8 @@ fn main() {
             "mdbx_tpcc" => mv_bench::mdbx_tpcc::main_mdbx_tpcc(parms),
             "benchmark" => mv_bench::suite::main_benchmark(parms),
             "_bench_one" => mv_bench::suite::main_bench_one(parms),
+            #[cfg(feature = "tree-viz")]
+            "viz_demo" => mv_test::main_viz_demo(parms),
             // "load_cc_new" => main_load_cc_new(parms),
             // "sorted_insert" => main_sorted_insert(parms),
             s => println!("Unknown Command '{s}'")
