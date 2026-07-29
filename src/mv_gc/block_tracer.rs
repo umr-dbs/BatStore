@@ -32,12 +32,12 @@ pub(crate) type DeadPageKey = (Version, usize);
 /// Sharded by worker: death versions come from one global clock
 /// (`MVBTSt::start_tx_commit`), so concurrent SMOs across every worker insert
 /// into what used to be a *single* skip list, all clustering near its current
-/// max key — its "always-contended tail" (see `TransactionTrace`'s doc for
-/// the same shape of problem, measured 6-9x/8-9x under sustained concurrent
-/// load elsewhere in this GC, and `TxContext::in_flight_bound`'s doc for
-/// another instance of it — a single shared `registrations_in_flight`
-/// counter every worker contended on, replaced by the same per-worker-slot
-/// idea used here). One shard per worker (mirrors `mv_wal`'s per-worker
+/// max key — its "always-contended tail" (see `TxContext::live_tx`'s doc for
+/// the same shape of problem, measured to dominate CPU time under sustained
+/// concurrent TPC-C load, and `TxContext::in_flight_bound`'s doc for another
+/// instance of it — a single shared `registrations_in_flight` counter every
+/// worker contended on, replaced by the same per-worker-slot idea used
+/// here). One shard per worker (mirrors `mv_wal`'s per-worker
 /// WAL shards) means each worker's own `register_died_page` calls only ever
 /// contend with themselves, not with every other worker's.
 ///

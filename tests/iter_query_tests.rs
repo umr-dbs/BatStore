@@ -43,7 +43,7 @@ fn payload_for(key: u64) -> u64 {
 fn collect_range(tree: &TestTree, range: Interval<u64>, version: Version) -> HashMap<u64, u64> {
     match tree.dispatch_crud(CRUDOperation::Range(range, version)) {
         CRUDOperationResult::MatchedRecords(records) =>
-            records.into_iter().map(|r| (r.key, r.payload)).collect(),
+            records.into_iter().map(|r| (r.key, *r.payload)).collect(),
         other => panic!("unexpected Range result: {other}"),
     }
 }
@@ -51,7 +51,7 @@ fn collect_range(tree: &TestTree, range: Interval<u64>, version: Version) -> Has
 fn collect_range_iter(tree: &TestTree, range: Interval<u64>, version: Version) -> HashMap<u64, u64> {
     match tree.dispatch_crud(CRUDOperation::RangeIter(range, version)) {
         CRUDOperationResult::MatchedRecordIter(iter) =>
-            iter.map(|r| (r.key, r.payload)).collect(),
+            iter.map(|r| (r.key, *r.payload)).collect(),
         other => panic!("unexpected RangeIter result: {other}"),
     }
 }

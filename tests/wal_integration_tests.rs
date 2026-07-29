@@ -17,7 +17,7 @@ fn temp_log_path(name: &str) -> std::path::PathBuf {
 
 fn point(tree: &TestTree, key: u64, version: Version) -> Option<u64> {
     match tree.dispatch_crud(CRUDOperation::Point(key, version)) {
-        CRUDOperationResult::MatchedRecords(records) if !records.is_empty() => Some(records[0].payload),
+        CRUDOperationResult::MatchedRecords(records) if !records.is_empty() => Some(*records[0].payload),
         _ => None,
     }
 }

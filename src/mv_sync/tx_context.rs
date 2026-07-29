@@ -1,7 +1,6 @@
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
-use crate::mv_gc::query_tracer::TransactionTrace;
 use crate::mv_query::SnapShot;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::{AtomicVersion, Version};
@@ -44,11 +43,50 @@ pub(crate) struct TxContext {
     global_clock: GlobalClock,
     commit_logs: Vec<CommitLog>,
     worker_registry: WorkerRegistry,
-    /// Active-snapshot tracking, moved verbatim from `TrackerHandleSt`: see
-    /// that type's former doc (now this one's) for why pruning `commit_logs`
-    /// is only sound while this precisely reflects every transaction with a
+    /// Active-snapshot tracking: one slot per worker, holding that worker's
+    /// currently-published `ts_start` (or `NOT_IN_FLIGHT` while idle) — see
+    /// that former doc (now this one's) for why pruning `commit_logs` is
+    /// only sound while this precisely reflects every transaction with a
     /// live, unreleased `ts_start` across every table sharing this context.
-    live_tx: TransactionTrace,
+    ///
+    /// Was a shared `SkipMap<SnapShot, AtomicUsize>` (`mv_gc::query_tracer`,
+    /// now removed): profiling a saturated TPC-C run showed it eating
+    /// roughly a quarter to half of *all* CPU cycles — every worker's
+    /// `on_tx_start`/`on_tx_completed` call inserts/removes into the same
+    /// shared skip list, clustering near its current max key exactly like
+    /// `in_flight_bound`'s doc describes for the counter it replaced, and
+    /// `commit_tx` walks the *entire* thing on every commit (not just under
+    /// GC — see `freshest_si_truncate_commit_log`). A worker only ever runs
+    /// one transaction at a time, so — like `in_flight_bound` — one slot per
+    /// worker suffices: `O(max_workers)` uncontended `Acquire` scans instead
+    /// of skip-list traversals contending with concurrent inserts/removes,
+    /// and no refcounting (two workers can independently publish the exact
+    /// same value with zero coordination, since neither ever touches the
+    /// other's slot).
+    ///
+    /// One wrinkle a naive single-value-per-worker slot would get wrong:
+    /// `mv_query::olc_query::traversal_write_olc` calls `begin_snapshot`/
+    /// `end_snapshot` on *every* insert/update/delete traversal, nested
+    /// inside an already-registered `DbTransaction`'s own live snapshot —
+    /// intentionally (its own doc: "concurrent registrations... explicitly
+    /// designed to stack"). `live_tx_depth` below makes only the *outermost*
+    /// `on_tx_start`/`on_tx_completed` for a worker actually touch this
+    /// slot: since one worker's `ts_start`s are drawn from a single
+    /// strictly-increasing clock, an outer (earlier, lower) registration's
+    /// protection already covers everything any later, nested (higher) one
+    /// could need, so nested calls have nothing to publish.
+    live_tx: Vec<AtomicVersion>,
+    /// Reentrancy depth per worker for `on_tx_start`/`on_tx_completed`, same
+    /// indexing as `live_tx` — see that field's doc for why nesting exists.
+    /// `Relaxed` throughout: each slot is written only by the one worker it
+    /// belongs to (nothing else ever touches index `worker_id`), so there is
+    /// no cross-thread ordering to establish here, just a plain counter that
+    /// happens to sit behind an atomic for `Sync`. A debug-only sanity net,
+    /// not load-bearing for correctness: `on_tx_start`/`on_tx_completed`
+    /// assert this stays balanced (never negative, never re-publishes over
+    /// an already-live outer value) — genuine caller bugs (unpaired calls),
+    /// not something real callers are expected to trigger.
+    live_tx_depth: Vec<AtomicU32>,
     /// One slot per worker (`WorkerId`-indexed, sized to `max_workers` like
     /// `commit_logs`): each worker publishes its own conservative lower bound
     /// here — `global_clock.current_version()` read just *before* drawing
@@ -109,7 +147,8 @@ impl TxContext {
             global_clock: GlobalClock::new(),
             commit_logs: (0..max_workers).map(|_| CommitLog::new()).collect(),
             worker_registry: WorkerRegistry::new(max_workers),
-            live_tx: TransactionTrace::new(),
+            live_tx: (0..max_workers).map(|_| AtomicVersion::new(NOT_IN_FLIGHT)).collect(),
+            live_tx_depth: (0..max_workers).map(|_| AtomicU32::new(0)).collect(),
             in_flight_bound: (0..max_workers).map(|_| AtomicVersion::new(NOT_IN_FLIGHT)).collect(),
             block_reclaim_enabled: AtomicBool::new(false),
             freshest_si_truncate_commit_log: AtomicBool::new(true),
@@ -203,14 +242,45 @@ impl TxContext {
     #[inline]
     pub(crate) fn on_tx_start(&self, snapshot: SnapShot) {
         if self.block_reclaim_enabled.load(Relaxed) {
-            self.live_tx.on_tx_start(snapshot);
+            let worker_id = self.worker_id();
+            // Pre-increment value, i.e. the depth *before* this call: 0 means
+            // this worker had no live registration at all, so this is the
+            // outermost one and must actually publish.
+            let depth_before = self.live_tx_depth[worker_id as usize].fetch_add(1, Relaxed);
+            if depth_before == 0 {
+                let previous = self.live_tx[worker_id as usize].swap(snapshot, Release);
+                debug_assert_eq!(
+                    previous, NOT_IN_FLIGHT,
+                    "TxContext::on_tx_start: worker {worker_id}'s outermost registration found \
+                     snapshot {previous} already published for it — on_tx_start/on_tx_completed \
+                     calls for one worker must be paired (unbalanced caller bug)"
+                );
+            }
         }
     }
 
     #[inline]
     pub(crate) fn on_tx_completed(&self, snapshot: SnapShot) {
         if self.block_reclaim_enabled.load(Relaxed) {
-            self.live_tx.on_tx_completed(snapshot);
+            let worker_id = self.worker_id();
+            // Pre-decrement value: 1 means this completion brings the depth
+            // back to 0, i.e. it's the outermost one and must actually clear.
+            let depth_before = self.live_tx_depth[worker_id as usize].fetch_sub(1, Relaxed);
+            debug_assert!(
+                depth_before > 0,
+                "TxContext::on_tx_completed: worker {worker_id} completed snapshot {snapshot} \
+                 with no live registration — on_tx_start/on_tx_completed calls for one worker \
+                 must be paired (unbalanced caller bug)"
+            );
+            if depth_before == 1 {
+                let previous = self.live_tx[worker_id as usize].swap(NOT_IN_FLIGHT, Release);
+                debug_assert_eq!(
+                    previous, snapshot,
+                    "TxContext::on_tx_completed: worker {worker_id}'s outermost completion \
+                     expected snapshot {snapshot} but {previous} was published — \
+                     on_tx_start/on_tx_completed calls for one worker don't nest correctly"
+                );
+            }
         }
     }
 
@@ -261,6 +331,18 @@ impl TxContext {
         })
     }
 
+    /// Every worker's currently-published (i.e. outermost, see `live_tx`'s
+    /// doc) live `ts_start`. `O(max_workers)`, each slot read independently
+    /// with no cross-slot synchronization needed — same reasoning as
+    /// `live_min_snapshot` below.
+    #[inline]
+    fn live_snapshots(&self) -> impl Iterator<Item = SnapShot> + '_ {
+        self.live_tx.iter().filter_map(|slot| {
+            let v = slot.load(Acquire);
+            (v != NOT_IN_FLIGHT).then_some(v)
+        })
+    }
+
     #[inline(always)]
     pub(crate) fn commit_tx(&self, worker_id: WorkerId) -> Version {
         if self.block_reclaim_enabled.load(Relaxed) ||
@@ -269,7 +351,7 @@ impl TxContext {
             self.commit_logs[worker_id as usize].commit_pruned(
                 &self.global_clock,
                 self.commit_logs.len(),
-                self.live_tx.active_snapshots(),
+                self.live_snapshots(),
             )
         } else {
             self.commit_logs[worker_id as usize].commit(&self.global_clock)
@@ -278,12 +360,11 @@ impl TxContext {
 
     #[inline]
     pub(crate) fn newest_live_si(&self) -> Option<SnapShot> {
-        self.live_tx.peek_max()
+        self.live_snapshots().max()
     }
 
     /// Is `ts_start` a currently-registered (not yet committed/aborted)
-    /// transaction? See `TransactionTrace::is_active`'s doc for why this
-    /// exists — `MVBTSt::record_survives_gc` uses it to keep a *deleted*
+    /// transaction? `MVBTSt::record_survives_gc` uses it to keep a *deleted*
     /// record physically present while its deleting transaction might
     /// still abort and need to reverse that delete. Always `false` while
     /// `block_reclaim_enabled` is off, matching `on_tx_start`/
@@ -293,7 +374,8 @@ impl TxContext {
     /// physically reuses a block — is also off then).
     #[inline]
     pub(crate) fn is_snapshot_live(&self, ts_start: Version) -> bool {
-        self.block_reclaim_enabled.load(Relaxed) && self.live_tx.is_active(ts_start)
+        self.block_reclaim_enabled.load(Relaxed)
+            && self.live_tx.iter().any(|slot| slot.load(Acquire) == ts_start)
     }
 
     /// The oldest currently-active-or-in-flight snapshot across every table
@@ -329,13 +411,13 @@ impl TxContext {
             }
         }
 
-        let live_min = self.live_tx.peek_min();
-        match (min, live_min) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        for slot in &self.live_tx {
+            let bound = slot.load(Acquire);
+            if bound != NOT_IN_FLIGHT {
+                min = Some(min.map_or(bound, |m| m.min(bound)));
+            }
         }
+        min
     }
 
     /// Test-only: current entry count of one worker's `CommitLog`, for tests
