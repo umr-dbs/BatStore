@@ -18,6 +18,7 @@ use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::mv_query::interval::Interval;
+use crate::mv_query::iter_query::RangeQueryIter;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_root::index_root::RootIndexType;
 use crate::mv_tree::mvbt::MVBTSt;
@@ -189,4 +190,36 @@ fn range_query_respects_snapshot_isolation_across_concurrent_inserts() {
         expected_after,
         "RangeIter at the post-insert version is missing some concurrently inserted keys"
     );
+}
+
+/// `LeafPage` records are append-ordered, never re-sorted by key
+/// (`LeafPage::push_uncommitted` always writes at the next free slot) — so
+/// `RangeQueryIter::min_by_key` can't just trust `next()`'s first result,
+/// it has to actually compare every match within the first matching leaf.
+/// Inserting keys in *descending* order specifically catches a naive "just
+/// take next()" implementation, which would return the first-inserted
+/// (largest, physically-first) key instead of the true minimum — exactly
+/// the bug this test guards against regressing (it's what `mv_bench::
+/// tpcc_txn::deliver_one_district` relies on `range_min` for: finding the
+/// oldest — smallest-key — queued new-order).
+#[test]
+fn range_min_by_key_finds_the_true_minimum_despite_descending_insertion_order() {
+    let tree = make_tree();
+
+    // FAN == 8: comfortably fits in a single leaf (no split forced), so
+    // this exercises purely within-leaf ordering, not cross-leaf.
+    for key in (0..6u64).rev() {
+        match tree.dispatch_crud(CRUDOperation::Insert(key, payload_for(key))) {
+            CRUDOperationResult::Inserted(_) => {}
+            other => panic!("insert of key {key} failed: {other}"),
+        }
+    }
+
+    let version = tree.current_version();
+    let min = RangeQueryIter::new(&tree, version, Interval::new(0, 5), false, tree.worker_id())
+        .min_by_key()
+        .expect("range should have at least one match");
+
+    assert_eq!(min.key, 0, "min_by_key must return the smallest key in range, not whichever the leaf happened to store first");
+    assert_eq!(*min.payload, payload_for(0));
 }

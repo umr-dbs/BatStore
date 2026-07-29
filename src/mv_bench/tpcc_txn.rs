@@ -75,6 +75,12 @@ impl<'a> TpccTxn<'a> {
         self.inner.range(self.resolve(table), range)
     }
 
+    /// Like `range`, but only the smallest-key match — see
+    /// `DbTransaction::range_min`'s doc.
+    pub fn range_min(&self, table: Table, range: Interval<TpccKey>) -> Option<RecordPointResult<TpccKey, TpccRow>> {
+        self.inner.range_min(self.resolve(table), range)
+    }
+
     pub fn insert(&self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'_> {
         self.inner.insert(self.resolve(table), key, payload)
     }
@@ -424,14 +430,14 @@ fn deliver_one_district(db: &TpccDatabase, w_id: u32, d_id: u8, carrier_id: u32)
     let tx = TpccTxn::begin(db);
 
     let (lo, hi) = k_new_order_district_bounds(w_id, d_id);
-    let mut queued = many(tx.range(Table::NewOrder, Interval::new(lo, hi), true));
-    if queued.is_empty() {
+    // `range_min`, not `range` + sort + take the smallest: ascending o_id
+    // within a fixed (w_id,d_id) prefix means the *oldest* queued new-order
+    // is exactly the smallest key in this range, so there's no need to
+    // collect every currently-queued row just to read off its minimum.
+    let Some(oldest) = tx.range_min(Table::NewOrder, Interval::new(lo, hi)) else {
         drop(tx);
         return TxnOutcome::UserAbort;
-    }
-    // Ascending key == ascending o_id within a fixed (w_id,d_id) prefix.
-    queued.sort_by_key(|r| r.key);
-    let oldest = &queued[0];
+    };
     let o_id = match &*oldest.payload {
         TpccRow::NewOrder(m) => m.no_o_id,
         _ => unreachable!("NEW_ORDER-range scan returned a non-NewOrder row"),

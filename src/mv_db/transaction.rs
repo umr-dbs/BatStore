@@ -53,7 +53,7 @@ use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::mv_page_model::leaf_page::LeafPage;
 use crate::mv_query::interval::Interval;
 use crate::mv_query::iter_query::RangeQueryIter;
-use crate::mv_record_model::record_point::RecordPoint;
+use crate::mv_record_model::record_point::{RecordPoint, RecordPointResult};
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::{Version, VersionInfo};
 use crate::mv_tree::mvbt::MVBTSt;
@@ -145,6 +145,21 @@ impl<
         let tree = self.tree(table);
         let scan = RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id);
         CRUDOperationResult::MatchedRecords(scan.collect())
+    }
+
+    /// Like `range`, but only ever finds the record with the smallest key
+    /// — see `RangeQueryIter::min_by_key`'s doc for why that needs a real
+    /// comparison within the first matching leaf rather than just taking
+    /// whatever `next()` yields first (leaf pages are append-ordered, not
+    /// key-sorted). No lifetime issue despite `range` being forced eager
+    /// for the same reason (see the module doc): the `RangeQueryIter`
+    /// itself never leaves this function, only the one owned result it
+    /// produces does. Callers that only want the minimum (e.g.
+    /// `mv_bench::tpcc_txn::deliver_one_district`'s "find the oldest queued
+    /// new-order") no longer have to collect the entire range to get it.
+    pub fn range_min(&self, table: TableId, range: Interval<Key>) -> Option<RecordPointResult<Key, Payload>> {
+        let tree = self.tree(table);
+        RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id).min_by_key()
     }
 
     // /// First-writer-wins check, on `table`: the physically newest version at

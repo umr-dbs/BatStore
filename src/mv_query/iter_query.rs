@@ -98,8 +98,28 @@ impl<'a,
     type Item = RecordPointResult<Key, Payload>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.refill();
+        self.buff.pop_front()
+    }
+}
+
+impl<'a,
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static
+> RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
+    /// Advances the scan until `self.buff` holds at least one more match —
+    /// always a whole leaf's worth at once, since a leaf's live/visible
+    /// records are filtered into `buff` together in one `extend` call
+    /// below — or the range is exhausted. Factored out of `Iterator::next`
+    /// (which pops one item off the front once this returns) so
+    /// `min_by_key` below can reuse the exact same leaf-fetching logic
+    /// without popping, to compare every match a leaf produced rather than
+    /// trusting whichever happens to land first in `buff`.
+    fn refill(&mut self) {
         if !self.buff.is_empty() {
-            return self.buff.pop_front();
+            return;
         }
 
         let si
@@ -135,7 +155,7 @@ impl<'a,
                 }
 
                 self.is_completed = true;
-                return None
+                return
             }
 
             let (curr_fence, curr_block)
@@ -182,11 +202,37 @@ impl<'a,
 
                     self.range.lower = inc(curr_fence.upper);
                     if !self.buff.is_empty() || self.range.lower == tree.max_key {
-                        return self.buff.pop_front()
+                        return
                     }
                 }
                 _ => unreachable!()
             }
         }
+    }
+
+    /// The record with the smallest key remaining in this scan, or `None`
+    /// once exhausted — without materializing (or even visiting) anything
+    /// past the first leaf that has a match.
+    ///
+    /// Sound because sibling leaves partition the keyspace into
+    /// non-overlapping, ascending ranges: once the first leaf with any live
+    /// match in range is found, no leaf visited later could ever contain a
+    /// smaller key, so comparing *within* that one leaf is enough — and it
+    /// must be a real comparison, not just `next()`'s first result: leaf
+    /// pages are append-ordered, never key-sorted (`LeafPage::
+    /// push_uncommitted` always writes at the next free slot), so the
+    /// first live match `refill` happens to buffer is not necessarily the
+    /// smallest one in that same leaf.
+    ///
+    /// Takes `self` by value: this is a "get the one thing I need, then
+    /// I'm done with this scan" query, not a general-purpose iterator
+    /// adapter — callers that also want to keep iterating afterward should
+    /// use plain `next()`/`Iterator` methods instead.
+    pub fn min_by_key(mut self) -> Option<RecordPointResult<Key, Payload>> {
+        self.refill();
+        let min_index = self.buff.iter().enumerate()
+            .min_by_key(|(_, r)| r.key)
+            .map(|(index, _)| index)?;
+        self.buff.remove(min_index)
     }
 }
