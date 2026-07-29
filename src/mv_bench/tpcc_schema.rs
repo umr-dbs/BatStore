@@ -401,8 +401,18 @@ pub const fn k_order_line(w_id: u32, d_id: u8, o_id: u32, ol_number: u8) -> Tpcc
 }
 
 /// `[lower, upper]` bounds covering every `ol_number` (1..=15) of one order.
+///
+/// The upper sentinel must be masked to `OL_NO_BITS` (`u8::MAX` doesn't fit:
+/// `OL_NO_BITS` is 4 bits wide, not a full byte, unlike e.g. `FIRST_CODE_BITS`
+/// which *is* exactly `u16`-wide and so can use `u16::MAX` directly in
+/// `k_customer_name_idx_prefix_bounds`) - an unmasked 255 there OR's bits
+/// into `o_id`'s own low nibble (`k_order_line`'s `o_id << OL_NO_BITS`
+/// starts right where `ol_number`'s bits end), rounding the upper bound's
+/// `o_id` up to the next `o_id | 0b1111` and leaking into however many
+/// subsequent orders' order-lines happen to fall in that widened range.
 pub const fn k_order_line_bounds(w_id: u32, d_id: u8, o_id: u32) -> (TpccKey, TpccKey) {
-    (k_order_line(w_id, d_id, o_id, 0), k_order_line(w_id, d_id, o_id, u8::MAX))
+    const MAX_OL_NUMBER: u8 = (1u8 << OL_NO_BITS) - 1;
+    (k_order_line(w_id, d_id, o_id, 0), k_order_line(w_id, d_id, o_id, MAX_OL_NUMBER))
 }
 
 /// Extracts `ol_number` (the low `OL_NO_BITS` bits) back out of an
