@@ -1,0 +1,1289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>cMVBT Tree Visualizer</title>
+<style>
+  :root {
+    --bg: #14171c;
+    --panel: #1b1f26;
+    --panel-2: #232833;
+    --border: #333a47;
+    --text: #d8dee9;
+    --text-dim: #8891a3;
+    --accent: #5b8cff;
+    --accent-2: #ffbf5b;
+    --leaf: #3aa876;
+    --internal: #5b8cff;
+    --dead: #e5586a;
+    --active: #3aa876;
+    --truncated: #8891a3;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---------- Toolbar ---------- */
+  #toolbar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  #toolbar h1 {
+    font-size: 14px; font-weight: 600; margin: 0 12px 0 0; white-space: nowrap;
+    color: var(--text);
+  }
+  #toolbar h1 span { color: var(--text-dim); font-weight: 400; }
+  .btn {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 12px;
+    white-space: nowrap;
+  }
+  .btn:hover { background: #2b3140; border-color: var(--accent); }
+  .btn:active { transform: translateY(1px); }
+  .btn.primary { border-color: var(--accent); color: #cfe0ff; }
+  .sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+  #search {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 8px; font-size: 12px; width: 140px;
+  }
+  .spacer { flex: 1; }
+  #fileLabel {
+    font-size: 11px; color: var(--text-dim); max-width: 240px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* ---------- Layout ---------- */
+  #body { flex: 1; display: flex; min-height: 0; }
+  #sidebar {
+    width: 260px; flex-shrink: 0; background: var(--panel);
+    border-right: 1px solid var(--border); overflow-y: auto;
+    display: flex; flex-direction: column;
+  }
+  #sidebar h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--text-dim); padding: 10px 12px 4px; margin: 0;
+  }
+  .root-row {
+    padding: 8px 12px; cursor: pointer; border-left: 3px solid transparent;
+    border-bottom: 1px solid var(--border);
+  }
+  .root-row:hover { background: var(--panel-2); }
+  .root-row.selected { background: #223055; border-left-color: var(--accent-2); }
+  .root-row .rv { font-weight: 600; }
+  .root-row .rh { color: var(--text-dim); float: right; }
+  .root-row .rid { color: var(--text-dim); font-size: 10px; display: block; margin-top: 2px; }
+  .latest-badge {
+    font-size: 9px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--active); border: 1px solid var(--active); border-radius: 3px;
+    padding: 0 4px; margin-left: 6px;
+  }
+
+  #canvasWrap {
+    flex: 1; position: relative; overflow: hidden; background:
+      radial-gradient(circle, #1e2330 1px, transparent 1px) 0 0/22px 22px, var(--bg);
+    cursor: grab;
+  }
+  #canvasWrap.grabbing { cursor: grabbing; }
+  svg#svg { width: 100%; height: 100%; display: block; }
+
+  #empty {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 10px; color: var(--text-dim); text-align: center; padding: 24px;
+    pointer-events: none;
+  }
+  #empty code {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 2px 6px; color: #cfe0ff;
+  }
+  #empty.hidden { display: none; }
+
+  #tracePanel {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 90%;
+    background: var(--panel); border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px rgba(0,0,0,.4); display: flex; flex-direction: column; z-index: 5;
+  }
+  #tracePanel.hidden { display: none; }
+  .trace-header {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid var(--border); font-weight: 600;
+  }
+  .trace-header .spacer { flex: 1; }
+  #traceBody { padding: 10px 12px; overflow-y: auto; font-size: 12px; }
+  #traceBody code { color: #cfe0ff; word-break: break-all; }
+  .trace-section { margin-bottom: 12px; }
+  .trace-section ul { list-style: none; margin: 4px 0 0; padding: 0; }
+  .trace-section li {
+    padding: 6px; margin-bottom: 4px; background: var(--panel-2); border-radius: 5px;
+    border-left: 3px solid var(--border);
+  }
+  .trace-section li.rel-live { border-left-color: var(--active); }
+  .trace-section li.rel-dead { border-left-color: var(--dead); }
+  .trace-row-actions { margin-top: 4px; display: flex; gap: 6px; }
+  .trace-row-actions .btn { padding: 2px 7px; font-size: 11px; }
+  .trace-warning {
+    background: rgba(255,191,91,.12); border: 1px solid var(--accent-2);
+    border-radius: 6px; padding: 8px; color: var(--text);
+  }
+
+  #statusBar {
+    padding: 5px 12px; background: var(--panel); border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-dim); display: flex; gap: 16px;
+  }
+  #liveLegend { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  #liveLegend.hidden { display: none; }
+  .legend-swatch {
+    display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 2px;
+  }
+  .legend-live { background: var(--active); box-shadow: 0 0 4px var(--active); }
+  .legend-dead { background: var(--dead); box-shadow: 0 0 4px var(--dead); }
+
+  /* ---------- Node box (rendered via foreignObject) ---------- */
+  .node-box {
+    width: 220px; border-radius: 8px; border: 1.5px solid var(--border);
+    background: var(--panel-2); overflow: hidden; user-select: none;
+    box-shadow: 0 2px 6px rgba(0,0,0,.35);
+  }
+  .node-box.internal { border-color: var(--internal); }
+  .node-box.leaf { border-color: var(--leaf); }
+  .node-box.truncated { border-color: var(--truncated); border-style: dashed; }
+  .node-box.more {
+    border-color: var(--accent-2); border-style: dashed; cursor: pointer;
+    text-align: center;
+  }
+  .node-box.more:hover { background: #2b3140; }
+  .node-box.more .kind { color: var(--accent-2); }
+  .node-box.more .node-body { color: var(--text-dim); font-size: 10px; }
+  .node-box.marked { outline: 2px solid var(--accent-2); }
+  /* Live view: node.active > 0 (still holds current data) vs. node.active
+     === 0 (everything in this page is dead/obsolete, kept only pending GC
+     or old-snapshot readers) - see the "Live view" toolbar toggle. */
+  .node-box.live-glow {
+    border-color: var(--active); border-width: 2px;
+    box-shadow: 0 0 0 2px rgba(58,168,118,.85), 0 0 18px 5px rgba(58,168,118,.85), 0 2px 6px rgba(0,0,0,.35);
+    background: linear-gradient(180deg, rgba(58,168,118,.16), var(--panel-2) 65%);
+  }
+  .node-box.dead-glow {
+    border-color: var(--dead); border-width: 2px;
+    box-shadow: 0 0 0 2px rgba(229,88,106,.8), 0 0 18px 5px rgba(229,88,106,.7), 0 2px 6px rgba(0,0,0,.35);
+    background: linear-gradient(180deg, rgba(229,88,106,.16), var(--panel-2) 65%);
+    opacity: .82;
+  }
+  .node-box.flash { animation: flash 1.4s ease-out; }
+  @keyframes flash {
+    0% { box-shadow: 0 0 0 6px rgba(255,191,91,.65); }
+    100% { box-shadow: 0 2px 6px rgba(0,0,0,.35); }
+  }
+  .node-head {
+    display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: pointer;
+  }
+  .node-head .kind { font-weight: 600; font-size: 11px; }
+  .node-box.internal .kind { color: var(--internal); }
+  .node-box.leaf .kind { color: var(--leaf); }
+  .node-box.truncated .kind { color: var(--truncated); }
+  .node-head .caret { color: var(--text-dim); font-size: 10px; width: 10px; }
+  .node-head .mark { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .trace-btn {
+    cursor: pointer; color: var(--text-dim); font-size: 13px; line-height: 1;
+    border: 1px solid var(--border); border-radius: 3px; padding: 0 3px;
+  }
+  .trace-btn:hover { color: var(--accent-2); border-color: var(--accent-2); }
+  .node-body { padding: 0 8px 7px; font-size: 11px; color: var(--text-dim); }
+  .node-body .range { color: var(--text); font-family: ui-monospace, monospace; font-size: 10.5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .node-body .fence { color: var(--accent-2); font-family: ui-monospace, monospace; font-size: 10px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+  .counts { display: flex; gap: 8px; margin-top: 3px; }
+  .count-active { color: var(--active); }
+  .count-dead { color: var(--dead); }
+  .records {
+    max-height: 190px; overflow-y: auto; margin-top: 6px; border-top: 1px solid var(--border);
+    padding-top: 4px;
+  }
+  .record-row {
+    display: flex; justify-content: space-between; gap: 6px; padding: 1.5px 0;
+    font-family: ui-monospace, monospace; font-size: 10px;
+  }
+  .record-row.deleted { color: var(--dead); text-decoration: line-through; opacity: .8; }
+  .record-row .k { color: var(--text); }
+  .record-row.deleted .k { color: var(--dead); }
+  .record-row.live .k { color: var(--active); }
+  .record-row .v { color: var(--text-dim); }
+  .truncated-note { font-size: 10.5px; padding-top: 4px; }
+
+  path.edge { stroke: #3a4152; stroke-width: 1.5px; fill: none; }
+  path.edge.live { stroke: var(--active); stroke-width: 2px; }
+  path.edge.dead { stroke: var(--dead); stroke-width: 1.5px; stroke-dasharray: 4 3; opacity: .75; }
+  text.edge-label {
+    fill: var(--text-dim); font-size: 9px; font-family: ui-monospace, monospace;
+  }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #3a4152; border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* Off-screen host used to measure a node box's real rendered height
+     before laying it out - see measureNodeHeight(). Same width a node box
+     renders at in the real tree, so wrapping/line-count matches exactly. */
+  #measure { position: fixed; left: -9999px; top: 0; visibility: hidden; width: 220px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <h1>cMVBT <span>tree visualizer</span></h1>
+    <button class="btn primary" id="loadBtn">Load dump...</button>
+    <input type="file" id="fileInput" accept=".json" style="display:none">
+    <span id="fileLabel">No file loaded</span>
+    <div class="sep"></div>
+    <button class="btn" id="zoomInBtn" title="Zoom in">+</button>
+    <button class="btn" id="zoomOutBtn" title="Zoom out">&minus;</button>
+    <button class="btn" id="fitBtn" title="Fit visible tree to view">Fit</button>
+    <button class="btn" id="resetZoomBtn" title="Reset zoom">100%</button>
+    <div class="sep"></div>
+    <button class="btn" id="liveViewBtn"
+            title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
+    <div class="sep"></div>
+    <button class="btn" id="expandAllBtn">Expand all</button>
+    <button class="btn" id="collapseAllBtn">Collapse all</button>
+    <div class="sep"></div>
+    <button class="btn" id="expandMarkedBtn">Expand marked</button>
+    <button class="btn" id="collapseMarkedBtn">Collapse marked</button>
+    <button class="btn" id="clearMarkedBtn">Clear marks</button>
+    <div class="sep"></div>
+    <input type="text" id="search" placeholder="find key...">
+    <button class="btn" id="searchBtn">Find</button>
+    <div class="spacer"></div>
+  </div>
+  <div id="body">
+    <div id="sidebar">
+      <h2>Root* list</h2>
+      <div id="rootList"></div>
+    </div>
+    <div id="canvasWrap">
+      <svg id="svg" xmlns="http://www.w3.org/2000/svg">
+        <g id="viewport">
+          <g id="edges"></g>
+          <g id="nodes"></g>
+        </g>
+      </svg>
+      <div id="empty">
+        <div style="font-size:15px;color:var(--text)">No dump loaded</div>
+        <div>Click <b>Load dump...</b> above, or drag a JSON file onto this window.</div>
+        <div style="max-width:480px">
+          Generate one from the engine, e.g.:<br>
+          <code>cargo run --features tree-viz -- viz_demo out.json 15000</code><br>
+          or call <code>tree.dump_to_file(path, None)</code> from your own benchmark/test code
+          at a quiescent point (see <code>src/mv_viz/dump.rs</code>).
+        </div>
+        <div style="max-width:480px;margin-top:6px">
+          Only structural metadata (keys, versions, active/dead counts) is ever
+          shown here &mdash; record payload values are never included in a dump.
+        </div>
+      </div>
+      <div id="tracePanel" class="hidden">
+        <div class="trace-header">
+          <span>Node trace</span>
+          <span class="spacer"></span>
+          <button class="btn" id="tracePopoutBtn" title="Open this trace in a new tab">Open in new tab &#8599;</button>
+          <button class="btn" id="traceCloseBtn" title="Close">&#10005;</button>
+        </div>
+        <div id="traceBody"></div>
+      </div>
+    </div>
+  </div>
+  <div id="measure" aria-hidden="true"></div>
+  <div id="statusBar">
+    <span id="statRoots">roots: -</span>
+    <span id="statNodes">unique nodes in file: -</span>
+    <span id="statVisible">visible boxes: -</span>
+    <span id="statReachable">nodes in current root: -</span>
+    <span id="statSelection">selected root: -</span>
+    <span id="liveLegend" class="hidden">
+      <span class="legend-swatch legend-live"></span>live/active
+      <span class="legend-swatch legend-dead"></span>dead/obsolete
+    </span>
+  </div>
+</div>
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------
+  let dump = null;              // parsed JSON: { fan_out, num_records, root_index_type, roots[], nodes{} }
+  let currentRootId = null;     // node_id of the root currently rendered
+  const expanded = new Set();  // node ids currently expanded
+  const checked = new Set();   // node ids currently "marked" via checkbox
+  const reachableCache = new Map(); // rootNodeId -> count of nodes reachable from it
+  const childLimit = new Map();     // internal node id -> how many of its children are laid out (Infinity = all)
+  const heightCache = new Map();    // "<id>:<isExpanded>" -> measured box height in px (see measureNodeHeight)
+  let liveViewMode = false;         // "Live view" toggle: jumps to the latest root* and highlights live vs. dead entries
+  let lastPositions = null;         // Map from the most recent render()'s buildLayout() - {parentId, fence, isLive, ...} per node id, used by the trace feature
+  let currentTraceHtml = null;      // last-rendered trace panel body, kept so "open in new tab" can reuse it verbatim
+
+  const view = { x: 0, y: 0, k: 1 };
+  const NODE_W = 220, HGAP = 24, VGAP = 46;
+  const EXPAND_ALL_WARN_THRESHOLD = 1500;
+  // A B+tree internal node can have up to FAN_OUT (often 100+) children -
+  // laying every one of them out side by side at once makes "Fit" (and any
+  // reasonable zoom level) unreadable. Cap how many render per node until
+  // the user explicitly asks for the rest via the "+N more" box.
+  const DEFAULT_CHILD_PAGE = 12;
+  const MORE_PREFIX = "more::";
+
+  // ---------------------------------------------------------------------
+  // DOM refs
+  // ---------------------------------------------------------------------
+  const svg = document.getElementById("svg");
+  const viewport = document.getElementById("viewport");
+  const edgesG = document.getElementById("edges");
+  const nodesG = document.getElementById("nodes");
+  const canvasWrap = document.getElementById("canvasWrap");
+  const emptyEl = document.getElementById("empty");
+  const rootListEl = document.getElementById("rootList");
+  const fileInput = document.getElementById("fileInput");
+  const fileLabel = document.getElementById("fileLabel");
+  const measureEl = document.getElementById("measure");
+  const liveViewBtn = document.getElementById("liveViewBtn");
+  const liveLegend = document.getElementById("liveLegend");
+  const tracePanel = document.getElementById("tracePanel");
+  const traceBody = document.getElementById("traceBody");
+
+  // ---------------------------------------------------------------------
+  // Data loading
+  // ---------------------------------------------------------------------
+  function loadFile(file) {
+    fileLabel.textContent = "Parsing " + file.name + " (" + (file.size / 1e6).toFixed(1) + " MB)...";
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        dump = JSON.parse(reader.result);
+      } catch (e) {
+        alert("Failed to parse JSON: " + e.message);
+        fileLabel.textContent = "Failed to load " + file.name;
+        return;
+      }
+      onDumpLoaded(file.name);
+    };
+    reader.onerror = () => alert("Failed to read file.");
+    reader.readAsText(file);
+  }
+
+  function onDumpLoaded(name) {
+    expanded.clear();
+    checked.clear();
+    reachableCache.clear();
+    childLimit.clear();
+    heightCache.clear();
+    currentRootId = null;
+
+    fileLabel.textContent = name + " - " + Object.keys(dump.nodes).length + " unique nodes";
+    document.getElementById("statRoots").textContent = "roots: " + dump.roots.length;
+    document.getElementById("statNodes").textContent = "unique nodes in file: " + Object.keys(dump.nodes).length;
+
+    renderRootList();
+
+    if (dump.roots.length) {
+      const latest = latestRoot();
+      selectRoot(latest.node_id, latest);
+    }
+  }
+
+  /// The root* with the highest version - i.e. the current, live view of the
+  /// tree. NOT simply `dump.roots[0]`: that only happens to already be
+  /// newest-first for the default `FrugalList` root-index backing (it
+  /// prepends new entries) - the `BTree`/`SkipList`/`LinkedList` backings
+  /// all enumerate oldest-first (see `mv_viz::dump::all_roots`), so this has
+  /// to actually compare versions regardless of which backing produced the
+  /// dump.
+  function latestRoot() {
+    return dump.roots.reduce((a, b) => (b.version > a.version ? b : a));
+  }
+
+  fileInput.addEventListener("change", (e) => {
+    if (e.target.files[0]) loadFile(e.target.files[0]);
+  });
+  document.getElementById("loadBtn").addEventListener("click", () => fileInput.click());
+
+  ["dragover", "drop"].forEach(evt =>
+    window.addEventListener(evt, (e) => { e.preventDefault(); }));
+  window.addEventListener("drop", (e) => {
+    if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+  });
+
+  // ---------------------------------------------------------------------
+  // Sidebar: root* list
+  // ---------------------------------------------------------------------
+  function renderRootList() {
+    rootListEl.innerHTML = "";
+    const latest = latestRoot();
+    // Display newest-first regardless of the underlying root-index's own
+    // enumeration order (see latestRoot()'s doc) - most users expect the
+    // current version at the top.
+    const sorted = [...dump.roots].sort((a, b) => b.version - a.version);
+    sorted.forEach((r) => {
+      const row = document.createElement("div");
+      row.className = "root-row" + (r.node_id === currentRootId ? " selected" : "");
+      row.innerHTML =
+        '<span class="rv">v' + r.version + '</span>' +
+        (r.node_id === latest.node_id ? '<span class="latest-badge">latest</span>' : '') +
+        '<span class="rh">h' + r.height + '</span>' +
+        '<span class="rid">' + r.node_id + '</span>';
+      row.addEventListener("click", () => selectRoot(r.node_id, r));
+      rootListEl.appendChild(row);
+    });
+  }
+
+  function selectRoot(nodeId, rootMeta) {
+    currentRootId = nodeId;
+    expanded.clear(); // start fully collapsed (just the root box) - a wide root
+                       // (e.g. FAN_OUT=125 children) would otherwise force an
+                       // unreadably tiny "fit" scale right away.
+    checked.clear();
+    childLimit.clear();
+    renderRootList();
+    document.getElementById("statSelection").textContent =
+      "selected root: v" + rootMeta.version + " (h" + rootMeta.height + ")";
+    computeReachable(nodeId);
+    render();
+    requestAnimationFrame(fitToView);
+  }
+
+  // ---------------------------------------------------------------------
+  // Live view: jump to the current root* and highlight, throughout it,
+  // which entries are still live (green glow/edges) vs. dead/obsolete
+  // history a physical page is still holding onto (red, dashed edges) -
+  // see mv_viz::dump.rs's `live` field (from `InternalPage::live_mask`) and
+  // the per-record `deleted` flag for where this comes from.
+  // ---------------------------------------------------------------------
+  liveViewBtn.addEventListener("click", () => {
+    liveViewMode = !liveViewMode;
+    liveViewBtn.classList.toggle("primary", liveViewMode);
+    liveLegend.classList.toggle("hidden", !liveViewMode);
+    if (!dump) return;
+
+    const latest = latestRoot();
+    if (liveViewMode && latest.node_id !== currentRootId) {
+      selectRoot(latest.node_id, latest); // already re-renders
+    } else {
+      render();
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Trace: for a node reached through some parent slot, find the sibling
+  // slots (in that same parent) whose key interval overlaps it - the
+  // *previous* ones are what this node overrode, the *next* ones are what
+  // overrides this node if it's since gone dead. This is exactly the
+  // relationship `InternalPage::live_mask` computes server-side (see
+  // mv_viz::dump.rs) - re-derived here per-pair so a specific override
+  // relationship can be shown, not just an aggregate live/dead flag.
+  // A node with no parent (the currently rendered root) traces via root*
+  // version adjacency instead: the previous/next root* by version.
+  // ---------------------------------------------------------------------
+  function intervalsOverlap(a, b) {
+    const aLo = tryBigInt(a.key_lower), aHi = tryBigInt(a.key_upper);
+    const bLo = tryBigInt(b.key_lower), bHi = tryBigInt(b.key_upper);
+    if (aLo === null || aHi === null || bLo === null || bHi === null) return false;
+    return !(aLo > bHi || bLo > aHi);
+  }
+
+  function computeRootTrace(nodeId) {
+    const sorted = [...dump.roots].sort((a, b) => a.version - b.version);
+    const idx = sorted.findIndex(r => r.node_id === nodeId);
+    return {
+      kind: "root",
+      nodeId,
+      previous: idx > 0 ? [sorted[idx - 1]] : [],
+      next: idx >= 0 && idx < sorted.length - 1 ? [sorted[idx + 1]] : [],
+    };
+  }
+
+  /// Every dead slot is dead *because* some later sibling in the same
+  /// parent overlaps it (that's exactly what `InternalPage::live_mask`
+  /// computes) - so `mine.live === false` should always come with a
+  /// non-empty `next` list below. But a node can also render dead-glow
+  /// purely because an *ancestor* was superseded (liveness propagates past
+  /// a supersession point - see buildLayout's `isLive`), while this node's
+  /// own immediate slot is still perfectly live. In that case there's
+  /// nothing to find at this level - `supersessionPoint` (computed by
+  /// `collect()` for this exact rendered instance and embedded directly on
+  /// its trace button - see that function's doc for why it can't be
+  /// reconstructed afterward from the bare node id) is the id+parentId of
+  /// the shallowest ancestor whose *own* slot is the one that's actually
+  /// dead, i.e. where the real override lives.
+  ///
+  /// `parentId`/`supersessionPoint` come straight from the clicked button's
+  /// data attributes for a direct click, or are passed through explicitly
+  /// when chaining onto a sibling result (which already knows its parent -
+  /// the one the current trace came from - without that sibling necessarily
+  /// being currently rendered). A chained trace never has its own
+  /// `supersessionPoint`: a direct sibling's liveness is exactly its own
+  /// `.live` flag, no ancestor-propagation ambiguity to resolve.
+  function computeTrace(nodeId, parentId, supersessionPoint) {
+    if (parentId === null) return computeRootTrace(nodeId);
+    // Chained "Trace this" from a root-adjacency entry (see
+    // computeRootTrace/renderTrace's "root" branch) carries no parent at
+    // all - those rows are root* entries, not sibling slots.
+    if (parentId === undefined) {
+      return dump.roots.some(r => r.node_id === nodeId)
+        ? computeRootTrace(nodeId)
+        : { kind: "unavailable", nodeId };
+    }
+
+    const parent = dump.nodes[parentId];
+    if (!parent || parent.type !== "internal") return { kind: "unavailable", nodeId };
+
+    const myIdx = parent.children.findIndex(c => c.node_id === nodeId);
+    if (myIdx < 0) return { kind: "unavailable", nodeId };
+    const mine = parent.children[myIdx];
+    const previous = parent.children.slice(0, myIdx).filter(c => intervalsOverlap(c, mine));
+    const next = parent.children.slice(myIdx + 1).filter(c => intervalsOverlap(c, mine));
+
+    return {
+      kind: "sibling", nodeId, parentId, mine, previous, next,
+      inheritedDeadFrom: mine.live !== false ? (supersessionPoint || null) : null,
+    };
+  }
+
+  function traceRowHtml(item, label, parentIdForChain) {
+    // `item.live` only exists on child-slot descriptors, not on root-list
+    // entries (which have no override/live concept of their own at this
+    // granularity) - undefined there simply skips the live/dead accent.
+    const relClass = item.live === true ? " rel-live" : item.live === false ? " rel-dead" : "";
+    const canJump = lastPositions && lastPositions.has(item.node_id);
+    return (
+      '<li class="' + relClass.trim() + '">' +
+      '<code>' + item.node_id + '</code><br>' + escapeHtml(label) +
+      '<div class="trace-row-actions">' +
+      '<button class="btn" data-trace-chain="' + item.node_id + '"' +
+      (parentIdForChain !== undefined ? ' data-trace-chain-parent="' + parentIdForChain + '"' : '') +
+      '>Trace this &#8646;</button>' +
+      (canJump ? '<button class="btn" data-trace-jump="' + item.node_id + '">Jump to it</button>' : '') +
+      '</div></li>'
+    );
+  }
+
+  function traceListHtml(title, items, label, parentIdForChain) {
+    if (!items.length) return '<div class="trace-section"><b>' + title + ':</b> none</div>';
+    return '<div class="trace-section"><b>' + title + ':</b><ul>' +
+      items.map(it => traceRowHtml(it, label(it), parentIdForChain)).join("") +
+      '</ul></div>';
+  }
+
+  function renderTrace(trace) {
+    if (trace.kind === "unavailable") {
+      return '<p>This node isn\'t currently rendered, so its parent context isn\'t known - expand its ' +
+        'containing branch first, then trace it directly.</p>';
+    }
+    if (trace.kind === "root") {
+      const label = r => "v" + r.version + " (height " + r.height + ")";
+      return (
+        '<p>Root* version adjacency for <code>' + trace.nodeId + '</code> ' +
+        '(root splits are the only events that append a new root*, so the immediately ' +
+        'adjacent version is the direct predecessor/successor):</p>' +
+        traceListHtml("Previous root* (older version this superseded)", trace.previous, label) +
+        traceListHtml("Next root* (newer version that superseded this)", trace.next, label)
+      );
+    }
+
+    const label = c => "[" + c.key_lower + " .. " + c.key_upper + "]  v" + c.version +
+      "  " + (c.live ? "(live)" : "(dead/obsolete)");
+    let html = '<p>Node <code>' + trace.nodeId + '</code> - slot ' + escapeHtml(label(trace.mine)) +
+      ' in parent <code>' + trace.parentId + '</code>.</p>';
+
+    if (trace.inheritedDeadFrom) {
+      html += '<div class="trace-section trace-warning">' +
+        'This node\'s own slot is still marked <b>live</b> in its immediate parent - it only ' +
+        'renders as dead because an ancestor, <code>' + trace.inheritedDeadFrom.id + '</code>, ' +
+        'was itself superseded. Every dead node has a successor, but it has to be looked up at ' +
+        'the point where the override actually happened, not down here.' +
+        '<div class="trace-row-actions">' +
+        '<button class="btn" data-trace-chain="' + trace.inheritedDeadFrom.id + '" data-trace-chain-parent="' +
+        trace.inheritedDeadFrom.parentId + '">Trace the actual supersession point &#8646;</button>' +
+        '</div></div>';
+    } else if (trace.mine.live === false && trace.next.length === 0) {
+      // Shouldn't happen - `live_mask` guarantees a dead slot has an
+      // overlapping later sibling - surfaced explicitly rather than left as
+      // a silently-empty list, in case this ever does turn up on real data.
+      html += '<div class="trace-section trace-warning">' +
+        'This slot is marked dead/obsolete, but no overlapping later sibling was found - that ' +
+        'shouldn\'t happen (a dead slot should always have one). Worth reporting if you see this.' +
+        '</div>';
+    }
+
+    html += traceListHtml("Overridden by this node (previous, same key range)", trace.previous, label, trace.parentId) +
+      traceListHtml("Overriding nodes (newer, supersede this one)", trace.next, label, trace.parentId);
+    return html;
+  }
+
+  function openTrace(nodeId, parentId, supersessionPoint) {
+    const trace = computeTrace(nodeId, parentId, supersessionPoint);
+    currentTraceHtml = renderTrace(trace);
+    traceBody.innerHTML = currentTraceHtml;
+    tracePanel.classList.remove("hidden");
+
+    traceBody.querySelectorAll("[data-trace-chain]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const parentAttr = btn.getAttribute("data-trace-chain-parent");
+        openTrace(btn.getAttribute("data-trace-chain"), parentAttr === null ? undefined : parentAttr);
+      });
+    });
+    traceBody.querySelectorAll("[data-trace-jump]").forEach(btn => {
+      btn.addEventListener("click", () => flashAndCenter(btn.getAttribute("data-trace-jump")));
+    });
+  }
+
+  document.getElementById("traceCloseBtn").addEventListener("click", () => {
+    tracePanel.classList.add("hidden");
+  });
+
+  const TRACE_POPOUT_CSS = `
+    body { background:#14171c; color:#d8dee9; font:13px -apple-system,sans-serif; padding:20px; max-width:640px; margin:auto; }
+    code { color:#cfe0ff; word-break:break-all; }
+    .trace-section { margin-bottom:16px; }
+    .trace-section ul { list-style:none; margin:6px 0 0; padding:0; }
+    .trace-section li { padding:8px; margin-bottom:6px; background:#232833; border-radius:5px; border-left:3px solid #333a47; }
+    .trace-section li.rel-live { border-left-color:#3aa876; }
+    .trace-section li.rel-dead { border-left-color:#e5586a; }
+    .trace-row-actions { display:none; } /* no live app state in a popped-out static report to act on */
+  `;
+
+  document.getElementById("tracePopoutBtn").addEventListener("click", () => {
+    if (!currentTraceHtml) return;
+    const w = window.open("", "_blank");
+    if (!w) { alert("The browser blocked opening a new tab - allow popups for this page and try again."); return; }
+    w.document.write(
+      "<!doctype html><html><head><title>cMVBT node trace</title><style>" + TRACE_POPOUT_CSS + "</style></head>" +
+      "<body><h2>cMVBT node trace</h2>" + currentTraceHtml + "</body></html>"
+    );
+    w.document.close();
+  });
+
+  // ---------------------------------------------------------------------
+  // Tree helpers
+  // ---------------------------------------------------------------------
+  function getNode(id) { return dump.nodes[id]; }
+
+  /// Resolves either a real dump node id, or a synthetic "more::<parentId>"
+  /// pagination placeholder (never present in `dump.nodes`) to a renderable
+  /// node-like object. Keeps layout/render code from needing two branches
+  /// everywhere a child id is handled.
+  function resolveNode(id) {
+    if (typeof id === "string" && id.startsWith(MORE_PREFIX)) {
+      const parentId = id.slice(MORE_PREFIX.length);
+      const parent = getNode(parentId);
+      const limit = childLimit.get(parentId) ?? DEFAULT_CHILD_PAGE;
+      return { type: "more", parentId, remaining: parent.children.length - limit };
+    }
+    return getNode(id);
+  }
+
+  /// The child *references* (`{node_id, key_lower, key_upper, version}`) to
+  /// actually lay out for `node` (whose own id is `id`) - the real children
+  /// up to that node's current page size, plus one synthetic "more" entry
+  /// if there are further children beyond it.
+  function visibleChildRefs(node, id) {
+    const limit = childLimit.get(id) ?? DEFAULT_CHILD_PAGE;
+    if (node.children.length <= limit) return node.children;
+    return node.children.slice(0, limit)
+      .concat([{ node_id: MORE_PREFIX + id, version: null }]);
+  }
+
+  function computeReachable(rootId) {
+    if (reachableCache.has(rootId)) return reachableCache.get(rootId);
+    let count = 0;
+    const seen = new Set();
+    const stack = [rootId];
+    while (stack.length) {
+      const id = stack.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      count++;
+      const n = getNode(id);
+      if (n && n.type === "internal") n.children.forEach(c => stack.push(c.node_id));
+    }
+    reachableCache.set(rootId, count);
+    return count;
+  }
+
+  // ---------------------------------------------------------------------
+  // Layout: classic subtree-width recursive layout over the *visible*
+  // (expanded-aware) tree. Only ever walks nodes currently shown, so
+  // rendering cost tracks what's on screen, not the whole dump.
+  // ---------------------------------------------------------------------
+  function buildLayout(rootId) {
+    const positions = new Map(); // id -> {x, y, depth, node}
+    const rowMaxHeight = [];     // per-depth tallest visible box
+    const edges = [];            // {from, to, label}
+
+    // Pass 1: depth-first collect + per-row max height.
+    //
+    // isLive is *path*-based, not the node's own active/dead counts: a node
+    // is live iff the entire chain of routing slots from the rendered root
+    // down to it is still in effect. A key/version split leaves the old
+    // page(s) physically in place (still holding whatever was "active" from
+    // their own point of view) but no longer reachable for current reads -
+    // the new node(s) the split produced hold the current entries instead.
+    // So liveness has to propagate down through dead edges regardless of
+    // what a subtree's own pages still locally report.
+    //
+    // A dead slot's target block can *also* still be reachable via some
+    // other, live path elsewhere in the same tree (a dead slot is simply
+    // never cleaned up until GC gets to it - it doesn't stop being a
+    // pointer). So the same physical node id can legitimately get visited
+    // more than once here, through different parents, with different
+    // isLive/fence/supersession context each time - there's no single
+    // canonical "the" parent for a node id in general. `supersessionPoint`
+    // (the id+parentId of the ancestor whose *own* slot is the one that's
+    // actually dead, i.e. where live_mask's overriding sibling(s) live) is
+    // computed fresh on this exact path and threaded straight into the
+    // rendered trace button's data attributes - never reconstructed
+    // afterward from a lookup keyed on the bare (ambiguous) node id.
+    (function collect(id, depth, isLive, parentId, fence, supersessionPoint) {
+      const node = resolveNode(id);
+      const h = measureNodeHeight(id, node, fence);
+      rowMaxHeight[depth] = Math.max(rowMaxHeight[depth] || 0, h);
+      positions.set(id, { depth, node, h, isLive, parentId, fence, supersessionPoint });
+      if (node.type === "internal" && expanded.has(id)) {
+        visibleChildRefs(node, id).forEach(c => {
+          // Once a node itself is dead, every one of its own edges is moot
+          // too, no matter what that edge's own slot-local live_mask says.
+          const edgeLive = isLive ? c.live : false;
+          edges.push({ from: id, to: c.node_id, label: c.version === null ? "" : "v" + c.version, live: edgeLive });
+          const childFence = c.node_id.startsWith(MORE_PREFIX) ? null : { lower: c.key_lower, upper: c.key_upper };
+          const childSupersessionPoint = !isLive
+            ? supersessionPoint // already inside a dead branch - keep the original cut point, don't move it deeper
+            : (c.live === false ? { id: c.node_id, parentId: id } : null); // isLive true: this either *is* or isn't the cut point
+          collect(c.node_id, depth + 1, isLive && c.live !== false, id, childFence, childSupersessionPoint);
+        });
+      }
+    })(rootId, 0, true, null, null, null); // the rendered root is always "the current version" by definition
+
+    // Row Y offsets from per-row max heights
+    const rowY = [0];
+    for (let d = 1; d < rowMaxHeight.length; d++) {
+      rowY[d] = rowY[d - 1] + rowMaxHeight[d - 1] + VGAP;
+    }
+
+    // Pass 2: subtree width (in visible-leaf-units) for X assignment
+    function width(id) {
+      const node = resolveNode(id);
+      if (node.type !== "internal" || !expanded.has(id) || node.children.length === 0) {
+        return NODE_W + HGAP;
+      }
+      return visibleChildRefs(node, id).reduce((sum, c) => sum + width(c.node_id), 0);
+    }
+
+    function assignX(id, xStart) {
+      const w = width(id);
+      const node = resolveNode(id);
+      const pos = positions.get(id);
+      pos.y = rowY[pos.depth];
+      if (node.type === "internal" && expanded.has(id) && node.children.length) {
+        const kids = visibleChildRefs(node, id);
+        let cursor = xStart;
+        kids.forEach(c => {
+          const cw = width(c.node_id);
+          assignX(c.node_id, cursor);
+          cursor += cw;
+        });
+        const first = positions.get(kids[0].node_id);
+        const last = positions.get(kids[kids.length - 1].node_id);
+        pos.x = (first.x + last.x) / 2;
+      } else {
+        pos.x = xStart + w / 2 - HGAP / 2;
+      }
+    }
+    assignX(rootId, 0);
+
+    return { positions, edges };
+  }
+
+  // ---------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  function nodeInnerHtml(id, node, fence, isLive, parentId, supersessionPoint) {
+    if (node.type === "more") {
+      return (
+        '<div class="node-box more" data-more-parent="' + node.parentId + '">' +
+        '<div class="node-head">' +
+        '<span class="kind">+' + node.remaining + ' more &hellip;</span>' +
+        '</div><div class="node-body">click to show the rest of this node\'s children</div>' +
+        '</div>'
+      );
+    }
+
+    const isExpanded = expanded.has(id);
+    const isMarked = checked.has(id);
+    const caret = node.type === "leaf" || node.type === "internal" ? (isExpanded ? "▾" : "▸") : "";
+    const kindLabel = node.type === "internal" ? "Internal" : node.type === "leaf" ? "Leaf" : "Internal (truncated)";
+
+    let body = '<div class="node-body">' +
+      '<div class="range" title="' + escapeHtml(node.min_key) + ' .. ' + escapeHtml(node.max_key) + '">' +
+      escapeHtml(node.min_key) + ' .. ' + escapeHtml(node.max_key) + '</div>';
+
+    // Fence keys: the parent-imposed key boundary this leaf was actually
+    // handed (from that slot's `Interval<Key>`) - can be wider than the
+    // range of keys the leaf currently happens to hold, so it's shown
+    // separately from "range" above rather than merged into it. Only
+    // available for a non-root node (the rendered root has no parent slot
+    // to inherit a fence from).
+    if (node.type === "leaf" && fence) {
+      body += '<div class="fence" title="parent-imposed key boundary for this leaf slot">' +
+        'fence: ' + escapeHtml(fence.lower) + ' .. ' + escapeHtml(fence.upper) + '</div>';
+    }
+
+    body += '<div class="counts">' +
+      '<span class="count-active">&#9679; ' + node.active + ' active</span>' +
+      '<span class="count-dead">&#9679; ' + node.dead + ' dead</span>' +
+      (node.type === "internal" ? '<span>' + node.children.length + ' child(ren)</span>' : '') +
+      (node.type === "internal_truncated" ? '<span>' + node.child_count + ' child(ren) not dumped</span>' : '') +
+      '</div>';
+
+    if (node.type === "internal_truncated") {
+      body += '<div class="truncated-note">Depth-limited dump: subtree exists but was not walked.</div>';
+    }
+
+    if (node.type === "leaf" && isExpanded) {
+      body += '<div class="records">' + node.records.map(r => {
+        const ver = "w" + r.insert_worker + "@" + r.insert_ts +
+          (r.deleted ? " &#8594; w" + r.delete_worker + "@" + r.delete_ts : "");
+        const rowClass = r.deleted ? " deleted" : (liveViewMode ? " live" : "");
+        return '<div class="record-row' + rowClass + '">' +
+          '<span class="k">' + escapeHtml(r.key) + '</span>' +
+          '<span class="v">' + ver + '</span></div>';
+      }).join("") + '</div>';
+    }
+
+    body += '</div>';
+
+    const liveClass = liveViewMode ? (isLive ? " live-glow" : " dead-glow") : "";
+
+    // Embedded directly rather than looked up later by the (possibly
+    // ambiguous - see collect()'s doc) bare node id: a dead slot's block can
+    // still be reachable via some other, live path elsewhere in the tree, so
+    // there's no single canonical "the parent" for a node id in general -
+    // only for *this specific rendered instance*, which is exactly what
+    // this call already knows.
+    const traceAttrs =
+      ' data-trace="' + id + '"' +
+      ' data-trace-parent="' + (parentId === null ? "" : parentId) + '"' +
+      (supersessionPoint
+        ? ' data-trace-super-id="' + supersessionPoint.id + '" data-trace-super-parent="' + supersessionPoint.parentId + '"'
+        : '');
+
+    return (
+      '<div class="node-box ' + node.type.replace("_truncated", " truncated") + (isMarked ? " marked" : "") + liveClass + '" data-id="' + id + '">' +
+      '<div class="node-head" data-toggle="' + id + '">' +
+      '<span class="caret">' + caret + '</span>' +
+      '<span class="kind">' + kindLabel + '</span>' +
+      '<span class="mark">' +
+      '<span class="trace-btn"' + traceAttrs + ' title="Trace this node\'s previous/overriding nodes">&#8646;</span>' +
+      '<input type="checkbox" data-mark="' + id + '" ' + (isMarked ? "checked" : "") + '>' +
+      '</span>' +
+      '</div>' + body + '</div>'
+    );
+  }
+
+  /// Actual rendered height of this node's box, via a hidden same-width
+  /// (`#measure`) host - rather than a guessed constant, so it can never
+  /// drift out of sync with `nodeInnerHtml`'s real markup (extra lines for
+  /// e.g. a truncated-subtree note, wrapped counts on unusually large
+  /// active/dead numbers, a fence line, etc. are all accounted for
+  /// automatically). Cached per (id, expanded-state, fence-presence) - a
+  /// node's own box content never depends on anything else that changes
+  /// across renders (marking/live-view glow are CSS-only, no layout size
+  /// change), but fence-presence can genuinely differ between renders for
+  /// the *same* physical id: it's whatever the rendered root happens to be
+  /// (no fence) vs. a deeper child reached through some parent (has one).
+  function measureNodeHeight(id, node, fence) {
+    const isExpanded = expanded.has(id);
+    const key = id + ":" + isExpanded + ":" + (fence ? "F" : "R");
+    let h = heightCache.get(key);
+    if (h === undefined) {
+      measureEl.innerHTML = nodeInnerHtml(id, node, fence, true);
+      h = measureEl.firstElementChild.offsetHeight;
+      heightCache.set(key, h);
+    }
+    return h;
+  }
+
+  function render() {
+    edgesG.innerHTML = "";
+    nodesG.innerHTML = "";
+
+    if (!currentRootId) {
+      emptyEl.classList.remove("hidden");
+      updateStatusVisible(0);
+      lastPositions = null;
+      return;
+    }
+    emptyEl.classList.add("hidden");
+
+    const { positions, edges } = buildLayout(currentRootId);
+
+    // Edges (drawn first, under nodes)
+    edges.forEach(e => {
+      const a = positions.get(e.from), b = positions.get(e.to);
+      if (!a || !b) return;
+      const x1 = a.x, y1 = a.y + a.h, x2 = b.x, y2 = b.y;
+      const midY = (y1 + y2) / 2;
+      const liveClass = liveViewMode && e.live === true ? " live" : liveViewMode && e.live === false ? " dead" : "";
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("class", "edge" + liveClass);
+      path.setAttribute("d", `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`);
+      edgesG.appendChild(path);
+
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.setAttribute("class", "edge-label");
+      label.setAttribute("x", (x1 + x2) / 2 + 4);
+      label.setAttribute("y", midY);
+      label.textContent = e.label;
+      edgesG.appendChild(label);
+    });
+
+    // Nodes
+    positions.forEach((pos, id) => {
+      const fo = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
+      fo.setAttribute("x", pos.x - NODE_W / 2);
+      fo.setAttribute("y", pos.y);
+      fo.setAttribute("width", NODE_W);
+      fo.setAttribute("height", pos.h);
+      fo.innerHTML =
+        '<div xmlns="http://www.w3.org/1999/xhtml">' +
+        nodeInnerHtml(id, pos.node, pos.fence, pos.isLive, pos.parentId, pos.supersessionPoint) +
+        '</div>';
+      nodesG.appendChild(fo);
+    });
+
+    lastPositions = positions; // for the trace feature, looked up on a later, separate click
+
+    wireNodeEvents();
+    updateStatusVisible(positions.size);
+  }
+
+  function updateStatusVisible(n) {
+    document.getElementById("statVisible").textContent = "visible boxes: " + n;
+    document.getElementById("statReachable").textContent =
+      currentRootId ? "nodes in current root: " + computeReachable(currentRootId) : "nodes in current root: -";
+  }
+
+  function wireNodeEvents() {
+    nodesG.querySelectorAll("[data-toggle]").forEach(el => {
+      el.addEventListener("click", (e) => {
+        if (e.target.matches("input[type=checkbox]") || e.target.closest(".trace-btn")) return;
+        const id = el.getAttribute("data-toggle");
+        toggleExpand(id);
+      });
+    });
+    nodesG.querySelectorAll("[data-mark]").forEach(el => {
+      el.addEventListener("click", (e) => e.stopPropagation());
+      el.addEventListener("change", (e) => {
+        const id = el.getAttribute("data-mark");
+        if (e.target.checked) checked.add(id); else checked.delete(id);
+        const box = el.closest(".node-box");
+        if (box) box.classList.toggle("marked", e.target.checked);
+      });
+    });
+    nodesG.querySelectorAll("[data-trace]").forEach(el => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const parentAttr = el.getAttribute("data-trace-parent");
+        const parentId = parentAttr === "" ? null : parentAttr;
+        const superId = el.getAttribute("data-trace-super-id");
+        const supersessionPoint = superId ? { id: superId, parentId: el.getAttribute("data-trace-super-parent") } : null;
+        openTrace(el.getAttribute("data-trace"), parentId, supersessionPoint);
+      });
+    });
+    nodesG.querySelectorAll("[data-more-parent]").forEach(el => {
+      el.addEventListener("click", () => {
+        childLimit.set(el.getAttribute("data-more-parent"), Infinity);
+        render();
+      });
+    });
+  }
+
+  function toggleExpand(id) {
+    if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
+    render();
+  }
+
+  // ---------------------------------------------------------------------
+  // Expand/collapse controls
+  // ---------------------------------------------------------------------
+  document.getElementById("expandAllBtn").addEventListener("click", () => {
+    if (!currentRootId) return;
+    const total = computeReachable(currentRootId);
+    if (total > EXPAND_ALL_WARN_THRESHOLD &&
+      !confirm(`This root reaches ${total} nodes - expanding all of them may be slow ` +
+        `and hard to navigate. Expand anyway?`)) {
+      return;
+    }
+    const stack = [currentRootId];
+    while (stack.length) {
+      const id = stack.pop();
+      expanded.add(id);
+      const n = getNode(id);
+      if (n && n.type === "internal") {
+        childLimit.set(id, Infinity); // explicit opt-in (confirmed above): show every child, no pagination
+        n.children.forEach(c => stack.push(c.node_id));
+      }
+    }
+    render();
+  });
+
+  document.getElementById("collapseAllBtn").addEventListener("click", () => {
+    if (!currentRootId) return;
+    expanded.clear();
+    expanded.add(currentRootId);
+    childLimit.clear();
+    render();
+  });
+
+  document.getElementById("expandMarkedBtn").addEventListener("click", () => {
+    checked.forEach(id => expanded.add(id));
+    render();
+  });
+  document.getElementById("collapseMarkedBtn").addEventListener("click", () => {
+    checked.forEach(id => expanded.delete(id));
+    render();
+  });
+  document.getElementById("clearMarkedBtn").addEventListener("click", () => {
+    checked.clear();
+    render();
+  });
+
+  // ---------------------------------------------------------------------
+  // Search: descend via key ranges to the leaf that would hold `key`,
+  // expanding every node along the path.
+  // ---------------------------------------------------------------------
+  function tryBigInt(s) { try { return BigInt(s); } catch (e) { return null; } }
+
+  document.getElementById("searchBtn").addEventListener("click", doSearch);
+  document.getElementById("search").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") doSearch();
+  });
+
+  function doSearch() {
+    if (!currentRootId) return;
+    const raw = document.getElementById("search").value.trim();
+    if (!raw) return;
+    const target = tryBigInt(raw);
+    if (target === null) { alert("Only integer keys are supported by search."); return; }
+
+    const path = [];
+    let id = currentRootId;
+    let found = null;
+    for (let guard = 0; guard < 10000; guard++) {
+      path.push(id);
+      const node = getNode(id);
+      if (node.type === "leaf") {
+        found = node.records.some(r => tryBigInt(r.key) === target) ? id : null;
+        break;
+      }
+      if (node.type === "internal_truncated") { found = null; break; }
+      const hit = node.children.find(c => {
+        const lo = tryBigInt(c.key_lower), hi = tryBigInt(c.key_upper);
+        return lo !== null && hi !== null && target >= lo && target <= hi;
+      });
+      if (!hit) { found = null; break; }
+      id = hit.node_id;
+    }
+
+    // Every ancestor on the path must be expanded *and* unpaginated -
+    // otherwise the matching child could be sitting past that ancestor's
+    // current "+N more" page and never actually render.
+    path.forEach(pid => {
+      expanded.add(pid);
+      const n = getNode(pid);
+      if (n && n.type === "internal") childLimit.set(pid, Infinity);
+    });
+    render();
+    requestAnimationFrame(() => {
+      if (found) flashAndCenter(found);
+      else if (path.length) flashAndCenter(path[path.length - 1]);
+      if (!found) {
+        alert("Key " + raw + " was not found in a live record (it may not exist, or may only " +
+          "exist as a dead/obsolete entry not surfaced by range descent).");
+      }
+    });
+  }
+
+  function flashAndCenter(id) {
+    const { positions } = buildLayout(currentRootId);
+    const pos = positions.get(id);
+    if (!pos) return;
+    centerOn(pos.x, pos.y + pos.h / 2);
+    const box = nodesG.querySelector(`.node-box[data-id="${id}"]`);
+    if (box) {
+      box.classList.add("flash");
+      setTimeout(() => box.classList.remove("flash"), 1400);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Zoom / pan
+  // ---------------------------------------------------------------------
+  function applyTransform() {
+    viewport.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`);
+  }
+
+  function zoomAt(clientX, clientY, factor) {
+    const rect = svg.getBoundingClientRect();
+    const mx = clientX - rect.left, my = clientY - rect.top;
+    const worldX = (mx - view.x) / view.k, worldY = (my - view.y) / view.k;
+    const newK = Math.min(3, Math.max(0.05, view.k * factor));
+    view.x = mx - worldX * newK;
+    view.y = my - worldY * newK;
+    view.k = newK;
+    applyTransform();
+  }
+
+  canvasWrap.addEventListener("wheel", (e) => {
+    // Let a leaf's own scrollable record list handle its wheel events
+    // natively - otherwise scrolling it always hijacks into zooming the
+    // whole canvas instead (preventDefault below would block the list's
+    // native scroll entirely).
+    if (e.target.closest(".records") || e.target.closest("#tracePanel")) return;
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    zoomAt(e.clientX, e.clientY, factor);
+  }, { passive: false });
+
+  document.getElementById("zoomInBtn").addEventListener("click", () => {
+    const r = canvasWrap.getBoundingClientRect();
+    zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1.25);
+  });
+  document.getElementById("zoomOutBtn").addEventListener("click", () => {
+    const r = canvasWrap.getBoundingClientRect();
+    zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1 / 1.25);
+  });
+  document.getElementById("resetZoomBtn").addEventListener("click", () => {
+    view.k = 1; applyTransform();
+  });
+  document.getElementById("fitBtn").addEventListener("click", fitToView);
+
+  function centerOn(worldX, worldY) {
+    const rect = canvasWrap.getBoundingClientRect();
+    view.x = rect.width / 2 - worldX * view.k;
+    view.y = rect.height / 2 - worldY * view.k;
+    applyTransform();
+  }
+
+  function fitToView() {
+    if (!currentRootId) return;
+    const { positions } = buildLayout(currentRootId);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    positions.forEach(p => {
+      minX = Math.min(minX, p.x - NODE_W / 2);
+      maxX = Math.max(maxX, p.x + NODE_W / 2);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y + p.h);
+    });
+    if (!isFinite(minX)) return;
+    const rect = canvasWrap.getBoundingClientRect();
+    const pad = 60;
+    const scaleX = (rect.width - pad * 2) / Math.max(1, (maxX - minX));
+    const scaleY = (rect.height - pad * 2) / Math.max(1, (maxY - minY));
+    view.k = Math.min(1.4, Math.max(0.03, Math.min(scaleX, scaleY)));
+    view.x = rect.width / 2 - ((minX + maxX) / 2) * view.k;
+    view.y = pad - minY * view.k;
+    applyTransform();
+  }
+
+  // Pan by dragging the empty canvas (not a node box).
+  let dragging = false, dragStart = null, viewStart = null;
+  canvasWrap.addEventListener("pointerdown", (e) => {
+    // Without the #tracePanel exclusion, every click inside the trace panel
+    // (including its own buttons) also starts a canvas pan and steals
+    // pointer capture onto canvasWrap - which then intercepts the pointerup
+    // that would otherwise complete the click on the actual button, so nothing
+    // in the panel visibly responds to a real mouse click (a synthetic
+    // `.click()` call skips this whole pointerdown/capture path, which is
+    // why this didn't show up in automated testing).
+    if (e.target.closest(".node-box") || e.target.closest("#tracePanel")) return;
+    dragging = true;
+    canvasWrap.classList.add("grabbing");
+    dragStart = { x: e.clientX, y: e.clientY };
+    viewStart = { x: view.x, y: view.y };
+    canvasWrap.setPointerCapture(e.pointerId);
+  });
+  canvasWrap.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    view.x = viewStart.x + (e.clientX - dragStart.x);
+    view.y = viewStart.y + (e.clientY - dragStart.y);
+    applyTransform();
+  });
+  ["pointerup", "pointercancel"].forEach(evt =>
+    canvasWrap.addEventListener(evt, () => {
+      dragging = false;
+      canvasWrap.classList.remove("grabbing");
+    }));
+
+  // A leaf's expanded `.records` list sits inside `#viewport`, which carries
+  // the pan/zoom `scale(view.k)` transform - browsers' native scrollbar
+  // *thumb-drag* hit-testing/pixel math doesn't correctly account for an
+  // ancestor's CSS/SVG scale (a long-standing cross-browser limitation;
+  // wheel scrolling is unaffected since deltaY is a logical amount, not a
+  // screen-pixel mapping, which is why that already worked). Emulate the
+  // thumb drag ourselves: convert the mouse's on-screen delta back to the
+  // list's own unscaled pixels (divide by view.k), then scale that by
+  // scrollHeight/clientHeight the way a real scrollbar thumb would.
+  let scrollDrag = null;
+  const SCROLLBAR_HIT_WIDTH = 12; // a bit wider than the 8px visual bar, forgiving to imprecise clicks
+
+  function nearScrollbar(el, clientX) {
+    if (el.scrollHeight <= el.clientHeight) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.right - clientX <= SCROLLBAR_HIT_WIDTH;
+  }
+
+  nodesG.addEventListener("pointerdown", (e) => {
+    const rec = e.target.closest(".records");
+    if (!rec || !nearScrollbar(rec, e.clientX)) return;
+    e.preventDefault();
+    e.stopPropagation(); // don't let canvasWrap's own pointerdown start a pan too
+    scrollDrag = { el: rec, startY: e.clientY, startScrollTop: rec.scrollTop };
+    rec.setPointerCapture(e.pointerId);
+  });
+  nodesG.addEventListener("pointermove", (e) => {
+    if (!scrollDrag) return;
+    const { el, startY, startScrollTop } = scrollDrag;
+    const contentDelta = (e.clientY - startY) / view.k;
+    el.scrollTop = startScrollTop + contentDelta * (el.scrollHeight / el.clientHeight);
+  });
+  ["pointerup", "pointercancel"].forEach(evt =>
+    nodesG.addEventListener(evt, () => { scrollDrag = null; }));
+
+  window.addEventListener("resize", () => { /* svg is 100%/100%, no-op */ });
+
+  applyTransform();
+
+  // Escape hatch for embedding/automation: load an already-parsed dump object
+  // directly, bypassing the <input type=file> dialog (which e.g. headless
+  // browser automation can't drive).
+  window.loadDumpObject = function (obj, label) {
+    dump = obj;
+    onDumpLoaded(label || "(loaded programmatically)");
+  };
+})();
+</script>
+</body>
+</html>

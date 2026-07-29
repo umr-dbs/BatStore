@@ -16,12 +16,12 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Updated non-gc settings; now always include live tx to trace liveness correctly. Removes hotspot txtrace">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Updated Tpcc find first">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_txn.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_txn.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_db/transaction.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_db/transaction.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/iter_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/iter_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/iter_query_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/iter_query_tests.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_test/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_test/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_tree/mvbt.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/mvbt.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -32,7 +32,7 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="14679" />
+    <option name="cachedIndexableFilesCount" value="14696" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
@@ -76,61 +76,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.000177520069535" />
-      <entry key="MS500" value="1.2255411606342594" />
-      <entry key="S2" value="3.046916212374586" />
-      <entry key="S5" value="6.756163861547467" />
-      <entry key="S10" value="12.31493169389154" />
-      <entry key="S30" value="22.28272322554433" />
-      <entry key="S60" value="26.558663916912675" />
-      <entry key="M2" value="29.113630063246163" />
-      <entry key="M5" value="30.802829761400776" />
-      <entry key="M10" value="31.407404167357377" />
-      <entry key="M15" value="31.684087844832444" />
-      <entry key="M30" value="32.5995361874471" />
-      <entry key="H1" value="37.65875986862711" />
-      <entry key="H2" value="61.6642747118526" />
-      <entry key="H4" value="155.5349520282918" />
-      <entry key="D1" value="1998.8883542815886" />
-      <entry key="W1" value="9034.274829253762" />
+      <entry key="MS100" value="1.2967076714626817" />
+      <entry key="MS500" value="2.4758372775021775" />
+      <entry key="S2" value="5.006665028218915" />
+      <entry key="S5" value="6.811822534393089" />
+      <entry key="S10" value="7.762641946986635" />
+      <entry key="S30" value="8.54969902103192" />
+      <entry key="S60" value="8.770991540489064" />
+      <entry key="M2" value="9.088129906429627" />
+      <entry key="M5" value="13.192728781350423" />
+      <entry key="M10" value="20.628516777004258" />
+      <entry key="M15" value="25.34321800087653" />
+      <entry key="M30" value="32.41652131505202" />
+      <entry key="H1" value="40.918380896260985" />
+      <entry key="H2" value="65.77180954367074" />
+      <entry key="H4" value="158.23895778434468" />
+      <entry key="D1" value="1994.1714139961912" />
+      <entry key="W1" value="9034.39221653689" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
       <entry key="MS500" value="0.0" />
       <entry key="S2" value="0.0" />
-      <entry key="S5" value="1.0237547767956147E-257" />
-      <entry key="S10" value="4.51895510752445E-129" />
-      <entry key="S30" value="2.623642132702193E-43" />
-      <entry key="S60" value="7.243939764159314E-22" />
-      <entry key="M2" value="3.8259773230412003E-11" />
-      <entry key="M5" value="1.1128957590634827E-4" />
-      <entry key="M10" value="0.01723248673051845" />
-      <entry key="M15" value="0.09465209197963785" />
-      <entry key="M30" value="0.5280482407074242" />
-      <entry key="H1" value="1.2587739018013027" />
-      <entry key="H2" value="2.416160881168757" />
-      <entry key="H4" value="10.51088938842527" />
-      <entry key="D1" value="224.44427647576507" />
-      <entry key="W1" value="968.0649357954612" />
+      <entry key="S5" value="2.160448914344857E-309" />
+      <entry key="S10" value="6.564657268651662E-155" />
+      <entry key="S30" value="6.401709165801484E-52" />
+      <entry key="S60" value="3.578248534188139E-26" />
+      <entry key="M2" value="2.68899644113416E-13" />
+      <entry key="M5" value="1.5317702195433912E-5" />
+      <entry key="M10" value="0.006393188652165122" />
+      <entry key="M15" value="0.04887010384462043" />
+      <entry key="M30" value="0.3794286515738234" />
+      <entry key="H1" value="1.0670284308085174" />
+      <entry key="H2" value="2.224538770133751" />
+      <entry key="H4" value="10.085479038799821" />
+      <entry key="D1" value="222.90409440530638" />
+      <entry key="W1" value="967.1131246719799" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.9728288141630481" />
-      <entry key="MS500" value="1.2189076407938697" />
-      <entry key="S2" value="3.0415839885222242" />
-      <entry key="S5" value="6.7512793992881335" />
-      <entry key="S10" value="12.310757736151201" />
-      <entry key="S30" value="22.28035610343114" />
-      <entry key="S60" value="26.557273911836866" />
-      <entry key="M2" value="29.112873519967682" />
-      <entry key="M5" value="30.802621879394845" />
-      <entry key="M10" value="31.424450079557413" />
-      <entry key="M15" value="31.778539503769068" />
-      <entry key="M30" value="33.127262270007" />
-      <entry key="H1" value="38.917159311047705" />
-      <entry key="H2" value="64.07994778738829" />
-      <entry key="H4" value="166.04418902523057" />
-      <entry key="D1" value="2223.326215571091" />
-      <entry key="W1" value="10002.335902736299" />
+      <entry key="MS100" value="1.261249214515962" />
+      <entry key="MS500" value="2.462172531823521" />
+      <entry key="S2" value="4.996156231422058" />
+      <entry key="S5" value="6.80333950453095" />
+      <entry key="S10" value="7.756991898111388" />
+      <entry key="S30" value="8.547390382565608" />
+      <entry key="S60" value="8.769775157537262" />
+      <entry key="M2" value="9.08750018908925" />
+      <entry key="M5" value="13.192446411430005" />
+      <entry key="M10" value="20.634713193858218" />
+      <entry key="M15" value="25.39189943243107" />
+      <entry key="M30" value="32.795675811654185" />
+      <entry key="H1" value="41.985070554897355" />
+      <entry key="H2" value="67.99588851401673" />
+      <entry key="H4" value="168.3228459675624" />
+      <entry key="D1" value="2217.0691363470737" />
+      <entry key="W1" value="10001.501482566198" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -1387,15 +1387,9 @@
       <workItem from="1785247073626" duration="9292000" />
       <workItem from="1785308485751" duration="13597000" />
       <workItem from="1785326720030" duration="918000" />
-      <workItem from="1785336025095" duration="2133000" />
-    </task>
-    <task id="LOCAL-00155" summary="Enabled update-in-place setting">
-      <option name="closed" value="true" />
-      <created>1770104237069</created>
-      <option name="number" value="00155" />
-      <option name="presentableId" value="LOCAL-00155" />
-      <option name="project" value="LOCAL" />
-      <updated>1770104237070</updated>
+      <workItem from="1785336025095" duration="5459000" />
+      <workItem from="1785344742321" duration="156000" />
+      <workItem from="1785357032394" duration="5152000" />
     </task>
     <task id="LOCAL-00156" summary="Enabled update-in-place setting">
       <option name="closed" value="true" />
@@ -1781,7 +1775,15 @@
       <option name="project" value="LOCAL" />
       <updated>1785325708114</updated>
     </task>
-    <option name="localTasksCounter" value="204" />
+    <task id="LOCAL-00204" summary="Updated Tpcc find first">
+      <option name="closed" value="true" />
+      <created>1785338863130</created>
+      <option name="number" value="00204" />
+      <option name="presentableId" value="LOCAL-00204" />
+      <option name="project" value="LOCAL" />
+      <updated>1785338863131</updated>
+    </task>
+    <option name="localTasksCounter" value="205" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1802,7 +1804,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Correct cargo btree version to 0.0.122" />
     <MESSAGE value="Add explicit padding" />
     <MESSAGE value="Cleaned code, and removed atomic type for nodes; GC doesn't require an mfence for reusing a node." />
     <MESSAGE value="Add YCSB and CH (TPC-C + TPC-H) Q1, Q6, Q4, Q5." />
@@ -1827,7 +1828,8 @@
     <MESSAGE value="Remove version_region atomic need; Changed SMO Liveness, now only checks overlap without actual need to obsolete mark" />
     <MESSAGE value="Update script tpcc" />
     <MESSAGE value="Updated non-gc settings; now always include live tx to trace liveness correctly. Removes hotspot txtrace" />
-    <option name="LAST_COMMIT_MESSAGE" value="Updated non-gc settings; now always include live tx to trace liveness correctly. Removes hotspot txtrace" />
+    <MESSAGE value="Updated Tpcc find first" />
+    <option name="LAST_COMMIT_MESSAGE" value="Updated Tpcc find first" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
