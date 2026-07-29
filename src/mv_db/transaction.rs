@@ -231,10 +231,23 @@ impl<
         //     return CRUDOperationResult::Conflict;
         // }
 
+        // Skip a physically-newest entry that's `invalid` (a since-aborted
+        // transaction's `Insert`/`Update`, left in place until the next SMO —
+        // see `LeafPage::apply_invalidate`'s doc): `is_visible_stamp` always
+        // reports an invalid stamp as *not visible, to anyone* (see
+        // `visibility::is_visible`'s doc — its own aborting writer included),
+        // since a reader must never see an aborted write. That's the right
+        // answer for a *read*, but wrong here — this is asking "is the
+        // current live state safe for me to overwrite", and treating a dead
+        // entry's invisibility as "someone else committed something newer"
+        // would report `Conflict` forever after any abort touched this key,
+        // even though `abort_write` already restored the true live
+        // predecessor underneath it. Mirrors `LeafPage::is_live_lineage`,
+        // which every abort/undelete path already searches by.
         match leaf_page
             .as_records_mut()
             .iter_mut()
-            .rfind(|r| r.key() == key)
+            .rfind(|r| r.key() == key && !r.version.insertion_stamp().is_invalid())
         {
             Some(record) =>
                 if tree.is_visible_stamp(self.worker_id, self.ts_start, record.version.insertion_stamp()) {
@@ -275,10 +288,14 @@ impl<
         //     return CRUDOperationResult::Conflict;
         // }
 
+        // See `update`'s identical comment just above: skip a physically-
+        // newest but `invalid` (since-aborted) entry, or its permanently-
+        // invisible stamp reports a spurious `Conflict` for every later
+        // writer of this key.
         match leaf_page
             .as_records_mut()
             .iter_mut()
-            .rfind(|r| r.key == key)
+            .rfind(|r| r.key == key && !r.version.insertion_stamp().is_invalid())
         {
             Some(record) => if tree.is_visible_stamp(
                 self.worker_id,

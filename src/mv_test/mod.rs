@@ -1375,3 +1375,12 @@ mod smo_race_investigation_tests;
 #[cfg(test)]
 #[path = "../../tests/db_transaction_abort_tests.rs"]
 mod db_transaction_abort_tests;
+#[cfg(test)]
+#[path = "../../tests/bench_tpcc_correctness_tests.rs"]
+mod bench_tpcc_correctness_tests;
+#[cfg(test)]
+#[path = "../../tests/bench_tpch_correctness_tests.rs"]
+mod bench_tpch_correctness_tests;
+#[cfg(test)]
+#[path = "../../tests/bench_ycsb_correctness_tests.rs"]
+mod bench_ycsb_correctness_tests;
