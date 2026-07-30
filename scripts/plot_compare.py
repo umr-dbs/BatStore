@@ -14,11 +14,17 @@ PDF and SVG into <run_dir>/plots/.
 Several plots (TPC-C/YCSB throughput bars, memory, summary-all) need exactly
 one row per engine/workload to draw a bar chart, but the manifest now has
 many rows per engine/workload (one per threads x gc combo). Those plots use
-a "reference slice": the largest threads value present, and gc="on" for
-engines that support toggling GC, "n/a" for the ones that don't (never
-"off") - see pick_reference_slice(). Every plot's title/filename says which
-thread count it's pinned to, since it's no longer the only data for that
-engine/workload in the manifest.
+a "reference slice": the largest threads value present, and gc=<choice> for
+engines that support toggling GC, "n/a" for the ones that don't - see
+pick_reference_slice(). Each of these 4 plots is generated ONCE PER gc
+choice ("on" and "off"), as a separate file (name/title suffixed
+"_gc_on"/"_gc_off"), so a single chart never mixes one engine's gc=on bar
+with another engine's gc=off bar - the two files are directly comparable
+side by side instead. Engines without a real toggle (gc_enabled="n/a")
+show the same bar in both files, since there's no separate on/off state
+for them. Every plot's title/filename also says which thread count it's
+pinned to, since it's no longer the only data for that engine/workload in
+the manifest.
 
 Note: PostgreSQL's peak_rss_mb is always 0 (see engines/postgres_benchbase.py's
 docstring for why) - the memory plot excludes it rather than showing a
@@ -81,15 +87,17 @@ def load_manifest(run_dir: Path) -> pd.DataFrame:
     return df
 
 
-def pick_reference_slice(manifest: pd.DataFrame) -> tuple:
-    """One row per engine/workload: the largest threads value present, and gc="on" for
-    engines that support toggling GC, "n/a" for the ones that don't - never "off", so a
-    bar chart never silently shows the GC-disabled number as if it were the default.
+def pick_reference_slice(manifest: pd.DataFrame, gc_choice: str) -> tuple:
+    """One row per engine/workload: the largest threads value present, and gc=gc_choice
+    for engines that support toggling GC, "n/a" for the ones that don't (they have no
+    separate on/off state, so the same row appears in both the "on" and "off" slices).
+    Called once per gc_choice ("on"/"off") so each resulting chart is entirely one GC
+    state, never a mix of one engine's "on" bar next to another engine's "off" bar.
     """
     if manifest.empty:
         return manifest, 0
     ref_threads = int(manifest["threads"].max())
-    slice_df = manifest[(manifest["threads"] == ref_threads) & (manifest["gc_enabled"] != "off")]
+    slice_df = manifest[(manifest["threads"] == ref_threads) & (manifest["gc_enabled"].isin([gc_choice, "n/a"]))]
     return slice_df, ref_threads
 
 
@@ -107,23 +115,23 @@ def _bar_by_engine(ax, df: pd.DataFrame, value_col: str):
                     ha="center", va="bottom", color="red", fontsize=8)
 
 
-def plot_tpcc_throughput(ref_slice: pd.DataFrame, ref_threads: int, out_dir: Path):
+def plot_tpcc_throughput(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str, out_dir: Path):
     df = ref_slice[ref_slice["workload"] == "tpcc"]
     if df.empty:
-        print("No tpcc rows in manifest.csv — skipping TPC-C throughput plot.")
+        print(f"No tpcc rows in manifest.csv for gc={gc_choice} — skipping TPC-C throughput plot.")
         return
     fig, ax = plt.subplots(figsize=(7, 5))
     _bar_by_engine(ax, df, "primary_metric_value")
     ax.set_ylabel("New-Order transactions / sec")
-    ax.set_title(f"TPC-C throughput by engine (threads={ref_threads}, gc=on/n/a)")
+    ax.set_title(f"TPC-C throughput by engine (threads={ref_threads}, gc={gc_choice})")
     ax.grid(alpha=0.3, axis="y")
-    _save(fig, out_dir, "tpcc_throughput_by_engine")
+    _save(fig, out_dir, f"tpcc_throughput_by_engine_gc_{gc_choice}")
 
 
-def plot_ycsb_throughput(ref_slice: pd.DataFrame, ref_threads: int, out_dir: Path):
+def plot_ycsb_throughput(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str, out_dir: Path):
     df = ref_slice[ref_slice["workload"].isin(YCSB_WORKLOADS)].copy()
     if df.empty:
-        print("No YCSB rows in manifest.csv — skipping YCSB throughput plot.")
+        print(f"No YCSB rows in manifest.csv for gc={gc_choice} — skipping YCSB throughput plot.")
         return
     df["workload_label"] = df["workload"].str.replace("ycsb_", "", regex=False).str.upper()
     engines_present = sorted(df["engine"].unique(), key=_engine_sort_key)
@@ -143,17 +151,17 @@ def plot_ycsb_throughput(ref_slice: pd.DataFrame, ref_threads: int, out_dir: Pat
     ax.set_xticklabels(workloads_present)
     ax.set_xlabel("YCSB workload")
     ax.set_ylabel("Operations / sec")
-    ax.set_title(f"YCSB throughput by workload and engine (threads={ref_threads}, gc=on/n/a)")
+    ax.set_title(f"YCSB throughput by workload and engine (threads={ref_threads}, gc={gc_choice})")
     ax.legend()
     ax.grid(alpha=0.3, axis="y")
-    _save(fig, out_dir, "ycsb_throughput_by_engine")
+    _save(fig, out_dir, f"ycsb_throughput_by_engine_gc_{gc_choice}")
 
 
-def plot_memory_usage(ref_slice: pd.DataFrame, ref_threads: int, out_dir: Path):
+def plot_memory_usage(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str, out_dir: Path):
     """Peak RSS by engine, per workload — PostgreSQL excluded (see module docstring)."""
     df = ref_slice[ref_slice["engine"] != "postgres"].copy()
     if df.empty:
-        print("No non-Postgres rows in manifest.csv — skipping memory plot.")
+        print(f"No non-Postgres rows in manifest.csv for gc={gc_choice} — skipping memory plot.")
         return
     workloads = sorted(df["workload"].unique(), key=lambda w: (w != "tpcc", w))
 
@@ -169,16 +177,16 @@ def plot_memory_usage(ref_slice: pd.DataFrame, ref_threads: int, out_dir: Path):
     for idx in range(len(workloads), rows * cols):
         axes[idx // cols][idx % cols].axis("off")
 
-    fig.suptitle(f"Peak memory usage by engine (threads={ref_threads}, gc=on/n/a; PostgreSQL not tracked)")
-    _save(fig, out_dir, "memory_by_engine")
+    fig.suptitle(f"Peak memory usage by engine (threads={ref_threads}, gc={gc_choice}; PostgreSQL not tracked)")
+    _save(fig, out_dir, f"memory_by_engine_gc_{gc_choice}")
 
 
-def plot_summary_all(ref_slice: pd.DataFrame, ref_threads: int, out_dir: Path):
+def plot_summary_all(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str, out_dir: Path):
     """Every workload x engine combo's primary metric, log-scaled purely so
     TPC-C and YCSB (different units/magnitudes) fit on one chart."""
     df = ref_slice.copy()
     if df.empty:
-        print("No rows in manifest.csv — skipping summary-all plot.")
+        print(f"No rows in manifest.csv for gc={gc_choice} — skipping summary-all plot.")
         return
     workloads = sorted(df["workload"].unique(), key=lambda w: (w != "tpcc", w))
     engines_present = sorted(df["engine"].unique(), key=_engine_sort_key)
@@ -197,10 +205,10 @@ def plot_summary_all(ref_slice: pd.DataFrame, ref_threads: int, out_dir: Path):
     ax.set_xticklabels(workloads, rotation=30, ha="right")
     ax.set_ylabel("Primary throughput metric (New-Order/sec or ops/sec)")
     ax.set_yscale("log")
-    ax.set_title(f"All workloads: primary throughput by engine (log scale, threads={ref_threads}, gc=on/n/a)")
+    ax.set_title(f"All workloads: primary throughput by engine (log scale, threads={ref_threads}, gc={gc_choice})")
     ax.legend()
     ax.grid(alpha=0.3, axis="y")
-    _save(fig, out_dir, "summary_all_workloads")
+    _save(fig, out_dir, f"summary_all_workloads_gc_{gc_choice}")
 
 
 def plot_throughput_vs_threads(manifest: pd.DataFrame, out_dir: Path):
@@ -403,13 +411,15 @@ def main():
 
     print(f"Plotting cross-engine comparison results from {run_dir}")
     manifest = load_manifest(run_dir)
-    ref_slice, ref_threads = pick_reference_slice(manifest)
     out_dir = run_dir / "plots"
 
-    plot_tpcc_throughput(ref_slice, ref_threads, out_dir)
-    plot_ycsb_throughput(ref_slice, ref_threads, out_dir)
-    plot_memory_usage(ref_slice, ref_threads, out_dir)
-    plot_summary_all(ref_slice, ref_threads, out_dir)
+    ref_threads = 0
+    for gc_choice in ("on", "off"):
+        ref_slice, ref_threads = pick_reference_slice(manifest, gc_choice)
+        plot_tpcc_throughput(ref_slice, ref_threads, gc_choice, out_dir)
+        plot_ycsb_throughput(ref_slice, ref_threads, gc_choice, out_dir)
+        plot_memory_usage(ref_slice, ref_threads, gc_choice, out_dir)
+        plot_summary_all(ref_slice, ref_threads, gc_choice, out_dir)
     plot_throughput_vs_threads(manifest, out_dir)
     plot_gc_comparison(manifest, ref_threads, out_dir)
     plot_scan_latency(manifest, ref_threads, out_dir)
