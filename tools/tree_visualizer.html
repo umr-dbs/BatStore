@@ -18,46 +18,56 @@
     --dead: #e5586a;
     --active: #3aa876;
     --truncated: #8891a3;
+    --font-scale: 1; /* set via the toolbar's A-/A+/reset controls, persisted in localStorage */
   }
   * { box-sizing: border-box; }
   html, body {
     margin: 0; padding: 0; height: 100%;
     background: var(--bg); color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    font-size: 13px;
+    font-size: calc(13px * var(--font-scale));
     overflow: hidden;
   }
   #app { display: flex; flex-direction: column; height: 100%; }
 
   /* ---------- Toolbar ---------- */
   #toolbar {
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 12px;
     background: var(--panel);
     border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
   }
+  .toolbar-row {
+    display: flex; align-items: center; gap: 12px; padding: 12px 18px; flex-wrap: wrap;
+  }
+  .toolbar-row-file { padding-bottom: 8px; }
+  .toolbar-row-actions { padding-top: 8px; border-top: 1px solid var(--border); }
   #toolbar h1 {
-    font-size: 14px; font-weight: 600; margin: 0 12px 0 0; white-space: nowrap;
-    color: var(--text);
+    font-size: calc(22px * var(--font-scale)); font-weight: 700; margin: 0 16px 0 0; white-space: nowrap;
+    color: var(--text); letter-spacing: .02em;
   }
-  #toolbar h1 span { color: var(--text-dim); font-weight: 400; }
   .btn {
     background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 12px;
+    border-radius: 6px; padding: 9px 16px; cursor: pointer; font-size: calc(15px * var(--font-scale));
     white-space: nowrap;
   }
   .btn:hover { background: #2b3140; border-color: var(--accent); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn:disabled:hover { background: var(--panel-2); border-color: var(--border); }
   .btn:active { transform: translateY(1px); }
   .btn.primary { border-color: var(--accent); color: #cfe0ff; }
-  .sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+  .btn.hidden { display: none; }
+  .sep { width: 1px; height: 30px; background: var(--border); margin: 0 6px; }
   #search {
     background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 8px; font-size: 12px; width: 140px;
+    border-radius: 6px; padding: 9px 12px; font-size: calc(15px * var(--font-scale)); width: 170px;
   }
+  #playbackSpeed {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 9px 10px; font-size: calc(15px * var(--font-scale));
+  }
+  #playbackStatus { font-size: calc(14px * var(--font-scale)); color: var(--text-dim); white-space: nowrap; }
   .spacer { flex: 1; }
   #fileLabel {
-    font-size: 11px; color: var(--text-dim); max-width: 240px; overflow: hidden;
+    font-size: calc(14px * var(--font-scale)); color: var(--text-dim); max-width: 320px; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap;
   }
 
@@ -69,22 +79,56 @@
     display: flex; flex-direction: column;
   }
   #sidebar h2 {
-    font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    font-size: calc(11px * var(--font-scale)); text-transform: uppercase; letter-spacing: .05em;
     color: var(--text-dim); padding: 10px 12px 4px; margin: 0;
   }
+  #versionJump {
+    margin: 10px; padding: 10px 12px 12px; border: 1.5px solid var(--accent-2); border-radius: 8px;
+    background: rgba(255,191,91,.08);
+  }
+  #versionJump h2 {
+    margin: 0 0 4px; padding: 0; font-size: calc(13px * var(--font-scale)); font-weight: 700;
+    color: var(--accent-2); text-transform: none; letter-spacing: 0;
+  }
+  .version-jump-hint {
+    font-size: calc(10.5px * var(--font-scale)); color: var(--text-dim); line-height: 1.4; margin-bottom: 8px;
+  }
+  .version-jump-row { display: flex; gap: 6px; }
+  #versionJump input {
+    flex: 1; min-width: 0; background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; font-size: calc(12px * var(--font-scale));
+  }
+  #rootListBox {
+    margin: 0 10px 10px; padding: 10px 0 8px; border: 1.5px solid var(--accent); border-radius: 8px;
+    background: rgba(91,140,255,.06); flex: 1; min-height: 0; display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  #rootListBox h2 {
+    margin: 0 0 4px; padding: 0 12px; font-size: calc(13px * var(--font-scale)); font-weight: 700;
+    color: var(--accent); text-transform: none; letter-spacing: 0;
+  }
+  #rootList { overflow-y: auto; flex: 1; min-height: 0; }
   .root-row {
-    padding: 8px 12px; cursor: pointer; border-left: 3px solid transparent;
+    padding: 9px 12px; cursor: pointer; border-left: 3px solid transparent;
     border-bottom: 1px solid var(--border);
   }
   .root-row:hover { background: var(--panel-2); }
   .root-row.selected { background: #223055; border-left-color: var(--accent-2); }
+  .root-row-top { display: flex; align-items: center; gap: 6px; }
   .root-row .rv { font-weight: 600; }
-  .root-row .rh { color: var(--text-dim); float: right; }
-  .root-row .rid { color: var(--text-dim); font-size: 10px; display: block; margin-top: 2px; }
+  .root-row-meta {
+    display: flex; gap: 8px; margin-top: 3px; font-size: calc(11px * var(--font-scale)); color: var(--text-dim);
+  }
+  .root-row .rlive { color: var(--active); }
+  .root-row .rdead { color: var(--dead); }
+  .root-row-snapshot {
+    color: var(--text-dim); font-family: ui-monospace, monospace;
+    font-size: calc(10.5px * var(--font-scale)); margin-top: 4px;
+  }
   .latest-badge {
-    font-size: 9px; text-transform: uppercase; letter-spacing: .04em;
+    font-size: calc(9px * var(--font-scale)); text-transform: uppercase; letter-spacing: .04em;
     color: var(--active); border: 1px solid var(--active); border-radius: 3px;
-    padding: 0 4px; margin-left: 6px;
+    padding: 0 4px;
   }
 
   #canvasWrap {
@@ -106,6 +150,15 @@
   }
   #empty.hidden { display: none; }
 
+  #snapshotBanner {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 6;
+    display: flex; align-items: center; justify-content: center; gap: 14px;
+    padding: 8px 16px; background: linear-gradient(180deg, rgba(255,191,91,.22), rgba(255,191,91,.1));
+    border-bottom: 1.5px solid var(--accent-2); color: var(--text);
+    font-size: calc(12.5px * var(--font-scale)); text-align: center;
+  }
+  #snapshotBanner.hidden { display: none; }
+  #snapshotBanner b { color: var(--accent-2); }
   #tracePanel {
     position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 90%;
     background: var(--panel); border-left: 1px solid var(--border);
@@ -113,11 +166,12 @@
   }
   #tracePanel.hidden { display: none; }
   .trace-header {
-    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px; flex-wrap: wrap;
     border-bottom: 1px solid var(--border); font-weight: 600;
   }
-  .trace-header .spacer { flex: 1; }
-  #traceBody { padding: 10px 12px; overflow-y: auto; font-size: 12px; }
+  .trace-header .spacer { flex: 1; min-width: 0; }
+  .trace-header .btn { font-weight: 400; }
+  #traceBody { padding: 10px 12px; overflow-y: auto; font-size: calc(12px * var(--font-scale)); }
   #traceBody code { color: #cfe0ff; word-break: break-all; }
   .trace-section { margin-bottom: 12px; }
   .trace-section ul { list-style: none; margin: 4px 0 0; padding: 0; }
@@ -127,8 +181,16 @@
   }
   .trace-section li.rel-live { border-left-color: var(--active); }
   .trace-section li.rel-dead { border-left-color: var(--dead); }
+  .trace-section li.rel-current {
+    border-left-color: var(--accent-2); border-left-width: 5px;
+    background: rgba(255,191,91,.14);
+  }
+  .you-are-here {
+    display: block; font-size: calc(9px * var(--font-scale)); text-transform: uppercase;
+    letter-spacing: .05em; color: var(--accent-2); font-weight: 600; margin-bottom: 2px;
+  }
   .trace-row-actions { margin-top: 4px; display: flex; gap: 6px; }
-  .trace-row-actions .btn { padding: 2px 7px; font-size: 11px; }
+  .trace-row-actions .btn { padding: 2px 7px; font-size: calc(11px * var(--font-scale)); }
   .trace-warning {
     background: rgba(255,191,91,.12); border: 1px solid var(--accent-2);
     border-radius: 6px; padding: 8px; color: var(--text);
@@ -136,7 +198,7 @@
 
   #statusBar {
     padding: 5px 12px; background: var(--panel); border-top: 1px solid var(--border);
-    font-size: 11px; color: var(--text-dim); display: flex; gap: 16px;
+    font-size: calc(11px * var(--font-scale)); color: var(--text-dim); display: flex; gap: 16px;
   }
   #liveLegend { margin-left: auto; display: flex; align-items: center; gap: 6px; }
   #liveLegend.hidden { display: none; }
@@ -161,7 +223,7 @@
   }
   .node-box.more:hover { background: #2b3140; }
   .node-box.more .kind { color: var(--accent-2); }
-  .node-box.more .node-body { color: var(--text-dim); font-size: 10px; }
+  .node-box.more .node-body { color: var(--text-dim); font-size: calc(10px * var(--font-scale)); }
   .node-box.marked { outline: 2px solid var(--accent-2); }
   /* Live view: node.active > 0 (still holds current data) vs. node.active
      === 0 (everything in this page is dead/obsolete, kept only pending GC
@@ -182,24 +244,32 @@
     0% { box-shadow: 0 0 0 6px rgba(255,191,91,.65); }
     100% { box-shadow: 0 2px 6px rgba(0,0,0,.35); }
   }
+  /* Evolution playback: a node that just became newly reachable this step. */
+  .node-box.flash-new { animation: flash-new 1.4s ease-out; }
+  @keyframes flash-new {
+    0% { box-shadow: 0 0 0 6px rgba(58,168,118,.75); }
+    100% { box-shadow: 0 2px 6px rgba(0,0,0,.35); }
+  }
   .node-head {
     display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: pointer;
   }
-  .node-head .kind { font-weight: 600; font-size: 11px; }
+  .node-head .kind { font-weight: 600; font-size: calc(11px * var(--font-scale)); }
   .node-box.internal .kind { color: var(--internal); }
   .node-box.leaf .kind { color: var(--leaf); }
   .node-box.truncated .kind { color: var(--truncated); }
-  .node-head .caret { color: var(--text-dim); font-size: 10px; width: 10px; }
+  .node-head .caret { color: var(--text-dim); font-size: calc(10px * var(--font-scale)); width: 10px; }
   .node-head .mark { margin-left: auto; display: flex; align-items: center; gap: 6px; }
   .trace-btn {
-    cursor: pointer; color: var(--text-dim); font-size: 13px; line-height: 1;
+    cursor: pointer; color: var(--text-dim); font-size: calc(13px * var(--font-scale)); line-height: 1;
     border: 1px solid var(--border); border-radius: 3px; padding: 0 3px;
   }
   .trace-btn:hover { color: var(--accent-2); border-color: var(--accent-2); }
-  .node-body { padding: 0 8px 7px; font-size: 11px; color: var(--text-dim); }
-  .node-body .range { color: var(--text); font-family: ui-monospace, monospace; font-size: 10.5px;
+  .node-body { padding: 0 8px 7px; font-size: calc(11px * var(--font-scale)); color: var(--text-dim); }
+  .node-body .birth { color: var(--text-dim); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
+    margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .node-body .range { color: var(--text); font-family: ui-monospace, monospace; font-size: calc(10.5px * var(--font-scale));
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .node-body .fence { color: var(--accent-2); font-family: ui-monospace, monospace; font-size: 10px;
+  .node-body .fence { color: var(--accent-2); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
   .counts { display: flex; gap: 8px; margin-top: 3px; }
   .count-active { color: var(--active); }
@@ -210,20 +280,25 @@
   }
   .record-row {
     display: flex; justify-content: space-between; gap: 6px; padding: 1.5px 0;
-    font-family: ui-monospace, monospace; font-size: 10px;
+    font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
   }
   .record-row.deleted { color: var(--dead); text-decoration: line-through; opacity: .8; }
   .record-row .k { color: var(--text); }
   .record-row.deleted .k { color: var(--dead); }
   .record-row.live .k { color: var(--active); }
   .record-row .v { color: var(--text-dim); }
-  .truncated-note { font-size: 10.5px; padding-top: 4px; }
+  .truncated-note { font-size: calc(10.5px * var(--font-scale)); padding-top: 4px; }
+  .record-row.record-highlight { animation: record-flash 2.2s ease-out; border-radius: 3px; }
+  @keyframes record-flash {
+    0% { background: rgba(255,191,91,.85); }
+    100% { background: transparent; }
+  }
 
   path.edge { stroke: #3a4152; stroke-width: 1.5px; fill: none; }
   path.edge.live { stroke: var(--active); stroke-width: 2px; }
   path.edge.dead { stroke: var(--dead); stroke-width: 1.5px; stroke-dasharray: 4 3; opacity: .75; }
   text.edge-label {
-    fill: var(--text-dim); font-size: 9px; font-family: ui-monospace, monospace;
+    fill: var(--text-dim); font-size: calc(9px * var(--font-scale)); font-family: ui-monospace, monospace;
   }
 
   ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -239,34 +314,69 @@
 <body>
 <div id="app">
   <div id="toolbar">
-    <h1>cMVBT <span>tree visualizer</span></h1>
-    <button class="btn primary" id="loadBtn">Load dump...</button>
-    <input type="file" id="fileInput" accept=".json" style="display:none">
-    <span id="fileLabel">No file loaded</span>
-    <div class="sep"></div>
-    <button class="btn" id="zoomInBtn" title="Zoom in">+</button>
-    <button class="btn" id="zoomOutBtn" title="Zoom out">&minus;</button>
-    <button class="btn" id="fitBtn" title="Fit visible tree to view">Fit</button>
-    <button class="btn" id="resetZoomBtn" title="Reset zoom">100%</button>
-    <div class="sep"></div>
-    <button class="btn" id="liveViewBtn"
-            title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
-    <div class="sep"></div>
-    <button class="btn" id="expandAllBtn">Expand all</button>
-    <button class="btn" id="collapseAllBtn">Collapse all</button>
-    <div class="sep"></div>
-    <button class="btn" id="expandMarkedBtn">Expand marked</button>
-    <button class="btn" id="collapseMarkedBtn">Collapse marked</button>
-    <button class="btn" id="clearMarkedBtn">Clear marks</button>
-    <div class="sep"></div>
-    <input type="text" id="search" placeholder="find key...">
-    <button class="btn" id="searchBtn">Find</button>
-    <div class="spacer"></div>
+    <div class="toolbar-row toolbar-row-file">
+      <h1>cMVBT</h1>
+      <button class="btn primary" id="loadBtn">Load dump...</button>
+      <input type="file" id="fileInput" accept=".json" style="display:none">
+      <span id="fileLabel">No file loaded</span>
+      <div class="spacer"></div>
+    </div>
+    <div class="toolbar-row toolbar-row-actions">
+      <button class="btn" id="zoomInBtn" title="Zoom in">+</button>
+      <button class="btn" id="zoomOutBtn" title="Zoom out">&minus;</button>
+      <button class="btn" id="fitBtn" title="Fit visible tree to view">Fit</button>
+      <button class="btn" id="resetZoomBtn" title="Reset zoom">100%</button>
+      <div class="sep"></div>
+      <button class="btn" id="fontDecBtn" title="Smaller text">A&minus;</button>
+      <button class="btn" id="fontIncBtn" title="Larger text">A+</button>
+      <button class="btn" id="fontResetBtn" title="Reset text size">100%</button>
+      <div class="sep"></div>
+      <button class="btn" id="liveViewBtn"
+              title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
+      <button class="btn" id="hideDeadBtn" disabled
+              title="Live view only: prune every dead/obsolete branch and record out of the render entirely, showing just the live tree">Hide dead</button>
+      <div class="sep"></div>
+      <button class="btn" id="expandAllBtn">Expand all</button>
+      <button class="btn" id="collapseAllBtn">Collapse all</button>
+      <div class="sep"></div>
+      <button class="btn" id="expandMarkedBtn">Expand marked</button>
+      <button class="btn" id="collapseMarkedBtn">Collapse marked</button>
+      <button class="btn" id="clearMarkedBtn">Clear marks</button>
+      <div class="sep"></div>
+      <input type="text" id="search" placeholder="key to find...">
+      <button class="btn" id="searchBtn" title="Find this key in the currently selected root* (and snapshot version, if one is active)">Find key</button>
+      <div class="sep"></div>
+      <button class="btn" id="stepBackBtn" title="Step to the previous root* version">&#9198;</button>
+      <button class="btn" id="playBtn" title="Play through every root* version, oldest to newest">&#9654; Play evolution</button>
+      <button class="btn" id="stepFwdBtn" title="Step to the next root* version">&#9197;</button>
+      <select id="playbackSpeed" title="Playback speed">
+        <option value="2200">Slow</option>
+        <option value="1200" selected>Normal</option>
+        <option value="600">Fast</option>
+      </select>
+      <span id="playbackStatus"></span>
+      <div class="spacer"></div>
+    </div>
   </div>
   <div id="body">
     <div id="sidebar">
-      <h2>Root* list</h2>
-      <div id="rootList"></div>
+      <div id="versionJump">
+        <h2>&#128247; Snapshot view</h2>
+        <div class="version-jump-hint">
+          View the tree exactly as it existed at one specific version - only
+          nodes/records that existed and weren't yet superseded then.
+        </div>
+        <div class="version-jump-row">
+          <input type="text" id="versionInput"
+                 placeholder="version number..."
+                 title="Select whichever root* was in effect at this snapshot version - the same predecessor lookup a point-in-time read (e.g. RangeIterSi) resolves internally, just exposed directly here.">
+          <button class="btn primary" id="versionJumpBtn">View snapshot</button>
+        </div>
+      </div>
+      <div id="rootListBox">
+        <h2>Root* list</h2>
+        <div id="rootList"></div>
+      </div>
     </div>
     <div id="canvasWrap">
       <svg id="svg" xmlns="http://www.w3.org/2000/svg">
@@ -289,10 +399,15 @@
           shown here &mdash; record payload values are never included in a dump.
         </div>
       </div>
+      <div id="snapshotBanner" class="hidden">
+        <span>&#128247; Snapshot view &mdash; version <b id="snapshotVersionLabel"></b>: only nodes/records that existed and weren't yet superseded at this version are shown.</span>
+        <button class="btn" id="exitSnapshotBtn">Exit snapshot view</button>
+      </div>
       <div id="tracePanel" class="hidden">
         <div class="trace-header">
           <span>Node trace</span>
           <span class="spacer"></span>
+          <button class="btn" id="traceModeBtn" title="Toggle between adjacent-only and the full override history">Show full history</button>
           <button class="btn" id="tracePopoutBtn" title="Open this trace in a new tab">Open in new tab &#8599;</button>
           <button class="btn" id="traceCloseBtn" title="Close">&#10005;</button>
         </div>
@@ -325,11 +440,19 @@
   const expanded = new Set();  // node ids currently expanded
   const checked = new Set();   // node ids currently "marked" via checkbox
   const reachableCache = new Map(); // rootNodeId -> count of nodes reachable from it
+  const liveDeadCache = new Map();  // rootNodeId -> {live, dead} node counts for that root's whole tree (sidebar display)
   const childLimit = new Map();     // internal node id -> how many of its children are laid out (Infinity = all)
   const heightCache = new Map();    // "<id>:<isExpanded>" -> measured box height in px (see measureNodeHeight)
   let liveViewMode = false;         // "Live view" toggle: jumps to the latest root* and highlights live vs. dead entries
+  let hideDeadMode = false;         // Live view sub-option: prune dead branches/records out of the render entirely instead of just coloring them
+  let snapshotVersion = null;       // BigInt or null - when set, render only what qualified (existed and wasn't yet superseded) as of this exact version, entered via the sidebar's "jump to version" control
   let lastPositions = null;         // Map from the most recent render()'s buildLayout() - {parentId, fence, isLive, ...} per node id, used by the trace feature
   let currentTraceHtml = null;      // last-rendered trace panel body, kept so "open in new tab" can reuse it verbatim
+  let currentTrace = null;          // last-computed trace result object, re-rendered by the show-all/adjacent-only toggle
+  let traceMode = "adjacent";       // "adjacent" (just previous/next) or "full" (entire history in one list)
+  let playbackTimer = null;         // setInterval handle for evolution auto-play, null when paused/stopped
+  let playbackSpeedMs = 1200;       // ms between auto-play steps
+  let playbackIndex = -1;           // index into sortedRootsAsc() of the currently-shown step, -1 = not started
 
   const view = { x: 0, y: 0, k: 1 };
   const NODE_W = 220, HGAP = 24, VGAP = 46;
@@ -355,6 +478,7 @@
   const fileLabel = document.getElementById("fileLabel");
   const measureEl = document.getElementById("measure");
   const liveViewBtn = document.getElementById("liveViewBtn");
+  const hideDeadBtn = document.getElementById("hideDeadBtn");
   const liveLegend = document.getElementById("liveLegend");
   const tracePanel = document.getElementById("tracePanel");
   const traceBody = document.getElementById("traceBody");
@@ -380,9 +504,13 @@
   }
 
   function onDumpLoaded(name) {
+    stopPlayback();
+    exitSnapshotMode();
+    playbackIndex = -1;
     expanded.clear();
     checked.clear();
     reachableCache.clear();
+    liveDeadCache.clear();
     childLimit.clear();
     heightCache.clear();
     currentRootId = null;
@@ -410,6 +538,66 @@
     return dump.roots.reduce((a, b) => (b.version > a.version ? b : a));
   }
 
+  /// The root* in effect for a point-in-time snapshot at `targetVersion` -
+  /// the same predecessor lookup `RootIndex::root_for(si)` does on the Rust
+  /// side for every one of its four backings (e.g. `LinkedList`'s
+  /// `ll.iter().rfind(|r| r.version() <= si).unwrap_or_else(|| ll.front()
+  /// .unwrap())`): the *latest* root* whose version is `<= targetVersion`,
+  /// or the oldest root* if `targetVersion` predates all of them. This is
+  /// exactly why a range query pinned to a specific snapshot version always
+  /// resolves to one specific tree - the version doesn't have to match a
+  /// root* exactly, it just has to fall on or after it and before the next.
+  function rootForVersion(targetVersion) {
+    const sorted = sortedRootsAsc();
+    let candidate = sorted[0];
+    for (const r of sorted) {
+      if (BigInt(r.version) <= targetVersion) candidate = r;
+      else break;
+    }
+    return candidate;
+  }
+
+  document.getElementById("versionJumpBtn").addEventListener("click", () => {
+    if (!dump || !dump.roots.length) return;
+    const raw = document.getElementById("versionInput").value.trim();
+    if (!raw) return;
+    const target = tryBigInt(raw);
+    if (target === null) { alert("Enter a whole-number version to jump to."); return; }
+
+    const result = rootForVersion(target);
+    selectRoot(result.node_id, result); // resets snapshotVersion - set it below, after
+    if (BigInt(result.version) !== target) {
+      document.getElementById("statSelection").textContent +=
+        " — snapshot for v" + raw + " resolves to this (its nearest predecessor)";
+    }
+
+    // Enter version-snapshot mode: from here on, effectiveChildren() (and
+    // nodeInnerHtml's leaf-record filter) show only what qualified as of
+    // this exact version - not just "whatever selectRoot's raw tree
+    // happens to contain", which per qualifyingChildrenAsOf's doc can
+    // include entries added to a shared page well after this version.
+    snapshotVersion = target;
+    heightCache.clear(); // box content (child/record counts) changes under snapshot filtering
+    document.getElementById("snapshotVersionLabel").textContent = "v" + target;
+    document.getElementById("snapshotBanner").classList.remove("hidden");
+    // Live view/Hide dead don't apply to a version pinned to a specific
+    // moment (snapshot filtering always takes precedence over them
+    // anyway - see effectiveChildren) - hide them outright rather than
+    // leaving inert controls visible.
+    liveViewBtn.classList.add("hidden");
+    hideDeadBtn.classList.add("hidden");
+    liveLegend.classList.add("hidden");
+    render();
+  });
+  document.getElementById("exitSnapshotBtn").addEventListener("click", () => {
+    exitSnapshotMode();
+    heightCache.clear();
+    render();
+  });
+  document.getElementById("versionInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.getElementById("versionJumpBtn").click();
+  });
+
   fileInput.addEventListener("change", (e) => {
     if (e.target.files[0]) loadFile(e.target.files[0]);
   });
@@ -427,6 +615,7 @@
   function renderRootList() {
     rootListEl.innerHTML = "";
     const latest = latestRoot();
+    const ascending = sortedRootsAsc();
     // Display newest-first regardless of the underlying root-index's own
     // enumeration order (see latestRoot()'s doc) - most users expect the
     // current version at the top.
@@ -434,17 +623,50 @@
     sorted.forEach((r) => {
       const row = document.createElement("div");
       row.className = "root-row" + (r.node_id === currentRootId ? " selected" : "");
+      const counts = computeLiveDeadCounts(r.node_id);
+      // This root* is "in effect" (what root_for(si)/a version-pinned range
+      // query would resolve to) for any snapshot version in [r.version,
+      // nextVersion) - half-open, since the *next* root* is exactly the
+      // point some later write superseded this one. The latest root* has
+      // no successor yet, hence "*" (still open-ended, could still be the
+      // active tree for a version not seen yet).
+      const idx = ascending.findIndex(x => x.node_id === r.node_id);
+      const nextVersion = idx >= 0 && idx < ascending.length - 1 ? ascending[idx + 1].version : null;
       row.innerHTML =
+        '<div class="root-row-top">' +
         '<span class="rv">v' + r.version + '</span>' +
         (r.node_id === latest.node_id ? '<span class="latest-badge">latest</span>' : '') +
-        '<span class="rh">h' + r.height + '</span>' +
-        '<span class="rid">' + r.node_id + '</span>';
+        '</div>' +
+        '<div class="root-row-meta"><span class="rh">Height ' + r.height + '</span></div>' +
+        '<div class="root-row-meta">' +
+        '<span class="rlive">' + counts.live + ' live</span>' +
+        '<span class="rdead">' + counts.dead + ' dead</span>' +
+        '</div>' +
+        '<div class="root-row-snapshot">snapshot [' + r.version + ', ' + (nextVersion !== null ? nextVersion : '*') + ')</div>';
       row.addEventListener("click", () => selectRoot(r.node_id, r));
       rootListEl.appendChild(row);
     });
   }
 
+  /// Leaves version-snapshot mode (see `effectiveChildren`/the "jump to
+  /// version" control) and hides its banner - called by every *other* way
+  /// of picking a root (a plain click, playback), so snapshot filtering
+  /// never silently keeps applying to a view the user didn't ask to pin to
+  /// a specific version.
+  function exitSnapshotMode() {
+    snapshotVersion = null;
+    document.getElementById("snapshotBanner").classList.add("hidden");
+    // Live view/Hide dead are today's-liveness concepts and don't apply to
+    // a version pinned to a specific moment - see effectiveChildren's own
+    // precedence (snapshot always wins over them anyway), but hiding them
+    // outright avoids ever showing controls that can't do anything here.
+    liveViewBtn.classList.remove("hidden");
+    hideDeadBtn.classList.remove("hidden");
+  }
+
   function selectRoot(nodeId, rootMeta) {
+    stopPlayback(); // any manual navigation cancels an in-progress evolution playback
+    exitSnapshotMode();
     currentRootId = nodeId;
     expanded.clear(); // start fully collapsed (just the root box) - a wide root
                        // (e.g. FAN_OUT=125 children) would otherwise force an
@@ -470,6 +692,10 @@
     liveViewMode = !liveViewMode;
     liveViewBtn.classList.toggle("primary", liveViewMode);
     liveLegend.classList.toggle("hidden", !liveViewMode);
+    // "Hide dead" only means anything while live view is on - keep it
+    // available (its own checked state stays as the user left it), just
+    // disabled/inert while live view is off, rather than resetting it.
+    hideDeadBtn.disabled = !liveViewMode;
     if (!dump) return;
 
     const latest = latestRoot();
@@ -477,6 +703,139 @@
       selectRoot(latest.node_id, latest); // already re-renders
     } else {
       render();
+    }
+  });
+
+  // Live view sub-option: instead of just coloring dead branches/records
+  // red, prune them out of the render entirely - every child slot/edge
+  // filtered through `effectiveChildren` (and every leaf record filtered
+  // in `nodeInnerHtml`), so what's left is exactly the live tree.
+  hideDeadBtn.addEventListener("click", () => {
+    hideDeadMode = !hideDeadMode;
+    hideDeadBtn.classList.toggle("primary", hideDeadMode);
+    heightCache.clear(); // box content (child/record counts) changes with this on/off
+    render();
+  });
+
+  // ---------------------------------------------------------------------
+  // Evolution playback: step or auto-play through every root* version,
+  // oldest to newest, to see how the tree structurally grew over time.
+  // Each step auto-expands a couple of levels (enough to see growth
+  // without exploding a big root's full fan-out) and flashes green
+  // whichever nodes just became newly reachable compared to the previous
+  // step - a lightweight diff, not a real animation between layouts.
+  // ---------------------------------------------------------------------
+  const PLAYBACK_AUTO_EXPAND_DEPTH = 2;
+
+  function sortedRootsAsc() {
+    return [...dump.roots].sort((a, b) => a.version - b.version);
+  }
+
+  function computeReachableSet(rootId) {
+    const seen = new Set();
+    const stack = [rootId];
+    while (stack.length) {
+      const id = stack.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const n = getNode(id);
+      if (n && n.type === "internal") n.children.forEach(c => stack.push(c.node_id));
+    }
+    return seen;
+  }
+
+  function autoExpandToDepth(rootId, maxDepth) {
+    const stack = [[rootId, 0]];
+    while (stack.length) {
+      const [id, depth] = stack.pop();
+      if (depth >= maxDepth) continue;
+      expanded.add(id);
+      const n = getNode(id);
+      if (n && n.type === "internal") n.children.forEach(c => stack.push([c.node_id, depth + 1]));
+    }
+  }
+
+  /// Like selectRoot, but for a playback *step* rather than a user click:
+  /// auto-expands a couple of levels instead of starting fully collapsed,
+  /// and flashes whatever just became newly reachable vs. the step before.
+  /// Deliberately doesn't call stopPlayback() (selectRoot does, precisely
+  /// so manual navigation cancels playback) - this function IS playback.
+  function selectRootForPlayback(rootMeta) {
+    exitSnapshotMode(); // playback walks raw root* history, not a version-pinned filtered view
+    const prevSet = currentRootId ? computeReachableSet(currentRootId) : new Set();
+    currentRootId = rootMeta.node_id;
+    expanded.clear();
+    checked.clear();
+    childLimit.clear();
+    autoExpandToDepth(rootMeta.node_id, PLAYBACK_AUTO_EXPAND_DEPTH);
+    renderRootList();
+    document.getElementById("statSelection").textContent =
+      "selected root: v" + rootMeta.version + " (h" + rootMeta.height + ")";
+    computeReachable(rootMeta.node_id);
+    render();
+    fitToView();
+
+    requestAnimationFrame(() => {
+      nodesG.querySelectorAll(".node-box[data-id]").forEach(box => {
+        if (!prevSet.has(box.dataset.id)) {
+          box.classList.add("flash-new");
+          setTimeout(() => box.classList.remove("flash-new"), 1400);
+        }
+      });
+    });
+  }
+
+  function updatePlaybackStatus() {
+    const roots = sortedRootsAsc();
+    document.getElementById("playbackStatus").textContent =
+      playbackIndex >= 0 && playbackIndex < roots.length
+        ? "Version " + (playbackIndex + 1) + " / " + roots.length +
+          " - v" + roots[playbackIndex].version + " (h" + roots[playbackIndex].height + ")"
+        : "";
+  }
+
+  function stepPlayback(direction) {
+    if (!dump || !dump.roots.length) return;
+    const roots = sortedRootsAsc();
+    playbackIndex = playbackIndex < 0
+      ? (direction > 0 ? 0 : roots.length - 1)
+      : playbackIndex + direction;
+
+    if (playbackIndex < 0 || playbackIndex >= roots.length) {
+      playbackIndex = Math.max(0, Math.min(roots.length - 1, playbackIndex));
+      stopPlayback();
+      return;
+    }
+    selectRootForPlayback(roots[playbackIndex]);
+    updatePlaybackStatus();
+  }
+
+  function stopPlayback() {
+    if (playbackTimer) { clearInterval(playbackTimer); playbackTimer = null; }
+    document.getElementById("playBtn").textContent = "▶ Play evolution";
+    document.getElementById("playBtn").classList.remove("primary");
+  }
+
+  function startPlayback() {
+    if (!dump || !dump.roots.length) return;
+    document.getElementById("playBtn").textContent = "⏸ Pause";
+    document.getElementById("playBtn").classList.add("primary");
+    const roots = sortedRootsAsc();
+    if (playbackIndex >= roots.length - 1) playbackIndex = -1; // restart from the beginning once at/after the end
+    stepPlayback(1); // show the first step immediately, don't wait a full interval
+    playbackTimer = setInterval(() => stepPlayback(1), playbackSpeedMs);
+  }
+
+  document.getElementById("playBtn").addEventListener("click", () => {
+    if (playbackTimer) stopPlayback(); else startPlayback();
+  });
+  document.getElementById("stepBackBtn").addEventListener("click", () => { stopPlayback(); stepPlayback(-1); });
+  document.getElementById("stepFwdBtn").addEventListener("click", () => { stopPlayback(); stepPlayback(1); });
+  document.getElementById("playbackSpeed").addEventListener("change", (e) => {
+    playbackSpeedMs = parseInt(e.target.value, 10);
+    if (playbackTimer) {
+      clearInterval(playbackTimer);
+      playbackTimer = setInterval(() => stepPlayback(1), playbackSpeedMs);
     }
   });
 
@@ -556,38 +915,68 @@
     };
   }
 
-  function traceRowHtml(item, label, parentIdForChain) {
+  function traceRowHtml(item, label, parentIdForChain, isCurrent) {
     // `item.live` only exists on child-slot descriptors, not on root-list
     // entries (which have no override/live concept of their own at this
     // granularity) - undefined there simply skips the live/dead accent.
     const relClass = item.live === true ? " rel-live" : item.live === false ? " rel-dead" : "";
     const canJump = lastPositions && lastPositions.has(item.node_id);
     return (
-      '<li class="' + relClass.trim() + '">' +
+      '<li class="' + relClass.trim() + (isCurrent ? " rel-current" : "") + '">' +
+      (isCurrent ? '<span class="you-are-here">YOU ARE HERE</span>' : '') +
       '<code>' + item.node_id + '</code><br>' + escapeHtml(label) +
       '<div class="trace-row-actions">' +
-      '<button class="btn" data-trace-chain="' + item.node_id + '"' +
-      (parentIdForChain !== undefined ? ' data-trace-chain-parent="' + parentIdForChain + '"' : '') +
-      '>Trace this &#8646;</button>' +
+      (isCurrent ? '' :
+        '<button class="btn" data-trace-chain="' + item.node_id + '"' +
+        (parentIdForChain !== undefined ? ' data-trace-chain-parent="' + parentIdForChain + '"' : '') +
+        '>Trace this &#8646;</button>') +
       (canJump ? '<button class="btn" data-trace-jump="' + item.node_id + '">Jump to it</button>' : '') +
       '</div></li>'
     );
   }
 
-  function traceListHtml(title, items, label, parentIdForChain) {
+  function traceListHtml(title, items, label, parentIdForChain, currentId) {
     if (!items.length) return '<div class="trace-section"><b>' + title + ':</b> none</div>';
     return '<div class="trace-section"><b>' + title + ':</b><ul>' +
-      items.map(it => traceRowHtml(it, label(it), parentIdForChain)).join("") +
+      items.map(it => traceRowHtml(it, label(it), parentIdForChain, it.node_id === currentId)).join("") +
       '</ul></div>';
   }
 
-  function renderTrace(trace) {
+  /// Every sibling slot in `parent.children` whose key interval overlaps
+  /// `mine`'s (including `mine` itself), in array order - array order is
+  /// chronological (append-only), so this is the *entire* connected
+  /// override chain for this key range in one page: every past version this
+  /// slot's lineage overrode, `mine` itself, and every later version that
+  /// has since overridden it - not just the one immediate hop either
+  /// direction. A later override's interval always overlaps everything it
+  /// superseded (it's derived from covering the same space, whether by an
+  /// exact version bump or a key split into pieces), so a flat overlap
+  /// filter already captures the full chain - no separate multi-hop walk
+  /// needed.
+  function computeFullHistory(parentId, mine) {
+    const parent = dump.nodes[parentId];
+    return parent.children
+      .map((c, idx) => ({ c, idx }))
+      .filter(({ c }) => c.node_id === mine.node_id || intervalsOverlap(c, mine))
+      .sort((a, b) => a.idx - b.idx)
+      .map(({ c }) => c);
+  }
+
+  function renderTrace(trace, mode) {
     if (trace.kind === "unavailable") {
       return '<p>This node isn\'t currently rendered, so its parent context isn\'t known - expand its ' +
         'containing branch first, then trace it directly.</p>';
     }
+
     if (trace.kind === "root") {
       const label = r => "v" + r.version + " (height " + r.height + ")";
+      if (mode === "full") {
+        const all = [...dump.roots].sort((a, b) => a.version - b.version);
+        return (
+          '<p>Full root* history (oldest to newest) - <code>' + trace.nodeId + '</code> marked below:</p>' +
+          traceListHtml("All root* versions", all, label, undefined, trace.nodeId)
+        );
+      }
       return (
         '<p>Root* version adjacency for <code>' + trace.nodeId + '</code> ' +
         '(root splits are the only events that append a new root*, so the immediately ' +
@@ -622,16 +1011,34 @@
         '</div>';
     }
 
-    html += traceListHtml("Overridden by this node (previous, same key range)", trace.previous, label, trace.parentId) +
-      traceListHtml("Overriding nodes (newer, supersede this one)", trace.next, label, trace.parentId);
+    if (mode === "full") {
+      const history = computeFullHistory(trace.parentId, trace.mine);
+      html += traceListHtml(
+        "Full history for this key range (oldest to newest, this node marked)",
+        history, label, trace.parentId, trace.nodeId
+      );
+    } else {
+      html += traceListHtml("Overridden by this node (previous, same key range)", trace.previous, label, trace.parentId) +
+        traceListHtml("Overriding nodes (newer, supersede this one)", trace.next, label, trace.parentId);
+    }
     return html;
   }
 
   function openTrace(nodeId, parentId, supersessionPoint) {
-    const trace = computeTrace(nodeId, parentId, supersessionPoint);
-    currentTraceHtml = renderTrace(trace);
-    traceBody.innerHTML = currentTraceHtml;
+    currentTrace = computeTrace(nodeId, parentId, supersessionPoint);
+    renderCurrentTrace();
     tracePanel.classList.remove("hidden");
+  }
+
+  /// Re-renders `currentTrace` at the current `traceMode` - shared by a
+  /// fresh `openTrace` and by the show-all/adjacent-only toggle, which only
+  /// changes how the *same* already-computed trace is presented.
+  function renderCurrentTrace() {
+    if (!currentTrace) return;
+    currentTraceHtml = renderTrace(currentTrace, traceMode);
+    traceBody.innerHTML = currentTraceHtml;
+    document.getElementById("traceModeBtn").textContent =
+      traceMode === "full" ? "Show adjacent only" : "Show full history";
 
     traceBody.querySelectorAll("[data-trace-chain]").forEach(btn => {
       btn.addEventListener("click", () => {
@@ -643,6 +1050,11 @@
       btn.addEventListener("click", () => flashAndCenter(btn.getAttribute("data-trace-jump")));
     });
   }
+
+  document.getElementById("traceModeBtn").addEventListener("click", () => {
+    traceMode = traceMode === "full" ? "adjacent" : "full";
+    renderCurrentTrace();
+  });
 
   document.getElementById("traceCloseBtn").addEventListener("click", () => {
     tracePanel.classList.add("hidden");
@@ -656,6 +1068,8 @@
     .trace-section li { padding:8px; margin-bottom:6px; background:#232833; border-radius:5px; border-left:3px solid #333a47; }
     .trace-section li.rel-live { border-left-color:#3aa876; }
     .trace-section li.rel-dead { border-left-color:#e5586a; }
+    .trace-section li.rel-current { border-left-color:#ffbf5b; border-left-width:5px; background:rgba(255,191,91,.14); }
+    .you-are-here { display:block; font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:#ffbf5b; font-weight:600; margin-bottom:2px; }
     .trace-row-actions { display:none; } /* no live app state in a popped-out static report to act on */
   `;
 
@@ -675,6 +1089,93 @@
   // ---------------------------------------------------------------------
   function getNode(id) { return dump.nodes[id]; }
 
+  /// Every child slot of `node` that existed by `version` (its own
+  /// `c.version <= version`) *and* wasn't yet superseded as of that same
+  /// version - i.e. exactly `InternalPage::live_mask`'s own overlap
+  /// computation, just re-run over only the subset of slots that existed
+  /// at `version` instead of the page's full, current array.
+  ///
+  /// Not redundant with the dump's own `c.live`: this engine's pages are
+  /// append-only *and* shared across many root* generations - a page still
+  /// reachable from an old root can go on receiving new sibling entries
+  /// later, for splits elsewhere that don't touch this specific page's own
+  /// identity (a real, partial-persistence design, not full copy-on-write
+  /// per operation). So a slot the dump marks dead only because something
+  /// *after* `version` superseded it must still count as live for a
+  /// snapshot pinned to `version` - `c.live` alone can't tell the two
+  /// apart, since it's computed once against the page's latest state.
+  function qualifyingChildrenAsOf(node, version) {
+    const qualifying = node.children.filter(c => {
+      const v = tryBigInt(c.version);
+      return v !== null && v <= version;
+    });
+    return qualifying.filter((c, idx) => !qualifying.slice(idx + 1).some(later => intervalsOverlap(c, later)));
+  }
+
+  /// The version everything "is this live/dead" should be judged against
+  /// right now - `null` when neither snapshot mode nor Live view is active
+  /// (nothing needs judging). This is deliberately *not* "the dump's
+  /// latest state" outside of explicit snapshot mode: it's whichever
+  /// root* is actually selected. `c.live` (from `InternalPage::live_mask`)
+  /// is computed once, server-side, against each page's absolute latest
+  /// state - a slot only marked dead because something added *after* the
+  /// currently-viewed root superseded it would incorrectly show as dead
+  /// even though, from that root's own point in time, its superseder
+  /// didn't exist yet. Confirmed on real data: root v377's own second
+  /// child (itself born at v377) is marked dead only by a sibling born at
+  /// v564 - which is *after* v377 - so viewing root v377 must treat it as
+  /// live, not dead. Root* pages are exactly the same append-only, shared
+  /// structure as any other page (see `qualifyingChildrenAsOf`'s doc), so
+  /// the same "did this even exist by version V" reasoning applies to
+  /// root* pages too, not just leaves/internal pages found while
+  /// descending.
+  /// `null` here means "no version-relative recomputation needed - fall
+  /// back to the dump's own raw `c.live`" (every call site does exactly
+  /// that), which is deliberately the answer for *two* different reasons:
+  /// neither Live view nor a snapshot is active at all, **or** the
+  /// currently-viewed root already *is* the latest one. That second case
+  /// isn't just an optimization: this engine's root* pages themselves keep
+  /// accumulating non-root-level operations long after the root's own
+  /// version stamp (confirmed on real data - the latest root* here is
+  /// v20392, but child slots exist elsewhere in the tree stamped as late
+  /// as v45077, from inserts/deletes that never triggered another
+  /// root-level split). So the latest root's *own* version number
+  /// understates "now" - raw `c.live` (computed against the dump's true
+  /// latest state, not any one page's version stamp) is the only correct
+  /// answer there. Only for an older, non-latest root does "its own
+  /// version" mean anything as a reference point at all.
+  function currentReferenceVersion() {
+    if (snapshotVersion !== null) return snapshotVersion;
+    if (!liveViewMode) return null;
+    if (currentRootId === latestRoot().node_id) return null;
+    const meta = dump.roots.find(r => r.node_id === currentRootId);
+    return meta ? BigInt(meta.version) : null;
+  }
+
+  /// `node.children` *pruned* down to just what should actually render -
+  /// distinct from `currentReferenceVersion()`'s broader "what should
+  /// things be judged against" scope: Live view alone (without "Hide
+  /// dead") still needs that reference version for glow/edge coloring
+  /// (see `collect()`), but must *not* prune anything - only "Hide dead"
+  /// or an explicit snapshot actually removes non-qualifying children from
+  /// the render. The single choke point every other children-counting/
+  /// traversing spot below goes through, so none of them have to
+  /// separately know about either mode. Since a non-qualifying edge is
+  /// never walked at all when pruning is active (see `collect()`'s use of
+  /// `visibleChildRefs`), every node reached then has `isLive === true` by
+  /// induction there.
+  function effectiveChildren(node) {
+    if (snapshotVersion !== null) return qualifyingChildrenAsOf(node, snapshotVersion);
+    if (liveViewMode && hideDeadMode) {
+      const ref = currentReferenceVersion();
+      // ref === null while viewing the latest root means "judge against
+      // raw c.live" (see currentReferenceVersion's doc), not "no filter" -
+      // Hide dead must still prune there.
+      return ref !== null ? qualifyingChildrenAsOf(node, ref) : node.children.filter(c => c.live !== false);
+    }
+    return node.children;
+  }
+
   /// Resolves either a real dump node id, or a synthetic "more::<parentId>"
   /// pagination placeholder (never present in `dump.nodes`) to a renderable
   /// node-like object. Keeps layout/render code from needing two branches
@@ -684,19 +1185,21 @@
       const parentId = id.slice(MORE_PREFIX.length);
       const parent = getNode(parentId);
       const limit = childLimit.get(parentId) ?? DEFAULT_CHILD_PAGE;
-      return { type: "more", parentId, remaining: parent.children.length - limit };
+      return { type: "more", parentId, remaining: effectiveChildren(parent).length - limit };
     }
     return getNode(id);
   }
 
   /// The child *references* (`{node_id, key_lower, key_upper, version}`) to
-  /// actually lay out for `node` (whose own id is `id`) - the real children
-  /// up to that node's current page size, plus one synthetic "more" entry
-  /// if there are further children beyond it.
+  /// actually lay out for `node` (whose own id is `id`) - the real (and, if
+  /// hiding dead, live-filtered) children up to that node's current page
+  /// size, plus one synthetic "more" entry if there are further children
+  /// beyond it.
   function visibleChildRefs(node, id) {
+    const children = effectiveChildren(node);
     const limit = childLimit.get(id) ?? DEFAULT_CHILD_PAGE;
-    if (node.children.length <= limit) return node.children;
-    return node.children.slice(0, limit)
+    if (children.length <= limit) return children;
+    return children.slice(0, limit)
       .concat([{ node_id: MORE_PREFIX + id, version: null }]);
   }
 
@@ -717,6 +1220,46 @@
     return count;
   }
 
+  /// Live vs. dead node counts for this root's *entire* tree, for the
+  /// sidebar - "live" here means the same thing "Hide dead" does: reachable
+  /// via an unbroken chain of non-dead slots from the root (not just "this
+  /// node's own slot happens to be non-dead", which by itself doesn't
+  /// account for an already-dead ancestor - see buildLayout's `isLive`
+  /// doc). `dead` is simply whatever's left of the full reachable set.
+  function computeLiveDeadCounts(rootId) {
+    if (liveDeadCache.has(rootId)) return liveDeadCache.get(rootId);
+    // Judged against *this root's own* version, not raw c.live - see
+    // currentReferenceVersion's doc. Every root* is displayed at once in
+    // the sidebar, each showing its own point in time, so there's no
+    // single "current" root to defer to here the way collect() does -
+    // each one's own version is exactly its own reference **except** the
+    // latest root, whose own tree can (and, confirmed on real data,
+    // does) contain non-root-level operations stamped past its own
+    // version - for it, raw c.live against the dump's true latest state
+    // is the correct (and only) answer, same reasoning as
+    // currentReferenceVersion's own latest-root special case.
+    const rootMeta = dump.roots.find(r => r.node_id === rootId);
+    const refVersion = (rootMeta && rootId !== latestRoot().node_id) ? BigInt(rootMeta.version) : null;
+    const total = computeReachable(rootId);
+    let live = 0;
+    const seen = new Set();
+    const stack = [rootId];
+    while (stack.length) {
+      const id = stack.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      live++;
+      const n = getNode(id);
+      if (n && n.type === "internal") {
+        const qualifying = refVersion !== null ? qualifyingChildrenAsOf(n, refVersion) : n.children.filter(c => c.live !== false);
+        qualifying.forEach(c => stack.push(c.node_id));
+      }
+    }
+    const result = { live, dead: total - live };
+    liveDeadCache.set(rootId, result);
+    return result;
+  }
+
   // ---------------------------------------------------------------------
   // Layout: classic subtree-width recursive layout over the *visible*
   // (expanded-aware) tree. Only ever walks nodes currently shown, so
@@ -726,6 +1269,13 @@
     const positions = new Map(); // id -> {x, y, depth, node}
     const rowMaxHeight = [];     // per-depth tallest visible box
     const edges = [];            // {from, to, label}
+    // The root's own birth version is its root* version (no parent slot to
+    // inherit one from) - every other node's birth version is whatever
+    // version its own parent slot was created at (`c.version`, already
+    // shown on the edge label - this threads the same number onto the node
+    // box itself instead of only the connecting line).
+    const rootMeta = dump.roots.find(r => r.node_id === rootId);
+    const rootBirthVersion = rootMeta ? rootMeta.version : null;
 
     // Pass 1: depth-first collect + per-row max height.
     //
@@ -750,25 +1300,41 @@
     // computed fresh on this exact path and threaded straight into the
     // rendered trace button's data attributes - never reconstructed
     // afterward from a lookup keyed on the bare (ambiguous) node id.
-    (function collect(id, depth, isLive, parentId, fence, supersessionPoint) {
+    (function collect(id, depth, isLive, parentId, fence, supersessionPoint, birthVersion) {
       const node = resolveNode(id);
-      const h = measureNodeHeight(id, node, fence);
+      const h = measureNodeHeight(id, node, fence, birthVersion);
       rowMaxHeight[depth] = Math.max(rowMaxHeight[depth] || 0, h);
-      positions.set(id, { depth, node, h, isLive, parentId, fence, supersessionPoint });
+      positions.set(id, { depth, node, h, isLive, parentId, fence, supersessionPoint, birthVersion });
       if (node.type === "internal" && expanded.has(id)) {
+        // Judge each child's liveness against currentReferenceVersion() -
+        // *not* its raw `c.live` - computed once per parent here rather
+        // than re-deriving per child. Raw `c.live` reflects supersession
+        // against the dump's absolute latest state; that's wrong the
+        // moment the currently-viewed root isn't the latest one (its own
+        // superseder may not have existed yet as of *this* root's time -
+        // see currentReferenceVersion's doc for the confirmed real
+        // example). `ref === null` means "judge against raw c.live instead"
+        // (see that function's doc for why that's correct both when
+        // liveness isn't being judged at all, and when it is but the
+        // viewed root already is the latest one).
+        const ref = currentReferenceVersion();
+        const qualifyingIds = ref !== null ? new Set(qualifyingChildrenAsOf(node, ref).map(q => q.node_id)) : null;
         visibleChildRefs(node, id).forEach(c => {
+          const isMoreBox = c.node_id.startsWith(MORE_PREFIX);
+          const cLive = isMoreBox ? true : (qualifyingIds ? qualifyingIds.has(c.node_id) : c.live);
           // Once a node itself is dead, every one of its own edges is moot
-          // too, no matter what that edge's own slot-local live_mask says.
-          const edgeLive = isLive ? c.live : false;
+          // too, no matter what that edge's own slot-local liveness says.
+          const edgeLive = isLive ? cLive : false;
           edges.push({ from: id, to: c.node_id, label: c.version === null ? "" : "v" + c.version, live: edgeLive });
-          const childFence = c.node_id.startsWith(MORE_PREFIX) ? null : { lower: c.key_lower, upper: c.key_upper };
+          const childFence = isMoreBox ? null : { lower: c.key_lower, upper: c.key_upper };
           const childSupersessionPoint = !isLive
             ? supersessionPoint // already inside a dead branch - keep the original cut point, don't move it deeper
-            : (c.live === false ? { id: c.node_id, parentId: id } : null); // isLive true: this either *is* or isn't the cut point
-          collect(c.node_id, depth + 1, isLive && c.live !== false, id, childFence, childSupersessionPoint);
+            : (cLive === false ? { id: c.node_id, parentId: id } : null); // isLive true: this either *is* or isn't the cut point
+          const childBirthVersion = isMoreBox ? null : c.version;
+          collect(c.node_id, depth + 1, isLive && cLive !== false, id, childFence, childSupersessionPoint, childBirthVersion);
         });
       }
-    })(rootId, 0, true, null, null, null); // the rendered root is always "the current version" by definition
+    })(rootId, 0, true, null, null, null, rootBirthVersion);
 
     // Row Y offsets from per-row max heights
     const rowY = [0];
@@ -779,7 +1345,7 @@
     // Pass 2: subtree width (in visible-leaf-units) for X assignment
     function width(id) {
       const node = resolveNode(id);
-      if (node.type !== "internal" || !expanded.has(id) || node.children.length === 0) {
+      if (node.type !== "internal" || !expanded.has(id) || effectiveChildren(node).length === 0) {
         return NODE_W + HGAP;
       }
       return visibleChildRefs(node, id).reduce((sum, c) => sum + width(c.node_id), 0);
@@ -790,7 +1356,7 @@
       const node = resolveNode(id);
       const pos = positions.get(id);
       pos.y = rowY[pos.depth];
-      if (node.type === "internal" && expanded.has(id) && node.children.length) {
+      if (node.type === "internal" && expanded.has(id) && effectiveChildren(node).length) {
         const kids = visibleChildRefs(node, id);
         let cursor = xStart;
         kids.forEach(c => {
@@ -819,7 +1385,7 @@
     }[c]));
   }
 
-  function nodeInnerHtml(id, node, fence, isLive, parentId, supersessionPoint) {
+  function nodeInnerHtml(id, node, fence, isLive, parentId, supersessionPoint, birthVersion) {
     if (node.type === "more") {
       return (
         '<div class="node-box more" data-more-parent="' + node.parentId + '">' +
@@ -835,9 +1401,51 @@
     const caret = node.type === "leaf" || node.type === "internal" ? (isExpanded ? "▾" : "▸") : "";
     const kindLabel = node.type === "internal" ? "Internal" : node.type === "leaf" ? "Leaf" : "Internal (truncated)";
 
-    let body = '<div class="node-body">' +
-      '<div class="range" title="' + escapeHtml(node.min_key) + ' .. ' + escapeHtml(node.max_key) + '">' +
-      escapeHtml(node.min_key) + ' .. ' + escapeHtml(node.max_key) + '</div>';
+    let body = '<div class="node-body">';
+
+    if (birthVersion !== null && birthVersion !== undefined) {
+      body += '<div class="birth" title="version this slot/root was created at">born: v' + birthVersion + '</div>';
+    }
+
+    // In snapshot mode, *everything* shown - the key range, the
+    // active/dead counts, and (below) the actual record rows - has to be
+    // re-derived from only what qualified as of that version. The dump's
+    // own `min_key`/`max_key`/`active`/`dead` fields are baked in against
+    // each page's *latest* state (e.g. min_key/max_key come from
+    // `records.first()/last()` over everything currently in the page), so
+    // using them as-is would leak exactly the kind of future information a
+    // snapshot must never show - a leaf whose first-ever-inserted record
+    // postdates the snapshot would otherwise show a "range" starting at a
+    // key that didn't exist yet.
+    let liveRecords = node.records;
+    let deadAsOfSnapshot = 0;
+    if (node.type === "leaf") {
+      if (snapshotVersion !== null) {
+        const qualifying = node.records.filter(r => tryBigInt(r.insert_ts) <= snapshotVersion);
+        liveRecords = qualifying.filter(r => !r.deleted || tryBigInt(r.delete_ts) > snapshotVersion);
+        deadAsOfSnapshot = qualifying.length - liveRecords.length;
+      } else if (liveViewMode && hideDeadMode) {
+        liveRecords = node.records.filter(r => !r.deleted);
+      }
+    }
+
+    let rangeLo = node.min_key, rangeHi = node.max_key;
+    if (snapshotVersion !== null) {
+      if (node.type === "leaf") {
+        rangeLo = liveRecords.length ? liveRecords[0].key : "";
+        rangeHi = liveRecords.length ? liveRecords[liveRecords.length - 1].key : "";
+      } else if (node.type === "internal") {
+        const qualifyingKids = effectiveChildren(node);
+        rangeLo = qualifyingKids.length ? qualifyingKids[0].key_lower : "";
+        rangeHi = qualifyingKids.length ? qualifyingKids[qualifyingKids.length - 1].key_upper : "";
+      }
+      // "internal_truncated" has no per-child data at all to re-derive a
+      // snapshot-relative range from (that's exactly what got truncated) -
+      // left as the dump's own (latest-state) range, a known limitation of
+      // combining snapshot mode with a depth-limited dump.
+    }
+    body += '<div class="range" title="' + escapeHtml(rangeLo) + ' .. ' + escapeHtml(rangeHi) + '">' +
+      escapeHtml(rangeLo) + ' .. ' + escapeHtml(rangeHi) + '</div>';
 
     // Fence keys: the parent-imposed key boundary this leaf was actually
     // handed (from that slot's `Interval<Key>`) - can be wider than the
@@ -850,10 +1458,22 @@
         'fence: ' + escapeHtml(fence.lower) + ' .. ' + escapeHtml(fence.upper) + '</div>';
     }
 
+    let activeCount = node.active, deadCount = node.dead;
+    if (snapshotVersion !== null) {
+      if (node.type === "leaf") {
+        activeCount = liveRecords.length;
+        deadCount = deadAsOfSnapshot; // qualified by insert_ts, but already deleted by this same version
+      } else if (node.type === "internal") {
+        const qualifyingByVersion = node.children.filter(c => tryBigInt(c.version) <= snapshotVersion);
+        activeCount = effectiveChildren(node).length;
+        deadCount = qualifyingByVersion.length - activeCount; // existed by V, but already superseded by V
+      }
+    }
+
     body += '<div class="counts">' +
-      '<span class="count-active">&#9679; ' + node.active + ' active</span>' +
-      '<span class="count-dead">&#9679; ' + node.dead + ' dead</span>' +
-      (node.type === "internal" ? '<span>' + node.children.length + ' child(ren)</span>' : '') +
+      '<span class="count-active">&#9679; ' + activeCount + ' active</span>' +
+      '<span class="count-dead">&#9679; ' + deadCount + ' dead</span>' +
+      (node.type === "internal" ? '<span>' + effectiveChildren(node).length + ' child(ren)</span>' : '') +
       (node.type === "internal_truncated" ? '<span>' + node.child_count + ' child(ren) not dumped</span>' : '') +
       '</div>';
 
@@ -862,7 +1482,7 @@
     }
 
     if (node.type === "leaf" && isExpanded) {
-      body += '<div class="records">' + node.records.map(r => {
+      body += '<div class="records">' + liveRecords.map(r => {
         const ver = "w" + r.insert_worker + "@" + r.insert_ts +
           (r.deleted ? " &#8594; w" + r.delete_worker + "@" + r.delete_ts : "");
         const rowClass = r.deleted ? " deleted" : (liveViewMode ? " live" : "");
@@ -913,12 +1533,22 @@
   /// change), but fence-presence can genuinely differ between renders for
   /// the *same* physical id: it's whatever the rendered root happens to be
   /// (no fence) vs. a deeper child reached through some parent (has one).
-  function measureNodeHeight(id, node, fence) {
+  function measureNodeHeight(id, node, fence, birthVersion) {
     const isExpanded = expanded.has(id);
-    const key = id + ":" + isExpanded + ":" + (fence ? "F" : "R");
+    // "Hide dead" and snapshot mode both change the actual rendered content
+    // (fewer child/record rows) for the same (id, isExpanded, fence), so
+    // whichever is active has to be part of the cache key too - and for
+    // snapshot mode, the *specific version* matters too (the same node can
+    // show a different qualifying-record count at two different versions).
+    // (Font scale doesn't need a key dimension here: applyFontScale()
+    // clears the whole cache outright on every change instead. birthVersion
+    // doesn't either: it's shown on a single nowrap-clamped line, so its
+    // exact value never changes how many lines the box renders as.)
+    const filterKey = snapshotVersion !== null ? ("S" + snapshotVersion) : (liveViewMode && hideDeadMode ? "H" : "L");
+    const key = id + ":" + isExpanded + ":" + (fence ? "F" : "R") + ":" + filterKey;
     let h = heightCache.get(key);
     if (h === undefined) {
-      measureEl.innerHTML = nodeInnerHtml(id, node, fence, true);
+      measureEl.innerHTML = nodeInnerHtml(id, node, fence, true, undefined, undefined, birthVersion);
       h = measureEl.firstElementChild.offsetHeight;
       heightCache.set(key, h);
     }
@@ -968,7 +1598,7 @@
       fo.setAttribute("height", pos.h);
       fo.innerHTML =
         '<div xmlns="http://www.w3.org/1999/xhtml">' +
-        nodeInnerHtml(id, pos.node, pos.fence, pos.isLive, pos.parentId, pos.supersessionPoint) +
+        nodeInnerHtml(id, pos.node, pos.fence, pos.isLive, pos.parentId, pos.supersessionPoint, pos.birthVersion) +
         '</div>';
       nodesG.appendChild(fo);
     });
@@ -1091,25 +1721,46 @@
     const path = [];
     let id = currentRootId;
     let found = null;
+    let foundKeyStr = null;
     for (let guard = 0; guard < 10000; guard++) {
       path.push(id);
       const node = getNode(id);
       if (node.type === "leaf") {
-        found = node.records.some(r => tryBigInt(r.key) === target) ? id : null;
+        // In snapshot mode, only a record that existed and wasn't yet
+        // deleted as of that version actually qualifies as "found" - the
+        // same rule nodeInnerHtml's own record filter applies (see there).
+        const pool = snapshotVersion !== null
+          ? node.records.filter(r => tryBigInt(r.insert_ts) <= snapshotVersion && (!r.deleted || tryBigInt(r.delete_ts) > snapshotVersion))
+          : node.records;
+        const matchedRecord = pool.find(r => tryBigInt(r.key) === target);
+        found = matchedRecord ? id : null;
+        foundKeyStr = matchedRecord ? matchedRecord.key : null;
         break;
       }
       if (node.type === "internal_truncated") { found = null; break; }
-      const hit = node.children.find(c => {
+      // effectiveChildren already applies whichever filter is active (a
+      // snapshot version, or "Hide dead") - a dead slot's fence is whatever
+      // it was *before* being superseded, usually wider than (and still
+      // numerically containing) whatever narrower live slot(s) later split
+      // out of it, so several dead *and* live/qualifying candidates can all
+      // technically overlap the target key. Picking array order (i.e. the
+      // oldest, typically-dead one first) would walk into a stale dead end
+      // even though a live/qualifying leaf actually holds the key - always
+      // prefer one when it exists.
+      const candidates = effectiveChildren(node).filter(c => {
         const lo = tryBigInt(c.key_lower), hi = tryBigInt(c.key_upper);
         return lo !== null && hi !== null && target >= lo && target <= hi;
       });
+      const hit = candidates.find(c => c.live !== false) || candidates[0];
       if (!hit) { found = null; break; }
       id = hit.node_id;
     }
 
     // Every ancestor on the path must be expanded *and* unpaginated -
     // otherwise the matching child could be sitting past that ancestor's
-    // current "+N more" page and never actually render.
+    // current "+N more" page and never actually render. The leaf itself is
+    // on this same path, so expanding it here is exactly what reveals its
+    // record list (see below) - not a separate step.
     path.forEach(pid => {
       expanded.add(pid);
       const n = getNode(pid);
@@ -1117,13 +1768,38 @@
     });
     render();
     requestAnimationFrame(() => {
-      if (found) flashAndCenter(found);
-      else if (path.length) flashAndCenter(path[path.length - 1]);
+      if (found) {
+        flashAndCenter(found);
+        highlightRecordRow(found, foundKeyStr);
+      } else if (path.length) {
+        flashAndCenter(path[path.length - 1]);
+      }
       if (!found) {
         alert("Key " + raw + " was not found in a live record (it may not exist, or may only " +
           "exist as a dead/obsolete entry not surfaced by range descent).");
       }
     });
+  }
+
+  /// Scrolls the specific record row matching `keyStr` into view within its
+  /// leaf box's own scrollable `.records` list (manual offsetTop math, not
+  /// `scrollIntoView` - this list sits inside an SVG `foreignObject` under
+  /// #viewport's pan/zoom transform, and native scroll APIs have already
+  /// proven unreliable in that context once this session, see the
+  /// leaf-scrollbar-drag fix), and flashes that one row - flashAndCenter
+  /// already centers/flashes the whole *box*, but with up to 125 records in
+  /// one leaf the matching key could still be scrolled out of sight inside
+  /// it.
+  function highlightRecordRow(leafId, keyStr) {
+    if (keyStr === null) return;
+    const box = nodesG.querySelector(`.node-box[data-id="${leafId}"]`);
+    const records = box && box.querySelector(".records");
+    if (!records) return;
+    const row = [...records.querySelectorAll(".record-row")].find(r => r.querySelector(".k").textContent === keyStr);
+    if (!row) return;
+    records.scrollTop = Math.max(0, row.offsetTop - records.clientHeight / 2 + row.offsetHeight / 2);
+    row.classList.add("record-highlight");
+    setTimeout(() => row.classList.remove("record-highlight"), 2200);
   }
 
   function flashAndCenter(id) {
@@ -1179,6 +1855,36 @@
     view.k = 1; applyTransform();
   });
   document.getElementById("fitBtn").addEventListener("click", fitToView);
+
+  // ---------------------------------------------------------------------
+  // Font size: a CSS variable (--font-scale) every font-size rule in this
+  // stylesheet is expressed as calc(Npx * var(--font-scale)) against - see
+  // measureNodeHeight's doc for why the height cache has to be cleared
+  // whenever this changes (a node box's real rendered height depends on it).
+  // ---------------------------------------------------------------------
+  const FONT_SCALE_MIN = 0.7, FONT_SCALE_MAX = 2.2, FONT_SCALE_STEP = 0.1;
+  let fontScale = parseFloat(localStorage.getItem("cmvbt-viz-font-scale")) || 1;
+
+  function applyFontScale() {
+    document.documentElement.style.setProperty("--font-scale", fontScale.toFixed(2));
+    document.getElementById("fontResetBtn").textContent = Math.round(fontScale * 100) + "%";
+    localStorage.setItem("cmvbt-viz-font-scale", fontScale.toFixed(2));
+    heightCache.clear(); // box heights were measured at the old font size - now wrong
+    render();
+  }
+  document.getElementById("fontIncBtn").addEventListener("click", () => {
+    fontScale = Math.min(FONT_SCALE_MAX, +(fontScale + FONT_SCALE_STEP).toFixed(2));
+    applyFontScale();
+  });
+  document.getElementById("fontDecBtn").addEventListener("click", () => {
+    fontScale = Math.max(FONT_SCALE_MIN, +(fontScale - FONT_SCALE_STEP).toFixed(2));
+    applyFontScale();
+  });
+  document.getElementById("fontResetBtn").addEventListener("click", () => {
+    fontScale = 1;
+    applyFontScale();
+  });
+  applyFontScale(); // apply the persisted (or default) scale immediately, even before a dump loads
 
   function centerOn(worldX, worldY) {
     const rect = canvasWrap.getBoundingClientRect();
