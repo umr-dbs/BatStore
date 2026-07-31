@@ -237,6 +237,19 @@ impl<const NUM_RECORDS: usize,
         assert!(len + n_records_len <= NUM_RECORDS,
                 "LeafPage::bulk_push: {n_records_len} records pushed at len={len} overflow NUM_RECORDS={NUM_RECORDS}");
 
+        // Callers filter by `record_survives_gc` before building `records`
+        // (`MVBTSt::split`'s version-split, `MVBTSt::merge`'s single-leaf
+        // `Merged` branch), which keeps *survivors* - every active record
+        // *and* any dead-but-still-protected one (deleted by a still-
+        // in-flight transaction, or still visible to a live reader
+        // snapshot - see that method's doc). Counting every pushed record
+        // as active unconditionally (as this used to) overcounts `active`
+        // and undercounts `dead` whenever any survivor is actually the
+        // latter - silently wrong `unsafe_degree()`/`unsafe_degree_root()`
+        // capacity/underflow accounting for the rest of this page's life.
+        let active_pushed = records.iter().filter(|r| r.version().is_live()).count();
+        let dead_pushed = n_records_len - active_pushed;
+
         unsafe {
             records.into_iter().enumerate().for_each(|(index, record)| {
                 self.record_data
@@ -249,7 +262,9 @@ impl<const NUM_RECORDS: usize,
         // See `len()`'s doc.
         // fence(Release);
         self.len.store(
-            from_active_dead(len as PageLenPrimitive + n_records_len as PageLenPrimitive, 0),
+            from_active_dead(
+                len as PageLenPrimitive + active_pushed as PageLenPrimitive,
+                dead_pushed as PageLenPrimitive),
             Release)
     }
 
@@ -263,6 +278,14 @@ impl<const NUM_RECORDS: usize,
         assert!(len + records.len() <= NUM_RECORDS,
                 "LeafPage::bulk_push_from_slice_ref: {} records pushed at len={len} overflow NUM_RECORDS={NUM_RECORDS}",
                 records.len());
+
+        // See `bulk_push`'s identical fix's doc: callers here also push
+        // `record_survives_gc` survivors (`MVBTSt::merge`'s/`split`'s
+        // KeySplit branches), which can include dead-but-protected entries,
+        // not just active ones.
+        let active_pushed = records.iter().filter(|r| r.version().is_live()).count();
+        let dead_pushed = records.len() - active_pushed;
+
         unsafe {
             records.into_iter().enumerate().for_each(|(index, record)| {
                 self.record_data
@@ -275,7 +298,9 @@ impl<const NUM_RECORDS: usize,
         // See `len()`'s doc.
         // fence(Release);
         self.len.store(
-            from_active_dead(len as PageLenPrimitive + records.len() as PageLenPrimitive, 0),
+            from_active_dead(
+                len as PageLenPrimitive + active_pushed as PageLenPrimitive,
+                dead_pushed as PageLenPrimitive),
             Release)
     }
 
