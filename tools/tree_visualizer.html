@@ -222,8 +222,9 @@
     box-shadow: 0 12px 40px rgba(0,0,0,.5); z-index: 8; max-width: 92%;
   }
   #map2dPanel.hidden { display: none; }
-  .map2d-hint { padding: 8px 12px 0; font-size: calc(11px * var(--font-scale)); color: var(--text-dim); max-width: 620px; }
-  #map2dSvgWrap { padding: 10px 12px; overflow: auto; }
+  #map2dSvgWrap { padding: 10px 12px; cursor: grab; touch-action: none; user-select: none; }
+  #map2dSvgWrap.grabbing { cursor: grabbing; }
+  #map2dSvgWrap svg { display: block; }
   .map2d-btn {
     cursor: pointer; color: var(--text-dim); font-size: calc(13px * var(--font-scale)); line-height: 1;
     border: 1px solid var(--border); border-radius: 3px; padding: 0 3px;
@@ -335,11 +336,12 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .node-body .fence { color: var(--accent-2); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
     font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+  .fence-usage { color: var(--text-dim); font-weight: 400; }
   .counts { display: flex; gap: 8px; margin-top: 3px; }
   .count-active { color: var(--active); }
   .count-dead { color: var(--dead); }
   .records {
-    max-height: 190px; overflow-y: auto; margin-top: 6px; border-top: 1px solid var(--border);
+    max-height: 420px; overflow-y: auto; margin-top: 6px; border-top: 1px solid var(--border);
     padding-top: 4px;
   }
   .record-row {
@@ -411,10 +413,9 @@
         <button class="btn" id="fontIncBtn" title="Larger text">A+</button>
         <button class="btn" id="fontResetBtn" title="Reset text size">100%</button>
         <div class="sep"></div>
-        <button class="btn" id="recordListBtn" title="Show leaf records as a list">List</button>
+        <button class="btn" id="recordListBtn"
+                title="Show leaf records as a list - click again while already on List to toggle Created ts / worker / delete details">List</button>
         <button class="btn" id="recordGridBtn" title="Show leaf records as compact boxes">Grid</button>
-        <button class="btn" id="detailedRecordsBtn"
-                title="Show ts_start / worker_id / delete info for each record instead of the compact form">Detailed records</button>
         <div class="sep"></div>
         <label for="childPageInput" style="font-size:calc(12px * var(--font-scale));color:var(--text-dim);white-space:nowrap;">Children shown:</label>
         <input type="number" id="childPageInput" min="1" max="500"
@@ -535,15 +536,13 @@
         <div class="trace-header">
           <span id="map2dTitle">2D entry map</span>
           <span class="spacer"></span>
-          <label style="font-size:calc(12px * var(--font-scale));display:flex;align-items:center;gap:4px;white-space:nowrap;">
-            <input type="checkbox" id="map2dOnlyLive"> Only live entries
-          </label>
+          <button class="btn" id="map2dOnlyLiveBtn" title="Only draw entries that are still live (uncontested)">Only live entries</button>
+          <div class="sep"></div>
+          <button class="btn" id="map2dZoomOutBtn" title="Zoom out">&minus;</button>
+          <button class="btn" id="map2dZoomInBtn" title="Zoom in">+</button>
+          <button class="btn" id="map2dResetZoomBtn" title="Reset zoom">Reset</button>
+          <div class="sep"></div>
           <button class="btn" id="map2dCloseBtn" title="Close">&#10005;</button>
-        </div>
-        <div class="map2d-hint">
-          Each box is one entry (child slot) this internal node has ever held: x = the version span during which it
-          was the current routing slot for its key range (open-ended if still live), y = its key interval
-          [key_lower, key_upper]. Green = still live, red = superseded/dead.
         </div>
         <div id="map2dSvgWrap"></div>
       </div>
@@ -602,6 +601,8 @@
   let recordDetailMode = localStorage.getItem("cmvbt-viz-record-detail") === "1";   // list mode only: ts_start/worker_id/delete info per record
   let map2dOnlyLive = false;        // 2D entry map sub-option: only draw still-live entries
   let currentMap2dNodeId = null;    // internal node id the 2D entry map panel is currently showing
+  let map2dDomain = null;           // {vMin, vMax, kMin, kMax} - the currently visible window (zoom/pan state); null = not yet computed for this node
+  let map2dFullExtent = null;       // {vMin, vMax, kMin, kMax} - the node's full data extent, i.e. what "Reset zoom" returns to
 
   const view = { x: 0, y: 0, k: 1 };
   const NODE_W = 220, HGAP = 24, VGAP = 46;
@@ -1384,7 +1385,11 @@
   // rectangles, x = the version span this slot was the current one for
   // (open-ended at the right if it's still live), y = its key interval
   // [key_lower, key_upper]. Complements the plain tree diagram, which only
-  // ever shows one slot's *target* node at a time per edge.
+  // ever shows one slot's *target* node at a time per edge. Axis ticks are
+  // the *actual* distinct version/key breakpoints in the data (not generic
+  // round numbers) - the same values a hand-drawn version of this chart
+  // would label, and it naturally gets denser as you zoom in since more of
+  // a shrinking visible range's breakpoints fit within the tick budget.
   // ---------------------------------------------------------------------
   function numOf(v) {
     const b = tryBigInt(v);
@@ -1412,76 +1417,257 @@
     });
   }
 
+  /// A page's outermost fence bound is very often a sentinel (e.g. u64::MAX
+  /// standing in for "unbounded") rather than a real, to-scale key - the
+  /// reference model for this chart labels that edge symbolically (f_min /
+  /// f_max), not with the literal number, for exactly this reason. Detects
+  /// that case (the extreme value sits vastly farther from its neighbor than
+  /// the neighbors sit from each other) and clips it to a padded edge next to
+  /// the next real breakpoint instead, the same way a "still live" entry's
+  /// open-ended version already gets a padded edge rather than literal
+  /// infinity. Returns {min, max} possibly narrower than the raw extremes.
+  function map2dNiceDomainFromBreaks(sortedDistinct) {
+    if (sortedDistinct.length === 1) return { min: sortedDistinct[0] - 0.5, max: sortedDistinct[0] + 0.5 };
+    let lo = sortedDistinct[0], hi = sortedDistinct[sortedDistinct.length - 1];
+    if (sortedDistinct.length >= 3) {
+      const core = sortedDistinct[sortedDistinct.length - 2] - sortedDistinct[1] || 1;
+      if (hi - sortedDistinct[sortedDistinct.length - 2] > core * 20) hi = sortedDistinct[sortedDistinct.length - 2] + core * 0.1;
+      if (sortedDistinct[1] - lo > core * 20) lo = sortedDistinct[1] - core * 0.1;
+    }
+    return { min: lo, max: hi };
+  }
+
+  /// The node's whole data extent (used as the zoomed-out/reset view and as
+  /// the fixed right/outer edges open-ended "still live" bars or
+  /// sentinel-bounded key ranges extend to, so those edges don't jump around
+  /// as the user zooms/pans elsewhere).
+  function map2dComputeFullExtent(entries) {
+    let minV = Infinity, maxV = -Infinity;
+    entries.forEach(e => {
+      minV = Math.min(minV, e.version);
+      maxV = Math.max(maxV, e.endVersion !== null ? e.endVersion : e.version);
+    });
+    const vSpan = Math.max(1, maxV - minV);
+    // A still-live entry has no natural right edge - extend a bit past the
+    // latest version seen so its open-ended bar is visibly open, not just
+    // clipped flush against the axis.
+    const keyBreaks = [...new Set(entries.flatMap(e => [e.lower, e.upper]))].sort((a, b) => a - b);
+    const kDomain = map2dNiceDomainFromBreaks(keyBreaks);
+    return { vMin: minV, vMax: maxV + vSpan * 0.08, kMin: kDomain.min, kMax: kDomain.max };
+  }
+
+  /// Picks which of `allValues` (already the full sorted set of real
+  /// breakpoints, not generated round numbers) to label given how many
+  /// pixels are available - an evenly-strided subset when there'd otherwise
+  /// be too many to read, every one of them once the visible range has
+  /// zoomed down to fewer breakpoints than the pixel budget allows.
+  function map2dPickTicks(allValues, domainMin, domainMax, pixelSpan, minPixelGap) {
+    const inRange = allValues.filter(v => v >= domainMin && v <= domainMax);
+    if (!inRange.length) return [];
+    const maxTicks = Math.max(2, Math.floor(pixelSpan / minPixelGap));
+    if (inRange.length <= maxTicks) return inRange;
+    const stride = (inRange.length - 1) / (maxTicks - 1);
+    const picked = new Set();
+    for (let i = 0; i < maxTicks; i++) picked.add(inRange[Math.round(i * stride)]);
+    return [...picked];
+  }
+
   function renderMap2d() {
     const nodeId = currentMap2dNodeId;
     const wrap = document.getElementById("map2dSvgWrap");
     if (!nodeId) return;
     const entries = computeMap2dData(nodeId);
-    const visible = map2dOnlyLive ? entries.filter(e => e.live) : entries;
+    document.getElementById("map2dOnlyLiveBtn").classList.toggle("primary", map2dOnlyLive);
 
+    if (!entries.length) {
+      document.getElementById("map2dTitle").textContent = "2D entry map — " + nodeId;
+      wrap.innerHTML = "<p style=\"padding:4px;color:var(--text-dim);\">This node has no entries.</p>";
+      return;
+    }
+    if (!map2dFullExtent) {
+      map2dFullExtent = map2dComputeFullExtent(entries);
+      map2dDomain = { ...map2dFullExtent };
+    }
+
+    const visible = map2dOnlyLive ? entries.filter(e => e.live) : entries;
     document.getElementById("map2dTitle").textContent =
       "2D entry map — " + nodeId + " (" + visible.length + " of " + entries.length + " entries shown)";
+    if (!visible.length) {
+      wrap.innerHTML = "<p style=\"padding:4px;color:var(--text-dim);\">No live entries to show.</p>";
+      return;
+    }
 
-    if (!entries.length) { wrap.innerHTML = "<p>This node has no entries.</p>"; return; }
-    if (!visible.length) { wrap.innerHTML = "<p>No live entries to show (try unchecking “Only live entries”).</p>"; return; }
+    const dom = map2dDomain;
+    const plotW = MAP2D_W - MAP2D_PAD * 2, plotH = MAP2D_H - MAP2D_PAD * 2;
+    const vDomSpan = Math.max(1e-9, dom.vMax - dom.vMin);
+    const kDomSpan = Math.max(1e-9, dom.kMax - dom.kMin);
+    const xOf = v => MAP2D_PAD + (v - dom.vMin) / vDomSpan * plotW;
+    const yOf = k => MAP2D_H - MAP2D_PAD - (k - dom.kMin) / kDomSpan * plotH;
 
-    let minV = Infinity, maxV = -Infinity, minK = Infinity, maxK = -Infinity;
-    entries.forEach(e => {
-      minV = Math.min(minV, e.version);
-      maxV = Math.max(maxV, e.endVersion !== null ? e.endVersion : e.version);
-      minK = Math.min(minK, e.lower);
-      maxK = Math.max(maxK, e.upper);
+    // Tick candidates always come from the *full* (unfiltered) entry set, so
+    // toggling "Only live entries" never rescales or relabels the axes.
+    const versionBreaks = [...new Set(entries.flatMap(e => e.endVersion !== null ? [e.version, e.endVersion] : [e.version]))]
+      .sort((a, b) => a - b);
+    const keyBreaks = [...new Set(entries.flatMap(e => [e.lower, e.upper]))].sort((a, b) => a - b);
+    const versionTicks = map2dPickTicks(versionBreaks, dom.vMin, dom.vMax, plotW, 42);
+    const keyTicks = map2dPickTicks(keyBreaks, dom.kMin, dom.kMax, plotH, 22);
+
+    let svgHtml = '<svg width="' + MAP2D_W + '" height="' + MAP2D_H + '" xmlns="http://www.w3.org/2000/svg">' +
+      '<defs><clipPath id="map2dClip"><rect x="' + MAP2D_PAD + '" y="' + MAP2D_PAD +
+      '" width="' + plotW + '" height="' + plotH + '"/></clipPath></defs>';
+
+    versionTicks.forEach(v => {
+      const x = xOf(v);
+      svgHtml += '<line x1="' + x + '" y1="' + MAP2D_PAD + '" x2="' + x + '" y2="' + (MAP2D_H - MAP2D_PAD) +
+        '" stroke="#262b36" stroke-width="1"/>' +
+        '<text x="' + x + '" y="' + (MAP2D_H - MAP2D_PAD + 14) +
+        '" fill="#8891a3" font-size="9" text-anchor="middle" font-family="ui-monospace,monospace">' +
+        escapeHtml(String(v)) + '</text>';
     });
-    const vSpan = Math.max(1, maxV - minV);
-    // A still-live entry has no natural right edge - extend the chart a bit
-    // past the latest version seen so its open-ended bar is visibly open,
-    // not just clipped flush against the axis.
-    const chartMaxV = maxV + vSpan * 0.08;
-    const kSpan = Math.max(1, maxK - minK);
+    keyTicks.forEach(k => {
+      const y = yOf(k);
+      svgHtml += '<line x1="' + MAP2D_PAD + '" y1="' + y + '" x2="' + (MAP2D_W - MAP2D_PAD) + '" y2="' + y +
+        '" stroke="#262b36" stroke-width="1"/>' +
+        '<text x="' + (MAP2D_PAD - 6) + '" y="' + (y + 3) +
+        '" fill="#8891a3" font-size="9" text-anchor="end" font-family="ui-monospace,monospace">' +
+        escapeHtml(String(k)) + '</text>';
+    });
 
-    const xOf = v => MAP2D_PAD + (v - minV) / (chartMaxV - minV) * (MAP2D_W - MAP2D_PAD * 2);
-    const yOf = k => MAP2D_H - MAP2D_PAD - (k - minK) / kSpan * (MAP2D_H - MAP2D_PAD * 2);
+    svgHtml += '<rect x="' + MAP2D_PAD + '" y="' + MAP2D_PAD + '" width="' + plotW + '" height="' + plotH +
+      '" fill="none" stroke="#3a4152"/>' +
+      '<text x="' + (MAP2D_W / 2) + '" y="' + (MAP2D_H - 6) +
+      '" fill="#8891a3" font-size="10" text-anchor="middle">version</text>' +
+      '<text x="14" y="' + (MAP2D_H / 2) +
+      '" fill="#8891a3" font-size="10" text-anchor="middle" transform="rotate(-90 14 ' + (MAP2D_H / 2) + ')">key</text>';
 
-    let svgHtml = '<svg width="' + MAP2D_W + '" height="' + MAP2D_H + '" xmlns="http://www.w3.org/2000/svg">';
-    svgHtml += '<line x1="' + MAP2D_PAD + '" y1="' + (MAP2D_H - MAP2D_PAD) + '" x2="' + (MAP2D_W - MAP2D_PAD) +
-      '" y2="' + (MAP2D_H - MAP2D_PAD) + '" stroke="#3a4152"/>';
-    svgHtml += '<line x1="' + MAP2D_PAD + '" y1="' + MAP2D_PAD + '" x2="' + MAP2D_PAD +
-      '" y2="' + (MAP2D_H - MAP2D_PAD) + '" stroke="#3a4152"/>';
-    svgHtml += '<text x="' + (MAP2D_W / 2) + '" y="' + (MAP2D_H - 8) +
-      '" fill="#8891a3" font-size="10" text-anchor="middle">version →</text>';
-    svgHtml += '<text x="12" y="' + (MAP2D_H / 2) + '" fill="#8891a3" font-size="10" text-anchor="middle" ' +
-      'transform="rotate(-90 12 ' + (MAP2D_H / 2) + ')">key space →</text>';
-
+    svgHtml += '<g clip-path="url(#map2dClip)">';
     visible.forEach(e => {
       const x1 = xOf(e.version);
-      const x2 = xOf(e.endVersion !== null ? e.endVersion : chartMaxV);
-      const y1 = yOf(e.upper), y2 = yOf(e.lower);
-      const w = Math.max(2, x2 - x1), h = Math.max(4, y2 - y1);
-      const fill = e.live ? "rgba(58,168,118,.35)" : "rgba(229,88,106,.25)";
+      const x2 = xOf(e.endVersion !== null ? e.endVersion : map2dFullExtent.vMax);
+      // Clamp a sentinel-bounded key edge (see map2dNiceDomainFromBreaks) to the
+      // same padded edge its tick axis uses, rather than the raw (often absurdly
+      // large) literal value.
+      const y1 = yOf(Math.min(e.upper, map2dFullExtent.kMax));
+      const y2 = yOf(Math.max(e.lower, map2dFullExtent.kMin));
+      const w = x2 - x1, h = y2 - y1;
+      // Entirely outside the current zoom/pan window in at least one axis - skip
+      // (the clip-path would hide it anyway; this just keeps the SVG smaller).
+      if (x2 < MAP2D_PAD || x1 > MAP2D_W - MAP2D_PAD || y2 < MAP2D_PAD || y1 > MAP2D_H - MAP2D_PAD) return;
+      const fill = e.live ? "rgba(58,168,118,.35)" : "rgba(229,88,106,.22)";
       const stroke = e.live ? "#3aa876" : "#e5586a";
       const title = "I_" + e.idx + " — keys [" + escapeHtml(String(e.lower)) + " .. " + escapeHtml(String(e.upper)) +
         "], born v" + escapeHtml(String(e.version)) +
         (e.endVersion !== null ? ", superseded v" + escapeHtml(String(e.endVersion)) : ", still live");
+      const showLabel = w > 16 && h > 10;
       svgHtml += '<g><title>' + title + '</title>' +
-        '<rect x="' + x1 + '" y="' + y1 + '" width="' + w + '" height="' + h +
+        '<rect x="' + x1 + '" y="' + y1 + '" width="' + Math.max(1, w) + '" height="' + Math.max(1, h) +
         '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1.2"/>' +
-        '<text x="' + (x1 + 3) + '" y="' + (y1 + (h > 10 ? 12 : h / 2 + 3)) +
-        '" fill="#d8dee9" font-size="9" font-family="ui-monospace,monospace">I_' + e.idx + '</text></g>';
+        (showLabel
+          ? '<text x="' + (x1 + 3) + '" y="' + (y1 + 12) +
+            '" fill="#d8dee9" font-size="9" font-family="ui-monospace,monospace">I_' + e.idx + '</text>'
+          : '') +
+        '</g>';
     });
-    svgHtml += '</svg>';
+    svgHtml += '</g></svg>';
     wrap.innerHTML = svgHtml;
   }
 
   function openMap2d(nodeId) {
     currentMap2dNodeId = nodeId;
+    map2dFullExtent = null; // force a fresh full-extent/reset-zoom computation for this node
+    map2dDomain = null;
     map2dPanel.classList.remove("hidden");
     renderMap2d();
   }
   document.getElementById("map2dCloseBtn").addEventListener("click", () => map2dPanel.classList.add("hidden"));
-  document.getElementById("map2dOnlyLive").addEventListener("change", (e) => {
-    map2dOnlyLive = e.target.checked;
+  document.getElementById("map2dOnlyLiveBtn").addEventListener("click", () => {
+    map2dOnlyLive = !map2dOnlyLive;
     renderMap2d();
   });
+
+  /// Zooms the visible domain by `factor` (>1 = in, <1 = out) around the
+  /// data point (dataX, dataY), clamped to [1%, 4x] of the node's full
+  /// extent so the user can't zoom into numerical nothing or pan away to
+  /// an empty void.
+  function map2dZoomAt(dataX, dataY, factor) {
+    if (!map2dDomain || !map2dFullExtent) return;
+    const dom = map2dDomain;
+    const fullVSpan = map2dFullExtent.vMax - map2dFullExtent.vMin;
+    const fullKSpan = map2dFullExtent.kMax - map2dFullExtent.kMin;
+    const vFrac = (dataX - dom.vMin) / (dom.vMax - dom.vMin);
+    const kFrac = (dataY - dom.kMin) / (dom.kMax - dom.kMin);
+    const newVSpan = Math.min(fullVSpan * 4, Math.max(fullVSpan * 0.01, (dom.vMax - dom.vMin) / factor));
+    const newKSpan = Math.min(fullKSpan * 4, Math.max(fullKSpan * 0.01, (dom.kMax - dom.kMin) / factor));
+    dom.vMin = dataX - vFrac * newVSpan; dom.vMax = dom.vMin + newVSpan;
+    dom.kMin = dataY - kFrac * newKSpan; dom.kMax = dom.kMin + newKSpan;
+    renderMap2d();
+  }
+
+  function map2dClientToData(clientX, clientY) {
+    const svgEl = document.querySelector("#map2dSvgWrap svg");
+    if (!svgEl || !map2dDomain) return null;
+    const rect = svgEl.getBoundingClientRect();
+    const px = clientX - rect.left, py = clientY - rect.top;
+    const plotW = MAP2D_W - MAP2D_PAD * 2, plotH = MAP2D_H - MAP2D_PAD * 2;
+    const dom = map2dDomain;
+    return {
+      v: dom.vMin + (px - MAP2D_PAD) / plotW * (dom.vMax - dom.vMin),
+      k: dom.kMax - (py - MAP2D_PAD) / plotH * (dom.kMax - dom.kMin),
+    };
+  }
+
+  const map2dWrapEl = document.getElementById("map2dSvgWrap");
+  map2dWrapEl.addEventListener("wheel", (e) => {
+    if (!map2dDomain) return;
+    e.preventDefault();
+    const pt = map2dClientToData(e.clientX, e.clientY);
+    if (!pt) return;
+    map2dZoomAt(pt.v, pt.k, e.deltaY < 0 ? 1.25 : 1 / 1.25);
+  }, { passive: false });
+
+  document.getElementById("map2dZoomInBtn").addEventListener("click", () => {
+    if (!map2dDomain) return;
+    map2dZoomAt((map2dDomain.vMin + map2dDomain.vMax) / 2, (map2dDomain.kMin + map2dDomain.kMax) / 2, 1.5);
+  });
+  document.getElementById("map2dZoomOutBtn").addEventListener("click", () => {
+    if (!map2dDomain) return;
+    map2dZoomAt((map2dDomain.vMin + map2dDomain.vMax) / 2, (map2dDomain.kMin + map2dDomain.kMax) / 2, 1 / 1.5);
+  });
+  document.getElementById("map2dResetZoomBtn").addEventListener("click", () => {
+    if (!map2dFullExtent) return;
+    map2dDomain = { ...map2dFullExtent };
+    renderMap2d();
+  });
+
+  // Drag-to-pan, mirroring the main canvas's own pan (see canvasWrap's
+  // pointerdown/move/up below) but shifting the data-space domain window
+  // instead of a CSS transform.
+  let map2dDragging = false, map2dDragStart = null, map2dDomainStart = null;
+  map2dWrapEl.addEventListener("pointerdown", (e) => {
+    if (!map2dDomain) return;
+    map2dDragging = true;
+    map2dWrapEl.classList.add("grabbing");
+    map2dDragStart = { x: e.clientX, y: e.clientY };
+    map2dDomainStart = { ...map2dDomain };
+    map2dWrapEl.setPointerCapture(e.pointerId);
+  });
+  map2dWrapEl.addEventListener("pointermove", (e) => {
+    if (!map2dDragging) return;
+    const plotW = MAP2D_W - MAP2D_PAD * 2, plotH = MAP2D_H - MAP2D_PAD * 2;
+    const dx = e.clientX - map2dDragStart.x, dy = e.clientY - map2dDragStart.y;
+    const vSpan = map2dDomainStart.vMax - map2dDomainStart.vMin;
+    const kSpan = map2dDomainStart.kMax - map2dDomainStart.kMin;
+    const vShift = -dx / plotW * vSpan, kShift = dy / plotH * kSpan;
+    map2dDomain = {
+      vMin: map2dDomainStart.vMin + vShift, vMax: map2dDomainStart.vMax + vShift,
+      kMin: map2dDomainStart.kMin + kShift, kMax: map2dDomainStart.kMax + kShift,
+    };
+    renderMap2d();
+  });
+  ["pointerup", "pointercancel"].forEach(evt => map2dWrapEl.addEventListener(evt, () => {
+    map2dDragging = false;
+    map2dWrapEl.classList.remove("grabbing");
+  }));
 
   const TRACE_POPOUT_CSS = `
     body { background:#14171c; color:#d8dee9; font:13px -apple-system,sans-serif; padding:20px; max-width:640px; margin:auto; }
@@ -1811,13 +1997,13 @@
     return s;
   }
 
-  /// Full "detailed records" breakdown: ts_start, worker_id, and (if
+  /// Full "detailed records" breakdown: when/by whom it was created, and (if
   /// deleted) when/by which worker - still never the record's value, which
   /// a dump never includes in the first place (see the empty-state note).
   function recordDetailFields(r) {
     let html =
-      '<div class="record-field"><span class="rf-label">ts_start:</span> ' + escapeHtml(String(r.insert_ts)) + '</div>' +
-      '<div class="record-field"><span class="rf-label">worker_id:</span> ' + escapeHtml(String(r.insert_worker)) + '</div>';
+      '<div class="record-field"><span class="rf-label">Created ts:</span> ' + escapeHtml(String(r.insert_ts)) + '</div>' +
+      '<div class="record-field"><span class="rf-label">Created worker:</span> ' + escapeHtml(String(r.insert_worker)) + '</div>';
     if (r.deleted) {
       html +=
         '<div class="record-field del"><span class="rf-label">deleted ts:</span> ' + escapeHtml(String(r.delete_ts)) + '</div>' +
@@ -1854,6 +2040,29 @@
         '<span class="k">' + escapeHtml(String(r.key)) + '</span>' +
         '<span class="v">' + escapeHtml(recordCompactLabel(r)) + '</span></div>';
     }).join("") + '</div>';
+  }
+
+  /// What fraction of this node's fence span the actually-present keys
+  /// (rangeLo..rangeHi, the "Keys:" line) span - i.e. how much of the
+  /// key-space this slot was handed is actually being used, judged purely by
+  /// the extent between the lowest and highest key present, not by how many
+  /// keys there are: fence [0,10] with keys anywhere from just {0,10} to a
+  /// dense {0..10} both read as 100% used, since either way nothing between
+  /// 0 and 10 could be routed anywhere else. Returns null (omit the info)
+  /// when there's nothing present to measure it against, or the values
+  /// aren't parseable integers.
+  function fenceCoveragePct(rangeLo, rangeHi, fence) {
+    if (rangeLo === "" || rangeHi === "" || rangeLo == null || rangeHi == null) return null;
+    const rLo = tryBigInt(rangeLo), rHi = tryBigInt(rangeHi);
+    const fLo = tryBigInt(fence.lower), fHi = tryBigInt(fence.upper);
+    if (rLo === null || rHi === null || fLo === null || fHi === null) return null;
+    const fenceSpan = fHi - fLo;
+    const rangeSpan = rHi - rLo;
+    if (rangeSpan < 0n) return null;
+    if (fenceSpan <= 0n) return rLo === fLo && rHi === fHi ? "100" : null;
+    const pctTenths = Number((rangeSpan * 1000n) / fenceSpan) / 10;
+    const clamped = Math.max(0, Math.min(100, pctTenths));
+    return clamped % 1 === 0 ? String(clamped) : clamped.toFixed(1);
   }
 
   function nodeInnerHtml(id, node, fence, isLive, parentId, supersessionPoint, birthVersion) {
@@ -1927,8 +2136,14 @@
     // both leaf and internal nodes alike - only the rendered root has no
     // fence at all (no parent slot to inherit one from).
     if (fence) {
+      const coverage = fenceCoveragePct(rangeLo, rangeHi, fence);
       body += '<div class="fence" title="parent-imposed key boundary for this node\'s slot">' +
-        'Fence: ' + escapeHtml(fence.lower) + ' .. ' + escapeHtml(fence.upper) + '</div>';
+        'Fence: ' + escapeHtml(fence.lower) + ' .. ' + escapeHtml(fence.upper) +
+        (coverage !== null
+          ? ' <span class="fence-usage" title="span of Keys above, as a fraction of this whole fence span">(' +
+            coverage + '% used)</span>'
+          : '') +
+        '</div>';
     }
 
     let activeCount = node.active, deadCount = node.dead;
@@ -2146,22 +2361,29 @@
   }
 
   // ---------------------------------------------------------------------
-  // Record display mode: List vs. Grid layout, and a "Detailed records"
-  // toggle (ts_start/worker_id/delete info per record) - see recordsHtml().
+  // Record display mode: List vs. Grid layout, and (list mode only) a
+  // detailed variant (Created ts/worker/delete info per record) - see
+  // recordsHtml(). List and "detailed" share one button: clicking it while
+  // already on List toggles detail mode instead of being a no-op, so there's
+  // no separate always-visible "Detailed records" control to make sense of.
   // Both persisted in localStorage like the font scale.
   // ---------------------------------------------------------------------
   const recordListBtn = document.getElementById("recordListBtn");
   const recordGridBtn = document.getElementById("recordGridBtn");
-  const detailedRecordsBtn = document.getElementById("detailedRecordsBtn");
 
   function applyRecordModeButtons() {
     recordListBtn.classList.toggle("primary", recordLayoutMode === "list");
+    recordListBtn.textContent = recordLayoutMode === "list" && recordDetailMode ? "Detailed" : "List";
     recordGridBtn.classList.toggle("primary", recordLayoutMode === "grid");
-    detailedRecordsBtn.classList.toggle("primary", recordDetailMode);
   }
   recordListBtn.addEventListener("click", () => {
-    recordLayoutMode = "list";
-    localStorage.setItem("cmvbt-viz-record-layout", recordLayoutMode);
+    if (recordLayoutMode === "list") {
+      recordDetailMode = !recordDetailMode;
+      localStorage.setItem("cmvbt-viz-record-detail", recordDetailMode ? "1" : "0");
+    } else {
+      recordLayoutMode = "list";
+      localStorage.setItem("cmvbt-viz-record-layout", recordLayoutMode);
+    }
     heightCache.clear();
     applyRecordModeButtons();
     render();
@@ -2169,13 +2391,6 @@
   recordGridBtn.addEventListener("click", () => {
     recordLayoutMode = "grid";
     localStorage.setItem("cmvbt-viz-record-layout", recordLayoutMode);
-    heightCache.clear();
-    applyRecordModeButtons();
-    render();
-  });
-  detailedRecordsBtn.addEventListener("click", () => {
-    recordDetailMode = !recordDetailMode;
-    localStorage.setItem("cmvbt-viz-record-detail", recordDetailMode ? "1" : "0");
     heightCache.clear();
     applyRecordModeButtons();
     render();
@@ -2359,6 +2574,16 @@
   // ---------------------------------------------------------------------
   // Zoom / pan
   // ---------------------------------------------------------------------
+  // Every overlay that floats on top of the canvas (side panels, the empty-state
+  // file browser, the 2D map modal, the directory-picker modal) has to be excluded
+  // from both the canvas's own wheel-zoom and its drag-to-pan below, or interacting
+  // with the overlay also drives the background canvas's zoom/pan and (for
+  // pointerdown) steals pointer capture onto canvasWrap - which then intercepts the
+  // pointerup that would otherwise complete a click on the overlay's own button, so
+  // nothing in it visibly responds to a real mouse click (a synthetic `.click()`
+  // call skips this whole pointerdown/capture path, which is why this doesn't show
+  // up in automated testing that only ever dispatches synthetic clicks).
+  const OVERLAY_SELECTOR = ".node-box, .side-panel, #empty, #map2dPanel, #dirModal";
   function applyTransform() {
     viewport.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`);
   }
@@ -2375,11 +2600,12 @@
   }
 
   canvasWrap.addEventListener("wheel", (e) => {
-    // Let a leaf's own scrollable record list handle its wheel events
-    // natively - otherwise scrolling it always hijacks into zooming the
-    // whole canvas instead (preventDefault below would block the list's
-    // native scroll entirely).
-    if (e.target.closest(".records") || e.target.closest("#tracePanel")) return;
+    // Let a leaf's own scrollable record list, and any overlay floating on
+    // top of the canvas (side panels, the 2D map's own wheel-zoom, the
+    // directory-picker modal), handle their wheel events natively - otherwise
+    // scrolling/zooming them always hijacks into zooming the whole canvas
+    // instead (preventDefault below would block that entirely).
+    if (e.target.closest(".records") || e.target.closest(OVERLAY_SELECTOR)) return;
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
     zoomAt(e.clientX, e.clientY, factor);
@@ -2456,17 +2682,11 @@
     applyTransform();
   }
 
-  // Pan by dragging the empty canvas (not a node box).
+  // Pan by dragging the empty canvas (not a node box) - see OVERLAY_SELECTOR's
+  // doc above for why every floating overlay must be excluded here too.
   let dragging = false, dragStart = null, viewStart = null;
   canvasWrap.addEventListener("pointerdown", (e) => {
-    // Without the #tracePanel exclusion, every click inside the trace panel
-    // (including its own buttons) also starts a canvas pan and steals
-    // pointer capture onto canvasWrap - which then intercepts the pointerup
-    // that would otherwise complete the click on the actual button, so nothing
-    // in the panel visibly responds to a real mouse click (a synthetic
-    // `.click()` call skips this whole pointerdown/capture path, which is
-    // why this didn't show up in automated testing).
-    if (e.target.closest(".node-box") || e.target.closest("#tracePanel")) return;
+    if (e.target.closest(OVERLAY_SELECTOR)) return;
     dragging = true;
     canvasWrap.classList.add("grabbing");
     dragStart = { x: e.clientX, y: e.clientY };
