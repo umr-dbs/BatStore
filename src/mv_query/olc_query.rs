@@ -104,7 +104,7 @@ impl<const FAN_OUT: usize,
         let root_block
             = master_guard.block();
 
-        let mut root_guard
+        let root_guard
             = root_block.borrow_read();
 
         if LOG_REORG {
@@ -122,60 +122,16 @@ impl<const FAN_OUT: usize,
             }
         }
         match root_guard.deref().unsafe_degree_root() {
-            // `root_guard` deliberately stays an unexcluded `Reader` here —
-            // `split_root` excludes it itself via `try_retire()` (the old
-            // root is only ever read, never mutated in place, and once this
-            // arm is reached the old root is unconditionally superseded).
-            // Same reasoning as `on_overflow_node`'s `simba`; see
-            // `SmartGuard::try_retire`'s doc.
-            //
-            // Forces a full restart after a successful split rather than
-            // handing the freshly-made root straight back for this same
-            // traversal to keep descending into: `on_overflow_node`'s
-            // non-root guard (`lacks_room_for_split_entries`) forces exactly
-            // this same restart-and-re-check whenever *it* splits a page,
-            // specifically so the very next capacity/liveness check for
-            // whatever comes next is done fresh, not against a guard this
-            // traversal has been holding since before the split happened.
-            // The root case had no equivalent - `self.split_root(..)`'s
-            // `Ok(guard)` used to be returned as-is, letting this exact
-            // traversal attempt carry on immediately with a root it never
-            // re-validated via `unsafe_degree_root()`. `?` still propagates
-            // a genuine failure (`try_retire()` losing the race to retire
-            // the old root) as `Err(())` the normal way; only the success
-            // path is redirected to also bail, via the fresh
-            // `retrieve_root_write_olc` retry this same `Err(())` already
-            // triggers for every other restart reason.
             BlockUnsafeDegree::Overflow
-            if master_guard.upgrade_write_lock()
-            => { self.split_root(master_guard, root_guard, root.height())?; Err(()) },
-            // Unlike the `Overflow` arm above, `root_guard` here DOES need
-            // `upgrade_write_lock()` — `merge_root` never retires
-            // `root_guard` itself, it only reads `root_guard.last_child()`
-            // to find the child to promote. `unsafe_degree_root()`'s
-            // `active == 1` check just above is a snapshot, not a standing
-            // guarantee: `on_overflow_node` proves elsewhere in this file
-            // that pushing a new sibling into a parent's page requires only
-            // that parent's `upgrade_write_lock()`, nothing from the child
-            // side — so a concurrent overflow of root's one active child
-            // can freely take `root_guard`'s lock (we're not holding it),
-            // split that child, and push a second active child into root,
-            // all before we get to `last_child()`. Discarding this
-            // function's result afterward (as an earlier version of this
-            // arm did, unconditionally returning `Err(())`) does NOT make
-            // that safe: `merge_root`'s call to `split_root` retires
-            // whatever `last_child()` returned and unconditionally
-            // publishes it as the new root via `self.root.append_root(..)`
-            // *before* returning anything — by the time we could discard a
-            // bad result, the wrong child has already silently replaced the
-            // whole tree, permanently orphaning the other, genuinely live
-            // one. No panic, no error — just silent data loss. Taking the
-            // lock here forces that concurrent overflow to finish first (or
-            // us to lose the CAS and retry), so `last_child()` is read
-            // against a state that's still genuinely at `active == 1`.
+            if master_guard.upgrade_write_lock() => {
+                self.split_root(master_guard, root_guard, root.height());
+                Err(())
+            },
             BlockUnsafeDegree::ActiveUnderflow
-            if master_guard.upgrade_write_lock() && root_guard.upgrade_write_lock() =>
-                self.merge_root(master_guard, root_guard, root.height()),
+            if master_guard.upgrade_write_lock() => {
+                self.merge_root(master_guard, root_guard, root.height());
+                Err(())
+            }
             BlockUnsafeDegree::Ok => Ok(root_guard),
             _ => Err(()),
         }
@@ -298,16 +254,10 @@ impl<const FAN_OUT: usize,
                         // function's doc). Only `curr_guard`/`mufasa`
                         // (mutated in place) needs the ordinary upgrade.
                         BlockUnsafeDegree::Overflow
-                        if curr_guard.upgrade_write_lock()
-                        => match self.on_overflow_node(curr_guard, next_curr_guard, index) {
-                                Ok(guard) => curr_guard = guard,
-                                Err(..) => {
-                                    if VERBOSE {
-                                        println!("traversal_write_internal_olc: on_overflow_node Err()");
-                                    }
-                                    return Err(attempts + 1)
-                                }
-                            },
+                        if curr_guard.upgrade_write_lock() => {
+                            self.on_overflow_node(curr_guard, next_curr_guard, index);
+                            return Err(attempts + 1);
+                        },
                         // `next_curr_guard` also stays an unexcluded
                         // `Reader` here now — `on_underflow_node` retires
                         // it itself via `try_retire()`, with an explicit
@@ -315,16 +265,10 @@ impl<const FAN_OUT: usize,
                         // `merge()` fails after that point. See that
                         // function's doc for why the revert is sound.
                         BlockUnsafeDegree::ActiveUnderflow
-                        if curr_guard.upgrade_write_lock()
-                        => match self.on_underflow_node(curr_guard, next_curr_guard, index) {
-                                Ok(guard) => curr_guard = guard,
-                                Err(..) => {
-                                    if VERBOSE {
-                                        println!("traversal_write_internal_olc: on_underflow_node Err()");
-                                    }
-                                    return Err(attempts + 1)
-                                }
-                            },
+                        if curr_guard.upgrade_write_lock() => {
+                            self.on_underflow_node(curr_guard, next_curr_guard, index);
+                            return Err(attempts + 1);
+                        },
                         BlockUnsafeDegree::Ok => curr_guard = next_curr_guard,
                         _ => return Err(attempts + 1)
                     }

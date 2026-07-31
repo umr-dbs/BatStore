@@ -313,7 +313,7 @@ impl<const FAN_OUT: usize,
         &self,
         mufasa: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         simba: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
-        child_index: usize) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
+        child_index: usize)
     {
         // `mufasa` may already be a `Writer` carried over from a *different*
         // child's overflow/underflow round earlier in this same traversal —
@@ -372,7 +372,7 @@ impl<const FAN_OUT: usize,
         // corrupting `pointer_region`'s adjacent memory with no bounds check
         // ever tripping first.
         if mufasa.lacks_room_for_split_entries() {
-            return Err(());
+            return
         }
 
         let mufasa_deref_mut
@@ -419,7 +419,7 @@ impl<const FAN_OUT: usize,
         // `upgrade_write_lock` would need.
         let simba_cell = match simba.try_retire() {
             Ok(cell) => cell,
-            Err(..) => return Err(()),
+            Err(..) => return,
         };
 
         let version = match self.split(simba_cell.deref(), &fence) {
@@ -487,8 +487,7 @@ impl<const FAN_OUT: usize,
             self.worker_id(),
             version,
             simba_cell);
-
-        Ok(mufasa)
+        // Ok(mufasa)
     }
 
     pub(crate) fn on_underflow_node<'a>(
@@ -496,7 +495,6 @@ impl<const FAN_OUT: usize,
         mufasa: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         simba: BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>,
         index_simba: usize)
-        -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
     {
         if VERBOSE {
             println!("on_underflow_node");
@@ -514,7 +512,7 @@ impl<const FAN_OUT: usize,
         // both outcomes before doing any of the (otherwise wasted) work
         // below, since which one `merge()` produces isn't known yet.
         if mufasa.lacks_room_for_split_entries() {
-            return Err(());
+            return
         }
 
         let mufasa_deref_mut
@@ -540,7 +538,7 @@ impl<const FAN_OUT: usize,
         // guard's `Drop` would.
         let simba_cell = match simba.try_retire() {
             Ok(cell) => cell,
-            Err(..) => return Err(()),
+            Err(..) => return
         };
 
         match self.merge(mufasa_deref_mut, simba_cell.deref(), index_simba) {
@@ -551,7 +549,6 @@ impl<const FAN_OUT: usize,
                 candidate_cell
             ) => {
                 if VERBOSE {
-
                     println!("MergeResult::Merged: Simba-fence: {} - Sibling-fence: {}",
                              mufasa_deref_mut.as_internal_page_ref().get_key(index_simba),
                              fence_sibling);
@@ -667,11 +664,11 @@ impl<const FAN_OUT: usize,
             // revert is sound.
             _ => {
                 simba_cell.clear_retired();
-                return Err(());
+                return
             }
         }
 
-        Ok(mufasa)
+        // Ok(mufasa)
     }
 
     /// Whether a record must be carried forward by a version-split/merge's
@@ -1333,8 +1330,7 @@ impl<const FAN_OUT: usize,
         master_guard: RootIndexGuard<FAN_OUT, NUM_RECORDS, Key, Payload>,
         root_guard: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         height: Height,
-    ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
-    {
+    ) {
         if VERBOSE {
             println!("merge root");
         }
@@ -1364,29 +1360,27 @@ impl<const FAN_OUT: usize,
             println!("Old root height = {}, new height = {}", height, height - 1);
         }
 
-        let guard
-            = self.split_root(master_guard, child_guard, height - 1)?;
+        self.split_root(master_guard, child_guard, height - 1);
 
-        if VERBOSE {
-            let guard_deref
-                = guard.deref_mut();
-
-            let (active, dead)
-                = guard_deref.active_dead_count();
-
-            println!("active dead count: ({} / {})", active, dead);
-        }
-
-        Ok(guard)
+        // if VERBOSE {
+        //     let guard_deref
+        //         = guard.deref_mut();
+        //
+        //     let (active, dead)
+        //         = guard_deref.active_dead_count();
+        //
+        //     println!("active dead count: ({} / {})", active, dead);
+        // }
+        //
+        // Ok(guard)
     }
 
     #[inline]
-    pub(crate) fn split_root<'a>(
+    pub(crate) fn split_root(
         &self,
         _master_guard: RootIndexGuard<FAN_OUT, NUM_RECORDS, Key, Payload>,
-        root_guard: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
-        height: Height,
-    ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
+        root_guard: BlockGuard<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        height: Height)
     {
         // `try_retire()`, not `upgrade_write_lock()`: `root_guard` is only
         // ever read below (`split()` takes `&Block`, never mutates it in
@@ -1396,9 +1390,17 @@ impl<const FAN_OUT: usize,
         // `SmartGuard::try_retire`'s doc. Both callers (the root-overflow
         // arm in `retrieve_root_write_internal_olc`, and `merge_root`) pass
         // `root_guard`/`child_guard` in as a still-unexcluded `Reader`.
-        let root_cell = root_guard.try_retire().map_err(|_| ())?;
+        let root_cell = match root_guard.try_retire() {
+            Ok(cell) => cell,
+            Err(_) => {
+                if VERBOSE {
+                    println!("split_root: root_guard.try_retire() failed");
+                }
+                return;
+            }
+        };
 
-        Ok(match self.split(root_cell.deref(), &Interval::new(self.min_key, self.max_key)) {
+        match self.split(root_cell.deref(), &Interval::new(self.min_key, self.max_key)) {
             BlockSplit::ByKey(left_fence,
                               left,
                               right_fence,
@@ -1424,9 +1426,6 @@ impl<const FAN_OUT: usize,
 
                 root_internal_page.commit_delta(2, 0);
 
-                let new_root_latch
-                    = new_root_block.borrow_read();
-
                 self.root.append_root(
                     Root::new(new_root_block, version, height + 1));
 
@@ -1440,24 +1439,17 @@ impl<const FAN_OUT: usize,
                 // already retired (`try_retire()` above) — used as-is.
                 self.block_manager.register_dead(
                     self.worker_id(), version, root_cell);
-
-                new_root_latch
             }
             BlockSplit::ByVersion(new_root_block) => {
                 let version
                     = self.start_tx_commit();
-
-                let new_root_latch
-                    = new_root_block.borrow_read();
 
                 self.root.append_root(
                     Root::new(new_root_block, version, height));
 
                 self.block_manager.register_dead(
                     self.worker_id(), version, root_cell);
-
-                new_root_latch
             }
-        })
+        }
     }
 }
