@@ -128,9 +128,27 @@ impl<const FAN_OUT: usize,
             // arm is reached the old root is unconditionally superseded).
             // Same reasoning as `on_overflow_node`'s `simba`; see
             // `SmartGuard::try_retire`'s doc.
+            //
+            // Forces a full restart after a successful split rather than
+            // handing the freshly-made root straight back for this same
+            // traversal to keep descending into: `on_overflow_node`'s
+            // non-root guard (`lacks_room_for_split_entries`) forces exactly
+            // this same restart-and-re-check whenever *it* splits a page,
+            // specifically so the very next capacity/liveness check for
+            // whatever comes next is done fresh, not against a guard this
+            // traversal has been holding since before the split happened.
+            // The root case had no equivalent - `self.split_root(..)`'s
+            // `Ok(guard)` used to be returned as-is, letting this exact
+            // traversal attempt carry on immediately with a root it never
+            // re-validated via `unsafe_degree_root()`. `?` still propagates
+            // a genuine failure (`try_retire()` losing the race to retire
+            // the old root) as `Err(())` the normal way; only the success
+            // path is redirected to also bail, via the fresh
+            // `retrieve_root_write_olc` retry this same `Err(())` already
+            // triggers for every other restart reason.
             BlockUnsafeDegree::Overflow
             if master_guard.upgrade_write_lock()
-            => self.split_root(master_guard, root_guard, root.height()),
+            => { self.split_root(master_guard, root_guard, root.height())?; Err(()) },
             // Unlike the `Overflow` arm above, `root_guard` here DOES need
             // `upgrade_write_lock()` — `merge_root` never retires
             // `root_guard` itself, it only reads `root_guard.last_child()`
