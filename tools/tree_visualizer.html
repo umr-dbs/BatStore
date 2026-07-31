@@ -1396,25 +1396,88 @@
     return b !== null ? Number(b) : Number(v);
   }
 
-  /// For each child slot, its rendered version span: [version, endVersion]
-  /// where endVersion is the version of the earliest later sibling that
-  /// overlaps it (the one that actually superseded it - same overlap
-  /// relationship `intervalsOverlap`/live_mask use elsewhere), or null if
-  /// nothing has superseded it yet (still live).
+  /// One child slot's key range can be superseded *piecewise*: a later
+  /// sibling only has to overlap *part* of it (a key-only split that only
+  /// carves off one side, or several unrelated later splits landing in
+  /// different sub-pieces of it at different versions) - the rest of the
+  /// range stays this slot's responsibility until something else eventually
+  /// overlaps that remainder too. A single (version, endVersion) pair for
+  /// the *whole* range would be wrong here: cutting the whole box off at the
+  /// *first* partial overlap would hide however much of it that was still
+  /// genuinely uncontested afterward. So this sweeps each slot's range
+  /// against every later overlapping sibling in version order, in effect
+  /// re-deriving `InternalPage::live_mask` per sub-range instead of once for
+  /// the whole slot, and emits one fragment per (still-uncovered-so-far
+  /// sub-range, version-it-got-covered-at) pair - several fragments for one
+  /// child slot when it really was only partially, repeatedly split, exactly
+  /// one (identical to the old whole-range shortcut) when a single later
+  /// sibling's range fully contains it or a simultaneous split's pieces
+  /// jointly cover it in one pass.
   function computeMap2dData(nodeId) {
     const node = getNode(nodeId);
     const children = node.children;
-    return children.map((c, i) => {
-      const superseder = children.slice(i + 1).find(later => intervalsOverlap(c, later));
-      return {
-        idx: i,
-        node_id: c.node_id,
-        lower: numOf(c.key_lower), upper: numOf(c.key_upper),
-        version: numOf(c.version),
-        endVersion: superseder ? numOf(superseder.version) : null,
-        live: c.live !== false,
-      };
+    const fragments = [];
+    children.forEach((c, i) => {
+      // The sweep below has to run in BigInt, not Number: a sentinel fence
+      // bound like u64::MAX (~1.8e19) is already past float64's ~2^53 exact-
+      // integer range, so a Number +1/-1 boundary nudge there is silently a
+      // no-op (rounds right back to the same float) - which then makes the
+      // subtraction below think a zero-width sliver is still "uncovered" and
+      // it gets rediscovered (and re-emitted as a fresh, wrong fragment)
+      // against every subsequent candidate. Only convert to Number once a
+      // fragment's *own* bounds are final and about to be handed to the
+      // (necessarily float, pixel-mapped) renderer.
+      const lo = tryBigInt(c.key_lower), hi = tryBigInt(c.key_upper);
+      if (lo === null || hi === null) return;
+      const versionNum = numOf(c.version);
+      const candidates = children.slice(i + 1)
+        .filter(later => intervalsOverlap(c, later))
+        .map(later => ({ lo: tryBigInt(later.key_lower), hi: tryBigInt(later.key_upper), version: later.version }))
+        .filter(cand => cand.lo !== null && cand.hi !== null)
+        .sort((a, b) => {
+          const av = tryBigInt(a.version), bv = tryBigInt(b.version);
+          if (av !== null && bv !== null) return av < bv ? -1 : av > bv ? 1 : 0;
+          return String(a.version).localeCompare(String(b.version));
+        });
+
+      // key_lower/key_upper are *inclusive* integer bounds where logically-
+      // adjacent slices differ by exactly 1 (e.g. [62,123] then [124,185] -
+      // no shared point, but no real gap either - every integer in between
+      // belongs to exactly one of them). Subtracting a covered piece out of
+      // an uncovered range has to know that, or a perfectly-adjacent pair
+      // like that looks like it leaves a nonexistent gap needing yet another
+      // (spurious, never-superseded, permanently-"live") sliver.
+      let uncovered = [[lo, hi]];
+      candidates.forEach(cand => {
+        const next = [];
+        uncovered.forEach(([uLo, uHi]) => {
+          const oLo = uLo > cand.lo ? uLo : cand.lo;
+          const oHi = uHi < cand.hi ? uHi : cand.hi;
+          if (oLo <= oHi) {
+            fragments.push({
+              idx: i, node_id: c.node_id, lower: numOf(oLo), upper: numOf(oHi),
+              version: versionNum, endVersion: numOf(cand.version), live: false,
+            });
+            if (oLo - 1n >= uLo) next.push([uLo, oLo - 1n]);
+            if (oHi + 1n <= uHi) next.push([oHi + 1n, uHi]);
+          } else {
+            next.push([uLo, uHi]);
+          }
+        });
+        uncovered = next;
+      });
+      // Whatever's left after every later overlap is accounted for was never
+      // superseded - still this slot's own responsibility today.
+      uncovered.forEach(([uLo, uHi]) => {
+        if (uLo < uHi) {
+          fragments.push({
+            idx: i, node_id: c.node_id, lower: numOf(uLo), upper: numOf(uHi),
+            version: versionNum, endVersion: null, live: true,
+          });
+        }
+      });
     });
+    return fragments;
   }
 
   /// A page's outermost fence bound is very often a sentinel (e.g. u64::MAX
@@ -1491,7 +1554,7 @@
 
     const visible = map2dOnlyLive ? entries.filter(e => e.live) : entries;
     document.getElementById("map2dTitle").textContent =
-      "2D entry map — " + nodeId + " (" + visible.length + " of " + entries.length + " entries shown)";
+      "2D entry map — " + nodeId + " (" + visible.length + " of " + entries.length + " fragments shown)";
     if (!visible.length) {
       wrap.innerHTML = "<p style=\"padding:4px;color:var(--text-dim);\">No live entries to show.</p>";
       return;
