@@ -38,11 +38,18 @@
   .toolbar-row {
     display: flex; align-items: center; gap: 12px; padding: 12px 18px; flex-wrap: wrap;
   }
-  .toolbar-row-file { padding-bottom: 8px; }
-  .toolbar-row-actions { padding-top: 8px; border-top: 1px solid var(--border); }
-  #toolbar h1 {
-    font-size: calc(22px * var(--font-scale)); font-weight: 700; margin: 0 16px 0 0; white-space: nowrap;
-    color: var(--text); letter-spacing: .02em;
+  .toolbar-row-actions { row-gap: 8px; }
+  .toolbar-group {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,.02);
+  }
+  .toolbar-group-label {
+    font-size: calc(10px * var(--font-scale)); text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-dim); margin-right: 2px; white-space: nowrap;
+  }
+  #childPageInput {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 6px; font-size: calc(13px * var(--font-scale));
   }
   .btn {
     background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
@@ -141,14 +148,45 @@
 
   #empty {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    flex-direction: column; gap: 10px; color: var(--text-dim); text-align: center; padding: 24px;
-    pointer-events: none;
+    color: var(--text-dim); padding: 24px;
   }
   #empty code {
     background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
     padding: 2px 6px; color: #cfe0ff;
   }
   #empty.hidden { display: none; }
+  #fileBrowser {
+    width: min(720px, 92%); background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 12px; padding: 22px 26px; text-align: left;
+  }
+  .file-browser-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .file-browser-title { font-size: calc(18px * var(--font-scale)); font-weight: 700; color: var(--text); }
+  .file-browser-actions { display: flex; gap: 8px; }
+  #fileBrowserHint { color: var(--text-dim); font-size: calc(12.5px * var(--font-scale)); margin-top: 10px; line-height: 1.5; }
+  #fileList { margin-top: 14px; max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+  #fileList.hidden { display: none; }
+  .file-row {
+    padding: 9px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
+    display: flex; justify-content: space-between; gap: 10px;
+  }
+  .file-row:last-child { border-bottom: none; }
+  .file-row:hover { background: #2b3140; }
+  .file-row-name {
+    font-family: ui-monospace, monospace; font-size: calc(12px * var(--font-scale));
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .file-row-meta { color: var(--text-dim); font-size: calc(11px * var(--font-scale)); white-space: nowrap; }
+  #fileBrowserEmptyNote { margin-top: 16px; color: var(--text-dim); font-size: calc(11.5px * var(--font-scale)); line-height: 1.6; }
+  #dirModal {
+    position: absolute; inset: 0; z-index: 9; display: flex; align-items: center;
+    justify-content: center; background: rgba(0,0,0,.5);
+  }
+  #dirModal.hidden { display: none; }
+  .dir-modal-inner {
+    width: min(640px, 90%); max-height: 80%; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; display: flex; flex-direction: column; overflow: hidden;
+  }
+  #dirModalList { overflow-y: auto; padding: 8px; }
 
   #snapshotBanner {
     position: absolute; top: 0; left: 0; right: 0; z-index: 6;
@@ -159,12 +197,38 @@
   }
   #snapshotBanner.hidden { display: none; }
   #snapshotBanner b { color: var(--accent-2); }
-  #tracePanel {
+  .side-panel {
     position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 90%;
     background: var(--panel); border-left: 1px solid var(--border);
     box-shadow: -8px 0 24px rgba(0,0,0,.4); display: flex; flex-direction: column; z-index: 5;
   }
-  #tracePanel.hidden { display: none; }
+  .side-panel.hidden { display: none; }
+  #keyTracerBody {
+    padding: 10px 12px; overflow-y: auto; font-size: calc(12px * var(--font-scale));
+  }
+  .keytrace-list { list-style: none; margin: 8px 0 0; padding: 0; }
+  .keytrace-item {
+    padding: 8px; margin-bottom: 8px; background: var(--panel-2); border-radius: 6px;
+    border-left: 3px solid var(--border); font-size: calc(11.5px * var(--font-scale));
+  }
+  .keytrace-item.rel-live { border-left-color: var(--active); }
+  .keytrace-item.rel-dead { border-left-color: var(--dead); }
+  .keytrace-meta { color: var(--text-dim); font-size: calc(10px * var(--font-scale)); margin-top: 2px; }
+  .keytrace-del { color: var(--dead); margin-top: 2px; }
+  .keytrace-live { color: var(--active); margin-top: 2px; }
+  #map2dPanel {
+    position: absolute; top: 40px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5); z-index: 8; max-width: 92%;
+  }
+  #map2dPanel.hidden { display: none; }
+  .map2d-hint { padding: 8px 12px 0; font-size: calc(11px * var(--font-scale)); color: var(--text-dim); max-width: 620px; }
+  #map2dSvgWrap { padding: 10px 12px; overflow: auto; }
+  .map2d-btn {
+    cursor: pointer; color: var(--text-dim); font-size: calc(13px * var(--font-scale)); line-height: 1;
+    border: 1px solid var(--border); border-radius: 3px; padding: 0 3px;
+  }
+  .map2d-btn:hover { color: var(--accent-2); border-color: var(--accent-2); }
   .trace-header {
     display: flex; align-items: center; gap: 8px; padding: 10px 12px; flex-wrap: wrap;
     border-bottom: 1px solid var(--border); font-weight: 600;
@@ -270,7 +334,7 @@
   .node-body .range { color: var(--text); font-family: ui-monospace, monospace; font-size: calc(10.5px * var(--font-scale));
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .node-body .fence { color: var(--accent-2); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+    font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
   .counts { display: flex; gap: 8px; margin-top: 3px; }
   .count-active { color: var(--active); }
   .count-dead { color: var(--dead); }
@@ -287,12 +351,33 @@
   .record-row.deleted .k { color: var(--dead); }
   .record-row.live .k { color: var(--active); }
   .record-row .v { color: var(--text-dim); }
+  .record-row.record-row-detailed {
+    display: block; text-decoration: none; padding: 4px 0; border-bottom: 1px solid var(--border);
+  }
+  .record-row.record-row-detailed:last-child { border-bottom: none; }
+  .record-row-key { color: var(--text); font-weight: 600; margin-bottom: 2px; }
+  .record-row.deleted .record-row-key { color: var(--dead); text-decoration: line-through; }
+  .record-field { font-size: calc(9.5px * var(--font-scale)); color: var(--text-dim); }
+  .record-field .rf-label { color: var(--text-dim); opacity: .8; }
+  .record-field.del { color: var(--dead); }
+  .records-grid { display: flex; flex-wrap: wrap; gap: 4px; }
+  .record-chip {
+    min-width: 30px; height: 20px; padding: 0 4px; display: flex; align-items: center; justify-content: center;
+    font-size: calc(9px * var(--font-scale)); border-radius: 4px; overflow: hidden;
+    font-family: ui-monospace, monospace; border: 1px solid var(--border);
+  }
+  .record-chip.r-live { background: rgba(58,168,118,.18); border-color: var(--active); color: var(--text); }
+  .record-chip.r-dead {
+    background: rgba(229,88,106,.14); border-color: var(--dead); color: var(--text-dim); text-decoration: line-through;
+  }
   .truncated-note { font-size: calc(10.5px * var(--font-scale)); padding-top: 4px; }
-  .record-row.record-highlight { animation: record-flash 2.2s ease-out; border-radius: 3px; }
+  .record-row.record-highlight, .record-chip.record-highlight { animation: record-flash 2.2s ease-out; border-radius: 3px; }
   @keyframes record-flash {
     0% { background: rgba(255,191,91,.85); }
     100% { background: transparent; }
   }
+  .more-actions { margin-top: 4px; }
+  .more-actions .btn { padding: 3px 8px; font-size: calc(10.5px * var(--font-scale)); }
 
   path.edge { stroke: #3a4152; stroke-width: 1.5px; fill: none; }
   path.edge.live { stroke: var(--active); stroke-width: 2px; }
@@ -314,48 +399,65 @@
 <body>
 <div id="app">
   <div id="toolbar">
-    <div class="toolbar-row toolbar-row-file">
-      <h1>cMVBT</h1>
-      <button class="btn primary" id="loadBtn">Load dump...</button>
-      <input type="file" id="fileInput" accept=".json" style="display:none">
-      <span id="fileLabel">No file loaded</span>
-      <div class="spacer"></div>
-    </div>
     <div class="toolbar-row toolbar-row-actions">
-      <button class="btn" id="zoomInBtn" title="Zoom in">+</button>
-      <button class="btn" id="zoomOutBtn" title="Zoom out">&minus;</button>
-      <button class="btn" id="fitBtn" title="Fit visible tree to view">Fit</button>
-      <button class="btn" id="resetZoomBtn" title="Reset zoom">100%</button>
-      <div class="sep"></div>
-      <button class="btn" id="fontDecBtn" title="Smaller text">A&minus;</button>
-      <button class="btn" id="fontIncBtn" title="Larger text">A+</button>
-      <button class="btn" id="fontResetBtn" title="Reset text size">100%</button>
-      <div class="sep"></div>
-      <button class="btn" id="liveViewBtn"
-              title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
-      <button class="btn" id="hideDeadBtn" disabled
-              title="Live view only: prune every dead/obsolete branch and record out of the render entirely, showing just the live tree">Hide dead</button>
-      <div class="sep"></div>
-      <button class="btn" id="expandAllBtn">Expand all</button>
-      <button class="btn" id="collapseAllBtn">Collapse all</button>
-      <div class="sep"></div>
-      <button class="btn" id="expandMarkedBtn">Expand marked</button>
-      <button class="btn" id="collapseMarkedBtn">Collapse marked</button>
-      <button class="btn" id="clearMarkedBtn">Clear marks</button>
-      <div class="sep"></div>
-      <input type="text" id="search" placeholder="key to find...">
-      <button class="btn" id="searchBtn" title="Find this key in the currently selected root* (and snapshot version, if one is active)">Find key</button>
-      <div class="sep"></div>
-      <button class="btn" id="stepBackBtn" title="Step to the previous root* version">&#9198;</button>
-      <button class="btn" id="playBtn" title="Play through every root* version, oldest to newest">&#9654; Play evolution</button>
-      <button class="btn" id="stepFwdBtn" title="Step to the next root* version">&#9197;</button>
-      <select id="playbackSpeed" title="Playback speed">
-        <option value="2200">Slow</option>
-        <option value="1200" selected>Normal</option>
-        <option value="600">Fast</option>
-      </select>
-      <span id="playbackStatus"></span>
+      <div class="toolbar-group" id="grpAppearance">
+        <span class="toolbar-group-label">Appearance</span>
+        <button class="btn" id="zoomInBtn" title="Zoom in">+</button>
+        <button class="btn" id="zoomOutBtn" title="Zoom out">&minus;</button>
+        <button class="btn" id="fitBtn" title="Fit visible tree to view">Fit</button>
+        <button class="btn" id="resetZoomBtn" title="Reset zoom">100%</button>
+        <div class="sep"></div>
+        <button class="btn" id="fontDecBtn" title="Smaller text">A&minus;</button>
+        <button class="btn" id="fontIncBtn" title="Larger text">A+</button>
+        <button class="btn" id="fontResetBtn" title="Reset text size">100%</button>
+        <div class="sep"></div>
+        <button class="btn" id="recordListBtn" title="Show leaf records as a list">List</button>
+        <button class="btn" id="recordGridBtn" title="Show leaf records as compact boxes">Grid</button>
+        <button class="btn" id="detailedRecordsBtn"
+                title="Show ts_start / worker_id / delete info for each record instead of the compact form">Detailed records</button>
+        <div class="sep"></div>
+        <label for="childPageInput" style="font-size:calc(12px * var(--font-scale));color:var(--text-dim);white-space:nowrap;">Children shown:</label>
+        <input type="number" id="childPageInput" min="1" max="500"
+               title="How many children of an expanded internal node render before a '+N more' box appears">
+      </div>
+      <div class="toolbar-group" id="grpOperations">
+        <span class="toolbar-group-label">Operations</span>
+        <button class="btn" id="expandAllBtn">Expand all</button>
+        <button class="btn" id="collapseAllBtn">Collapse all</button>
+        <div class="sep"></div>
+        <button class="btn" id="expandMarkedBtn">Expand marked</button>
+        <button class="btn" id="collapseMarkedBtn">Collapse marked</button>
+        <button class="btn" id="clearMarkedBtn">Clear marks</button>
+        <div class="sep"></div>
+        <input type="text" id="search" placeholder="key to find...">
+        <button class="btn" id="searchBtn" title="Find this key in the currently selected root* (and snapshot version, if one is active)">Find key</button>
+        <div class="sep"></div>
+        <input type="text" id="keyTracerInput" placeholder="key to trace...">
+        <button class="btn" id="keyTracerBtn"
+                title="Trace every created/updated/deleted event for one key across the whole dump">Key tracer</button>
+        <div class="sep"></div>
+        <button class="btn" id="liveViewBtn"
+                title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
+        <button class="btn" id="hideDeadBtn" disabled
+                title="Live view only: prune every dead/obsolete branch and record out of the render entirely, showing just the live tree">Hide dead</button>
+      </div>
+      <div class="toolbar-group" id="grpPlayback">
+        <span class="toolbar-group-label">Playback</span>
+        <button class="btn" id="stepBackBtn" title="Step to the previous root* version">&#9198;</button>
+        <button class="btn" id="playBtn" title="Play through every root* version, oldest to newest">&#9654; Play evolution</button>
+        <button class="btn" id="stepFwdBtn" title="Step to the next root* version">&#9197;</button>
+        <select id="playbackSpeed" title="Playback speed">
+          <option value="2200">Slow</option>
+          <option value="1200" selected>Normal</option>
+          <option value="600">Fast</option>
+        </select>
+        <span id="playbackStatus"></span>
+      </div>
       <div class="spacer"></div>
+      <button class="btn" id="openFileBtn" title="Load a different dump file">Open file&hellip;</button>
+      <button class="btn" id="openDirBtn" title="Browse a directory of dump files">Open dir&hellip;</button>
+      <input type="file" id="fileInput" accept=".json" style="display:none">
+      <input type="file" id="dirInput" webkitdirectory multiple style="display:none">
     </div>
   </div>
   <div id="body">
@@ -386,24 +488,32 @@
         </g>
       </svg>
       <div id="empty">
-        <div style="font-size:15px;color:var(--text)">No dump loaded</div>
-        <div>Click <b>Load dump...</b> above, or drag a JSON file onto this window.</div>
-        <div style="max-width:480px">
-          Generate one from the engine, e.g.:<br>
-          <code>cargo run --features tree-viz -- viz_demo out.json 15000</code><br>
-          or call <code>tree.dump_to_file(path, None)</code> from your own benchmark/test code
-          at a quiescent point (see <code>src/mv_viz/dump.rs</code>).
-        </div>
-        <div style="max-width:480px;margin-top:6px">
-          Only structural metadata (keys, versions, active/dead counts) is ever
-          shown here &mdash; record payload values are never included in a dump.
+        <div id="fileBrowser">
+          <div class="file-browser-head">
+            <div class="file-browser-title">Load a tree dump</div>
+            <div class="file-browser-actions">
+              <button class="btn primary" id="chooseDirBtn">Choose directory&hellip;</button>
+              <button class="btn" id="chooseFileBtn">Choose file&hellip;</button>
+            </div>
+          </div>
+          <div id="fileBrowserHint">
+            Pick a directory to list every <code>.json</code> dump found in it (searched recursively), or pick a
+            single file directly. You can also just drag a JSON file onto this window.
+          </div>
+          <div id="fileList" class="hidden"></div>
+          <div id="fileBrowserEmptyNote">
+            Generate a dump from the engine, e.g. <code>cargo run --features tree-viz -- viz_demo out.json 15000</code>
+            or call <code>tree.dump_to_file(path, None)</code> from your own benchmark/test code at a quiescent point
+            (see <code>src/mv_viz/dump.rs</code>). Only structural metadata (keys, versions, active/dead counts) is
+            ever shown here &mdash; record payload values are never included in a dump.
+          </div>
         </div>
       </div>
       <div id="snapshotBanner" class="hidden">
         <span>&#128247; Snapshot view &mdash; version <b id="snapshotVersionLabel"></b>: only nodes/records that existed and weren't yet superseded at this version are shown.</span>
         <button class="btn" id="exitSnapshotBtn">Exit snapshot view</button>
       </div>
-      <div id="tracePanel" class="hidden">
+      <div id="tracePanel" class="side-panel hidden">
         <div class="trace-header">
           <span>Node trace</span>
           <span class="spacer"></span>
@@ -413,10 +523,45 @@
         </div>
         <div id="traceBody"></div>
       </div>
+      <div id="keyTracerPanel" class="side-panel hidden">
+        <div class="trace-header">
+          <span>Key tracer</span>
+          <span class="spacer"></span>
+          <button class="btn" id="keyTracerCloseBtn" title="Close">&#10005;</button>
+        </div>
+        <div id="keyTracerBody"></div>
+      </div>
+      <div id="map2dPanel" class="hidden">
+        <div class="trace-header">
+          <span id="map2dTitle">2D entry map</span>
+          <span class="spacer"></span>
+          <label style="font-size:calc(12px * var(--font-scale));display:flex;align-items:center;gap:4px;white-space:nowrap;">
+            <input type="checkbox" id="map2dOnlyLive"> Only live entries
+          </label>
+          <button class="btn" id="map2dCloseBtn" title="Close">&#10005;</button>
+        </div>
+        <div class="map2d-hint">
+          Each box is one entry (child slot) this internal node has ever held: x = the version span during which it
+          was the current routing slot for its key range (open-ended if still live), y = its key interval
+          [key_lower, key_upper]. Green = still live, red = superseded/dead.
+        </div>
+        <div id="map2dSvgWrap"></div>
+      </div>
+      <div id="dirModal" class="hidden">
+        <div class="dir-modal-inner">
+          <div class="trace-header">
+            <span>Choose a dump file</span>
+            <span class="spacer"></span>
+            <button class="btn" id="dirModalCloseBtn" title="Close">&#10005;</button>
+          </div>
+          <div id="dirModalList"></div>
+        </div>
+      </div>
     </div>
   </div>
   <div id="measure" aria-hidden="true"></div>
   <div id="statusBar">
+    <span id="fileLabel">No file loaded</span>
     <span id="statRoots">roots: -</span>
     <span id="statNodes">unique nodes in file: -</span>
     <span id="statVisible">visible boxes: -</span>
@@ -453,6 +598,10 @@
   let playbackTimer = null;         // setInterval handle for evolution auto-play, null when paused/stopped
   let playbackSpeedMs = 1200;       // ms between auto-play steps
   let playbackIndex = -1;           // index into sortedRootsAsc() of the currently-shown step, -1 = not started
+  let recordLayoutMode = localStorage.getItem("cmvbt-viz-record-layout") || "list"; // "list" | "grid"
+  let recordDetailMode = localStorage.getItem("cmvbt-viz-record-detail") === "1";   // list mode only: ts_start/worker_id/delete info per record
+  let map2dOnlyLive = false;        // 2D entry map sub-option: only draw still-live entries
+  let currentMap2dNodeId = null;    // internal node id the 2D entry map panel is currently showing
 
   const view = { x: 0, y: 0, k: 1 };
   const NODE_W = 220, HGAP = 24, VGAP = 46;
@@ -460,9 +609,11 @@
   // A B+tree internal node can have up to FAN_OUT (often 100+) children -
   // laying every one of them out side by side at once makes "Fit" (and any
   // reasonable zoom level) unreadable. Cap how many render per node until
-  // the user explicitly asks for the rest via the "+N more" box.
-  const DEFAULT_CHILD_PAGE = 12;
+  // the user explicitly asks for the rest via the "+N more" box. Adjustable
+  // at runtime via the toolbar's "Children shown" input - not a const.
+  let DEFAULT_CHILD_PAGE = 12;
   const MORE_PREFIX = "more::";
+  const MAP2D_W = 640, MAP2D_H = 420, MAP2D_PAD = 40;
 
   // ---------------------------------------------------------------------
   // DOM refs
@@ -475,6 +626,7 @@
   const emptyEl = document.getElementById("empty");
   const rootListEl = document.getElementById("rootList");
   const fileInput = document.getElementById("fileInput");
+  const dirInput = document.getElementById("dirInput");
   const fileLabel = document.getElementById("fileLabel");
   const measureEl = document.getElementById("measure");
   const liveViewBtn = document.getElementById("liveViewBtn");
@@ -482,6 +634,9 @@
   const liveLegend = document.getElementById("liveLegend");
   const tracePanel = document.getElementById("tracePanel");
   const traceBody = document.getElementById("traceBody");
+  const keyTracerPanel = document.getElementById("keyTracerPanel");
+  const map2dPanel = document.getElementById("map2dPanel");
+  const dirModal = document.getElementById("dirModal");
 
   // ---------------------------------------------------------------------
   // Data loading
@@ -503,6 +658,66 @@
     reader.readAsText(file);
   }
 
+  // ---------------------------------------------------------------------
+  // File browser: directory/file pickers shown in the empty-state box (and,
+  // once a dump is already loaded, in a small modal reached via the
+  // toolbar's "Open dir..." button) - built on <input webkitdirectory>
+  // rather than the File System Access API so it works the same in every
+  // browser without needing a persisted directory-handle permission.
+  // ---------------------------------------------------------------------
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  function buildFileRows(files) {
+    return files.map((f, i) =>
+      '<div class="file-row" data-file-idx="' + i + '">' +
+      '<span class="file-row-name">' + escapeHtml(f.webkitRelativePath || f.name) + '</span>' +
+      '<span class="file-row-meta">' + (f.size / 1e6).toFixed(2) + ' MB</span>' +
+      '</div>'
+    ).join("");
+  }
+
+  function wireFileRows(container, files, onPick) {
+    container.querySelectorAll("[data-file-idx]").forEach(row => {
+      row.addEventListener("click", () => {
+        loadFile(files[+row.getAttribute("data-file-idx")]);
+        if (onPick) onPick();
+      });
+    });
+  }
+
+  function handleDirFiles(fileList) {
+    const jsonFiles = [...fileList].filter(f => f.name.toLowerCase().endsWith(".json"));
+    if (!jsonFiles.length) {
+      alert("No .json files found in that directory (searched recursively).");
+      return;
+    }
+    jsonFiles.sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
+    if (!dump) {
+      const listEl = document.getElementById("fileList");
+      listEl.innerHTML = buildFileRows(jsonFiles);
+      listEl.classList.remove("hidden");
+      wireFileRows(listEl, jsonFiles);
+    } else {
+      const listEl = document.getElementById("dirModalList");
+      listEl.innerHTML = buildFileRows(jsonFiles);
+      wireFileRows(listEl, jsonFiles, () => dirModal.classList.add("hidden"));
+      dirModal.classList.remove("hidden");
+    }
+  }
+
+  dirInput.addEventListener("change", (e) => {
+    if (e.target.files.length) handleDirFiles(e.target.files);
+  });
+  document.getElementById("chooseDirBtn").addEventListener("click", () => dirInput.click());
+  document.getElementById("chooseFileBtn").addEventListener("click", () => fileInput.click());
+  document.getElementById("openDirBtn").addEventListener("click", () => dirInput.click());
+  document.getElementById("openFileBtn").addEventListener("click", () => fileInput.click());
+  document.getElementById("dirModalCloseBtn").addEventListener("click", () => dirModal.classList.add("hidden"));
+
   function onDumpLoaded(name) {
     stopPlayback();
     exitSnapshotMode();
@@ -514,6 +729,11 @@
     childLimit.clear();
     heightCache.clear();
     currentRootId = null;
+    tracePanel.classList.add("hidden");
+    keyTracerPanel.classList.add("hidden");
+    map2dPanel.classList.add("hidden");
+    dirModal.classList.add("hidden");
+    currentMap2dNodeId = null;
 
     fileLabel.textContent = name + " - " + Object.keys(dump.nodes).length + " unique nodes";
     document.getElementById("statRoots").textContent = "roots: " + dump.roots.length;
@@ -601,7 +821,6 @@
   fileInput.addEventListener("change", (e) => {
     if (e.target.files[0]) loadFile(e.target.files[0]);
   });
-  document.getElementById("loadBtn").addEventListener("click", () => fileInput.click());
 
   ["dragover", "drop"].forEach(evt =>
     window.addEventListener(evt, (e) => { e.preventDefault(); }));
@@ -1025,6 +1244,7 @@
   }
 
   function openTrace(nodeId, parentId, supersessionPoint) {
+    keyTracerPanel.classList.add("hidden"); // mutually exclusive with the key tracer panel
     currentTrace = computeTrace(nodeId, parentId, supersessionPoint);
     renderCurrentTrace();
     tracePanel.classList.remove("hidden");
@@ -1058,6 +1278,209 @@
 
   document.getElementById("traceCloseBtn").addEventListener("click", () => {
     tracePanel.classList.add("hidden");
+  });
+
+  // ---------------------------------------------------------------------
+  // Key tracer: unlike the node trace above (which follows one *node's*
+  // lineage through its parent's slots), this follows one *key's* whole
+  // lifecycle - created, deleted, and possibly re-inserted - by scanning
+  // every leaf in the entire dump for a record matching it, not just the
+  // leaves reachable from whichever root is currently selected. A key's
+  // history can span several leaves: a page split can carry an old,
+  // already-superseded record along into a leaf that's no longer reachable
+  // from the latest root, while a later re-insert of the same key lands in
+  // whatever leaf currently owns that key range now.
+  // ---------------------------------------------------------------------
+  function computeKeyHistory(keyStr) {
+    const target = tryBigInt(keyStr);
+    const reachableFromLatest = computeReachableSet(latestRoot().node_id);
+    const events = [];
+    Object.keys(dump.nodes).forEach(nodeId => {
+      const n = dump.nodes[nodeId];
+      if (n.type !== "leaf") return;
+      n.records.forEach(r => {
+        const rk = tryBigInt(r.key);
+        const matches = target !== null && rk !== null ? rk === target : String(r.key) === keyStr;
+        if (!matches) return;
+        events.push({
+          nodeId,
+          insert_ts: r.insert_ts, insert_worker: r.insert_worker,
+          deleted: r.deleted, delete_ts: r.delete_ts, delete_worker: r.delete_worker,
+          reachable: reachableFromLatest.has(nodeId),
+        });
+      });
+    });
+    events.sort((a, b) => {
+      const av = tryBigInt(a.insert_ts), bv = tryBigInt(b.insert_ts);
+      if (av !== null && bv !== null) return av < bv ? -1 : av > bv ? 1 : 0;
+      return String(a.insert_ts).localeCompare(String(b.insert_ts));
+    });
+    return events;
+  }
+
+  function renderKeyTrace(keyStr, events) {
+    if (!events.length) {
+      return '<p>No records found for key <code>' + escapeHtml(keyStr) + '</code> anywhere in this dump.</p>';
+    }
+    let html = '<p>History for key <code>' + escapeHtml(keyStr) + '</code> - ' + events.length +
+      ' record(s) found across the whole dump, oldest to newest:</p><ul class="keytrace-list">';
+    events.forEach((e, i) => {
+      const label = i === 0 ? "Created" : "Re-inserted";
+      html += '<li class="keytrace-item' + (e.reachable ? " rel-live" : " rel-dead") + '">' +
+        '<div><b>' + label + '</b> at ts ' + escapeHtml(String(e.insert_ts)) + ' by worker ' +
+        escapeHtml(String(e.insert_worker)) + '</div>' +
+        '<div class="keytrace-meta">leaf <code>' + e.nodeId + '</code> - ' +
+        (e.reachable ? "currently reachable from the latest root*" : "no longer reachable from the latest root*") +
+        '</div>';
+      if (e.deleted) {
+        html += '<div class="keytrace-del">Deleted at ts ' + escapeHtml(String(e.delete_ts)) + ' by worker ' +
+          escapeHtml(String(e.delete_worker)) + '</div>';
+      } else {
+        html += '<div class="keytrace-live">Still live (not deleted) as of this leaf\'s recorded state</div>';
+      }
+      html += '<div class="trace-row-actions"><button class="btn" data-keytrace-jump="' + e.nodeId + '">Jump to leaf</button></div>';
+      html += '</li>';
+    });
+    html += '</ul>';
+    return html;
+  }
+
+  function openKeyTracer(keyStr) {
+    tracePanel.classList.add("hidden"); // mutually exclusive with the node trace panel
+    const events = computeKeyHistory(keyStr);
+    const body = document.getElementById("keyTracerBody");
+    body.innerHTML = renderKeyTrace(keyStr, events);
+    keyTracerPanel.classList.remove("hidden");
+    body.querySelectorAll("[data-keytrace-jump]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-keytrace-jump");
+        if (lastPositions && lastPositions.has(id)) {
+          flashAndCenter(id);
+        } else {
+          alert("This leaf isn't part of the currently rendered tree - select the root* it belongs to " +
+            "(or expand down into it) first, then jump to it again.");
+        }
+      });
+    });
+  }
+
+  document.getElementById("keyTracerBtn").addEventListener("click", () => {
+    if (!dump) return;
+    const raw = document.getElementById("keyTracerInput").value.trim();
+    if (!raw) return;
+    openKeyTracer(raw);
+  });
+  document.getElementById("keyTracerInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.getElementById("keyTracerBtn").click();
+  });
+  document.getElementById("keyTracerCloseBtn").addEventListener("click", () => {
+    keyTracerPanel.classList.add("hidden");
+  });
+
+  // ---------------------------------------------------------------------
+  // 2D entry map: an internal node's `children` array is its whole history
+  // of routing slots for its key range, not just the currently-paginated
+  // ones (see visibleChildRefs) - this plots *all* of them at once as
+  // rectangles, x = the version span this slot was the current one for
+  // (open-ended at the right if it's still live), y = its key interval
+  // [key_lower, key_upper]. Complements the plain tree diagram, which only
+  // ever shows one slot's *target* node at a time per edge.
+  // ---------------------------------------------------------------------
+  function numOf(v) {
+    const b = tryBigInt(v);
+    return b !== null ? Number(b) : Number(v);
+  }
+
+  /// For each child slot, its rendered version span: [version, endVersion]
+  /// where endVersion is the version of the earliest later sibling that
+  /// overlaps it (the one that actually superseded it - same overlap
+  /// relationship `intervalsOverlap`/live_mask use elsewhere), or null if
+  /// nothing has superseded it yet (still live).
+  function computeMap2dData(nodeId) {
+    const node = getNode(nodeId);
+    const children = node.children;
+    return children.map((c, i) => {
+      const superseder = children.slice(i + 1).find(later => intervalsOverlap(c, later));
+      return {
+        idx: i,
+        node_id: c.node_id,
+        lower: numOf(c.key_lower), upper: numOf(c.key_upper),
+        version: numOf(c.version),
+        endVersion: superseder ? numOf(superseder.version) : null,
+        live: c.live !== false,
+      };
+    });
+  }
+
+  function renderMap2d() {
+    const nodeId = currentMap2dNodeId;
+    const wrap = document.getElementById("map2dSvgWrap");
+    if (!nodeId) return;
+    const entries = computeMap2dData(nodeId);
+    const visible = map2dOnlyLive ? entries.filter(e => e.live) : entries;
+
+    document.getElementById("map2dTitle").textContent =
+      "2D entry map — " + nodeId + " (" + visible.length + " of " + entries.length + " entries shown)";
+
+    if (!entries.length) { wrap.innerHTML = "<p>This node has no entries.</p>"; return; }
+    if (!visible.length) { wrap.innerHTML = "<p>No live entries to show (try unchecking “Only live entries”).</p>"; return; }
+
+    let minV = Infinity, maxV = -Infinity, minK = Infinity, maxK = -Infinity;
+    entries.forEach(e => {
+      minV = Math.min(minV, e.version);
+      maxV = Math.max(maxV, e.endVersion !== null ? e.endVersion : e.version);
+      minK = Math.min(minK, e.lower);
+      maxK = Math.max(maxK, e.upper);
+    });
+    const vSpan = Math.max(1, maxV - minV);
+    // A still-live entry has no natural right edge - extend the chart a bit
+    // past the latest version seen so its open-ended bar is visibly open,
+    // not just clipped flush against the axis.
+    const chartMaxV = maxV + vSpan * 0.08;
+    const kSpan = Math.max(1, maxK - minK);
+
+    const xOf = v => MAP2D_PAD + (v - minV) / (chartMaxV - minV) * (MAP2D_W - MAP2D_PAD * 2);
+    const yOf = k => MAP2D_H - MAP2D_PAD - (k - minK) / kSpan * (MAP2D_H - MAP2D_PAD * 2);
+
+    let svgHtml = '<svg width="' + MAP2D_W + '" height="' + MAP2D_H + '" xmlns="http://www.w3.org/2000/svg">';
+    svgHtml += '<line x1="' + MAP2D_PAD + '" y1="' + (MAP2D_H - MAP2D_PAD) + '" x2="' + (MAP2D_W - MAP2D_PAD) +
+      '" y2="' + (MAP2D_H - MAP2D_PAD) + '" stroke="#3a4152"/>';
+    svgHtml += '<line x1="' + MAP2D_PAD + '" y1="' + MAP2D_PAD + '" x2="' + MAP2D_PAD +
+      '" y2="' + (MAP2D_H - MAP2D_PAD) + '" stroke="#3a4152"/>';
+    svgHtml += '<text x="' + (MAP2D_W / 2) + '" y="' + (MAP2D_H - 8) +
+      '" fill="#8891a3" font-size="10" text-anchor="middle">version →</text>';
+    svgHtml += '<text x="12" y="' + (MAP2D_H / 2) + '" fill="#8891a3" font-size="10" text-anchor="middle" ' +
+      'transform="rotate(-90 12 ' + (MAP2D_H / 2) + ')">key space →</text>';
+
+    visible.forEach(e => {
+      const x1 = xOf(e.version);
+      const x2 = xOf(e.endVersion !== null ? e.endVersion : chartMaxV);
+      const y1 = yOf(e.upper), y2 = yOf(e.lower);
+      const w = Math.max(2, x2 - x1), h = Math.max(4, y2 - y1);
+      const fill = e.live ? "rgba(58,168,118,.35)" : "rgba(229,88,106,.25)";
+      const stroke = e.live ? "#3aa876" : "#e5586a";
+      const title = "I_" + e.idx + " — keys [" + escapeHtml(String(e.lower)) + " .. " + escapeHtml(String(e.upper)) +
+        "], born v" + escapeHtml(String(e.version)) +
+        (e.endVersion !== null ? ", superseded v" + escapeHtml(String(e.endVersion)) : ", still live");
+      svgHtml += '<g><title>' + title + '</title>' +
+        '<rect x="' + x1 + '" y="' + y1 + '" width="' + w + '" height="' + h +
+        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1.2"/>' +
+        '<text x="' + (x1 + 3) + '" y="' + (y1 + (h > 10 ? 12 : h / 2 + 3)) +
+        '" fill="#d8dee9" font-size="9" font-family="ui-monospace,monospace">I_' + e.idx + '</text></g>';
+    });
+    svgHtml += '</svg>';
+    wrap.innerHTML = svgHtml;
+  }
+
+  function openMap2d(nodeId) {
+    currentMap2dNodeId = nodeId;
+    map2dPanel.classList.remove("hidden");
+    renderMap2d();
+  }
+  document.getElementById("map2dCloseBtn").addEventListener("click", () => map2dPanel.classList.add("hidden"));
+  document.getElementById("map2dOnlyLive").addEventListener("change", (e) => {
+    map2dOnlyLive = e.target.checked;
+    renderMap2d();
   });
 
   const TRACE_POPOUT_CSS = `
@@ -1379,10 +1802,58 @@
   // ---------------------------------------------------------------------
   // Rendering
   // ---------------------------------------------------------------------
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-    }[c]));
+
+  /// A record's ts_start/worker_id summary in a clearly-labeled compact
+  /// form - deliberately not the old cryptic "w0@123" shorthand.
+  function recordCompactLabel(r) {
+    let s = "ts " + r.insert_ts;
+    if (r.deleted) s += " · del ts " + r.delete_ts;
+    return s;
+  }
+
+  /// Full "detailed records" breakdown: ts_start, worker_id, and (if
+  /// deleted) when/by which worker - still never the record's value, which
+  /// a dump never includes in the first place (see the empty-state note).
+  function recordDetailFields(r) {
+    let html =
+      '<div class="record-field"><span class="rf-label">ts_start:</span> ' + escapeHtml(String(r.insert_ts)) + '</div>' +
+      '<div class="record-field"><span class="rf-label">worker_id:</span> ' + escapeHtml(String(r.insert_worker)) + '</div>';
+    if (r.deleted) {
+      html +=
+        '<div class="record-field del"><span class="rf-label">deleted ts:</span> ' + escapeHtml(String(r.delete_ts)) + '</div>' +
+        '<div class="record-field del"><span class="rf-label">deleted by:</span> worker ' + escapeHtml(String(r.delete_worker)) + '</div>';
+    }
+    return html;
+  }
+
+  /// Renders a leaf's record list under whichever display mode is active -
+  /// see the toolbar's List/Grid and "Detailed records" controls. Every
+  /// row/chip carries `data-record-key` so search's highlightRecordRow can
+  /// find the right one regardless of which layout is currently showing.
+  function recordsHtml(liveRecords) {
+    if (recordLayoutMode === "grid") {
+      return '<div class="records records-grid">' + liveRecords.map(r => {
+        const stateClass = r.deleted ? " r-dead" : " r-live";
+        const title = "key " + r.key + " · ts_start " + r.insert_ts + " · worker " + r.insert_worker +
+          (r.deleted ? (" · deleted ts " + r.delete_ts + " by worker " + r.delete_worker) : "");
+        return '<div class="record-chip' + stateClass + '" data-record-key="' + escapeHtml(String(r.key)) + '" title="' +
+          escapeHtml(title) + '">' + escapeHtml(String(r.key)) + '</div>';
+      }).join("") + '</div>';
+    }
+
+    return '<div class="records">' + liveRecords.map(r => {
+      const rowClass = (r.deleted ? " deleted" : (liveViewMode ? " live" : "")) + (recordDetailMode ? " record-row-detailed" : "");
+      const keyAttr = ' data-record-key="' + escapeHtml(String(r.key)) + '"';
+      if (recordDetailMode) {
+        return '<div class="record-row' + rowClass + '"' + keyAttr + '>' +
+          '<div class="record-row-key">' + escapeHtml(String(r.key)) + '</div>' +
+          recordDetailFields(r) +
+          '</div>';
+      }
+      return '<div class="record-row' + rowClass + '"' + keyAttr + '>' +
+        '<span class="k">' + escapeHtml(String(r.key)) + '</span>' +
+        '<span class="v">' + escapeHtml(recordCompactLabel(r)) + '</span></div>';
+    }).join("") + '</div>';
   }
 
   function nodeInnerHtml(id, node, fence, isLive, parentId, supersessionPoint, birthVersion) {
@@ -1391,7 +1862,9 @@
         '<div class="node-box more" data-more-parent="' + node.parentId + '">' +
         '<div class="node-head">' +
         '<span class="kind">+' + node.remaining + ' more &hellip;</span>' +
-        '</div><div class="node-body">click to show the rest of this node\'s children</div>' +
+        '</div><div class="node-body">click to show the next page' +
+        '<div class="more-actions"><button class="btn" data-more-all-parent="' + node.parentId + '">Show all</button></div>' +
+        '</div>' +
         '</div>'
       );
     }
@@ -1404,7 +1877,7 @@
     let body = '<div class="node-body">';
 
     if (birthVersion !== null && birthVersion !== undefined) {
-      body += '<div class="birth" title="version this slot/root was created at">born: v' + birthVersion + '</div>';
+      body += '<div class="birth" title="version this slot/root was created at">Birth: v' + birthVersion + '</div>';
     }
 
     // In snapshot mode, *everything* shown - the key range, the
@@ -1445,17 +1918,17 @@
       // combining snapshot mode with a depth-limited dump.
     }
     body += '<div class="range" title="' + escapeHtml(rangeLo) + ' .. ' + escapeHtml(rangeHi) + '">' +
-      escapeHtml(rangeLo) + ' .. ' + escapeHtml(rangeHi) + '</div>';
+      'Keys: ' + escapeHtml(rangeLo) + ' .. ' + escapeHtml(rangeHi) + '</div>';
 
-    // Fence keys: the parent-imposed key boundary this leaf was actually
-    // handed (from that slot's `Interval<Key>`) - can be wider than the
-    // range of keys the leaf currently happens to hold, so it's shown
-    // separately from "range" above rather than merged into it. Only
-    // available for a non-root node (the rendered root has no parent slot
-    // to inherit a fence from).
-    if (node.type === "leaf" && fence) {
-      body += '<div class="fence" title="parent-imposed key boundary for this leaf slot">' +
-        'fence: ' + escapeHtml(fence.lower) + ' .. ' + escapeHtml(fence.upper) + '</div>';
+    // Fence keys: the parent-imposed key boundary this node's slot was
+    // actually handed (from that slot's `Interval<Key>`) - can be wider than
+    // the range of keys actually found under/in it (see "Keys:" above), so
+    // it's shown separately rather than merged into that line. Applies to
+    // both leaf and internal nodes alike - only the rendered root has no
+    // fence at all (no parent slot to inherit one from).
+    if (fence) {
+      body += '<div class="fence" title="parent-imposed key boundary for this node\'s slot">' +
+        'Fence: ' + escapeHtml(fence.lower) + ' .. ' + escapeHtml(fence.upper) + '</div>';
     }
 
     let activeCount = node.active, deadCount = node.dead;
@@ -1482,14 +1955,7 @@
     }
 
     if (node.type === "leaf" && isExpanded) {
-      body += '<div class="records">' + liveRecords.map(r => {
-        const ver = "w" + r.insert_worker + "@" + r.insert_ts +
-          (r.deleted ? " &#8594; w" + r.delete_worker + "@" + r.delete_ts : "");
-        const rowClass = r.deleted ? " deleted" : (liveViewMode ? " live" : "");
-        return '<div class="record-row' + rowClass + '">' +
-          '<span class="k">' + escapeHtml(r.key) + '</span>' +
-          '<span class="v">' + ver + '</span></div>';
-      }).join("") + '</div>';
+      body += recordsHtml(liveRecords);
     }
 
     body += '</div>';
@@ -1516,6 +1982,9 @@
       '<span class="kind">' + kindLabel + '</span>' +
       '<span class="mark">' +
       '<span class="trace-btn"' + traceAttrs + ' title="Trace this node\'s previous/overriding nodes">&#8646;</span>' +
+      (node.type === "internal"
+        ? '<span class="map2d-btn" data-map2d="' + id + '" title="View this node\'s entries in a 2D version/key map">&#9638;</span>'
+        : '') +
       '<input type="checkbox" data-mark="' + id + '" ' + (isMarked ? "checked" : "") + '>' +
       '</span>' +
       '</div>' + body + '</div>'
@@ -1543,9 +2012,14 @@
     // (Font scale doesn't need a key dimension here: applyFontScale()
     // clears the whole cache outright on every change instead. birthVersion
     // doesn't either: it's shown on a single nowrap-clamped line, so its
-    // exact value never changes how many lines the box renders as.)
+    // exact value never changes how many lines the box renders as. The
+    // record layout/detail toggles also clear the whole cache on change -
+    // see their listeners - since they affect every leaf uniformly, but the
+    // mode is still folded into the key here in case a future toggle
+    // doesn't clear it globally.)
     const filterKey = snapshotVersion !== null ? ("S" + snapshotVersion) : (liveViewMode && hideDeadMode ? "H" : "L");
-    const key = id + ":" + isExpanded + ":" + (fence ? "F" : "R") + ":" + filterKey;
+    const recordModeKey = recordLayoutMode + (recordDetailMode ? "D" : "C");
+    const key = id + ":" + isExpanded + ":" + (fence ? "F" : "R") + ":" + filterKey + ":" + recordModeKey;
     let h = heightCache.get(key);
     if (h === undefined) {
       measureEl.innerHTML = nodeInnerHtml(id, node, fence, true, undefined, undefined, birthVersion);
@@ -1618,7 +2092,7 @@
   function wireNodeEvents() {
     nodesG.querySelectorAll("[data-toggle]").forEach(el => {
       el.addEventListener("click", (e) => {
-        if (e.target.matches("input[type=checkbox]") || e.target.closest(".trace-btn")) return;
+        if (e.target.matches("input[type=checkbox]") || e.target.closest(".trace-btn") || e.target.closest(".map2d-btn")) return;
         const id = el.getAttribute("data-toggle");
         toggleExpand(id);
       });
@@ -1642,9 +2116,25 @@
         openTrace(el.getAttribute("data-trace"), parentId, supersessionPoint);
       });
     });
+    nodesG.querySelectorAll("[data-map2d]").forEach(el => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openMap2d(el.getAttribute("data-map2d"));
+      });
+    });
     nodesG.querySelectorAll("[data-more-parent]").forEach(el => {
-      el.addEventListener("click", () => {
-        childLimit.set(el.getAttribute("data-more-parent"), Infinity);
+      el.addEventListener("click", (e) => {
+        if (e.target.closest("[data-more-all-parent]")) return; // handled by the dedicated listener below
+        const parentId = el.getAttribute("data-more-parent");
+        const cur = childLimit.get(parentId) ?? DEFAULT_CHILD_PAGE;
+        childLimit.set(parentId, cur + DEFAULT_CHILD_PAGE);
+        render();
+      });
+    });
+    nodesG.querySelectorAll("[data-more-all-parent]").forEach(el => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        childLimit.set(el.getAttribute("data-more-all-parent"), Infinity);
         render();
       });
     });
@@ -1654,6 +2144,58 @@
     if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
     render();
   }
+
+  // ---------------------------------------------------------------------
+  // Record display mode: List vs. Grid layout, and a "Detailed records"
+  // toggle (ts_start/worker_id/delete info per record) - see recordsHtml().
+  // Both persisted in localStorage like the font scale.
+  // ---------------------------------------------------------------------
+  const recordListBtn = document.getElementById("recordListBtn");
+  const recordGridBtn = document.getElementById("recordGridBtn");
+  const detailedRecordsBtn = document.getElementById("detailedRecordsBtn");
+
+  function applyRecordModeButtons() {
+    recordListBtn.classList.toggle("primary", recordLayoutMode === "list");
+    recordGridBtn.classList.toggle("primary", recordLayoutMode === "grid");
+    detailedRecordsBtn.classList.toggle("primary", recordDetailMode);
+  }
+  recordListBtn.addEventListener("click", () => {
+    recordLayoutMode = "list";
+    localStorage.setItem("cmvbt-viz-record-layout", recordLayoutMode);
+    heightCache.clear();
+    applyRecordModeButtons();
+    render();
+  });
+  recordGridBtn.addEventListener("click", () => {
+    recordLayoutMode = "grid";
+    localStorage.setItem("cmvbt-viz-record-layout", recordLayoutMode);
+    heightCache.clear();
+    applyRecordModeButtons();
+    render();
+  });
+  detailedRecordsBtn.addEventListener("click", () => {
+    recordDetailMode = !recordDetailMode;
+    localStorage.setItem("cmvbt-viz-record-detail", recordDetailMode ? "1" : "0");
+    heightCache.clear();
+    applyRecordModeButtons();
+    render();
+  });
+  applyRecordModeButtons();
+
+  // ---------------------------------------------------------------------
+  // Child page size: how many children of an expanded internal node render
+  // before a "+N more" box takes over (see DEFAULT_CHILD_PAGE's doc).
+  // ---------------------------------------------------------------------
+  const childPageInput = document.getElementById("childPageInput");
+  childPageInput.value = DEFAULT_CHILD_PAGE;
+  childPageInput.addEventListener("change", () => {
+    const v = parseInt(childPageInput.value, 10);
+    if (!Number.isFinite(v) || v < 1) { childPageInput.value = DEFAULT_CHILD_PAGE; return; }
+    DEFAULT_CHILD_PAGE = v;
+    childLimit.clear(); // per-node pagination overrides are relative to the old page size - reset them
+    heightCache.clear();
+    render();
+  });
 
   // ---------------------------------------------------------------------
   // Expand/collapse controls
@@ -1795,7 +2337,7 @@
     const box = nodesG.querySelector(`.node-box[data-id="${leafId}"]`);
     const records = box && box.querySelector(".records");
     if (!records) return;
-    const row = [...records.querySelectorAll(".record-row")].find(r => r.querySelector(".k").textContent === keyStr);
+    const row = [...records.querySelectorAll("[data-record-key]")].find(r => r.getAttribute("data-record-key") === keyStr);
     if (!row) return;
     records.scrollTop = Math.max(0, row.offsetTop - records.clientHeight / 2 + row.offsetHeight / 2);
     row.classList.add("record-highlight");
