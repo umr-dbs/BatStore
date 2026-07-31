@@ -1110,7 +1110,38 @@ impl<const FAN_OUT: usize,
         let (active_block, _dead_block)
             = block.active_dead_count();
 
-        if active_block as usize >= block.filling_80_percent() {
+        // What a VERSION_SPLIT (the `else` branch below) would actually have
+        // to push into its one single new page: every *survivor*, not just
+        // the active count `filling_80_percent()` is measured against -
+        // active entries for a leaf plus any dead-but-still-snapshot-
+        // protected one (`record_survives_gc`, same predicate `merge()`'s
+        // `leaf_merge_would_overflow` already uses for the identical
+        // hazard on the merge side - see that check's doc), or every
+        // `live_mask()`-live entry for an internal page. Under heavy
+        // concurrent load with long-held reader snapshots (TPC-C's
+        // signature), this can run well ahead of `active_block` alone, so
+        // a block whose *active* count looks comfortably below 80%
+        // (choosing VERSION_SPLIT) can still hold more survivors than the
+        // new page's capacity - `bulk_push`'s bounds `assert!` would catch
+        // the write, but only after already deciding on the wrong split
+        // shape. Folded into the KEY_SPLIT decision below instead, exactly
+        // like `merge()`'s equivalent check, so this size is never chosen
+        // when it can't actually fit in one page.
+        let survivor_count = match is_leaf {
+            true => block.as_records()
+                .iter()
+                .filter(|r| self.record_survives_gc(r.version()))
+                .count(),
+            false => block.as_internal_page_ref()
+                .live_mask()
+                .iter()
+                .filter(|live| **live)
+                .count(),
+        };
+
+        let capacity = if is_leaf { NUM_RECORDS } else { FAN_OUT };
+
+        if active_block as usize >= block.filling_80_percent() || survivor_count > capacity {
             // KEY_SPLIT
             match is_leaf {
                 true => unsafe { // LeafPage

@@ -231,56 +231,64 @@ impl TxContext {
         result
     }
 
-    /// No-op while block reclaim is disabled — see this type's doc for why
-    /// tracking a snapshot as "active" is pointless (and, worse, would let
-    /// `commit_tx` believe it's safe to prune around) when nothing
-    /// downstream (`CommitLog` pruning, `free_block`) is gated on the
-    /// result. `pub(crate)`: also called directly by
+    /// Used to be a no-op while block reclaim was disabled, on the theory
+    /// that "nothing downstream (`CommitLog` pruning, `free_block`) is
+    /// gated on the result" then — wrong: `MVBTSt::record_survives_gc`
+    /// (via `is_snapshot_live`) also depends on `live_tx` being populated,
+    /// to keep a record a still-in-flight transaction deleted physically
+    /// present in case that transaction aborts and needs to reverse the
+    /// delete. That protection is needed unconditionally, because the SMO
+    /// compaction it guards (`MVBTSt::split`'s version-split path) runs
+    /// unconditionally too — it's driven by `active`/`dead` counts, not by
+    /// the GC/block-reclaim toggle. Gating this on `block_reclaim_enabled`
+    /// left every deleted-but-still-reversible record unprotected whenever
+    /// GC was off, so a compaction could discard the one physical entry an
+    /// in-flight transaction's own later `abort()` needed to restore —
+    /// confirmed as a real, repeatable crash (`DbTransaction::update`
+    /// returning `ZeroAffected(KeyDoesNotExist)` for a row that a moment
+    /// earlier `point()` had just read live) under sustained TPC-C load
+    /// with GC disabled. `pub(crate)`: also called directly by
     /// `MVBTSt::on_acquire_reader_snapshot`/`on_release_reader_snapshot`
     /// (registering an already-known version as a reader, as opposed to
     /// `begin_snapshot`/`end_snapshot`, which draw a fresh one).
     #[inline]
     pub(crate) fn on_tx_start(&self, snapshot: SnapShot) {
-        if self.block_reclaim_enabled.load(Relaxed) {
-            let worker_id = self.worker_id();
-            // Pre-increment value, i.e. the depth *before* this call: 0 means
-            // this worker had no live registration at all, so this is the
-            // outermost one and must actually publish.
-            let depth_before = self.live_tx_depth[worker_id as usize].fetch_add(1, Relaxed);
-            if depth_before == 0 {
-                let previous = self.live_tx[worker_id as usize].swap(snapshot, Release);
-                debug_assert_eq!(
-                    previous, NOT_IN_FLIGHT,
-                    "TxContext::on_tx_start: worker {worker_id}'s outermost registration found \
-                     snapshot {previous} already published for it — on_tx_start/on_tx_completed \
-                     calls for one worker must be paired (unbalanced caller bug)"
-                );
-            }
+        let worker_id = self.worker_id();
+        // Pre-increment value, i.e. the depth *before* this call: 0 means
+        // this worker had no live registration at all, so this is the
+        // outermost one and must actually publish.
+        let depth_before = self.live_tx_depth[worker_id as usize].fetch_add(1, Relaxed);
+        if depth_before == 0 {
+            let previous = self.live_tx[worker_id as usize].swap(snapshot, Release);
+            debug_assert_eq!(
+                previous, NOT_IN_FLIGHT,
+                "TxContext::on_tx_start: worker {worker_id}'s outermost registration found \
+                 snapshot {previous} already published for it — on_tx_start/on_tx_completed \
+                 calls for one worker must be paired (unbalanced caller bug)"
+            );
         }
     }
 
     #[inline]
     pub(crate) fn on_tx_completed(&self, snapshot: SnapShot) {
-        if self.block_reclaim_enabled.load(Relaxed) {
-            let worker_id = self.worker_id();
-            // Pre-decrement value: 1 means this completion brings the depth
-            // back to 0, i.e. it's the outermost one and must actually clear.
-            let depth_before = self.live_tx_depth[worker_id as usize].fetch_sub(1, Relaxed);
-            debug_assert!(
-                depth_before > 0,
-                "TxContext::on_tx_completed: worker {worker_id} completed snapshot {snapshot} \
-                 with no live registration — on_tx_start/on_tx_completed calls for one worker \
-                 must be paired (unbalanced caller bug)"
+        let worker_id = self.worker_id();
+        // Pre-decrement value: 1 means this completion brings the depth
+        // back to 0, i.e. it's the outermost one and must actually clear.
+        let depth_before = self.live_tx_depth[worker_id as usize].fetch_sub(1, Relaxed);
+        debug_assert!(
+            depth_before > 0,
+            "TxContext::on_tx_completed: worker {worker_id} completed snapshot {snapshot} \
+             with no live registration — on_tx_start/on_tx_completed calls for one worker \
+             must be paired (unbalanced caller bug)"
+        );
+        if depth_before == 1 {
+            let previous = self.live_tx[worker_id as usize].swap(NOT_IN_FLIGHT, Release);
+            debug_assert_eq!(
+                previous, snapshot,
+                "TxContext::on_tx_completed: worker {worker_id}'s outermost completion \
+                 expected snapshot {snapshot} but {previous} was published — \
+                 on_tx_start/on_tx_completed calls for one worker don't nest correctly"
             );
-            if depth_before == 1 {
-                let previous = self.live_tx[worker_id as usize].swap(NOT_IN_FLIGHT, Release);
-                debug_assert_eq!(
-                    previous, snapshot,
-                    "TxContext::on_tx_completed: worker {worker_id}'s outermost completion \
-                     expected snapshot {snapshot} but {previous} was published — \
-                     on_tx_start/on_tx_completed calls for one worker don't nest correctly"
-                );
-            }
         }
     }
 
@@ -366,16 +374,14 @@ impl TxContext {
     /// Is `ts_start` a currently-registered (not yet committed/aborted)
     /// transaction? `MVBTSt::record_survives_gc` uses it to keep a *deleted*
     /// record physically present while its deleting transaction might
-    /// still abort and need to reverse that delete. Always `false` while
-    /// `block_reclaim_enabled` is off, matching `on_tx_start`/
-    /// `on_tx_completed`'s own gating: `live_tx` is never populated at all
-    /// in that mode, so there's nothing to protect (and nothing wrongly
-    /// discarded either, since block reclaim itself — the only thing that
-    /// physically reuses a block — is also off then).
+    /// still abort and need to reverse that delete — needed unconditionally,
+    /// not just while `block_reclaim_enabled`, since it's protecting against
+    /// SMO compaction (`MVBTSt::split`'s version-split path), which runs
+    /// regardless of the GC toggle. See `on_tx_start`'s doc for the crash
+    /// this being gated on the GC flag used to cause.
     #[inline]
     pub(crate) fn is_snapshot_live(&self, ts_start: Version) -> bool {
-        self.block_reclaim_enabled.load(Relaxed)
-            && self.live_tx.iter().any(|slot| slot.load(Acquire) == ts_start)
+        self.live_tx.iter().any(|slot| slot.load(Acquire) == ts_start)
     }
 
     /// The oldest currently-active-or-in-flight snapshot across every table

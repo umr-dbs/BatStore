@@ -38,10 +38,13 @@ impl<const FAN_OUT: usize,
     /// fine — deliberately so, see `TxContext::live_tx`'s doc: nested
     /// `begin_snapshot`/`end_snapshot` pairs for the same worker are cheap
     /// (a reentrancy-depth bump, no shared state touched) and correctly
-    /// leave the outer registration's protection in place throughout. A
-    /// no-op with zero overhead when block reclaim (GC) is disabled — the
-    /// default here — since `TxContext::on_tx_start`/`on_tx_completed`
-    /// short-circuit on that flag.
+    /// leave the outer registration's protection in place throughout.
+    /// `TxContext::on_tx_start`/`on_tx_completed` used to short-circuit
+    /// (zero overhead) whenever block reclaim (GC) was disabled - no longer
+    /// true, since `record_survives_gc`'s own use of this same registration
+    /// is needed regardless of the GC toggle (see `on_tx_start`'s doc); this
+    /// registration now always does real work, just a cheap depth-bump in
+    /// the common (already-registered) case.
     #[inline]
     pub(crate) fn traversal_write_olc(&self, key: Key) -> BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let ts_start = self.begin_snapshot();
