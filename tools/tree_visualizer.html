@@ -19,6 +19,8 @@
     --active: #3aa876;
     --truncated: #8891a3;
     --font-scale: 1; /* set via the toolbar's A-/A+/reset controls, persisted in localStorage */
+    --node-w: 280px; /* set via the toolbar's "Node width" input, persisted in localStorage - kept in sync with the JS NODE_W constant used for layout math */
+    --records-h: 600px; /* set via the toolbar's "Leaf records height" input, persisted in localStorage */
   }
   * { box-sizing: border-box; }
   html, body {
@@ -275,7 +277,7 @@
 
   /* ---------- Node box (rendered via foreignObject) ---------- */
   .node-box {
-    width: 220px; border-radius: 8px; border: 1.5px solid var(--border);
+    width: var(--node-w); border-radius: 8px; border: 1.5px solid var(--border);
     background: var(--panel-2); overflow: hidden; user-select: none;
     box-shadow: 0 2px 6px rgba(0,0,0,.35);
   }
@@ -337,11 +339,26 @@
   .node-body .fence { color: var(--accent-2); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
     font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
   .fence-usage { color: var(--text-dim); font-weight: 400; }
+  .capacity {
+    color: var(--text-dim); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
+    margin-top: 2px;
+  }
+  .safeness {
+    display: flex; align-items: center; gap: 5px; font-size: calc(10px * var(--font-scale));
+    margin-top: 2px; font-weight: 600;
+  }
+  .safeness-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .safeness-safe { color: var(--active); }
+  .safeness-safe .safeness-dot { background: var(--active); box-shadow: 0 0 4px var(--active); }
+  .safeness-warn { color: var(--accent-2); }
+  .safeness-warn .safeness-dot { background: var(--accent-2); box-shadow: 0 0 4px var(--accent-2); }
+  .safeness-unsafe { color: var(--dead); }
+  .safeness-unsafe .safeness-dot { background: var(--dead); box-shadow: 0 0 4px var(--dead); }
   .counts { display: flex; gap: 8px; margin-top: 3px; }
   .count-active { color: var(--active); }
   .count-dead { color: var(--dead); }
   .records {
-    max-height: 420px; overflow-y: auto; margin-top: 6px; border-top: 1px solid var(--border);
+    max-height: var(--records-h); overflow-y: auto; margin-top: 6px; border-top: 1px solid var(--border);
     padding-top: 4px;
   }
   .record-row {
@@ -395,7 +412,7 @@
   /* Off-screen host used to measure a node box's real rendered height
      before laying it out - see measureNodeHeight(). Same width a node box
      renders at in the real tree, so wrapping/line-count matches exactly. */
-  #measure { position: fixed; left: -9999px; top: 0; visibility: hidden; width: 220px; }
+  #measure { position: fixed; left: -9999px; top: 0; visibility: hidden; width: var(--node-w); }
 </style>
 </head>
 <body>
@@ -413,16 +430,15 @@
         <button class="btn" id="fontIncBtn" title="Larger text">A+</button>
         <button class="btn" id="fontResetBtn" title="Reset text size">100%</button>
         <div class="sep"></div>
-        <button class="btn" id="recordListBtn"
-                title="Show leaf records as a list - click again while already on List to toggle Created ts / worker / delete details">List</button>
-        <button class="btn" id="recordGridBtn" title="Show leaf records as compact boxes">Grid</button>
-        <div class="sep"></div>
         <label for="childPageInput" style="font-size:calc(12px * var(--font-scale));color:var(--text-dim);white-space:nowrap;">Children shown:</label>
         <input type="number" id="childPageInput" min="1" max="500"
                title="How many children of an expanded internal node render before a '+N more' box appears">
-      </div>
-      <div class="toolbar-group" id="grpOperations">
-        <span class="toolbar-group-label">Operations</span>
+        <label for="nodeWidthInput" style="font-size:calc(12px * var(--font-scale));color:var(--text-dim);white-space:nowrap;">Node width:</label>
+        <input type="number" id="nodeWidthInput" min="120" max="600" step="10" title="Width of every node box, in pixels">
+        <label for="recordsHeightInput" style="font-size:calc(12px * var(--font-scale));color:var(--text-dim);white-space:nowrap;">Leaf records height:</label>
+        <input type="number" id="recordsHeightInput" min="80" max="2000" step="20"
+               title="Max height of an expanded leaf's record list before it scrolls internally, in pixels">
+        <div class="sep"></div>
         <button class="btn" id="expandAllBtn">Expand all</button>
         <button class="btn" id="collapseAllBtn">Collapse all</button>
         <div class="sep"></div>
@@ -430,17 +446,23 @@
         <button class="btn" id="collapseMarkedBtn">Collapse marked</button>
         <button class="btn" id="clearMarkedBtn">Clear marks</button>
         <div class="sep"></div>
+        <button class="btn" id="liveViewBtn"
+                title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
+        <button class="btn" id="hideDeadBtn" disabled
+                title="Live view only: prune every dead/obsolete branch and record out of the render entirely, showing just the live tree">Hide dead</button>
+      </div>
+      <div class="toolbar-group" id="grpDataView">
+        <span class="toolbar-group-label">Data view</span>
+        <button class="btn" id="recordListBtn"
+                title="Show leaf records as a list - click again while already on List to toggle Created ts / worker / delete details">List</button>
+        <button class="btn" id="recordGridBtn" title="Show leaf records as compact boxes">Grid</button>
+        <div class="sep"></div>
         <input type="text" id="search" placeholder="key to find...">
         <button class="btn" id="searchBtn" title="Find this key in the currently selected root* (and snapshot version, if one is active)">Find key</button>
         <div class="sep"></div>
         <input type="text" id="keyTracerInput" placeholder="key to trace...">
         <button class="btn" id="keyTracerBtn"
                 title="Trace every created/updated/deleted event for one key across the whole dump">Key tracer</button>
-        <div class="sep"></div>
-        <button class="btn" id="liveViewBtn"
-                title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
-        <button class="btn" id="hideDeadBtn" disabled
-                title="Live view only: prune every dead/obsolete branch and record out of the render entirely, showing just the live tree">Hide dead</button>
       </div>
       <div class="toolbar-group" id="grpPlayback">
         <span class="toolbar-group-label">Playback</span>
@@ -605,7 +627,10 @@
   let map2dFullExtent = null;       // {vMin, vMax, kMin, kMax} - the node's full data extent, i.e. what "Reset zoom" returns to
 
   const view = { x: 0, y: 0, k: 1 };
-  const NODE_W = 220, HGAP = 24, VGAP = 46;
+  // Both adjustable at runtime via the toolbar's Appearance group - not consts.
+  let NODE_W = parseInt(localStorage.getItem("cmvbt-viz-node-w"), 10) || 280;
+  let RECORDS_H = parseInt(localStorage.getItem("cmvbt-viz-records-h"), 10) || 600;
+  const HGAP = 24, VGAP = 46;
   const EXPAND_ALL_WARN_THRESHOLD = 1500;
   // A B+tree internal node can have up to FAN_OUT (often 100+) children -
   // laying every one of them out side by side at once makes "Fit" (and any
@@ -670,6 +695,20 @@
     return String(s).replace(/[&<>"']/g, c => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
     }[c]));
+  }
+
+  // A rightmost/unbounded fence slot's upper bound is conventionally the
+  // sentinel u64::MAX, not a real to-scale key - shown as "MAX" everywhere
+  // a key gets displayed, the same way the reference model for these pages
+  // labels that edge symbolically (f_max) rather than spelling out all 20
+  // digits of it.
+  const U64_MAX_BIGINT = 18446744073709551615n;
+  const U64_MAX_NUM = Number(U64_MAX_BIGINT);
+  function formatKey(v) {
+    if (typeof v === "number") return v === U64_MAX_NUM ? "MAX" : String(v);
+    if (v === "" || v == null) return String(v);
+    const b = tryBigInt(v);
+    return b !== null && b === U64_MAX_BIGINT ? "MAX" : String(v);
   }
 
   function buildFileRows(files) {
@@ -1396,88 +1435,34 @@
     return b !== null ? Number(b) : Number(v);
   }
 
-  /// One child slot's key range can be superseded *piecewise*: a later
-  /// sibling only has to overlap *part* of it (a key-only split that only
-  /// carves off one side, or several unrelated later splits landing in
-  /// different sub-pieces of it at different versions) - the rest of the
-  /// range stays this slot's responsibility until something else eventually
-  /// overlaps that remainder too. A single (version, endVersion) pair for
-  /// the *whole* range would be wrong here: cutting the whole box off at the
-  /// *first* partial overlap would hide however much of it that was still
-  /// genuinely uncontested afterward. So this sweeps each slot's range
-  /// against every later overlapping sibling in version order, in effect
-  /// re-deriving `InternalPage::live_mask` per sub-range instead of once for
-  /// the whole slot, and emits one fragment per (still-uncovered-so-far
-  /// sub-range, version-it-got-covered-at) pair - several fragments for one
-  /// child slot when it really was only partially, repeatedly split, exactly
-  /// one (identical to the old whole-range shortcut) when a single later
-  /// sibling's range fully contains it or a simultaneous split's pieces
-  /// jointly cover it in one pass.
+  /// A key-split (or version bump) is one atomic event: the moment *any*
+  /// later sibling's range overlaps this slot at all, this slot's physical
+  /// page has already been superseded as a whole - a read for any key in
+  /// its original range has to consider the new page(s) from that version
+  /// on, even for the part of the range no later sibling has "directly"
+  /// claimed yet. So a slot dies in full at the version of the *earliest*
+  /// later overlapping sibling, not just across whichever narrower portion
+  /// that one sibling's own range happens to cover.
   function computeMap2dData(nodeId) {
     const node = getNode(nodeId);
     const children = node.children;
-    const fragments = [];
-    children.forEach((c, i) => {
-      // The sweep below has to run in BigInt, not Number: a sentinel fence
-      // bound like u64::MAX (~1.8e19) is already past float64's ~2^53 exact-
-      // integer range, so a Number +1/-1 boundary nudge there is silently a
-      // no-op (rounds right back to the same float) - which then makes the
-      // subtraction below think a zero-width sliver is still "uncovered" and
-      // it gets rediscovered (and re-emitted as a fresh, wrong fragment)
-      // against every subsequent candidate. Only convert to Number once a
-      // fragment's *own* bounds are final and about to be handed to the
-      // (necessarily float, pixel-mapped) renderer.
-      const lo = tryBigInt(c.key_lower), hi = tryBigInt(c.key_upper);
-      if (lo === null || hi === null) return;
-      const versionNum = numOf(c.version);
-      const candidates = children.slice(i + 1)
-        .filter(later => intervalsOverlap(c, later))
-        .map(later => ({ lo: tryBigInt(later.key_lower), hi: tryBigInt(later.key_upper), version: later.version }))
-        .filter(cand => cand.lo !== null && cand.hi !== null)
-        .sort((a, b) => {
-          const av = tryBigInt(a.version), bv = tryBigInt(b.version);
-          if (av !== null && bv !== null) return av < bv ? -1 : av > bv ? 1 : 0;
-          return String(a.version).localeCompare(String(b.version));
-        });
-
-      // key_lower/key_upper are *inclusive* integer bounds where logically-
-      // adjacent slices differ by exactly 1 (e.g. [62,123] then [124,185] -
-      // no shared point, but no real gap either - every integer in between
-      // belongs to exactly one of them). Subtracting a covered piece out of
-      // an uncovered range has to know that, or a perfectly-adjacent pair
-      // like that looks like it leaves a nonexistent gap needing yet another
-      // (spurious, never-superseded, permanently-"live") sliver.
-      let uncovered = [[lo, hi]];
-      candidates.forEach(cand => {
-        const next = [];
-        uncovered.forEach(([uLo, uHi]) => {
-          const oLo = uLo > cand.lo ? uLo : cand.lo;
-          const oHi = uHi < cand.hi ? uHi : cand.hi;
-          if (oLo <= oHi) {
-            fragments.push({
-              idx: i, node_id: c.node_id, lower: numOf(oLo), upper: numOf(oHi),
-              version: versionNum, endVersion: numOf(cand.version), live: false,
-            });
-            if (oLo - 1n >= uLo) next.push([uLo, oLo - 1n]);
-            if (oHi + 1n <= uHi) next.push([oHi + 1n, uHi]);
-          } else {
-            next.push([uLo, uHi]);
-          }
-        });
-        uncovered = next;
+    return children.map((c, i) => {
+      let minVersion = null;
+      children.slice(i + 1).forEach(later => {
+        if (!intervalsOverlap(c, later)) return;
+        const v = tryBigInt(later.version);
+        if (v === null) return;
+        if (minVersion === null || v < minVersion) minVersion = v;
       });
-      // Whatever's left after every later overlap is accounted for was never
-      // superseded - still this slot's own responsibility today.
-      uncovered.forEach(([uLo, uHi]) => {
-        if (uLo < uHi) {
-          fragments.push({
-            idx: i, node_id: c.node_id, lower: numOf(uLo), upper: numOf(uHi),
-            version: versionNum, endVersion: null, live: true,
-          });
-        }
-      });
+      return {
+        idx: i,
+        node_id: c.node_id,
+        lower: numOf(c.key_lower), upper: numOf(c.key_upper),
+        version: numOf(c.version),
+        endVersion: minVersion !== null ? numOf(minVersion) : null,
+        live: c.live !== false,
+      };
     });
-    return fragments;
   }
 
   /// A page's outermost fence bound is very often a sentinel (e.g. u64::MAX
@@ -1593,7 +1578,7 @@
         '" stroke="#262b36" stroke-width="1"/>' +
         '<text x="' + (MAP2D_PAD - 6) + '" y="' + (y + 3) +
         '" fill="#8891a3" font-size="9" text-anchor="end" font-family="ui-monospace,monospace">' +
-        escapeHtml(String(k)) + '</text>';
+        escapeHtml(formatKey(k)) + '</text>';
     });
 
     svgHtml += '<rect x="' + MAP2D_PAD + '" y="' + MAP2D_PAD + '" width="' + plotW + '" height="' + plotH +
@@ -1618,7 +1603,7 @@
       if (x2 < MAP2D_PAD || x1 > MAP2D_W - MAP2D_PAD || y2 < MAP2D_PAD || y1 > MAP2D_H - MAP2D_PAD) return;
       const fill = e.live ? "rgba(58,168,118,.35)" : "rgba(229,88,106,.22)";
       const stroke = e.live ? "#3aa876" : "#e5586a";
-      const title = "I_" + e.idx + " — keys [" + escapeHtml(String(e.lower)) + " .. " + escapeHtml(String(e.upper)) +
+      const title = "I_" + e.idx + " — keys [" + escapeHtml(formatKey(e.lower)) + " .. " + escapeHtml(formatKey(e.upper)) +
         "], born v" + escapeHtml(String(e.version)) +
         (e.endVersion !== null ? ", superseded v" + escapeHtml(String(e.endVersion)) : ", still live");
       const showLabel = w > 16 && h > 10;
@@ -2128,6 +2113,44 @@
     return clamped % 1 === 0 ? String(clamped) : clamped.toFixed(1);
   }
 
+  /// Mirrors the engine's own `BlockUnsafeDegree` classification for a leaf
+  /// (`src/mv_tree/smo.rs` `unsafe_degree`/`unsafe_degree_root`) - the exact
+  /// same trigger the SMO logic uses to decide a block needs a split/merge
+  /// *right now* - plus one extra "warn" tier this visualizer adds on top
+  /// (not a real engine state) for "getting close", so a block doesn't only
+  /// ever go from green to red with no warning in between.
+  ///
+  /// unsafe_degree (non-root leaf): ActiveUnderflow if `active <= oneD`
+  /// (`oneD` = filling_20_percent = `(NUM_RECORDS+4)/5`); otherwise Overflow
+  /// once physically full (`active+dead >= NUM_RECORDS`) - unless even then
+  /// there still aren't many live records (`active <= oneD*2`), in which
+  /// case it's still classified ActiveUnderflow (a full-but-sparse block
+  /// wants a GC-ing merge, not a plain split).
+  ///
+  /// unsafe_degree_root (root leaf): the `active == 1 && !is_leaf` collapse
+  /// rule only applies to an *internal* root, so a root leaf can only ever
+  /// be Overflow or Ok - never ActiveUnderflow.
+  function leafSafeness(active, dead, numRecords, isRoot) {
+    const used = active + dead;
+    const oneD = Math.floor((numRecords + 4) / 5);      // filling_20_percent
+    const fourD = Math.floor((4 * numRecords + 4) / 5);  // filling_80_percent
+
+    if (isRoot) {
+      if (used >= numRecords) return { level: "unsafe", label: "Overflow" };
+      if (used >= fourD) return { level: "warn", label: "Nearing overflow" };
+      return { level: "safe", label: "Safe" };
+    }
+    if (active <= oneD) return { level: "unsafe", label: "Underflow" };
+    if (used >= numRecords) {
+      return active <= oneD * 2
+        ? { level: "unsafe", label: "Underflow (full)" }
+        : { level: "unsafe", label: "Overflow" };
+    }
+    if (active <= oneD * 2) return { level: "warn", label: "Nearing underflow" };
+    if (used >= fourD) return { level: "warn", label: "Nearing overflow" };
+    return { level: "safe", label: "Safe" };
+  }
+
   function nodeInnerHtml(id, node, fence, isLive, parentId, supersessionPoint, birthVersion) {
     if (node.type === "more") {
       return (
@@ -2189,8 +2212,8 @@
       // left as the dump's own (latest-state) range, a known limitation of
       // combining snapshot mode with a depth-limited dump.
     }
-    body += '<div class="range" title="' + escapeHtml(rangeLo) + ' .. ' + escapeHtml(rangeHi) + '">' +
-      'Keys: ' + escapeHtml(rangeLo) + ' .. ' + escapeHtml(rangeHi) + '</div>';
+    body += '<div class="range" title="' + escapeHtml(formatKey(rangeLo)) + ' .. ' + escapeHtml(formatKey(rangeHi)) + '">' +
+      'Keys: ' + escapeHtml(formatKey(rangeLo)) + ' .. ' + escapeHtml(formatKey(rangeHi)) + '</div>';
 
     // Fence keys: the parent-imposed key boundary this node's slot was
     // actually handed (from that slot's `Interval<Key>`) - can be wider than
@@ -2201,7 +2224,7 @@
     if (fence) {
       const coverage = fenceCoveragePct(rangeLo, rangeHi, fence);
       body += '<div class="fence" title="parent-imposed key boundary for this node\'s slot">' +
-        'Fence: ' + escapeHtml(fence.lower) + ' .. ' + escapeHtml(fence.upper) +
+        'Fence: ' + escapeHtml(formatKey(fence.lower)) + ' .. ' + escapeHtml(formatKey(fence.upper)) +
         (coverage !== null
           ? ' <span class="fence-usage" title="span of Keys above, as a fraction of this whole fence span">(' +
             coverage + '% used)</span>'
@@ -2230,6 +2253,25 @@
 
     if (node.type === "internal_truncated") {
       body += '<div class="truncated-note">Depth-limited dump: subtree exists but was not walked.</div>';
+    }
+
+    // Capacity/Safeness: leaf-only (see leafSafeness's doc) - uses the same
+    // activeCount/deadCount already resolved above, so this stays correct
+    // under snapshot mode too, not just against the dump's latest state.
+    if (node.type === "leaf") {
+      const numRecords = tryBigInt(dump.num_records);
+      if (numRecords !== null && numRecords > 0n) {
+        const nr = Number(numRecords);
+        const used = activeCount + deadCount;
+        const usedPct = Math.max(0, Math.min(100, Math.round((used / nr) * 1000) / 10));
+        const safeness = leafSafeness(activeCount, deadCount, nr, parentId === null);
+        body += '<div class="capacity" title="(active + dead) slots filled, out of this leaf\'s ' + nr + '-record capacity">' +
+          'Capacity: ' + used + ' / ' + nr + ' (' + usedPct + '% used)</div>';
+        body += '<div class="safeness safeness-' + safeness.level + '" ' +
+          'title="Mirrors the engine\'s own unsafe_degree' + (parentId === null ? "_root" : "") +
+          ' SMO check for this block">' +
+          '<span class="safeness-dot"></span>Safeness: ' + escapeHtml(safeness.label) + '</div>';
+      }
     }
 
     if (node.type === "leaf" && isExpanded) {
@@ -2476,6 +2518,35 @@
   });
 
   // ---------------------------------------------------------------------
+  // Node box width / leaf records height - both a CSS variable (drives the
+  // actual box rendering) and a layout constant (NODE_W feeds the x-axis
+  // spacing math in buildLayout, which CSS alone can't touch).
+  // ---------------------------------------------------------------------
+  const nodeWidthInput = document.getElementById("nodeWidthInput");
+  nodeWidthInput.value = NODE_W;
+  nodeWidthInput.addEventListener("change", () => {
+    const v = parseInt(nodeWidthInput.value, 10);
+    if (!Number.isFinite(v) || v < 60) { nodeWidthInput.value = NODE_W; return; }
+    NODE_W = v;
+    document.documentElement.style.setProperty("--node-w", v + "px");
+    localStorage.setItem("cmvbt-viz-node-w", String(v));
+    heightCache.clear(); // wrapping depends on box width
+    render();
+  });
+
+  const recordsHeightInput = document.getElementById("recordsHeightInput");
+  recordsHeightInput.value = RECORDS_H;
+  recordsHeightInput.addEventListener("change", () => {
+    const v = parseInt(recordsHeightInput.value, 10);
+    if (!Number.isFinite(v) || v < 40) { recordsHeightInput.value = RECORDS_H; return; }
+    RECORDS_H = v;
+    document.documentElement.style.setProperty("--records-h", v + "px");
+    localStorage.setItem("cmvbt-viz-records-h", String(v));
+    heightCache.clear();
+    render();
+  });
+
+  // ---------------------------------------------------------------------
   // Expand/collapse controls
   // ---------------------------------------------------------------------
   document.getElementById("expandAllBtn").addEventListener("click", () => {
@@ -2716,6 +2787,10 @@
     applyFontScale();
   });
   applyFontScale(); // apply the persisted (or default) scale immediately, even before a dump loads
+  // Same idea for node width / leaf records height - apply whatever was persisted
+  // (or the built-in default) to the CSS vars right away, not just on first change.
+  document.documentElement.style.setProperty("--node-w", NODE_W + "px");
+  document.documentElement.style.setProperty("--records-h", RECORDS_H + "px");
 
   function centerOn(worldX, worldY) {
     const rect = canvasWrap.getBoundingClientRect();
