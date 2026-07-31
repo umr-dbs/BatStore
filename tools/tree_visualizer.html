@@ -1435,6 +1435,25 @@
     return b !== null ? Number(b) : Number(v);
   }
 
+  /// Like `currentReferenceVersion()`, but *not* gated behind the Live view
+  /// toggle: the 2D map is itself an explicit, opt-in, per-node view (opened
+  /// by clicking that node's own map2d button), so it should always be
+  /// scoped to whichever root is actually selected, not only when the user
+  /// separately remembered to flip Live view on too. Returns null exactly
+  /// when raw `c.live`/the full `children` array are already correct on
+  /// their own: no snapshot pinned, and the selected root already is the
+  /// latest one (see `currentReferenceVersion`'s doc for exactly why that
+  /// second case matters - a root* page keeps accumulating child slots long
+  /// after its own version stamp, so any *other*, non-latest root's own
+  /// version is the only correct cutoff for "what did this page's history
+  /// look like as of that root").
+  function map2dReferenceVersion() {
+    if (snapshotVersion !== null) return snapshotVersion;
+    if (currentRootId === latestRoot().node_id) return null;
+    const meta = dump.roots.find(r => r.node_id === currentRootId);
+    return meta ? BigInt(meta.version) : null;
+  }
+
   /// A key-split (or version bump) is one atomic event: the moment *any*
   /// later sibling's range overlaps this slot at all, this slot's physical
   /// page has already been superseded as a whole - a read for any key in
@@ -1443,9 +1462,22 @@
   /// claimed yet. So a slot dies in full at the version of the *earliest*
   /// later overlapping sibling, not just across whichever narrower portion
   /// that one sibling's own range happens to cover.
+  ///
+  /// When `map2dReferenceVersion()` returns non-null, both the candidate
+  /// pool and "later" are restricted to slots that existed by that version
+  /// (`c.version <= ref`) - a slot born *after* the reference point isn't
+  /// part of this page's history as of then, and can't be what superseded
+  /// anything either. Liveness is then re-derived from that same restricted
+  /// view (no later-and-qualifying overlap => still live as of `ref`),
+  /// exactly like `qualifyingChildrenAsOf` does for the main tree render -
+  /// raw `c.live` alone can't be used here since it's computed once against
+  /// the page's absolute latest state, not any earlier point in time.
   function computeMap2dData(nodeId) {
     const node = getNode(nodeId);
-    const children = node.children;
+    const refVersion = map2dReferenceVersion();
+    const children = refVersion !== null
+      ? node.children.filter(c => { const v = tryBigInt(c.version); return v !== null && v <= refVersion; })
+      : node.children;
     return children.map((c, i) => {
       let minVersion = null;
       children.slice(i + 1).forEach(later => {
@@ -1460,7 +1492,7 @@
         lower: numOf(c.key_lower), upper: numOf(c.key_upper),
         version: numOf(c.version),
         endVersion: minVersion !== null ? numOf(minVersion) : null,
-        live: c.live !== false,
+        live: refVersion !== null ? minVersion === null : c.live !== false,
       };
     });
   }
@@ -1524,11 +1556,13 @@
     const nodeId = currentMap2dNodeId;
     const wrap = document.getElementById("map2dSvgWrap");
     if (!nodeId) return;
+    const refVersion = map2dReferenceVersion();
+    const scopeSuffix = refVersion !== null ? " — as of v" + refVersion : "";
     const entries = computeMap2dData(nodeId);
     document.getElementById("map2dOnlyLiveBtn").classList.toggle("primary", map2dOnlyLive);
 
     if (!entries.length) {
-      document.getElementById("map2dTitle").textContent = "2D entry map — " + nodeId;
+      document.getElementById("map2dTitle").textContent = "2D entry map — " + nodeId + scopeSuffix;
       wrap.innerHTML = "<p style=\"padding:4px;color:var(--text-dim);\">This node has no entries.</p>";
       return;
     }
@@ -1539,7 +1573,7 @@
 
     const visible = map2dOnlyLive ? entries.filter(e => e.live) : entries;
     document.getElementById("map2dTitle").textContent =
-      "2D entry map — " + nodeId + " (" + visible.length + " of " + entries.length + " fragments shown)";
+      "2D entry map — " + nodeId + scopeSuffix + " (" + visible.length + " of " + entries.length + " fragments shown)";
     if (!visible.length) {
       wrap.innerHTML = "<p style=\"padding:4px;color:var(--text-dim);\">No live entries to show.</p>";
       return;
@@ -2113,35 +2147,47 @@
     return clamped % 1 === 0 ? String(clamped) : clamped.toFixed(1);
   }
 
-  /// Mirrors the engine's own `BlockUnsafeDegree` classification for a leaf
+  /// Mirrors the engine's own `BlockUnsafeDegree` classification
   /// (`src/mv_tree/smo.rs` `unsafe_degree`/`unsafe_degree_root`) - the exact
   /// same trigger the SMO logic uses to decide a block needs a split/merge
   /// *right now* - plus one extra "warn" tier this visualizer adds on top
   /// (not a real engine state) for "getting close", so a block doesn't only
   /// ever go from green to red with no warning in between.
   ///
-  /// unsafe_degree (non-root leaf): ActiveUnderflow if `active <= oneD`
-  /// (`oneD` = filling_20_percent = `(NUM_RECORDS+4)/5`); otherwise Overflow
-  /// once physically full (`active+dead >= NUM_RECORDS`) - unless even then
-  /// there still aren't many live records (`active <= oneD*2`), in which
-  /// case it's still classified ActiveUnderflow (a full-but-sparse block
-  /// wants a GC-ing merge, not a plain split).
+  /// `maxUnits` is the capacity this block is actually measured against -
+  /// `NUM_RECORDS` for a leaf (`max_records`), `FAN_OUT` for an internal
+  /// node (`max_keys`) - and `overflowAt` is the real trigger threshold,
+  /// which for an internal node is `maxUnits - 1` (`overflow_keys_count`),
+  /// not `maxUnits` itself (a leaf's own overflow threshold *is* its full
+  /// capacity - `overflow_records_count() == max_records()`).
   ///
-  /// unsafe_degree_root (root leaf): the `active == 1 && !is_leaf` collapse
-  /// rule only applies to an *internal* root, so a root leaf can only ever
-  /// be Overflow or Ok - never ActiveUnderflow.
-  function leafSafeness(active, dead, numRecords, isRoot) {
+  /// unsafe_degree (non-root): ActiveUnderflow if `active <= oneD` (`oneD`
+  /// = filling_20_percent = `(maxUnits+4)/5`); otherwise Overflow once
+  /// physically full (`active+dead >= overflowAt`) - unless even then there
+  /// still aren't many live entries (`active <= oneD*2`), in which case
+  /// it's still classified ActiveUnderflow (a full-but-sparse block wants a
+  /// GC-ing merge, not a plain split).
+  ///
+  /// unsafe_degree_root: the `active == 1 && !is_leaf` collapse rule (an
+  /// internal root with a single child should drop a level) only applies
+  /// when `isLeaf` is false - a root leaf can only ever be Overflow or Ok,
+  /// never ActiveUnderflow.
+  function blockSafeness(active, dead, isLeaf, isRoot) {
+    const maxUnits = Number(tryBigInt(isLeaf ? dump.num_records : dump.fan_out));
+    if (!Number.isFinite(maxUnits) || maxUnits <= 0) return null;
+    const overflowAt = isLeaf ? maxUnits : maxUnits - 1;
     const used = active + dead;
-    const oneD = Math.floor((numRecords + 4) / 5);      // filling_20_percent
-    const fourD = Math.floor((4 * numRecords + 4) / 5);  // filling_80_percent
+    const oneD = Math.floor((maxUnits + 4) / 5);       // filling_20_percent
+    const fourD = Math.floor((4 * maxUnits + 4) / 5);  // filling_80_percent
 
     if (isRoot) {
-      if (used >= numRecords) return { level: "unsafe", label: "Overflow" };
+      if (!isLeaf && active === 1) return { level: "unsafe", label: "Single child" };
+      if (used >= overflowAt) return { level: "unsafe", label: "Overflow" };
       if (used >= fourD) return { level: "warn", label: "Nearing overflow" };
       return { level: "safe", label: "Safe" };
     }
     if (active <= oneD) return { level: "unsafe", label: "Underflow" };
-    if (used >= numRecords) {
+    if (used >= overflowAt) {
       return active <= oneD * 2
         ? { level: "unsafe", label: "Underflow (full)" }
         : { level: "unsafe", label: "Overflow" };
@@ -2255,20 +2301,27 @@
       body += '<div class="truncated-note">Depth-limited dump: subtree exists but was not walked.</div>';
     }
 
-    // Capacity/Safeness: leaf-only (see leafSafeness's doc) - uses the same
-    // activeCount/deadCount already resolved above, so this stays correct
-    // under snapshot mode too, not just against the dump's latest state.
-    if (node.type === "leaf") {
-      const numRecords = tryBigInt(dump.num_records);
-      if (numRecords !== null && numRecords > 0n) {
-        const nr = Number(numRecords);
+    // Capacity/Safeness: leaf and internal nodes (see blockSafeness's doc) -
+    // uses the same activeCount/deadCount already resolved above, so this
+    // stays correct under snapshot mode too, not just against the dump's
+    // latest state. Not shown for "internal_truncated" - a depth-limited
+    // dump never walked that subtree, so there's no active/dead count to
+    // trust here in the first place.
+    if (node.type === "leaf" || node.type === "internal") {
+      const isLeaf = node.type === "leaf";
+      const maxUnits = tryBigInt(isLeaf ? dump.num_records : dump.fan_out);
+      if (maxUnits !== null && maxUnits > 0n) {
+        const mu = Number(maxUnits);
         const used = activeCount + deadCount;
-        const usedPct = Math.max(0, Math.min(100, Math.round((used / nr) * 1000) / 10));
-        const safeness = leafSafeness(activeCount, deadCount, nr, parentId === null);
-        body += '<div class="capacity" title="(active + dead) slots filled, out of this leaf\'s ' + nr + '-record capacity">' +
-          'Capacity: ' + used + ' / ' + nr + ' (' + usedPct + '% used)</div>';
+        const usedPct = Math.max(0, Math.min(100, Math.round((used / mu) * 1000) / 10));
+        const isRoot = parentId === null;
+        const safeness = blockSafeness(activeCount, deadCount, isLeaf, isRoot);
+        const capNoun = isLeaf ? "record" : "key";
+        body += '<div class="capacity" title="(active + dead) slots filled, out of this ' +
+          (isLeaf ? "leaf" : "internal node") + '\'s ' + mu + '-' + capNoun + ' capacity">' +
+          'Capacity: ' + used + ' / ' + mu + ' (' + usedPct + '% used)</div>';
         body += '<div class="safeness safeness-' + safeness.level + '" ' +
-          'title="Mirrors the engine\'s own unsafe_degree' + (parentId === null ? "_root" : "") +
+          'title="Mirrors the engine\'s own unsafe_degree' + (isRoot ? "_root" : "") +
           ' SMO check for this block">' +
           '<span class="safeness-dot"></span>Safeness: ' + escapeHtml(safeness.label) + '</div>';
       }
