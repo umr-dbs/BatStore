@@ -1558,17 +1558,22 @@
       return [...new Set(vals)].sort((a, b) => a - b);
     };
     let kMin = fenceLo, kMax = fenceHi;
-    if (kMax === U64_MAX_NUM) {
+    const kMaxIsSentinel = kMax === U64_MAX_NUM, kMinIsSentinel = kMin === U64_MAX_NUM;
+    if (kMaxIsSentinel) {
       const breaks = finiteKeys();
       const hi = breaks.length ? breaks[breaks.length - 1] : kMin + 1;
       kMax = hi + Math.max(1, hi - kMin) * 0.08;
     }
-    if (kMin === U64_MAX_NUM) { // symmetric, if a fence's *lower* bound were ever the sentinel
+    if (kMinIsSentinel) { // symmetric, if a fence's *lower* bound were ever the sentinel
       const breaks = finiteKeys();
       const lo = breaks.length ? breaks[0] : kMax - 1;
       kMin = lo - Math.max(1, kMax - lo) * 0.08;
     }
-    return { vMin: minV, vMax: maxV + vSpan * 0.08, kMin, kMax };
+    // The pixel-math placeholder above is never the real value at a
+    // sentinel-clipped edge - the axis still has to *label* that edge "MAX"
+    // (this node's fence data already says so explicitly), not whatever
+    // arbitrary padded number stands in for it internally.
+    return { vMin: minV, vMax: maxV + vSpan * 0.08, kMin, kMax, kMinIsSentinel, kMaxIsSentinel };
   }
 
   /// Picks which of `allValues` (already the full sorted set of real
@@ -1645,13 +1650,21 @@
         '" fill="#8891a3" font-size="9" text-anchor="middle" font-family="ui-monospace,monospace">' +
         escapeHtml(String(v)) + '</text>';
     });
+    // A sentinel-clipped edge's own tick sits at map2dFullExtent's padded
+    // placeholder value (real pixel math needs *a* number there), but the
+    // label has to say what that edge actually *is* - this node's own fence
+    // data already says so exactly (see map2dComputeFullExtent's doc).
+    const formatAxisKey = k =>
+      ((map2dFullExtent.kMaxIsSentinel && k === map2dFullExtent.kMax) ||
+       (map2dFullExtent.kMinIsSentinel && k === map2dFullExtent.kMin))
+        ? "MAX" : formatKey(k);
     keyTicks.forEach(k => {
       const y = yOf(k);
       svgHtml += '<line x1="' + MAP2D_PAD + '" y1="' + y + '" x2="' + (MAP2D_W - MAP2D_PAD) + '" y2="' + y +
         '" stroke="#262b36" stroke-width="1"/>' +
         '<text x="' + (MAP2D_PAD - 6) + '" y="' + (y + 3) +
         '" fill="#8891a3" font-size="9" text-anchor="end" font-family="ui-monospace,monospace">' +
-        escapeHtml(formatKey(k)) + '</text>';
+        escapeHtml(formatAxisKey(k)) + '</text>';
     });
 
     svgHtml += '<rect x="' + MAP2D_PAD + '" y="' + MAP2D_PAD + '" width="' + plotW + '" height="' + plotH +
