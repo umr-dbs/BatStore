@@ -18,6 +18,7 @@
     --dead: #e5586a;
     --active: #3aa876;
     --truncated: #8891a3;
+    --keys: #5bc8e0;
     --font-scale: 1; /* set via the toolbar's A-/A+/reset controls, persisted in localStorage */
     --node-w: 280px; /* set via the toolbar's "Node width" input, persisted in localStorage - kept in sync with the JS NODE_W constant used for layout math */
     --records-h: 600px; /* set via the toolbar's "Leaf records height" input, persisted in localStorage */
@@ -99,16 +100,13 @@
     margin: 0 0 4px; padding: 0; font-size: calc(13px * var(--font-scale)); font-weight: 700;
     color: var(--accent-2); text-transform: none; letter-spacing: 0;
   }
-  .version-jump-hint {
-    font-size: calc(10.5px * var(--font-scale)); color: var(--text-dim); line-height: 1.4; margin-bottom: 8px;
-  }
   .version-jump-row { display: flex; gap: 6px; }
   #versionJump input {
     flex: 1; min-width: 0; background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 6px 8px; font-size: calc(12px * var(--font-scale));
   }
   #rootListBox {
-    margin: 0 10px 10px; padding: 10px 0 8px; border: 1.5px solid var(--accent); border-radius: 8px;
+    margin: 10px 10px 10px; padding: 10px 0 8px; border: 1.5px solid var(--accent); border-radius: 8px;
     background: rgba(91,140,255,.06); flex: 1; min-height: 0; display: flex; flex-direction: column;
     overflow: hidden;
   }
@@ -179,16 +177,6 @@
   }
   .file-row-meta { color: var(--text-dim); font-size: calc(11px * var(--font-scale)); white-space: nowrap; }
   #fileBrowserEmptyNote { margin-top: 16px; color: var(--text-dim); font-size: calc(11.5px * var(--font-scale)); line-height: 1.6; }
-  #dirModal {
-    position: absolute; inset: 0; z-index: 9; display: flex; align-items: center;
-    justify-content: center; background: rgba(0,0,0,.5);
-  }
-  #dirModal.hidden { display: none; }
-  .dir-modal-inner {
-    width: min(640px, 90%); max-height: 80%; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 10px; display: flex; flex-direction: column; overflow: hidden;
-  }
-  #dirModalList { overflow-y: auto; padding: 8px; }
 
   #snapshotBanner {
     position: absolute; top: 0; left: 0; right: 0; z-index: 6;
@@ -334,15 +322,18 @@
   .node-body { padding: 0 8px 7px; font-size: calc(11px * var(--font-scale)); color: var(--text-dim); }
   .node-body .birth { color: var(--text-dim); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
     margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .node-body .range { color: var(--text); font-family: ui-monospace, monospace; font-size: calc(10.5px * var(--font-scale));
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .node-body .range { color: var(--keys); font-family: ui-monospace, monospace; font-size: calc(10.5px * var(--font-scale));
+    font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
   .node-body .fence { color: var(--accent-2); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
     font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
   .fence-usage { color: var(--text-dim); font-weight: 400; }
   .capacity {
-    color: var(--text-dim); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
-    margin-top: 2px;
+    font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
+    font-weight: 600; margin-top: 2px;
   }
+  .capacity-safe { color: var(--active); }
+  .capacity-warn { color: var(--accent-2); }
+  .capacity-unsafe { color: var(--dead); }
   .safeness {
     display: flex; align-items: center; gap: 5px; font-size: calc(10px * var(--font-scale));
     margin-top: 2px; font-weight: 600;
@@ -445,11 +436,6 @@
         <button class="btn" id="expandMarkedBtn">Expand marked</button>
         <button class="btn" id="collapseMarkedBtn">Collapse marked</button>
         <button class="btn" id="clearMarkedBtn">Clear marks</button>
-        <div class="sep"></div>
-        <button class="btn" id="liveViewBtn"
-                title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
-        <button class="btn" id="hideDeadBtn" disabled
-                title="Live view only: prune every dead/obsolete branch and record out of the render entirely, showing just the live tree">Hide dead</button>
       </div>
       <div class="toolbar-group" id="grpDataView">
         <span class="toolbar-group-label">Data view</span>
@@ -463,6 +449,11 @@
         <input type="text" id="keyTracerInput" placeholder="key to trace...">
         <button class="btn" id="keyTracerBtn"
                 title="Trace every created/updated/deleted event for one key across the whole dump">Key tracer</button>
+        <div class="sep"></div>
+        <button class="btn" id="liveViewBtn"
+                title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
+        <button class="btn" id="hideDeadBtn" disabled
+                title="Live view only: prune every dead/obsolete branch and record out of the render entirely, showing just the live tree">Hide dead</button>
       </div>
       <div class="toolbar-group" id="grpPlayback">
         <span class="toolbar-group-label">Playback</span>
@@ -477,30 +468,24 @@
         <span id="playbackStatus"></span>
       </div>
       <div class="spacer"></div>
-      <button class="btn" id="openFileBtn" title="Load a different dump file">Open file&hellip;</button>
-      <button class="btn" id="openDirBtn" title="Browse a directory of dump files">Open dir&hellip;</button>
       <input type="file" id="fileInput" accept=".json" style="display:none">
       <input type="file" id="dirInput" webkitdirectory multiple style="display:none">
     </div>
   </div>
   <div id="body">
     <div id="sidebar">
-      <div id="versionJump">
-        <h2>&#128247; Snapshot view</h2>
-        <div class="version-jump-hint">
-          View the tree exactly as it existed at one specific version - only
-          nodes/records that existed and weren't yet superseded then.
-        </div>
-        <div class="version-jump-row">
-          <input type="text" id="versionInput"
-                 placeholder="version number..."
-                 title="Select whichever root* was in effect at this snapshot version - the same predecessor lookup a point-in-time read (e.g. RangeIterSi) resolves internally, just exposed directly here.">
-          <button class="btn primary" id="versionJumpBtn">View snapshot</button>
-        </div>
-      </div>
       <div id="rootListBox">
         <h2>Root* list</h2>
         <div id="rootList"></div>
+      </div>
+      <div id="versionJump">
+        <h2>Snapshot</h2>
+        <div class="version-jump-row">
+          <input type="text" id="versionInput"
+                 placeholder="Snapshot number"
+                 title="Select whichever root* was in effect at this snapshot version - the same predecessor lookup a point-in-time read (e.g. RangeIterSi) resolves internally, just exposed directly here.">
+          <button class="btn primary" id="versionJumpBtn">View snapshot</button>
+        </div>
       </div>
     </div>
     <div id="canvasWrap">
@@ -568,16 +553,6 @@
         </div>
         <div id="map2dSvgWrap"></div>
       </div>
-      <div id="dirModal" class="hidden">
-        <div class="dir-modal-inner">
-          <div class="trace-header">
-            <span>Choose a dump file</span>
-            <span class="spacer"></span>
-            <button class="btn" id="dirModalCloseBtn" title="Close">&#10005;</button>
-          </div>
-          <div id="dirModalList"></div>
-        </div>
-      </div>
     </div>
   </div>
   <div id="measure" aria-hidden="true"></div>
@@ -623,6 +598,8 @@
   let recordDetailMode = localStorage.getItem("cmvbt-viz-record-detail") === "1";   // list mode only: ts_start/worker_id/delete info per record
   let map2dOnlyLive = false;        // 2D entry map sub-option: only draw still-live entries
   let currentMap2dNodeId = null;    // internal node id the 2D entry map panel is currently showing
+  let currentMap2dFenceLower = 0;   // that node's actual fence bounds - entries must exactly tile this, not some range inferred from their own historical key values
+  let currentMap2dFenceUpper = 0;
   let map2dDomain = null;           // {vMin, vMax, kMin, kMax} - the currently visible window (zoom/pan state); null = not yet computed for this node
   let map2dFullExtent = null;       // {vMin, vMax, kMin, kMax} - the node's full data extent, i.e. what "Reset zoom" returns to
 
@@ -662,7 +639,6 @@
   const traceBody = document.getElementById("traceBody");
   const keyTracerPanel = document.getElementById("keyTracerPanel");
   const map2dPanel = document.getElementById("map2dPanel");
-  const dirModal = document.getElementById("dirModal");
 
   // ---------------------------------------------------------------------
   // Data loading
@@ -729,6 +705,9 @@
     });
   }
 
+  // Reachable only from the empty-state file browser (its buttons are only
+  // visible when no dump is loaded yet) - loading a different dump after one
+  // is already open is drag-and-drop only now.
   function handleDirFiles(fileList) {
     const jsonFiles = [...fileList].filter(f => f.name.toLowerCase().endsWith(".json"));
     if (!jsonFiles.length) {
@@ -736,17 +715,10 @@
       return;
     }
     jsonFiles.sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
-    if (!dump) {
-      const listEl = document.getElementById("fileList");
-      listEl.innerHTML = buildFileRows(jsonFiles);
-      listEl.classList.remove("hidden");
-      wireFileRows(listEl, jsonFiles);
-    } else {
-      const listEl = document.getElementById("dirModalList");
-      listEl.innerHTML = buildFileRows(jsonFiles);
-      wireFileRows(listEl, jsonFiles, () => dirModal.classList.add("hidden"));
-      dirModal.classList.remove("hidden");
-    }
+    const listEl = document.getElementById("fileList");
+    listEl.innerHTML = buildFileRows(jsonFiles);
+    listEl.classList.remove("hidden");
+    wireFileRows(listEl, jsonFiles);
   }
 
   dirInput.addEventListener("change", (e) => {
@@ -754,9 +726,6 @@
   });
   document.getElementById("chooseDirBtn").addEventListener("click", () => dirInput.click());
   document.getElementById("chooseFileBtn").addEventListener("click", () => fileInput.click());
-  document.getElementById("openDirBtn").addEventListener("click", () => dirInput.click());
-  document.getElementById("openFileBtn").addEventListener("click", () => fileInput.click());
-  document.getElementById("dirModalCloseBtn").addEventListener("click", () => dirModal.classList.add("hidden"));
 
   function onDumpLoaded(name) {
     stopPlayback();
@@ -772,7 +741,6 @@
     tracePanel.classList.add("hidden");
     keyTracerPanel.classList.add("hidden");
     map2dPanel.classList.add("hidden");
-    dirModal.classList.add("hidden");
     currentMap2dNodeId = null;
 
     fileLabel.textContent = name + " - " + Object.keys(dump.nodes).length + " unique nodes";
@@ -1165,13 +1133,38 @@
     const myIdx = parent.children.findIndex(c => c.node_id === nodeId);
     if (myIdx < 0) return { kind: "unavailable", nodeId };
     const mine = parent.children[myIdx];
-    const previous = parent.children.slice(0, myIdx).filter(c => intervalsOverlap(c, mine));
-    const next = parent.children.slice(myIdx + 1).filter(c => intervalsOverlap(c, mine));
+    const previousAll = parent.children.slice(0, myIdx).filter(c => intervalsOverlap(c, mine));
+    const nextAll = parent.children.slice(myIdx + 1).filter(c => intervalsOverlap(c, mine));
+    const previous = immediateOverlaps(previousAll, false);
+    const next = immediateOverlaps(nextAll, true);
 
     return {
       kind: "sibling", nodeId, parentId, mine, previous, next,
       inheritedDeadFrom: mine.live !== false ? (supersessionPoint || null) : null,
     };
+  }
+
+  /// `previousAll`/`nextAll` (whichever `intervalsOverlap`-matched slice
+  /// `computeTrace` handed in) can contain far more than the *immediate*
+  /// neighbors: a wide slot's key range - most commonly one holding a
+  /// sentinel fence bound like u64::MAX - overlaps not just whatever
+  /// directly superseded it, but *everything* that later, transitively,
+  /// superseded THAT too (a later override's range always overlaps
+  /// everything its own predecessor covered, so the raw overlap filter picks
+  /// up the whole downstream chain, not just the first hop). Sorting
+  /// closest-to-`mine`-first and dropping any candidate an already-kept,
+  /// closer candidate itself overlaps keeps only the direct hop(s) - while
+  /// still correctly keeping *multiple* entries when they're independent,
+  /// non-overlapping pieces (e.g. two differently-aged neighbors merged into
+  /// one), since neither of those overlaps the other and so neither
+  /// excludes the other.
+  function immediateOverlaps(candidates, ascending) {
+    const sorted = [...candidates].sort((a, b) => {
+      const av = tryBigInt(a.version), bv = tryBigInt(b.version);
+      if (av === null || bv === null) return 0;
+      return ascending ? (av < bv ? -1 : av > bv ? 1 : 0) : (av > bv ? -1 : av < bv ? 1 : 0);
+    });
+    return sorted.filter((c, i) => !sorted.slice(0, i).some(closer => intervalsOverlap(c, closer)));
   }
 
   function traceRowHtml(item, label, parentIdForChain, isCurrent) {
@@ -1334,7 +1327,7 @@
   function computeKeyHistory(keyStr) {
     const target = tryBigInt(keyStr);
     const reachableFromLatest = computeReachableSet(latestRoot().node_id);
-    const events = [];
+    const rawMatches = [];
     Object.keys(dump.nodes).forEach(nodeId => {
       const n = dump.nodes[nodeId];
       if (n.type !== "leaf") return;
@@ -1342,13 +1335,42 @@
         const rk = tryBigInt(r.key);
         const matches = target !== null && rk !== null ? rk === target : String(r.key) === keyStr;
         if (!matches) return;
-        events.push({
+        rawMatches.push({
           nodeId,
           insert_ts: r.insert_ts, insert_worker: r.insert_worker,
           deleted: r.deleted, delete_ts: r.delete_ts, delete_worker: r.delete_worker,
           reachable: reachableFromLatest.has(nodeId),
         });
       });
+    });
+
+    // The *same* logical insert can be physically duplicated across several
+    // leaves - a split copies records into the new page(s), and the old page
+    // can still be dumped, unreachable but otherwise untouched, holding the
+    // exact same record. That's one insert event, not several - group every
+    // copy sharing an (insert_ts, insert_worker) pair together, preferring
+    // whichever copy has the most advanced state when they disagree (a stale
+    // pre-split copy can predate a delete that only ever touched the page
+    // that actually survived).
+    const groups = new Map();
+    rawMatches.forEach(m => {
+      const groupKey = String(m.insert_ts) + "@" + String(m.insert_worker);
+      if (!groups.has(groupKey)) groups.set(groupKey, []);
+      groups.get(groupKey).push(m);
+    });
+
+    const events = [...groups.values()].map(copies => {
+      const deletedCopy = copies.find(c => c.deleted) || null;
+      const reachableCopy = copies.find(c => c.reachable) || copies[0];
+      return {
+        insert_ts: copies[0].insert_ts, insert_worker: copies[0].insert_worker,
+        deleted: !!deletedCopy,
+        delete_ts: deletedCopy ? deletedCopy.delete_ts : null,
+        delete_worker: deletedCopy ? deletedCopy.delete_worker : null,
+        reachable: copies.some(c => c.reachable),
+        jumpNodeId: reachableCopy.nodeId,
+        copies,
+      };
     });
     events.sort((a, b) => {
       const av = tryBigInt(a.insert_ts), bv = tryBigInt(b.insert_ts);
@@ -1358,18 +1380,24 @@
     return events;
   }
 
-  function renderKeyTrace(keyStr, events) {
+  function renderKeyTrace(keyStr, events, current) {
     if (!events.length) {
       return '<p>No records found for key <code>' + escapeHtml(keyStr) + '</code> anywhere in this dump.</p>';
     }
     let html = '<p>History for key <code>' + escapeHtml(keyStr) + '</code> - ' + events.length +
-      ' record(s) found across the whole dump, oldest to newest:</p><ul class="keytrace-list">';
+      ' insert event(s) found across the whole dump, oldest to newest:</p><ul class="keytrace-list">';
     events.forEach((e, i) => {
       const label = i === 0 ? "Created" : "Re-inserted";
-      html += '<li class="keytrace-item' + (e.reachable ? " rel-live" : " rel-dead") + '">' +
+      const isCurrent = !!current && e.copies.some(c => c.nodeId === current.nodeId) &&
+        String(e.insert_ts) === String(current.insertTs);
+      html += '<li class="keytrace-item' + (e.reachable ? " rel-live" : " rel-dead") + (isCurrent ? " rel-current" : "") + '">' +
+        (isCurrent ? '<span class="you-are-here">YOU ARE HERE</span>' : '') +
         '<div><b>' + label + '</b> at ts ' + escapeHtml(String(e.insert_ts)) + ' by worker ' +
         escapeHtml(String(e.insert_worker)) + '</div>' +
-        '<div class="keytrace-meta">leaf <code>' + e.nodeId + '</code> - ' +
+        '<div class="keytrace-meta">' +
+        (e.copies.length > 1
+          ? "physically present in " + e.copies.length + " leaf pages (splits carry a record's copy along) - "
+          : "leaf <code>" + e.copies[0].nodeId + "</code> - ") +
         (e.reachable ? "currently reachable from the latest root*" : "no longer reachable from the latest root*") +
         '</div>';
       if (e.deleted) {
@@ -1378,18 +1406,18 @@
       } else {
         html += '<div class="keytrace-live">Still live (not deleted) as of this leaf\'s recorded state</div>';
       }
-      html += '<div class="trace-row-actions"><button class="btn" data-keytrace-jump="' + e.nodeId + '">Jump to leaf</button></div>';
+      html += '<div class="trace-row-actions"><button class="btn" data-keytrace-jump="' + e.jumpNodeId + '">Jump to leaf</button></div>';
       html += '</li>';
     });
     html += '</ul>';
     return html;
   }
 
-  function openKeyTracer(keyStr) {
+  function openKeyTracer(keyStr, current) {
     tracePanel.classList.add("hidden"); // mutually exclusive with the node trace panel
     const events = computeKeyHistory(keyStr);
     const body = document.getElementById("keyTracerBody");
-    body.innerHTML = renderKeyTrace(keyStr, events);
+    body.innerHTML = renderKeyTrace(keyStr, events, current);
     keyTracerPanel.classList.remove("hidden");
     body.querySelectorAll("[data-keytrace-jump]").forEach(btn => {
       btn.addEventListener("click", () => {
@@ -1497,43 +1525,50 @@
     });
   }
 
-  /// A page's outermost fence bound is very often a sentinel (e.g. u64::MAX
-  /// standing in for "unbounded") rather than a real, to-scale key - the
-  /// reference model for this chart labels that edge symbolically (f_min /
-  /// f_max), not with the literal number, for exactly this reason. Detects
-  /// that case (the extreme value sits vastly farther from its neighbor than
-  /// the neighbors sit from each other) and clips it to a padded edge next to
-  /// the next real breakpoint instead, the same way a "still live" entry's
-  /// open-ended version already gets a padded edge rather than literal
-  /// infinity. Returns {min, max} possibly narrower than the raw extremes.
-  function map2dNiceDomainFromBreaks(sortedDistinct) {
-    if (sortedDistinct.length === 1) return { min: sortedDistinct[0] - 0.5, max: sortedDistinct[0] + 0.5 };
-    let lo = sortedDistinct[0], hi = sortedDistinct[sortedDistinct.length - 1];
-    if (sortedDistinct.length >= 3) {
-      const core = sortedDistinct[sortedDistinct.length - 2] - sortedDistinct[1] || 1;
-      if (hi - sortedDistinct[sortedDistinct.length - 2] > core * 20) hi = sortedDistinct[sortedDistinct.length - 2] + core * 0.1;
-      if (sortedDistinct[1] - lo > core * 20) lo = sortedDistinct[1] - core * 0.1;
-    }
-    return { min: lo, max: hi };
-  }
-
-  /// The node's whole data extent (used as the zoomed-out/reset view and as
-  /// the fixed right/outer edges open-ended "still live" bars or
-  /// sentinel-bounded key ranges extend to, so those edges don't jump around
-  /// as the user zooms/pans elsewhere).
-  function map2dComputeFullExtent(entries) {
+  /// The node's whole data extent (used as the zoomed-out/reset view, and as
+  /// the fixed edges open-ended "still live" bars or sentinel-bounded fence
+  /// edges extend to, so those edges don't jump around as the user
+  /// zooms/pans elsewhere).
+  ///
+  /// The key (y) axis is anchored on the node's *actual fence* - passed in
+  /// as `fenceLo`/`fenceHi` (the implicit universal [0, u64::MAX] for a
+  /// root, which has no real parent-imposed fence) - not a range inferred
+  /// from the entries' own historical key values. Entries partition the
+  /// fence exactly, by construction; deriving the domain from whichever
+  /// key values happen to appear in this node's own history instead can
+  /// easily be narrower (a fence edge no entry has ever actually reached
+  /// yet) or subtly miscalibrated, which is exactly what made this look
+  /// "approximately right" while still not truly spanning the fence.
+  ///
+  /// A fence bound that *is* the u64::MAX sentinel (standing in for
+  /// "unbounded", not a real to-scale key) still can't be plotted literally
+  /// - clipped to a padded edge past the highest real (non-sentinel) key
+  /// any entry actually has, the same way a "still live" entry's open-ended
+  /// version already gets a padded edge rather than literal infinity.
+  function map2dComputeFullExtent(entries, fenceLo, fenceHi) {
     let minV = Infinity, maxV = -Infinity;
     entries.forEach(e => {
       minV = Math.min(minV, e.version);
       maxV = Math.max(maxV, e.endVersion !== null ? e.endVersion : e.version);
     });
     const vSpan = Math.max(1, maxV - minV);
-    // A still-live entry has no natural right edge - extend a bit past the
-    // latest version seen so its open-ended bar is visibly open, not just
-    // clipped flush against the axis.
-    const keyBreaks = [...new Set(entries.flatMap(e => [e.lower, e.upper]))].sort((a, b) => a - b);
-    const kDomain = map2dNiceDomainFromBreaks(keyBreaks);
-    return { vMin: minV, vMax: maxV + vSpan * 0.08, kMin: kDomain.min, kMax: kDomain.max };
+
+    const finiteKeys = () => {
+      const vals = entries.flatMap(e => [e.lower, e.upper]).filter(v => v !== U64_MAX_NUM);
+      return [...new Set(vals)].sort((a, b) => a - b);
+    };
+    let kMin = fenceLo, kMax = fenceHi;
+    if (kMax === U64_MAX_NUM) {
+      const breaks = finiteKeys();
+      const hi = breaks.length ? breaks[breaks.length - 1] : kMin + 1;
+      kMax = hi + Math.max(1, hi - kMin) * 0.08;
+    }
+    if (kMin === U64_MAX_NUM) { // symmetric, if a fence's *lower* bound were ever the sentinel
+      const breaks = finiteKeys();
+      const lo = breaks.length ? breaks[0] : kMax - 1;
+      kMin = lo - Math.max(1, kMax - lo) * 0.08;
+    }
+    return { vMin: minV, vMax: maxV + vSpan * 0.08, kMin, kMax };
   }
 
   /// Picks which of `allValues` (already the full sorted set of real
@@ -1567,7 +1602,7 @@
       return;
     }
     if (!map2dFullExtent) {
-      map2dFullExtent = map2dComputeFullExtent(entries);
+      map2dFullExtent = map2dComputeFullExtent(entries, currentMap2dFenceLower, currentMap2dFenceUpper);
       map2dDomain = { ...map2dFullExtent };
     }
 
@@ -1590,7 +1625,11 @@
     // toggling "Only live entries" never rescales or relabels the axes.
     const versionBreaks = [...new Set(entries.flatMap(e => e.endVersion !== null ? [e.version, e.endVersion] : [e.version]))]
       .sort((a, b) => a - b);
-    const keyBreaks = [...new Set(entries.flatMap(e => [e.lower, e.upper]))].sort((a, b) => a - b);
+    // The fence's own edges (map2dFullExtent.kMin/kMax) are always included so the
+    // chart's actual top/bottom boundary is labeled even when no entry's own key
+    // value happens to land exactly there.
+    const keyBreaks = [...new Set(entries.flatMap(e => [e.lower, e.upper])
+      .concat([map2dFullExtent.kMin, map2dFullExtent.kMax]))].sort((a, b) => a - b);
     const versionTicks = map2dPickTicks(versionBreaks, dom.vMin, dom.vMax, plotW, 42);
     const keyTicks = map2dPickTicks(keyBreaks, dom.kMin, dom.kMax, plotH, 22);
 
@@ -1626,7 +1665,7 @@
     visible.forEach(e => {
       const x1 = xOf(e.version);
       const x2 = xOf(e.endVersion !== null ? e.endVersion : map2dFullExtent.vMax);
-      // Clamp a sentinel-bounded key edge (see map2dNiceDomainFromBreaks) to the
+      // Clamp a sentinel-bounded key edge (see map2dComputeFullExtent) to the
       // same padded edge its tick axis uses, rather than the raw (often absurdly
       // large) literal value.
       const y1 = yOf(Math.min(e.upper, map2dFullExtent.kMax));
@@ -1654,8 +1693,15 @@
     wrap.innerHTML = svgHtml;
   }
 
-  function openMap2d(nodeId) {
+  function parseFenceBound(v, fallback) {
+    const b = tryBigInt(v);
+    return b !== null ? Number(b) : fallback;
+  }
+
+  function openMap2d(nodeId, fenceLowerStr, fenceUpperStr) {
     currentMap2dNodeId = nodeId;
+    currentMap2dFenceLower = parseFenceBound(fenceLowerStr, 0);
+    currentMap2dFenceUpper = parseFenceBound(fenceUpperStr, U64_MAX_NUM);
     map2dFullExtent = null; // force a fresh full-extent/reset-zoom computation for this node
     map2dDomain = null;
     map2dPanel.classList.remove("hidden");
@@ -2103,22 +2149,25 @@
       return '<div class="records records-grid">' + liveRecords.map(r => {
         const stateClass = r.deleted ? " r-dead" : " r-live";
         const title = "key " + r.key + " · ts_start " + r.insert_ts + " · worker " + r.insert_worker +
-          (r.deleted ? (" · deleted ts " + r.delete_ts + " by worker " + r.delete_worker) : "");
-        return '<div class="record-chip' + stateClass + '" data-record-key="' + escapeHtml(String(r.key)) + '" title="' +
+          (r.deleted ? (" · deleted ts " + r.delete_ts + " by worker " + r.delete_worker) : "") +
+          " · click for full trace";
+        return '<div class="record-chip' + stateClass + '" data-record-key="' + escapeHtml(String(r.key)) +
+          '" data-record-insert-ts="' + escapeHtml(String(r.insert_ts)) + '" title="' +
           escapeHtml(title) + '">' + escapeHtml(String(r.key)) + '</div>';
       }).join("") + '</div>';
     }
 
     return '<div class="records">' + liveRecords.map(r => {
       const rowClass = (r.deleted ? " deleted" : (liveViewMode ? " live" : "")) + (recordDetailMode ? " record-row-detailed" : "");
-      const keyAttr = ' data-record-key="' + escapeHtml(String(r.key)) + '"';
+      const keyAttrs = ' data-record-key="' + escapeHtml(String(r.key)) + '" data-record-insert-ts="' +
+        escapeHtml(String(r.insert_ts)) + '" title="Click for this record\'s full created/deleted/re-inserted trace"';
       if (recordDetailMode) {
-        return '<div class="record-row' + rowClass + '"' + keyAttr + '>' +
+        return '<div class="record-row' + rowClass + '"' + keyAttrs + '>' +
           '<div class="record-row-key">' + escapeHtml(String(r.key)) + '</div>' +
           recordDetailFields(r) +
           '</div>';
       }
-      return '<div class="record-row' + rowClass + '"' + keyAttr + '>' +
+      return '<div class="record-row' + rowClass + '"' + keyAttrs + '>' +
         '<span class="k">' + escapeHtml(String(r.key)) + '</span>' +
         '<span class="v">' + escapeHtml(recordCompactLabel(r)) + '</span></div>';
     }).join("") + '</div>';
@@ -2243,41 +2292,6 @@
       }
     }
 
-    let rangeLo = node.min_key, rangeHi = node.max_key;
-    if (snapshotVersion !== null) {
-      if (node.type === "leaf") {
-        rangeLo = liveRecords.length ? liveRecords[0].key : "";
-        rangeHi = liveRecords.length ? liveRecords[liveRecords.length - 1].key : "";
-      } else if (node.type === "internal") {
-        const qualifyingKids = effectiveChildren(node);
-        rangeLo = qualifyingKids.length ? qualifyingKids[0].key_lower : "";
-        rangeHi = qualifyingKids.length ? qualifyingKids[qualifyingKids.length - 1].key_upper : "";
-      }
-      // "internal_truncated" has no per-child data at all to re-derive a
-      // snapshot-relative range from (that's exactly what got truncated) -
-      // left as the dump's own (latest-state) range, a known limitation of
-      // combining snapshot mode with a depth-limited dump.
-    }
-    body += '<div class="range" title="' + escapeHtml(formatKey(rangeLo)) + ' .. ' + escapeHtml(formatKey(rangeHi)) + '">' +
-      'Keys: ' + escapeHtml(formatKey(rangeLo)) + ' .. ' + escapeHtml(formatKey(rangeHi)) + '</div>';
-
-    // Fence keys: the parent-imposed key boundary this node's slot was
-    // actually handed (from that slot's `Interval<Key>`) - can be wider than
-    // the range of keys actually found under/in it (see "Keys:" above), so
-    // it's shown separately rather than merged into that line. Applies to
-    // both leaf and internal nodes alike - only the rendered root has no
-    // fence at all (no parent slot to inherit one from).
-    if (fence) {
-      const coverage = fenceCoveragePct(rangeLo, rangeHi, fence);
-      body += '<div class="fence" title="parent-imposed key boundary for this node\'s slot">' +
-        'Fence: ' + escapeHtml(formatKey(fence.lower)) + ' .. ' + escapeHtml(formatKey(fence.upper)) +
-        (coverage !== null
-          ? ' <span class="fence-usage" title="span of Keys above, as a fraction of this whole fence span">(' +
-            coverage + '% used)</span>'
-          : '') +
-        '</div>';
-    }
-
     let activeCount = node.active, deadCount = node.dead;
     if (snapshotVersion !== null) {
       if (node.type === "leaf") {
@@ -2288,17 +2302,6 @@
         activeCount = effectiveChildren(node).length;
         deadCount = qualifyingByVersion.length - activeCount; // existed by V, but already superseded by V
       }
-    }
-
-    body += '<div class="counts">' +
-      '<span class="count-active">&#9679; ' + activeCount + ' active</span>' +
-      '<span class="count-dead">&#9679; ' + deadCount + ' dead</span>' +
-      (node.type === "internal" ? '<span>' + effectiveChildren(node).length + ' child(ren)</span>' : '') +
-      (node.type === "internal_truncated" ? '<span>' + node.child_count + ' child(ren) not dumped</span>' : '') +
-      '</div>';
-
-    if (node.type === "internal_truncated") {
-      body += '<div class="truncated-note">Depth-limited dump: subtree exists but was not walked.</div>';
     }
 
     // Capacity/Safeness: leaf and internal nodes (see blockSafeness's doc) -
@@ -2317,7 +2320,7 @@
         const isRoot = parentId === null;
         const safeness = blockSafeness(activeCount, deadCount, isLeaf, isRoot);
         const capNoun = isLeaf ? "record" : "key";
-        body += '<div class="capacity" title="(active + dead) slots filled, out of this ' +
+        body += '<div class="capacity capacity-' + safeness.level + '" title="(active + dead) slots filled, out of this ' +
           (isLeaf ? "leaf" : "internal node") + '\'s ' + mu + '-' + capNoun + ' capacity">' +
           'Capacity: ' + used + ' / ' + mu + ' (' + usedPct + '% used)</div>';
         body += '<div class="safeness safeness-' + safeness.level + '" ' +
@@ -2325,6 +2328,59 @@
           ' SMO check for this block">' +
           '<span class="safeness-dot"></span>Safeness: ' + escapeHtml(safeness.label) + '</div>';
       }
+    }
+
+    let rangeLo = node.min_key, rangeHi = node.max_key;
+    if (snapshotVersion !== null) {
+      if (node.type === "leaf") {
+        rangeLo = liveRecords.length ? liveRecords[0].key : "";
+        rangeHi = liveRecords.length ? liveRecords[liveRecords.length - 1].key : "";
+      } else if (node.type === "internal") {
+        const qualifyingKids = effectiveChildren(node);
+        rangeLo = qualifyingKids.length ? qualifyingKids[0].key_lower : "";
+        rangeHi = qualifyingKids.length ? qualifyingKids[qualifyingKids.length - 1].key_upper : "";
+      }
+      // "internal_truncated" has no per-child data at all to re-derive a
+      // snapshot-relative range from (that's exactly what got truncated) -
+      // left as the dump's own (latest-state) range, a known limitation of
+      // combining snapshot mode with a depth-limited dump.
+    }
+
+    // Fence keys: the parent-imposed key boundary this node's slot was
+    // actually handed (from that slot's `Interval<Key>`) - can be wider than
+    // the range of keys actually found under/in it (see "Keys:" below), so
+    // it's shown separately rather than merged into that line. Applies to
+    // both leaf and internal nodes alike - only the rendered root has no
+    // fence at all (no parent slot to inherit one from).
+    if (fence) {
+      const coverage = fenceCoveragePct(rangeLo, rangeHi, fence);
+      body += '<div class="fence" title="parent-imposed key boundary for this node\'s slot">' +
+        'Fence: ' + escapeHtml(formatKey(fence.lower)) + ' .. ' + escapeHtml(formatKey(fence.upper)) +
+        (coverage !== null
+          ? ' <span class="fence-usage" title="span of Keys above, as a fraction of this whole fence span">(' +
+            coverage + '% used)</span>'
+          : '') +
+        '</div>';
+    }
+
+    // Keys: the actual range of keys present, as opposed to the wider
+    // parent-imposed Fence above. For a leaf, only shown once expanded -
+    // right above the record list it summarizes, not cluttering the
+    // collapsed view with a line that's otherwise a near-duplicate of Fence.
+    if (node.type !== "leaf" || isExpanded) {
+      body += '<div class="range" title="' + escapeHtml(formatKey(rangeLo)) + ' .. ' + escapeHtml(formatKey(rangeHi)) + '">' +
+        'Keys: ' + escapeHtml(formatKey(rangeLo)) + ' .. ' + escapeHtml(formatKey(rangeHi)) + '</div>';
+    }
+
+    body += '<div class="counts">' +
+      '<span class="count-active">&#9679; ' + activeCount + ' active</span>' +
+      '<span class="count-dead">&#9679; ' + deadCount + ' dead</span>' +
+      (node.type === "internal" ? '<span>' + effectiveChildren(node).length + ' child(ren)</span>' : '') +
+      (node.type === "internal_truncated" ? '<span>' + node.child_count + ' child(ren) not dumped</span>' : '') +
+      '</div>';
+
+    if (node.type === "internal_truncated") {
+      body += '<div class="truncated-note">Depth-limited dump: subtree exists but was not walked.</div>';
     }
 
     if (node.type === "leaf" && isExpanded) {
@@ -2356,7 +2412,10 @@
       '<span class="mark">' +
       '<span class="trace-btn"' + traceAttrs + ' title="Trace this node\'s previous/overriding nodes">&#8646;</span>' +
       (node.type === "internal"
-        ? '<span class="map2d-btn" data-map2d="' + id + '" title="View this node\'s entries in a 2D version/key map">&#9638;</span>'
+        ? '<span class="map2d-btn" data-map2d="' + id + '"' +
+          ' data-map2d-fence-lower="' + (fence ? escapeHtml(fence.lower) : "0") + '"' +
+          ' data-map2d-fence-upper="' + (fence ? escapeHtml(fence.upper) : U64_MAX_BIGINT.toString()) + '"' +
+          ' title="View this node\'s entries in a 2D version/key map">&#9638;</span>'
         : '') +
       '<input type="checkbox" data-mark="' + id + '" ' + (isMarked ? "checked" : "") + '>' +
       '</span>' +
@@ -2492,7 +2551,23 @@
     nodesG.querySelectorAll("[data-map2d]").forEach(el => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
-        openMap2d(el.getAttribute("data-map2d"));
+        openMap2d(el.getAttribute("data-map2d"), el.getAttribute("data-map2d-fence-lower"), el.getAttribute("data-map2d-fence-upper"));
+      });
+    });
+    // Clicking a record (list row or grid chip) opens the key tracer for its
+    // key, marking this exact record instance as "YOU ARE HERE" in the
+    // resulting timeline - the record's own created/deleted detail is
+    // already part of that timeline entry, so this doubles as "show me
+    // detailed info about the record" without a second, redundant view.
+    nodesG.querySelectorAll("[data-record-key]").forEach(el => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const box = el.closest(".node-box");
+        const leafId = box ? box.getAttribute("data-id") : null;
+        openKeyTracer(el.getAttribute("data-record-key"), {
+          nodeId: leafId,
+          insertTs: el.getAttribute("data-record-insert-ts"),
+        });
       });
     });
     nodesG.querySelectorAll("[data-more-parent]").forEach(el => {
@@ -2770,7 +2845,7 @@
   // nothing in it visibly responds to a real mouse click (a synthetic `.click()`
   // call skips this whole pointerdown/capture path, which is why this doesn't show
   // up in automated testing that only ever dispatches synthetic clicks).
-  const OVERLAY_SELECTOR = ".node-box, .side-panel, #empty, #map2dPanel, #dirModal";
+  const OVERLAY_SELECTOR = ".node-box, .side-panel, #empty, #map2dPanel";
   function applyTransform() {
     viewport.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`);
   }
