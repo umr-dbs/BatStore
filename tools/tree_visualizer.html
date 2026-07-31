@@ -598,8 +598,8 @@
   let recordDetailMode = localStorage.getItem("cmvbt-viz-record-detail") === "1";   // list mode only: ts_start/worker_id/delete info per record
   let map2dOnlyLive = false;        // 2D entry map sub-option: only draw still-live entries
   let currentMap2dNodeId = null;    // internal node id the 2D entry map panel is currently showing
-  let currentMap2dFenceLower = 0;   // that node's actual fence bounds - entries must exactly tile this, not some range inferred from their own historical key values
-  let currentMap2dFenceUpper = 0;
+  let currentMap2dFenceLower = null; // that node's actual fence bounds - entries must exactly tile this, not a range inferred from their own historical key values; null (only for a rendered root, which has no parent-imposed fence) means "derive from the union of this node's own children instead"
+  let currentMap2dFenceUpper = null;
   let map2dDomain = null;           // {vMin, vMax, kMin, kMax} - the currently visible window (zoom/pan state); null = not yet computed for this node
   let map2dFullExtent = null;       // {vMin, vMax, kMin, kMax} - the node's full data extent, i.e. what "Reset zoom" returns to
 
@@ -1557,7 +1557,18 @@
       const vals = entries.flatMap(e => [e.lower, e.upper]).filter(v => v !== U64_MAX_NUM);
       return [...new Set(vals)].sort((a, b) => a - b);
     };
+    // A rendered root has no parent-imposed fence - its true domain is
+    // whatever the union of its own children's fences ever covered, which
+    // for a dethroned/historical root can be far narrower than the literal
+    // [0, u64::MAX] the *latest* root eventually grows into. That per-child
+    // fence data is already authoritative, so derive from it instead of
+    // assuming every root implicitly spans the universal sentinel range.
     let kMin = fenceLo, kMax = fenceHi;
+    if (kMin === null || kMax === null) {
+      const allKeys = entries.flatMap(e => [e.lower, e.upper]);
+      kMin = allKeys.length ? Math.min(...allKeys) : 0;
+      kMax = allKeys.length ? Math.max(...allKeys) : 1;
+    }
     const kMaxIsSentinel = kMax === U64_MAX_NUM, kMinIsSentinel = kMin === U64_MAX_NUM;
     if (kMaxIsSentinel) {
       const breaks = finiteKeys();
@@ -1706,15 +1717,19 @@
     wrap.innerHTML = svgHtml;
   }
 
-  function parseFenceBound(v, fallback) {
+  function parseFenceBound(v) {
     const b = tryBigInt(v);
-    return b !== null ? Number(b) : fallback;
+    return b !== null ? Number(b) : null;
   }
 
   function openMap2d(nodeId, fenceLowerStr, fenceUpperStr) {
     currentMap2dNodeId = nodeId;
-    currentMap2dFenceLower = parseFenceBound(fenceLowerStr, 0);
-    currentMap2dFenceUpper = parseFenceBound(fenceUpperStr, U64_MAX_NUM);
+    // null (both attributes absent) means "no real fence - this is a
+    // rendered root" - map2dComputeFullExtent then derives the domain from
+    // the union of this node's own children instead of assuming a bound
+    // that was never actually true for this specific root.
+    currentMap2dFenceLower = fenceLowerStr != null ? parseFenceBound(fenceLowerStr) : null;
+    currentMap2dFenceUpper = fenceUpperStr != null ? parseFenceBound(fenceUpperStr) : null;
     map2dFullExtent = null; // force a fresh full-extent/reset-zoom computation for this node
     map2dDomain = null;
     map2dPanel.classList.remove("hidden");
@@ -2426,8 +2441,14 @@
       '<span class="trace-btn"' + traceAttrs + ' title="Trace this node\'s previous/overriding nodes">&#8646;</span>' +
       (node.type === "internal"
         ? '<span class="map2d-btn" data-map2d="' + id + '"' +
-          ' data-map2d-fence-lower="' + (fence ? escapeHtml(fence.lower) : "0") + '"' +
-          ' data-map2d-fence-upper="' + (fence ? escapeHtml(fence.upper) : U64_MAX_BIGINT.toString()) + '"' +
+          // No fence at all (only true for a rendered root) omits these
+          // attributes entirely - openMap2d then derives the domain from
+          // the union of this node's own children's key ranges instead of
+          // assuming a universal [0, MAX] that's only ever really true for
+          // the *latest* root (see map2dComputeFullExtent's doc).
+          (fence
+            ? ' data-map2d-fence-lower="' + escapeHtml(fence.lower) + '" data-map2d-fence-upper="' + escapeHtml(fence.upper) + '"'
+            : '') +
           ' title="View this node\'s entries in a 2D version/key map">&#9638;</span>'
         : '') +
       '<input type="checkbox" data-mark="' + id + '" ' + (isMarked ? "checked" : "") + '>' +
