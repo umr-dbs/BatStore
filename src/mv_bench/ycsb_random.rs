@@ -2,11 +2,29 @@
 //! SoCC 2010, §3): which key an operation targets, and the standard "Core
 //! Workloads" A-F op-type proportions.
 
+use rand::distr::Alphanumeric;
 use rand::prelude::*;
 use rand_distr::Zipf;
+use std::cell::RefCell;
 
-use crate::mv_bench::tpcc_random::rnd_astring;
 use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbKey, YcsbRow};
+
+thread_local! {
+    // `rand::rng()` (used throughout this file previously) is a cryptographically
+    // secure generator (ChaCha-backed) - overkill for load-generator data that
+    // never needs to be unpredictable, and expensive enough that it dominated
+    // whole-benchmark `perf` profiles (a plain YCSB-C run spent ~14% of all
+    // cycles just picking which key to read). `SmallRng` (Xoshiro256++) is
+    // seeded once per thread from the real thread-local RNG via `make_rng` -
+    // paying the crypto-RNG cost exactly once, not once per op - then every
+    // draw after that is a cheap, non-cryptographic PRNG step.
+    static FAST_RNG: RefCell<SmallRng> = RefCell::new(rand::make_rng());
+}
+
+#[inline]
+fn with_fast_rng<R>(f: impl FnOnce(&mut SmallRng) -> R) -> R {
+    FAST_RNG.with(|rng| f(&mut rng.borrow_mut()))
+}
 
 /// YCSB `requestdistribution`: which key an op targets, relative to the
 /// current loaded key range.
@@ -46,21 +64,21 @@ impl KeySampler {
     /// so far (`>= record_count` once inserts start happening) — only used
     /// by `Latest`, to bias towards the newest rows.
     pub fn sample(&self, record_count: u64, current_max_key: u64) -> YcsbKey {
-        match self.dist {
+        with_fast_rng(|rng| match self.dist {
             RequestDistribution::Uniform =>
-                rand::rng().random_range(1..=record_count.max(1)),
+                rng.random_range(1..=record_count.max(1)),
             RequestDistribution::Zipfian { .. } => {
-                let k = self.zipf.as_ref().unwrap().sample(&mut rand::rng()) as u64;
+                let k = self.zipf.as_ref().unwrap().sample(rng) as u64;
                 k.clamp(1, record_count.max(1))
             }
             RequestDistribution::Latest { .. } => {
                 // Zipf sample in [1, record_count]; treated as a 0-based
                 // "how many keys back from the newest" offset, so an offset
                 // of 1 (the most likely draw) lands exactly on the newest key.
-                let offset = self.zipf.as_ref().unwrap().sample(&mut rand::rng()) as u64;
+                let offset = self.zipf.as_ref().unwrap().sample(rng) as u64;
                 current_max_key.saturating_sub(offset - 1).max(1)
             }
-        }
+        })
     }
 }
 
@@ -122,7 +140,7 @@ pub fn pick_op(mix: &YcsbMix) -> YcsbOpType {
     if total <= 0.0 {
         return YcsbOpType::Read;
     }
-    let mut x = rand::rng().random_range(0.0..total);
+    let mut x = with_fast_rng(|rng| rng.random_range(0.0..total));
 
     if x < mix.read { return YcsbOpType::Read; }
     x -= mix.read;
@@ -135,17 +153,22 @@ pub fn pick_op(mix: &YcsbMix) -> YcsbOpType {
 }
 
 pub fn random_row(cfg: &YcsbConfig) -> YcsbRow {
-    // `rnd_astring` draws from `Alphanumeric`, always 1 byte/char, so a
-    // `min == max` draw is exactly `field_length` bytes - safe to concat
-    // straight into the flat buffer with no per-field boundary bookkeeping.
-    let mut data = Vec::with_capacity(cfg.field_count * cfg.field_length);
-    for _ in 0..cfg.field_count {
-        data.extend_from_slice(rnd_astring(cfg.field_length, cfg.field_length).as_bytes());
-    }
+    // Samples `Alphanumeric` bytes directly into the flat buffer - every
+    // field is exactly `field_length` bytes, so there's no need to go via
+    // `tpcc_random::rnd_astring`'s `String` (which would mean allocating and
+    // UTF8-encoding one throwaway `String` per field, then copying its bytes
+    // out again) when a `u8` can be pushed straight in.
+    let total_len = cfg.field_count * cfg.field_length;
+    let mut data = Vec::with_capacity(total_len);
+    with_fast_rng(|rng| {
+        for _ in 0..total_len {
+            data.push(rng.sample(Alphanumeric));
+        }
+    });
     YcsbRow::from_bytes(&data)
 }
 
 /// Scan length, uniform in `[1, max_scan_length]` (YCSB `maxscanlength`).
 pub fn random_scan_length(max_scan_length: u64) -> u64 {
-    rand::rng().random_range(1..=max_scan_length.max(1))
+    with_fast_rng(|rng| rng.random_range(1..=max_scan_length.max(1)))
 }

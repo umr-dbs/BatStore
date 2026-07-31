@@ -13,6 +13,7 @@ use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::fmt::{Debug, Display, Formatter};
 use std::mem::size_of;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU32, Ordering::{Relaxed, Release, Acquire}};
 
 use crate::mv_tree::mvbt::MVBTSt;
 use crate::mv_wal::record::WalPayload;
@@ -61,34 +62,52 @@ impl Default for YcsbConfig {
 ///
 /// Unlike a `Box<[u8]>` (a 16-byte fat pointer: data pointer + length),
 /// `YcsbRow` owns its buffer through a single *thin* (8-byte) pointer, with
-/// the length stored as a `u32` header at the start of the same allocation
-/// (`[len: u32][bytes...]`) rather than in pointer metadata. That's the
-/// difference that matters to `RecordPoint::payload`'s `PayloadSlot<Payload>`
-/// (`record_point.rs`): it only bit-inlines a `Payload` that's itself exactly
-/// `usize`-sized/aligned, and boxes anything else behind one more word. A
-/// fat-pointer-shaped row would get boxed *again* on top of its own `Box<[u8]>`
-/// - two allocations and two pointer-chases per row. This thin-pointer shape
-/// takes the inline path instead: one allocation, one pointer-chase, same as
-/// the base tree's plain `u64` payload. `Drop`/`Clone` recover the buffer's
-/// length from its own header, so no external config is needed to free or
-/// duplicate a row.
+/// an atomic refcount and the length stored as a `[AtomicU32 refcount][u32
+/// len][bytes...]` header at the start of the same allocation, rather than
+/// in pointer metadata. That's the difference that matters to
+/// `RecordPoint::payload`'s `PayloadSlot<Payload>` (`record_point.rs`): it
+/// only bit-inlines a `Payload` that's itself exactly `usize`-sized/aligned,
+/// and boxes anything else behind a `triomphe::Arc` (one more word plus a
+/// refcount) instead. A fat-pointer-shaped row would get boxed *again* on
+/// top of its own buffer - two allocations and two pointer-chases per row.
+/// This thin-pointer shape takes the inline path instead: one allocation,
+/// one pointer-chase, same as the base tree's plain `u64` payload.
 ///
-/// Every op replaces/reads the row as a whole (see `ycsb_txn` module docs) —
-/// there's no partial-field update at the storage layer, same simplification
-/// `tpcc_schema::TpccRow` makes for its own read-modify-write fields.
+/// `Clone` bumps the refcount rather than duplicating the buffer - the same
+/// "share, don't deep-copy" contract `PayloadSlot`'s own non-inline (`Arc`)
+/// branch already gives every other payload type (see that type's doc). A
+/// deep-copying `Clone` here was the one payload shape that didn't honor
+/// that contract, because `PayloadSlot`'s bit-inline branch (taken for any
+/// `usize`-sized `Payload`, `YcsbRow` included) clones by calling
+/// `Payload::clone()` directly rather than bumping a slot-level refcount
+/// itself - so a plain deep-copying `YcsbRow::clone()` paid a fresh
+/// alloc+memcpy on every read/scan/split that materializes a copy of a row,
+/// measurable in a `perf` profile of a scan-heavy workload once scans run
+/// in the millions per second. Safe to share like this because a row's
+/// buffer never changes after construction: every op replaces/reads the row
+/// as a whole (see `ycsb_txn` module docs) - there's no partial-field
+/// update at the storage layer, same simplification `tpcc_schema::TpccRow`
+/// makes for its own read-modify-write fields - so no live `YcsbRow` ever
+/// needs `&mut` access into a buffer another clone might be reading.
 pub struct YcsbRow {
-    /// Points at a `[u32 len][u8; len]` allocation, aligned to `HEADER_LEN`
-    /// so the header can be read/written without unaligned-access helpers.
+    /// Points at a `[AtomicU32 refcount][u32 len][u8; len]` allocation,
+    /// aligned to `HEADER_LEN` so the header can be read/written without
+    /// unaligned-access helpers.
     ptr: NonNull<u8>,
 }
 
-// Sound exactly like `Box<[u8]>`: `YcsbRow` uniquely owns its heap
-// allocation (no aliasing, see the type's doc), so it's safe to move/share
-// a reference across threads the same way `Box`'s own blanket impls are.
+// Sound exactly like `triomphe::Arc<[u8]>`: every live `YcsbRow` (from
+// `from_bytes`/`clone`) holds a genuine strong reference to this
+// allocation - shared, but the shared bytes are never mutated after
+// construction (see this type's doc) - so concurrent readers across
+// threads never race, the same argument that makes any plain `Arc<T: Sync>`
+// `Send + Sync`.
 unsafe impl Send for YcsbRow {}
 unsafe impl Sync for YcsbRow {}
 
-const HEADER_LEN: usize = size_of::<u32>();
+const REFCOUNT_LEN: usize = size_of::<AtomicU32>();
+const LEN_LEN: usize = size_of::<u32>();
+const HEADER_LEN: usize = REFCOUNT_LEN + LEN_LEN;
 
 impl YcsbRow {
     pub fn from_bytes(bytes: &[u8]) -> Self {
@@ -98,7 +117,8 @@ impl YcsbRow {
             if raw.is_null() {
                 handle_alloc_error(layout);
             }
-            raw.cast::<u32>().write(bytes.len() as u32);
+            raw.cast::<AtomicU32>().write(AtomicU32::new(1));
+            raw.add(REFCOUNT_LEN).cast::<u32>().write(bytes.len() as u32);
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), raw.add(HEADER_LEN), bytes.len());
             Self { ptr: NonNull::new_unchecked(raw) }
         }
@@ -108,15 +128,21 @@ impl YcsbRow {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().add(HEADER_LEN), self.len()) }
     }
 
-    fn len(&self) -> usize {
-        unsafe { self.ptr.as_ptr().cast::<u32>().read() as usize }
+    #[inline(always)]
+    fn refcount(&self) -> &AtomicU32 {
+        unsafe { &*(self.ptr.as_ptr() as *const AtomicU32) }
     }
 
-    /// Aligned to `HEADER_LEN` (4B) so the `u32` header is never a misaligned
-    /// read/write - the allocator hands back a suitably-aligned pointer for
-    /// whatever `Layout` we ask for.
+    fn len(&self) -> usize {
+        unsafe { self.ptr.as_ptr().add(REFCOUNT_LEN).cast::<u32>().read() as usize }
+    }
+
+    /// Aligned to `REFCOUNT_LEN` (4B, same as `AtomicU32`/`u32`'s own
+    /// alignment) so neither header field is ever a misaligned read/write -
+    /// the allocator hands back a suitably-aligned pointer for whatever
+    /// `Layout` we ask for.
     fn layout_for(data_len: usize) -> Layout {
-        Layout::from_size_align(HEADER_LEN + data_len, HEADER_LEN)
+        Layout::from_size_align(HEADER_LEN + data_len, REFCOUNT_LEN)
             .expect("YcsbRow: row too large to allocate")
     }
 }
@@ -133,14 +159,32 @@ const _: () = assert!(
 );
 
 impl Drop for YcsbRow {
+    /// Same `Release`-decrement + `Acquire`-fence-before-free pattern as
+    /// `std`/`triomphe`'s own `Arc`: the `Release` on the count that takes it
+    /// to zero ensures every other clone's prior reads of the shared buffer
+    /// are ordered-before this thread's `dealloc`, and the fence ensures
+    /// this thread in turn sees every one of those other clones' writes (none,
+    /// in practice, since the buffer is never mutated post-construction - but
+    /// the pattern is what makes that "never" a proven guarantee rather than
+    /// an assumption).
     fn drop(&mut self) {
+        if self.refcount().fetch_sub(1, Release) != 1 {
+            return;
+        }
+        std::sync::atomic::fence(Acquire);
         unsafe { dealloc(self.ptr.as_ptr(), Self::layout_for(self.len())); }
     }
 }
 
 impl Clone for YcsbRow {
+    /// `Relaxed` suffices for the increment (same as `Arc::clone`): every
+    /// ordering guarantee that matters is enforced on the *decrement* side in
+    /// `Drop`, not here - this thread already holds a valid strong reference
+    /// it's merely duplicating, not synchronizing with anyone's else's view
+    /// of the buffer's contents.
     fn clone(&self) -> Self {
-        Self::from_bytes(self.as_bytes())
+        self.refcount().fetch_add(1, Relaxed);
+        Self { ptr: self.ptr }
     }
 }
 
@@ -168,9 +212,10 @@ impl Display for YcsbRow {
     }
 }
 
-/// Length-prefixed raw bytes: `YcsbRow` is already stored this way on the
-/// heap, so WAL encoding is just a memcpy of the same layout its own buffer
-/// already uses - decoding hands the bytes straight to `from_bytes`.
+/// Length-prefixed raw bytes: the on-disk shape of `YcsbRow`'s own buffer,
+/// minus the refcount header word (which is in-memory-only bookkeeping - a
+/// WAL record has exactly one reader, `wal_decode`, so it has nothing to
+/// count) - decoding hands the bytes straight to `from_bytes`.
 impl WalPayload for YcsbRow {
     fn wal_encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&(self.len() as u32).to_le_bytes());
@@ -201,11 +246,18 @@ mod tests {
     }
 
     #[test]
-    fn clone_is_a_deep_copy() {
+    fn clone_shares_the_same_allocation() {
+        // Refcounted, not deep-copying (see the type's doc) - matching
+        // `PayloadSlot`'s "share, don't duplicate" contract for every other
+        // payload type, now honored here too instead of paying a fresh
+        // alloc+memcpy on every read/scan/split that clones a row.
         let a = YcsbRow::from_bytes(b"field0field1field2");
         let b = a.clone();
         assert_eq!(a, b);
-        assert_ne!(a.as_bytes().as_ptr(), b.as_bytes().as_ptr());
+        assert_eq!(a.as_bytes().as_ptr(), b.as_bytes().as_ptr());
+        drop(a);
+        // `b` alone still owns a valid strong reference after `a` drops.
+        assert_eq!(b.as_bytes(), b"field0field1field2");
     }
 
     #[test]
