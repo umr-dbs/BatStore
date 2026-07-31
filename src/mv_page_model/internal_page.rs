@@ -146,7 +146,7 @@ impl<const FAN_OUT: usize,
         // turns it into the same loud, clean panic `pointer_region`'s own
         // bounds-checked indexing already gives for the same out-of-bounds
         // condition.
-        debug_assert!(index < FAN_OUT, "InternalPage::push_uncommitted: index {index} out of bounds for FAN_OUT={FAN_OUT}");
+        assert!(index < FAN_OUT, "InternalPage::push_uncommitted: index {index} out of bounds for FAN_OUT={FAN_OUT}");
         unsafe {
             self.key_interval_region
                 .as_mut_ptr()
@@ -230,7 +230,7 @@ impl<const FAN_OUT: usize,
         // `version_region` past `FAN_OUT` via a raw, unchecked store,
         // silently corrupting `pointer_region`'s adjacent bytes instead of
         // failing where the actual out-of-bounds condition is.
-        debug_assert!(len + add <= FAN_OUT, "InternalPage::bulk_push: {add} entries pushed at len={len} overflow FAN_OUT={FAN_OUT}");
+        assert!(len + add <= FAN_OUT, "InternalPage::bulk_push: {add} entries pushed at len={len} overflow FAN_OUT={FAN_OUT}");
 
         entries.into_iter()
             .enumerate()

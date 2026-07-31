@@ -114,6 +114,36 @@ impl<const FAN_OUT: usize,
         self.unsafe_degree().is_overflow()
     }
 
+    /// The raw "is there room for up to 2 more entries" capacity check —
+    /// `active + dead >= overflow_units_count()`, the same condition
+    /// `unsafe_degree()` computes internally as its own local `is_overflow`
+    /// — exposed directly rather than through `unsafe_degree()`'s
+    /// `BlockUnsafeDegree::Overflow` classification, which can *hide* this
+    /// exact condition: `unsafe_degree()` reclassifies it to
+    /// `ActiveUnderflow` whenever `active` is also low (`<= 40%` of
+    /// capacity, preferring a merge over a split for a sparse-but-cluttered
+    /// page), so `BlockUnsafeDegree::is_overflow()` can return `false` for a
+    /// page that is, by raw slot count, already full or one entry short of
+    /// it.
+    ///
+    /// `on_overflow_node`/`on_underflow_node`'s pre-emptive "does `mufasa`
+    /// have room for the entries I'm about to push" guard used to check
+    /// `is_overflow()` (the classification) instead of this — sound for a
+    /// page with a healthy active count, but silently defeated for a mostly
+    /// *dead-but-still-snapshot-protected* `mufasa`: exactly the shape a
+    /// sustained-transaction workload with long-held reader snapshots
+    /// produces (TPC-C's default OLAP scan-sweep and multi-table
+    /// transactions far more than YCSB's simpler point-op workload),
+    /// confirmed as the mechanism behind `push_uncommitted` writing past
+    /// `FAN_OUT` into `pointer_region`'s/`OptCell`'s adjacent memory with no
+    /// bounds check ever tripping first (that guard having already, wrongly,
+    /// let the push through).
+    #[inline(always)]
+    fn lacks_room_for_split_entries(&self) -> bool {
+        let (active, dead) = self.active_dead_count();
+        (active as usize) + (dead as usize) >= self.overflow_units_count()
+    }
+
     #[inline(always)]
     pub fn unsafe_degree(&self) -> BlockUnsafeDegree {
         let (active, dead)
@@ -299,13 +329,12 @@ impl<const FAN_OUT: usize,
         // itself — which a fresh `unsafe_degree()` check one level up (or,
         // if `mufasa` is the root, `retrieve_root_write_olc`'s own
         // `unsafe_degree_root()` check, reached the same way on retry)
-        // will correctly detect, since reaching this capacity limit
-        // implies `sum_len >= overflow_units_count()` already — so bail out
-        // and force a restart rather than corrupt it. Root and non-root
-        // `mufasa` share this same fixed-size-array capacity constraint
-        // identically; `split_root`/`merge_root` don't need the same guard
-        // because they only ever push into a *freshly allocated* page,
-        // never one that could have already absorbed an earlier round.
+        // will correctly detect — so bail out and force a restart rather
+        // than corrupt it. Root and non-root `mufasa` share this same
+        // fixed-size-array capacity constraint identically; `split_root`/
+        // `merge_root` don't need the same guard because they only ever
+        // push into a *freshly allocated* page, never one that could have
+        // already absorbed an earlier round.
         //
         // This was written and documented but left disabled — confirmed via
         // `generate` on a large population: `rand_query`'s per-level
@@ -317,17 +346,32 @@ impl<const FAN_OUT: usize,
         // `push_uncommitted`'s `index == FAN_OUT` bounds panic.
         //
         // Must be the narrow "is there literally no room for 2 more
-        // entries" check (`sum_len`, not the full `unsafe_degree()`) —
-        // `unsafe_degree().is_unsafe()` also trips on plain `ActiveUnderflow`
-        // (`active <= one_d`, ~20% of capacity), which is the *normal*,
-        // expected state for almost every internal page in a small/young
-        // tree (plenty of physical room, just not many children yet) — using
-        // the broad check here permanently blocks every split attempt on
-        // such a `mufasa` (its "too few children" never resolves on its own,
-        // and nothing above it can fix it either, since the ancestor hits
-        // the identical false trip), a total deadlock confirmed via
-        // `generate` stalling at ~234 keys, essentially immediately.
-        if mufasa.is_overflow() { // is_overflow in re-repeated corrections
+        // entries" check (`lacks_room_for_split_entries`, not the full
+        // `unsafe_degree()`) — `unsafe_degree().is_unsafe()` also trips on
+        // plain `ActiveUnderflow` (`active <= one_d`, ~20% of capacity),
+        // which is the *normal*, expected state for almost every internal
+        // page in a small/young tree (plenty of physical room, just not
+        // many children yet) — using the broad check here permanently
+        // blocks every split attempt on such a `mufasa` (its "too few
+        // children" never resolves on its own, and nothing above it can fix
+        // it either, since the ancestor hits the identical false trip), a
+        // total deadlock confirmed via `generate` stalling at ~234 keys,
+        // essentially immediately.
+        //
+        // Originally written as `mufasa.is_overflow()` — *not* equivalent to
+        // `lacks_room_for_split_entries()` despite looking narrower than
+        // `unsafe_degree()`: `is_overflow()` goes through the exact same
+        // `ActiveUnderflow`-reclassification `unsafe_degree()` does (see
+        // that method's doc), so it silently returned `false` — letting
+        // this guard through — for a `mufasa` that's mostly dead-but-still-
+        // protected entries with a low active count, even at raw sum_len
+        // already at/past capacity. Confirmed as the actual mechanism behind
+        // a real crash under sustained TPC-C load (long-held reader
+        // snapshots keep exactly this many dead-but-protected entries
+        // around): `push_uncommitted` then writes past `FAN_OUT` for real,
+        // corrupting `pointer_region`'s adjacent memory with no bounds check
+        // ever tripping first.
+        if mufasa.lacks_room_for_split_entries() {
             return Err(());
         }
 
@@ -459,16 +503,17 @@ impl<const FAN_OUT: usize,
         }
 
         // See `on_overflow_node`'s matching comment (including why this was
-        // written but left disabled, why it must be the narrow `sum_len`
-        // capacity check and not the broad `unsafe_degree().is_unsafe()`,
-        // and how `generate` reproduces each failure mode in turn): a merge
-        // can need up to 2 fresh entries (`MergeResult::KeySplit`), and
-        // `mufasa` gets the same "already a Writer from an earlier round in
-        // this traversal, no re-validated capacity" exposure. Checked
-        // conservatively for both outcomes before doing any of the
-        // (otherwise wasted) work below, since which one `merge()` produces
-        // isn't known yet.
-        if mufasa.is_overflow() {
+        // written but left disabled, why it must be the narrow
+        // `lacks_room_for_split_entries()` capacity check and not the broad
+        // `unsafe_degree().is_unsafe()`, why plain `is_overflow()` was *not*
+        // equivalent to that narrow check either, and how `generate`
+        // reproduces each failure mode in turn): a merge can need up to 2
+        // fresh entries (`MergeResult::KeySplit`), and `mufasa` gets the
+        // same "already a Writer from an earlier round in this traversal,
+        // no re-validated capacity" exposure. Checked conservatively for
+        // both outcomes before doing any of the (otherwise wasted) work
+        // below, since which one `merge()` produces isn't known yet.
+        if mufasa.lacks_room_for_split_entries() {
             return Err(());
         }
 
