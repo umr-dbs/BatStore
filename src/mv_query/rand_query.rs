@@ -123,25 +123,15 @@ impl<const FAN_OUT: usize,
                     match next_curr_guard.deref().unsafe_degree() {
                         BlockUnsafeDegree::Overflow
                         if curr_guard.upgrade_write_lock()
-                        => match self.on_overflow_node(curr_guard, next_curr_guard, index) {
-                            Ok(guard) => curr_guard = guard,
-                            Err(..) => {
-                                if VERBOSE {
-                                    println!("traversal_write_internal_rand: on_overflow_node Err()");
-                                }
-                                return Err(attempts + 1)
-                            }
+                        => {
+                            self.on_overflow_node(curr_guard, next_curr_guard, index);
+                            return Err(attempts + 1);
                         },
                         BlockUnsafeDegree::ActiveUnderflow
                         if curr_guard.upgrade_write_lock()
-                        => match self.on_underflow_node(curr_guard, next_curr_guard, index) {
-                            Ok(guard) => curr_guard = guard,
-                            Err(..) => {
-                                if VERBOSE {
-                                    println!("traversal_write_internal_olc: on_underflow_node Err()");
-                                }
-                                return Err(attempts + 1)
-                            }
+                        => {
+                            self.on_underflow_node(curr_guard, next_curr_guard, index);
+                            return Err(attempts + 1);
                         },
                         BlockUnsafeDegree::Ok => curr_guard = next_curr_guard,
                         _ => return Err(attempts + 1)
