@@ -234,6 +234,60 @@ fn explicit_abort_after_delete_conflict_reverts_earlier_writes() {
     check.commit();
 }
 
+/// A transaction that writes the *same* key more than once (e.g.
+/// `mv_bench::tpcc_txn::new_order` pricing two order-lines for the same
+/// item, both landing on the same Stock key) before losing a conflict on a
+/// later, different key must still fully unwind - every physical version it
+/// wrote for that key reverted, all the way back to the pre-transaction
+/// value - not just the last one. `written` records one entry per physical
+/// write, so `abort`'s reverse walk calls `LeafPage::abort_write` twice for
+/// key 1 here; each call must land on progressively older, still-valid
+/// self-written versions rather than repeatedly re-matching the same
+/// (already-invalidated) newest one.
+#[test]
+fn explicit_abort_reverts_every_self_written_version_of_a_repeatedly_written_key() {
+    let db = new_db();
+    let t = db.create_table("t").table_id().unwrap();
+
+    let setup = DbTransaction::begin(&db);
+    assert!(matches!(setup.insert(t, 1, 1), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(setup.insert(t, 2, 2), CRUDOperationResult::Inserted(_)));
+    setup.commit();
+
+    let tx1 = DbTransaction::begin(&db);
+    // Two writes to the *same* key within one transaction - both stamped
+    // identically (one `TxStamp` per transaction, not per write).
+    assert!(matches!(tx1.update(t, 1, 111), CRUDOperationResult::Updated(_)));
+    assert!(matches!(tx1.update(t, 1, 222), CRUDOperationResult::Updated(_)));
+
+    // A concurrent transaction updates and commits key 2 after tx1's
+    // snapshot was taken, so tx1's own later update of key 2 must conflict.
+    let db_ref = &db;
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let tx2 = DbTransaction::begin(db_ref);
+            assert!(matches!(tx2.update(t, 2, 999), CRUDOperationResult::Updated(_)));
+            tx2.commit();
+        }).join().unwrap();
+    });
+
+    assert!(matches!(tx1.update(t, 2, 333), CRUDOperationResult::Conflict));
+    assert!(tx1.abort());
+
+    // Same OS thread as `tx1` (this test never spawned another one for it),
+    // so `WorkerId` caching (`mv_sync::worker`) hands this the very same
+    // worker id - exactly the "same-worker fast path never re-checks the
+    // commit log" case that would let a leftover un-invalidated self-write
+    // stay visible forever if `abort_write` only unwound the last of two
+    // self-written versions instead of all of them.
+    let check = DbTransaction::begin(&db);
+    match check.point(t, 1) {
+        CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 1 => {}
+        other => panic!("key 1 must be reverted all the way back to its pre-transaction value (1), got {other}"),
+    }
+    check.commit();
+}
+
 /// An explicitly aborted write must not resurface after a crash + recovery
 /// — same guarantee `aborted_transaction_write_does_not_resurface_after_
 /// recovery` (`query_transaction_tests.rs`) proves for the implicit-`Drop`

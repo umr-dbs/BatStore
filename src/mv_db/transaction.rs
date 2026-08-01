@@ -24,11 +24,15 @@
 //! already applied, automatically, in `Drop` — see `MVBTSt::abort_write`.
 //! Each write's *key* (paired with the table it was written on) is
 //! remembered (not a full undo log: replaying it back to its live-tree
-//! state is enough, since every current caller writes a given key at most
-//! once per transaction — a transaction that wrote the same key more than
-//! once would still abort safely, just without replaying its intermediate
-//! states one at a time). Reversal marks the record invalid (or undeletes
-//! it, for a plain `Delete`) rather than physically removing it — see
+//! state is enough) — including a key written more than once by the same
+//! transaction (e.g. `mv_bench::tpcc_txn::new_order` pricing two order-lines
+//! for the same item): `written` gets one entry per physical write, and
+//! `abort`'s reverse-order walk unwinds them one at a time, each call
+//! landing on the next-older still-valid version (`LeafPage::abort_write`
+//! skips already-invalidated entries for exactly this reason), so all of
+//! them come back out in order, same as a real undo log would. Reversal
+//! marks the record invalid (or undeletes it, for a plain `Delete`) rather
+//! than physically removing it — see
 //! `TxStamp::is_invalid`'s doc — and is purely in-memory: since this
 //! transaction never commits, no `wal_log_commit` marker is ever logged for
 //! it, so replay skips its writes regardless of whether/when a crash
