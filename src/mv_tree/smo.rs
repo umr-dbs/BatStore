@@ -1141,7 +1141,33 @@ impl<const FAN_OUT: usize,
 
         let capacity = if is_leaf { NUM_RECORDS } else { FAN_OUT };
 
-        if active_block as usize >= block.filling_80_percent() || survivor_count > capacity {
+        // `>=`, not `>`: this decision exists *because* some pending write
+        // needs room in whatever comes out of it (that's why `split()` was
+        // called at all - see `on_overflow_node`/`split_root`, its only
+        // callers) - so a `VERSION_SPLIT` is only a real fix when it leaves
+        // at least one free slot for that write, not merely when survivors
+        // don't yet outnumber capacity. At `survivor_count == capacity`
+        // exactly, the old `>` comparison chose `VERSION_SPLIT` anyway,
+        // `bulk_push`ing every survivor into a fresh page that came out
+        // already 100% full - the pending write then had nowhere to go.
+        // For a root-is-leaf tree (no parent to redo the overflow check on
+        // the fresh result - see `retrieve_root_write_internal_olc`, whose
+        // `Overflow` arm returns `split_root`'s result directly) that write
+        // immediately panicked (`LeafPage::push_uncommitted`'s bounds
+        // check); for a non-root leaf (whose parent *does* recheck the
+        // fresh child before writing to it) it instead re-entered this same
+        // decision with the identical, still-fully-protected survivor set,
+        // repeating the exact same no-op `VERSION_SPLIT` forever. Neither
+        // failure needed a repeated or "hot" key - confirmed via a repro
+        // where every survivor was a distinct key, piled up simply because
+        // one transaction happened to be slower to commit than several
+        // others sharing its page (see `tests/db_transaction_abort_tests.rs`
+        // and the git history around this change for the traced repro).
+        // `>=` instead reserves that one slot: at the boundary, `KEY_SPLIT`
+        // now runs instead, which always produces two pages with real free
+        // space (short of the separate, still-open same-key-tearing
+        // limitation this doesn't touch - see `nearest_key_boundary`'s doc).
+        if active_block as usize >= block.filling_80_percent() || survivor_count >= capacity {
             // KEY_SPLIT
             match is_leaf {
                 true => unsafe { // LeafPage
