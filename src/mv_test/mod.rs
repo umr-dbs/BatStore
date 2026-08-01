@@ -1429,3 +1429,15 @@ mod bench_tpch_correctness_tests;
 #[cfg(test)]
 #[path = "../../tests/bench_ycsb_correctness_tests.rs"]
 mod bench_ycsb_correctness_tests;
+#[cfg(test)]
+#[path = "../../tests/bench_tpcc_stress_tests.rs"]
+mod bench_tpcc_stress_tests;
+#[cfg(test)]
+#[path = "../../tests/bench_ycsb_stress_tests.rs"]
+mod bench_ycsb_stress_tests;
+#[cfg(test)]
+#[path = "../../tests/bench_tpch_stress_tests.rs"]
+mod bench_tpch_stress_tests;
+#[cfg(test)]
+#[path = "../../tests/bench_wal_recovery_stress_tests.rs"]
+mod bench_wal_recovery_stress_tests;

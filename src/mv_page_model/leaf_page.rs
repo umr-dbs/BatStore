@@ -383,25 +383,40 @@ impl<const NUM_RECORDS: usize,
     }
 
     /// Live path only: decides which of `apply_invalidate`/`apply_undelete`
-    /// this abort needs, by checking whether the *newest* entry for `key`
-    /// was written by `my_stamp` (an `Insert`/`Update` — invalidate it) or
-    /// not (a plain `Delete` of a pre-existing record — just undelete it).
-    /// `NotFound` if there's no entry for `key` at all (defensive — a
-    /// transaction only ever calls this for a key it itself wrote).
+    /// this abort needs, by checking whether the *newest not-yet-invalidated*
+    /// entry for `key` was written by `my_stamp` (an `Insert`/`Update` —
+    /// invalidate it) or not (a plain `Delete` of a pre-existing record —
+    /// just undelete it). `NotFound` if there's no such entry for `key` at
+    /// all (defensive — a transaction only ever calls this for a key it
+    /// itself wrote).
     ///
-    /// Safe to call twice for the same key (e.g. a transaction that wrote it
-    /// more than once, ending up in this same worker's write set twice):
-    /// the second call's stamp-equality check compares raw bits, which no
-    /// longer match once the first call's `apply_invalidate`/`apply_undelete`
-    /// changed the entry (invalidating sets a bit; undeleting on a *plain*
-    /// delete leaves no further `Delete`d entry to find under the same
-    /// stamp), so it correctly falls through to a no-op `NotFound` rather
-    /// than double-applying anything.
+    /// Must skip already-invalidated entries in the lookup (mirrors
+    /// `update`/`delete`'s own `!insertion_stamp().is_invalid()` filter):
+    /// safe to call more than once for the same key — a transaction that
+    /// wrote it more than once (e.g. `mv_bench::tpcc_txn::new_order` pricing
+    /// two order-lines for the same item, both landing on the same Stock
+    /// key) ends up in this same worker's write set once per physical
+    /// version, all stamped identically (one `TxStamp` per transaction, not
+    /// per write). `abort`'s reverse-order walk then calls this once per
+    /// occurrence; without the filter, every call after the first would
+    /// re-find the very same (already-invalidated) newest entry — whose
+    /// stamp still reads as "mine" even once invalid — and re-invalidate an
+    /// already-dead entry as a no-op, leaving every *older* self-written
+    /// version (and, via `apply_invalidate`'s predecessor-undelete, the
+    /// true pre-transaction record) never reverted at all: a stale
+    /// self-write left permanently live and visible to this same worker's
+    /// own future transactions (`visibility::is_visible`'s same-worker fast
+    /// path never re-checks the commit log), corrupting every later read
+    /// through this worker. Skipping already-invalidated entries here
+    /// instead makes each successive call land on the next-older
+    /// still-valid self-written version, so a transaction that wrote a key
+    /// N times gets all N versions unwound one at a time, in order,
+    /// same as a real undo log would.
     #[inline]
     pub(crate) fn abort_write(&mut self, key: Key, my_stamp: TxStamp) -> AbortOutcome {
         let newest_is_mine = self.as_records()
             .iter()
-            .rfind(|r| r.key == key)
+            .rfind(|r| r.key == key && !r.version().insertion_stamp().is_invalid())
             .map(|r| r.version().insertion_stamp() == my_stamp);
 
         match newest_is_mine {
@@ -455,10 +470,19 @@ impl<const NUM_RECORDS: usize,
     /// before invalidating it (see `mv_wal::recovery`).
     #[inline]
     pub(crate) fn apply_invalidate(&mut self, key: Key) {
+        // Must skip already-invalid entries here too (`is_live_lineage`,
+        // same filter `abort_write`'s own lookup uses): a key written more
+        // than once by the same (now-aborting) transaction has more than
+        // one physical entry that could match `key`, and a raw `r.key ==
+        // key` rfind always lands on the physically newest one regardless
+        // of whether an earlier call already invalidated it - which would
+        // just re-invalidate that same dead entry over and over instead of
+        // reaching the next-older still-valid self-written version each
+        // call is actually meant to unwind (see `abort_write`'s doc).
         let (stamp, was_live) = match self
             .as_records_mut()
             .iter_mut()
-            .rfind(|r| r.key == key)
+            .rfind(|r| Self::is_live_lineage(r, key))
         {
             Some(record) => {
                 let stamp = record.version().insertion_stamp();
