@@ -259,6 +259,37 @@ impl<
                         = TxStamp::new(self.worker_id, self.ts_start);
 
                     tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
+
+                    // Self-overwrite fast path: the live record is already
+                    // *this exact transaction's own* write (same worker,
+                    // same `ts_start` — one `TxStamp` per transaction, not
+                    // per write), e.g. `mv_bench::tpcc_txn::new_order`
+                    // pricing two order-lines for the same item and writing
+                    // the same Stock key twice. Nobody but this transaction
+                    // can ever see an uncommitted write (visibility requires
+                    // either being this same worker, or finding the stamp in
+                    // the commit log — neither applies to anyone else here),
+                    // so there is no live/possible reader relying on this
+                    // record's *current* payload the way there would be for
+                    // an already-committed predecessor — replacing it in
+                    // place is unconditionally sound. Skips minting a new
+                    // physical version entirely: a busy transaction that
+                    // writes one key N times now leaves exactly one extra
+                    // physical entry behind instead of N, which is what was
+                    // piling up enough same-key, still-open-transaction-
+                    // protected garbage (`mv_tree::smo::record_survives_gc`)
+                    // to occasionally force a same-key leaf split (see
+                    // `bench_tpcc_stress_tests.rs`'s doc on that limitation).
+                    // No new `written` entry needed — the one pushed by
+                    // whichever earlier write in this transaction created
+                    // this record already covers it, and `abort_write` only
+                    // ever needs to unwind one physical version per key here
+                    // now.
+                    if record.version.insertion_stamp() == stamp {
+                        record.set_payload(payload);
+                        return CRUDOperationResult::Updated(stamp.ts_start());
+                    }
+
                     if !record.version.delete(stamp) {
                         return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
                     }
