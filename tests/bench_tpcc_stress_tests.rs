@@ -35,16 +35,20 @@ use crate::mv_root::index_root::RootIndexType;
 /// same-district counter contention both actually happen), still small
 /// enough that population is instant and every table scan below stays cheap.
 ///
-/// `num_items` deliberately isn't tiny: a too-small item catalog makes it
-/// likely that a single New-Order transaction's own up-to-15 order-lines
-/// repeat the same item several times, which can pile up enough of that one
-/// transaction's own (not-yet-committed, so `record_survives_gc`-protected)
-/// self-written versions of one Stock key to overflow a single leaf page —
-/// a real, pre-existing structural limit (a same-key leaf split can't
-/// safely tear one key's version chain across two sibling leaves; see
-/// `mv_tree::smo::nearest_key_boundary`'s doc) that's out of scope to fix
-/// here and that no realistic TPC-C item catalog (the spec's own 100,000)
-/// ever comes close to triggering.
+/// `num_items` deliberately isn't tiny: a too-small item catalog makes some
+/// Stock rows disproportionately popular, so enough *different*, separately
+/// committed New-Order transactions land on the exact same Stock key that
+/// its own version chain alone can dominate - or entirely fill - a leaf
+/// page. Two narrower contributors to this same class of pressure are
+/// already fixed (`DbTransaction::update`'s same-transaction self-overwrite
+/// fast path, and a `mv_tree::smo::split` off-by-one that used to demand a
+/// free slot to remain a hot key at all - see `leaf_split_off_by_one_
+/// regression_tests.rs`), but a page whose survivors are genuinely *all*
+/// versions of one key still has no valid boundary for `KEY_SPLIT` to
+/// divide by (`mv_tree::smo::nearest_key_boundary`'s doc: "a pre-existing
+/// structural limit this doesn't attempt to fix"), and no realistic TPC-C
+/// item catalog (the spec's own 100,000) ever comes close to concentrating
+/// enough traffic on one key to hit it.
 fn stress_cfg() -> TpccConfig {
     TpccConfig {
         num_warehouses: 4,
