@@ -1441,3 +1441,6 @@ mod bench_tpch_stress_tests;
 #[cfg(test)]
 #[path = "../../tests/bench_wal_recovery_stress_tests.rs"]
 mod bench_wal_recovery_stress_tests;
+#[cfg(test)]
+#[path = "../../tests/known_issue_hot_key_version_tearing_repro.rs"]
+mod known_issue_hot_key_version_tearing_repro;
