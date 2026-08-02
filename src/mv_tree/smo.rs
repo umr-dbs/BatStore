@@ -816,8 +816,8 @@ impl<const FAN_OUT: usize,
 
             let chosen = match (left, right) {
                 (Some(l), Some(r)) => {
-                    let (l_active, l_dead) = all_candidates[l].1.borrow_read().deref().active_dead_count();
-                    let (r_active, r_dead) = all_candidates[r].1.borrow_read().deref().active_dead_count();
+                    let (l_active, l_dead) = all_candidates[l].1.active_dead_count();
+                    let (r_active, r_dead) = all_candidates[r].1.active_dead_count();
                     if l_active as usize + l_dead as usize <= r_active as usize + r_dead as usize { l } else { r }
                 }
                 (Some(l), None) => l,
@@ -828,22 +828,10 @@ impl<const FAN_OUT: usize,
             Ok(all_candidates.remove(chosen))
         };
 
-        let (candidate_index,
-            // candidate_guard,
-            candidate_block,
-            // candidate_active_count,
-            candidate_fence
-        ) = match compute_candidate() {
-            Ok((index,
-                   // mut candidate_guard,
-                   block,
-                   // cac,
-                   cf)
-            ) => (index, block, cf),
-            _ => return MergeResult::Error
+        let (candidate_index, candidate_block, candidate_fence) = match compute_candidate() {
+            Ok(triple) => triple,
+            Err(()) => return MergeResult::Error,
         };
-
-        all_candidates.clear();
 
         // `try_retire()`, not `upgrade_write_lock()`: `candidate` is never
         // mutated in place below (only read, to build `combined_block`/the
@@ -856,10 +844,25 @@ impl<const FAN_OUT: usize,
         // function can still fail above (`compute_candidate` finding
         // nothing) — `simba`'s exclusion has to stay reversible for that,
         // `candidate`'s doesn't once we're here.
+        //
+        // A failed retire (someone else concurrently retired, or is
+        // retiring, this exact candidate first) bails out to `Error` rather
+        // than immediately trying the next sibling in `all_candidates`:
+        // tried once (see git history), but retrying in a tight loop here
+        // has no backoff at all, unlike the caller's own retry path
+        // (`sched_yield`'s jittered backoff) - under real contention that
+        // spins fast enough to starve every thread racing on the same
+        // region instead of ever making progress, confirmed empirically as
+        // several `tree_wal_consistency_tests` cases hanging for 60+
+        // seconds. Bailing to `Error` costs a full traversal restart, but
+        // restarts here go through the same backoff the rest of the OLC
+        // retry machinery already relies on.
         let candidate_cell = match candidate_block.borrow_read().try_retire() {
             Ok(cell) => cell,
             Err(..) => return MergeResult::Error,
         };
+
+        all_candidates.clear();
 
         let (candidate_active_count, _candidate_dead_count) = candidate_cell
             .deref()
