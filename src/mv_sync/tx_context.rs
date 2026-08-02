@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
+use crossbeam_utils::CachePadded;
+
 use crate::mv_query::SnapShot;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::{AtomicVersion, Version};
@@ -75,7 +77,20 @@ pub(crate) struct TxContext {
     /// strictly-increasing clock, an outer (earlier, lower) registration's
     /// protection already covers everything any later, nested (higher) one
     /// could need, so nested calls have nothing to publish.
-    live_tx: Vec<AtomicVersion>,
+    /// `CachePadded`: without it, up to 8 adjacent workers' `AtomicU64`
+    /// slots share one 64-byte cache line, so one worker's `Release` store
+    /// here (every `on_tx_start`/`on_tx_completed`) invalidates the line for
+    /// every *other* worker whose slot happens to land in it too — silent
+    /// false sharing that directly contradicts this field's own "no shared
+    /// cache line with any other worker's slot" design intent below. Doesn't
+    /// change behavior at all (`CachePadded<T>` derefs straight to `T`), only
+    /// each slot's physical placement — invisible at low thread counts (the
+    /// coherence traffic is real but small next to everything else going on)
+    /// and, going by this exact false-sharing shape, plausibly significant
+    /// at the 64-core/128-thread scale this project's benchmarks target,
+    /// where cross-CCD cache-coherence traffic costs considerably more than
+    /// on a small single-CCX box.
+    live_tx: Vec<CachePadded<AtomicVersion>>,
     /// Reentrancy depth per worker for `on_tx_start`/`on_tx_completed`, same
     /// indexing as `live_tx` — see that field's doc for why nesting exists.
     /// `Relaxed` throughout: each slot is written only by the one worker it
@@ -86,7 +101,9 @@ pub(crate) struct TxContext {
     /// assert this stays balanced (never negative, never re-publishes over
     /// an already-live outer value) — genuine caller bugs (unpaired calls),
     /// not something real callers are expected to trigger.
-    live_tx_depth: Vec<AtomicU32>,
+    ///
+    /// `CachePadded` for the same reason as `live_tx` — see that field's doc.
+    live_tx_depth: Vec<CachePadded<AtomicU32>>,
     /// One slot per worker (`WorkerId`-indexed, sized to `max_workers` like
     /// `commit_logs`): each worker publishes its own conservative lower bound
     /// here — `global_clock.current_version()` read just *before* drawing
@@ -127,7 +144,11 @@ pub(crate) struct TxContext {
     /// lower it — the scan doesn't need every slot to be simultaneously
     /// consistent with every other, each is independently safe to read on
     /// its own.
-    in_flight_bound: Vec<AtomicVersion>,
+    ///
+    /// `CachePadded` for the same false-sharing reason as `live_tx` — see
+    /// that field's doc (this field's own "no shared cache line" claim above
+    /// is exactly what the padding actually delivers on).
+    in_flight_bound: Vec<CachePadded<AtomicVersion>>,
     /// Own copy, independent of any single table's
     /// `TrackerHandleSt::block_reclaim_enabled` (which still gates that
     /// table's own dead-page bookkeeping/reuse) — this one gates whether
@@ -147,9 +168,9 @@ impl TxContext {
             global_clock: GlobalClock::new(),
             commit_logs: (0..max_workers).map(|_| CommitLog::new()).collect(),
             worker_registry: WorkerRegistry::new(max_workers),
-            live_tx: (0..max_workers).map(|_| AtomicVersion::new(NOT_IN_FLIGHT)).collect(),
-            live_tx_depth: (0..max_workers).map(|_| AtomicU32::new(0)).collect(),
-            in_flight_bound: (0..max_workers).map(|_| AtomicVersion::new(NOT_IN_FLIGHT)).collect(),
+            live_tx: (0..max_workers).map(|_| CachePadded::new(AtomicVersion::new(NOT_IN_FLIGHT))).collect(),
+            live_tx_depth: (0..max_workers).map(|_| CachePadded::new(AtomicU32::new(0))).collect(),
+            in_flight_bound: (0..max_workers).map(|_| CachePadded::new(AtomicVersion::new(NOT_IN_FLIGHT))).collect(),
             block_reclaim_enabled: AtomicBool::new(false),
             freshest_si_truncate_commit_log: AtomicBool::new(true),
         }
