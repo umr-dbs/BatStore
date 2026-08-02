@@ -11,7 +11,6 @@
 //! distributions (% remote, % rollback, % by-name), and atomicity are
 //! faithful to the spec.
 
-use rand::prelude::*;
 use std::fmt::Display;
 
 use crate::mv_bench::tpcc_random::*;
@@ -150,7 +149,7 @@ macro_rules! wtry {
 /// Callers only invoke this when `cfg.num_warehouses > 1`.
 fn pick_remote_warehouse(cfg: &TpccConfig, home: u32) -> u32 {
     loop {
-        let w = rand::rng().random_range(1..=cfg.num_warehouses);
+        let w = with_fast_rng(|rng| rng.u32(1..=cfg.num_warehouses));
         if w != home {
             return w;
         }
@@ -172,13 +171,13 @@ fn pick_middle_by_name(matches: &[RecordPointResult<TpccKey, TpccRow>]) -> u32 {
 // ---------------------------------------------------------------------
 
 pub fn new_order(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remote: bool) -> TxnOutcome {
-    let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
+    let d_id = with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse));
     let c_id = nu_rand_customer_id(cfg.customers_per_district);
-    let ol_cnt = rand::rng().random_range(5..=15u8);
+    let ol_cnt = with_fast_rng(|rng| rng.u8(5..=15));
     // Spec: ~1% of New-Order transactions roll back on an intentionally
     // invalid item id, chosen among that transaction's own order lines.
-    let invalid_line = if rand::rng().random_range(1..=100) == 1 {
-        Some(rand::rng().random_range(0..ol_cnt))
+    let invalid_line = if with_fast_rng(|rng| rng.u32(1..=100)) == 1 {
+        Some(with_fast_rng(|rng| rng.u8(0..ol_cnt)))
     } else {
         None
     };
@@ -186,9 +185,9 @@ pub fn new_order(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remo
     struct Line { i_id: u32, supply_w_id: u32, qty: u8 }
     let lines: Vec<Line> = (0..ol_cnt).map(|i| {
         let i_id = if Some(i) == invalid_line { cfg.num_items + 1 } else { nu_rand_item_id(cfg.num_items) };
-        let remote = allow_remote && cfg.num_warehouses > 1 && rand::rng().random_range(1..=100) == 1;
+        let remote = allow_remote && cfg.num_warehouses > 1 && with_fast_rng(|rng| rng.u32(1..=100)) == 1;
         let supply_w_id = if remote { pick_remote_warehouse(cfg, home_w_id) } else { home_w_id };
-        let qty = rand::rng().random_range(1..=10u8);
+        let qty = with_fast_rng(|rng| rng.u8(1..=10));
         Line { i_id, supply_w_id, qty }
     }).collect();
     let all_local = lines.iter().all(|l| l.supply_w_id == home_w_id);
@@ -287,16 +286,16 @@ pub fn new_order(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remo
 // ---------------------------------------------------------------------
 
 pub fn payment(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remote: bool, history_seq: &std::sync::atomic::AtomicU64) -> TxnOutcome {
-    let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
-    let amount = rand::rng().random_range(100..=500_000) as f64 / 100.0;
+    let d_id = with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse));
+    let amount = with_fast_rng(|rng| rng.u32(100..=500_000)) as f64 / 100.0;
 
-    let remote = allow_remote && cfg.num_warehouses > 1 && rand::rng().random_range(1..=100) <= 15;
+    let remote = allow_remote && cfg.num_warehouses > 1 && with_fast_rng(|rng| rng.u32(1..=100)) <= 15;
     let (c_w_id, c_d_id) = if remote {
-        (pick_remote_warehouse(cfg, home_w_id), rand::rng().random_range(1..=cfg.districts_per_warehouse))
+        (pick_remote_warehouse(cfg, home_w_id), with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse)))
     } else {
         (home_w_id, d_id)
     };
-    let by_last_name = rand::rng().random_range(1..=100) <= 60;
+    let by_last_name = with_fast_rng(|rng| rng.u32(1..=100)) <= 60;
 
     let tx = TpccTxn::begin(db);
 
@@ -364,8 +363,8 @@ pub fn payment(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remote
 // ---------------------------------------------------------------------
 
 pub fn order_status(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32) -> TxnOutcome {
-    let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
-    let by_last_name = rand::rng().random_range(1..=100) <= 60;
+    let d_id = with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse));
+    let by_last_name = with_fast_rng(|rng| rng.u32(1..=100)) <= 60;
 
     let tx = TpccTxn::begin(db);
 
@@ -413,7 +412,7 @@ pub struct DeliveryOutcome {
 }
 
 pub fn delivery(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32) -> DeliveryOutcome {
-    let carrier_id = rand::rng().random_range(1..=10u32);
+    let carrier_id = with_fast_rng(|rng| rng.u32(1..=10));
     let mut out = DeliveryOutcome { delivered_districts: 0, empty_districts: 0, conflicts: 0 };
 
     for d_id in 1..=cfg.districts_per_warehouse {
@@ -496,7 +495,7 @@ fn deliver_one_district(db: &TpccDatabase, w_id: u32, d_id: u8, carrier_id: u32)
 // ---------------------------------------------------------------------
 
 pub fn stock_level(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, threshold: i32) -> TxnOutcome {
-    let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
+    let d_id = with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse));
     let tx = TpccTxn::begin(db);
 
     let Some(district) = one(tx.point(Table::District, k_district(home_w_id, d_id))) else {

@@ -7,7 +7,6 @@
 //! (nothing reads the data set until loading is done) nor representative of
 //! anything the paper's methodology measures.
 
-use rand::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use crate::mv_bench::tpcc_random::*;
@@ -72,9 +71,9 @@ pub fn populate_suppliers(db: &TpccDatabase, cfg: &TpccConfig) {
         insert(&db.tree_for(Table::Supplier), k_supplier(su_id), TpccRow::Supplier(Box::new(Supplier {
             s_name: format!("Supplier#{:09}", su_id),
             s_address: rnd_astring(10, 40),
-            s_nationkey: rand::rng().random_range(0..NATIONS.len() as u8),
+            s_nationkey: with_fast_rng(|rng| rng.u8(0..NATIONS.len() as u8)),
             s_phone: rnd_phone(),
-            s_acctbal: rand::rng().random_range(-99999..=999999) as f64 / 100.0,
+            s_acctbal: with_fast_rng(|rng| rng.i32(-99999..=999999)) as f64 / 100.0,
             s_comment: rnd_astring(20, 100),
         })));
     }
@@ -84,9 +83,9 @@ pub fn populate_suppliers(db: &TpccDatabase, cfg: &TpccConfig) {
 pub fn populate_items(db: &TpccDatabase, cfg: &TpccConfig) {
     for i_id in 1..=cfg.num_items {
         insert(&db.tree_for(Table::Item), k_item(i_id), TpccRow::Item(Box::new(Item {
-            i_im_id: rand::rng().random_range(1..=10_000),
+            i_im_id: with_fast_rng(|rng| rng.u32(1..=10_000)),
             i_name: rnd_astring(14, 24),
-            i_price: rand::rng().random_range(100..=10_000) as f64 / 100.0,
+            i_price: with_fast_rng(|rng| rng.i32(100..=10_000)) as f64 / 100.0,
             i_data: rnd_original_data(26, 50),
         })));
     }
@@ -104,7 +103,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
         w_city: rnd_astring(10, 20),
         w_state: rnd_astring(2, 2),
         w_zip: rnd_zip(),
-        w_tax: rand::rng().random_range(0..=2000) as f64 / 10000.0,
+        w_tax: with_fast_rng(|rng| rng.i32(0..=2000)) as f64 / 10000.0,
         w_ytd: 300_000.0,
     })));
 
@@ -116,7 +115,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
             d_city: rnd_astring(10, 20),
             d_state: rnd_astring(2, 2),
             d_zip: rnd_zip(),
-            d_tax: rand::rng().random_range(0..=2000) as f64 / 10000.0,
+            d_tax: with_fast_rng(|rng| rng.i32(0..=2000)) as f64 / 10000.0,
             d_ytd: 30_000.0,
             d_next_o_id: cfg.initial_orders_per_district + 1,
         })));
@@ -127,7 +126,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
             let c_last = gen_last_name(last_code);
             let c_first = rnd_astring(8, 16);
             let first_code_v = first_code(&c_first);
-            let c_credit_bad = rand::rng().random_range(0..10) == 0;
+            let c_credit_bad = with_fast_rng(|rng| rng.u32(0..10)) == 0;
 
             insert(&db.tree_for(Table::Customer), k_customer(w_id, d_id, c_id), TpccRow::Customer(Box::new(Customer {
                 c_first,
@@ -142,7 +141,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
                 c_since: now_millis(),
                 c_credit_bad,
                 c_credit_lim: 50_000.0,
-                c_discount: rand::rng().random_range(0..=5000) as f64 / 10000.0,
+                c_discount: with_fast_rng(|rng| rng.i32(0..=5000)) as f64 / 10000.0,
                 c_balance: -10.0,
                 c_ytd_payment: 10.0,
                 c_payment_cnt: 1,
@@ -167,16 +166,16 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
         // Order ids are assigned as a random permutation of customer ids,
         // per spec §4.3.3.1.
         let mut c_ids: Vec<u32> = (1..=cfg.customers_per_district).collect();
-        c_ids.shuffle(&mut rand::rng());
+        with_fast_rng(|rng| rng.shuffle(&mut c_ids));
 
         let new_order_floor = cfg.initial_orders_per_district.saturating_sub(cfg.initial_new_orders);
 
         for o_ord in 0..cfg.initial_orders_per_district {
             let o_id = o_ord + 1;
             let c_id = c_ids[o_ord as usize];
-            let ol_cnt = rand::rng().random_range(5..=15u8);
+            let ol_cnt = with_fast_rng(|rng| rng.u8(5..=15));
             let is_new = o_id > new_order_floor;
-            let o_carrier_id = if is_new { None } else { Some(rand::rng().random_range(1..=10u32)) };
+            let o_carrier_id = if is_new { None } else { Some(with_fast_rng(|rng| rng.u32(1..=10))) };
 
             insert(&db.tree_for(Table::Orders), k_order(w_id, d_id, o_id), TpccRow::Order(Box::new(Order {
                 o_c_id: c_id,
@@ -188,9 +187,9 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
             insert(&db.tree_for(Table::CustLastOrder), k_cust_last_order(w_id, d_id, c_id), TpccRow::CustLastOrder(o_id));
 
             for ol_number in 1..=ol_cnt {
-                let i_id = rand::rng().random_range(1..=cfg.num_items);
+                let i_id = with_fast_rng(|rng| rng.u32(1..=cfg.num_items));
                 let (ol_delivery_d, ol_amount) = if is_new {
-                    (None, rand::rng().random_range(100..=999_999) as f64 / 100.0)
+                    (None, with_fast_rng(|rng| rng.i32(100..=999_999)) as f64 / 100.0)
                 } else {
                     (Some(now_millis()), 0.0)
                 };
@@ -213,7 +212,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
 
     for i_id in 1..=cfg.num_items {
         insert(&db.tree_for(Table::Stock), k_stock(w_id, i_id), TpccRow::Stock(Box::new(Stock {
-            s_quantity: rand::rng().random_range(10..=100),
+            s_quantity: with_fast_rng(|rng| rng.i32(10..=100)),
             s_dist: std::array::from_fn(|_| rnd_astring(24, 24)),
             s_ytd: 0.0,
             s_order_cnt: 0,

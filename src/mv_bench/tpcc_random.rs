@@ -4,14 +4,36 @@
 //! per the spec's randomized-once-per-run procedure, which does not affect
 //! the shape of the workload).
 
-use rand::distr::Alphanumeric;
-use rand::prelude::*;
+use std::cell::RefCell;
+
+thread_local! {
+    // Plain `rand::rng()` (used throughout this module, `tpcc_txn.rs`, and
+    // `tpcc_load.rs` previously) is a cryptographically secure generator
+    // (ChaCha-backed) - overkill for load-generator/transaction-parameter
+    // data that never needs to be unpredictable, and expensive enough that
+    // it showed up as a double-digit percentage of whole-benchmark `perf`
+    // profiles (see `ycsb_random.rs`'s identical fix, which found the same
+    // thing for YCSB's key-picking - up to ~14% of all cycles there).
+    // `fastrand`'s `Rng` (WyRand) is seeded once per thread here, paying
+    // any setup cost exactly once, not once per op - every draw after that
+    // is a handful of integer ops, no block-cipher rounds.
+    static FAST_RNG: RefCell<fastrand::Rng> = RefCell::new(fastrand::Rng::new());
+}
+
+/// Thread-local fast (non-cryptographic) RNG for TPC-C benchmark data
+/// generation - see this module's doc for why not `rand::rng()`. Exposed
+/// (not just used internally) so `tpcc_txn.rs`/`tpcc_load.rs` can draw from
+/// the same thread-local instance for their own random transaction
+/// parameters/load data, for the same reason.
+#[inline]
+pub fn with_fast_rng<R>(f: impl FnOnce(&mut fastrand::Rng) -> R) -> R {
+    FAST_RNG.with(|rng| f(&mut rng.borrow_mut()))
+}
 
 /// NURand(A, x, y) = (((random(0,A) | random(x,y)) + C) % (y-x+1)) + x
 #[inline]
 pub fn nurand(a: u64, x: u64, y: u64, c: u64) -> u64 {
-    let r1 = rand::random_range(0..=a);
-    let r2 = rand::random_range(x..=y);
+    let (r1, r2) = with_fast_rng(|rng| (rng.u64(0..=a), rng.u64(x..=y)));
     (((r1 | r2) + c) % (y - x + 1)) + x
 }
 
@@ -81,14 +103,18 @@ pub fn first_code(s: &str) -> u16 {
 
 /// TPC-C a-string: random length in `[min, max]` of alphanumeric characters.
 pub fn rnd_astring(min: usize, max: usize) -> String {
-    let len = rand::rng().random_range(min..=max);
-    rand::rng().sample_iter(&Alphanumeric).take(len).map(char::from).collect()
+    with_fast_rng(|rng| {
+        let len = rng.usize(min..=max);
+        (0..len).map(|_| rng.alphanumeric()).collect()
+    })
 }
 
 /// TPC-C n-string: random length in `[min, max]` of decimal digits.
 pub fn rnd_nstring(min: usize, max: usize) -> String {
-    let len = rand::rng().random_range(min..=max);
-    (0..len).map(|_| char::from(b'0' + rand::rng().random_range(0..=9u8))).collect()
+    with_fast_rng(|rng| {
+        let len = rng.usize(min..=max);
+        (0..len).map(|_| rng.digit(10)).collect()
+    })
 }
 
 /// TPC-C "original data": an a-string in `[min, max]`, with a 1-in-10 chance
@@ -96,8 +122,8 @@ pub fn rnd_nstring(min: usize, max: usize) -> String {
 /// NewOrder's brand-generic marker checks for this substring).
 pub fn rnd_original_data(min: usize, max: usize) -> String {
     let mut s = rnd_astring(min, max);
-    if rand::rng().random_range(0..10) == 0 && s.len() >= 8 {
-        let pos = rand::rng().random_range(0..=(s.len() - 8));
+    if with_fast_rng(|rng| rng.u32(0..10)) == 0 && s.len() >= 8 {
+        let pos = with_fast_rng(|rng| rng.usize(0..=(s.len() - 8)));
         s.replace_range(pos..pos + 8, "ORIGINAL");
     }
     s
