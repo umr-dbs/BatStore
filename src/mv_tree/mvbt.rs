@@ -11,12 +11,28 @@ use crate::mv_root::index_root::{RootIndex, RootIndexType};
 use crate::mv_sync::tx_context::TxContext;
 use crate::mv_wal::writer::WalWriter;
 
-pub const FAN_OUT: usize        = 125;
 /// `RecordPoint<Key, Payload>` is 32B for `Key = Payload = u64` (`VersionInfo`
 /// packs down to 16B — see `mv_record_model::tx_stamp::TxStamp`'s doc), so
-/// 125 keeps the leaf's record array at the same ~4000B budget `FAN_OUT`'s
-/// internal-node arrays target.
-pub const NUM_RECORDS: usize    = 125;
+/// 123 keeps the leaf's record array at the same ~4000B budget `FAN_OUT`'s
+/// internal-node arrays target - and, unlike 125, lands the *actual*
+/// heap-allocated unit exactly on a 4096B page.
+///
+/// The real allocation is `OptCell<Block<..>>` (see `SmartCell`'s pointee),
+/// not `Block` alone: `OptCell` adds an 8B `cell_version` alongside the
+/// block, and `Block`'s own `Node` header rounds up to a 64B-aligned total
+/// (`#[repr(C, align(64))]`). At 125, `Block` itself already lands on
+/// exactly 4096B, leaving no room for that extra 8B without spilling into
+/// a second 64B slice - so `OptCell<Block>` actually came out to 4160B,
+/// which isn't a page-sized jemalloc size class either, so jemalloc rounds
+/// it up further and packs allocations with no page-alignment guarantee at
+/// all: confirmed empirically (real allocations) at only 16/64 (25%) landing
+/// page-aligned, each one otherwise wasting ~960B against jemalloc's actual
+/// size class and most straddling two physical pages. At 123, `Block` is
+/// 4032B, leaving exactly enough room for `OptCell`'s extra 8B (rounded to
+/// 4096B) to land back on a page boundary with zero waste - confirmed
+/// empirically at 64/64 (100%) page-aligned.
+pub const FAN_OUT: usize        = 123;
+pub const NUM_RECORDS: usize    = 123;
 pub type Key                    = u64;
 pub type Payload                = u64;
 // pub type Payload = PayloadIndirection;
