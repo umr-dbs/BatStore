@@ -924,6 +924,22 @@ impl<const FAN_OUT: usize,
                     let combined_block = self.block_manager
                         .new_empty_leaf(&self.ctx);
 
+                    // Plain concatenation, not a `ts_start`-ordered
+                    // `merge_by`: `simba` and `candidate` are distinct
+                    // siblings in `mufasa`'s own child list, so their fences
+                    // are disjoint by construction and no key can appear in
+                    // both. Every physical-order-sensitive lookup downstream
+                    // (`LeafPage::is_live_lineage`/`rfind`) filters on exact
+                    // key match first, so it only ever compares two records
+                    // of the *same* key against each other — which, since
+                    // that key's whole chain necessarily comes from just one
+                    // of these two sources, always stays in that source's
+                    // own original relative order regardless of how the two
+                    // sources are interleaved with each other here. Unlike
+                    // the `KeySplit` branches' identical-looking comment
+                    // (see those for the actual hazard), there's no live-
+                    // ahead-of-dead reordering risk to avoid in the first
+                    // place — nothing here spans more than one key's chain.
                     combined_block
                         .unsafe_borrow_mut()
                         .as_leaf_page()
@@ -931,13 +947,11 @@ impl<const FAN_OUT: usize,
                             .as_records()
                             .iter()
                             .filter(|r| self.record_survives_gc(r.version()))
-                            .merge_by(candidate_cell
-                                          .deref()
-                                          .as_records()
-                                          .iter()
-                                          .filter(|r| self.record_survives_gc(r.version())),
-                                      |f, s|
-                                          f.version().insertion_stamp().ts_start() <= s.version().insertion_stamp().ts_start())
+                            .chain(candidate_cell
+                                       .deref()
+                                       .as_records()
+                                       .iter()
+                                       .filter(|r| self.record_survives_gc(r.version())))
                             .collect_vec());
 
                     if TRACE_KEY_DEBUG {
