@@ -787,17 +787,46 @@ impl<const FAN_OUT: usize,
                 (index, bro, fence))
             .collect_vec();
 
-        let mut compute_candidate = ||
-            match all_candidates.binary_search_by_key(&simba_fence.lower, |(.., f)| f.lower) {
-                Ok(index) => Ok(all_candidates.remove(index)),
-                Err(index) => if index < all_candidates.len() {
-                    Ok(all_candidates.remove(index))
-                } else if !all_candidates.is_empty() {
-                    return Ok(all_candidates.pop().unwrap());
-                } else {
-                    return Err(());
-                },
+        // Picking blindly between two adjacent siblings (the old
+        // right-then-left-fallback order below) can land on one that's
+        // already nearly full itself: merging `simba` into it then can't
+        // qualify for `Merged` (single combined leaf, this fn's real,
+        // child-count-reducing outcome) and instead falls through to
+        // `KeySplit` — safe, but a pure repartition of two already-full
+        // leaves into two other full leaves, achieving nothing `mufasa`
+        // actually needed, and wasted allocation/copy work to boot. When
+        // both an adjacent left and right sibling exist, peek at each
+        // one's own `active_dead_count()` (already loaded elsewhere in
+        // this fn for the same purpose - a single atomic read, no per-
+        // record scan) and prefer whichever has more room, so a genuinely
+        // emptier neighbor on the "wrong" side isn't skipped over in favor
+        // of a fuller one just because of fence order. A stale peek here
+        // (the candidate isn't retired for this) only risks picking the
+        // still-valid but slightly worse of the two — the actual merge
+        // decision below re-reads whichever one is chosen fresh, once
+        // retired, exactly as before.
+        let mut compute_candidate = || {
+            let insertion_point = match all_candidates.binary_search_by_key(&simba_fence.lower, |(.., f)| f.lower) {
+                Ok(index) => return Ok(all_candidates.remove(index)),
+                Err(index) => index,
             };
+
+            let right = (insertion_point < all_candidates.len()).then_some(insertion_point);
+            let left = insertion_point.checked_sub(1);
+
+            let chosen = match (left, right) {
+                (Some(l), Some(r)) => {
+                    let (l_active, l_dead) = all_candidates[l].1.borrow_read().deref().active_dead_count();
+                    let (r_active, r_dead) = all_candidates[r].1.borrow_read().deref().active_dead_count();
+                    if l_active as usize + l_dead as usize <= r_active as usize + r_dead as usize { l } else { r }
+                }
+                (Some(l), None) => l,
+                (None, Some(r)) => r,
+                (None, None) => return Err(()),
+            };
+
+            Ok(all_candidates.remove(chosen))
+        };
 
         let (candidate_index,
             // candidate_guard,
