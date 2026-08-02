@@ -1444,3 +1444,9 @@ mod bench_wal_recovery_stress_tests;
 #[cfg(test)]
 #[path = "../../tests/leaf_split_off_by_one_regression_tests.rs"]
 mod leaf_split_off_by_one_regression_tests;
+#[cfg(test)]
+#[path = "../../tests/verify_range_scan.rs"]
+mod verify_range_scan;
+#[cfg(test)]
+#[path = "../../tests/verify_concurrent_shared_keys.rs"]
+mod verify_concurrent_shared_keys;

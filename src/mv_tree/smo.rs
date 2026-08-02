@@ -41,48 +41,79 @@ fn diag_thread_hash() -> u64 {
 
 /// Nearest index to `target` in `[1, items.len() - 1]` at which `key_of`
 /// changes between `items[i - 1]` and `items[i]`, given `items` is already
-/// key-sorted so one key's own entries are contiguous. A raw `len / 2` cut
-/// can otherwise land inside a single key's own multi-entry chain (e.g. a
-/// dead-but-abortable predecessor next to its live successor, the exact
-/// shape `record_survives_gc` preserves) and tear it across the two
-/// resulting sibling blocks — whose fences are disjoint by construction —
-/// making the torn-off half unreachable by any fence-routed lookup. Falls
-/// back to `target` only when every entry shares one key (the whole slice
-/// is one key's chain): tearing is then unavoidable without duplicate-key
-/// sibling support, a pre-existing structural limit this doesn't attempt
-/// to fix.
+/// key-sorted so one key's own entries are contiguous, preferring — in
+/// order — a boundary that (1) doesn't tear a key *and* keeps both
+/// resulting halves within `capacity`, (2) at least keeps both halves
+/// within `capacity` (may tear a key), (3) at least doesn't tear a key
+/// (may overflow `capacity` on one side), falling back to `target` itself
+/// only if `items` is a single key's entire chain (no boundary exists at
+/// all).
+///
+/// Two distinct hazards motivate this order. A raw `len / 2` cut can land
+/// inside a single key's own multi-entry chain (e.g. a dead-but-abortable
+/// predecessor next to its live successor, the exact shape
+/// `record_survives_gc` preserves) and tear it across the two resulting
+/// sibling blocks — whose fences are disjoint by construction — making the
+/// torn-off half unreachable by any fence-routed lookup; that's what
+/// tier (1) avoids in the common case. But nearest-to-`target` alone isn't
+/// enough once `items` can hold *two* pages' worth of survivors combined
+/// (`merge()`'s combined-then-split path, up to `2 * capacity`): dense
+/// key-version clustering right at the midpoint can force every
+/// tear-avoiding boundary to overflow one side or the other (e.g. 31
+/// records, capacity 16: every non-tearing boundary sits at 14 or 17, both
+/// leaving the other half over capacity) — confirmed as a real crash
+/// (`LeafPage::bulk_push`/`bulk_push_from_slice_ref` panicking past
+/// `NUM_RECORDS`) under sustained multi-table concurrent load. Whenever
+/// `len <= 2 * capacity` (guaranteed for `merge()`'s combined case, since
+/// neither original page can itself hold more than one page's worth), a
+/// capacity-fitting position always exists in the range
+/// `[len - capacity, capacity]` — tier (2) picks the one nearest `target`
+/// in that range even if it tears a key, since a torn (but recoverable via
+/// its own already-documented limitation) key beats a hard capacity
+/// violation. Tier (3) is the original, tear-avoiding-only search, kept as
+/// a fallback for callers whose `items` can exceed `2 * capacity` (none
+/// currently do) or where `capacity` doesn't apply.
 fn nearest_key_boundary<T, K: PartialEq>(
     items: &[T],
     target: usize,
+    capacity: usize,
     key_of: impl Fn(&T) -> K,
 ) -> usize {
     let len = items.len();
     debug_assert!(len >= 2);
     let target = target.clamp(1, len - 1);
     let is_boundary = |i: usize| key_of(&items[i - 1]) != key_of(&items[i]);
+    let fits = |i: usize| i <= capacity && len - i <= capacity;
 
-    if is_boundary(target) {
-        return target;
-    }
+    let search = |accept: &dyn Fn(usize) -> bool| -> Option<usize> {
+        if accept(target) {
+            return Some(target);
+        }
 
-    let mut lo = target;
-    while lo > 1 && !is_boundary(lo) {
-        lo -= 1;
-    }
-    let found_lo = is_boundary(lo).then_some(lo);
+        let mut lo = target;
+        while lo > 1 && !accept(lo) {
+            lo -= 1;
+        }
+        let found_lo = accept(lo).then_some(lo);
 
-    let mut hi = target;
-    while hi < len - 1 && !is_boundary(hi) {
-        hi += 1;
-    }
-    let found_hi = is_boundary(hi).then_some(hi);
+        let mut hi = target;
+        while hi < len - 1 && !accept(hi) {
+            hi += 1;
+        }
+        let found_hi = accept(hi).then_some(hi);
 
-    match (found_lo, found_hi) {
-        (Some(l), Some(h)) => if target - l <= h - target { l } else { h },
-        (Some(l), None) => l,
-        (None, Some(h)) => h,
-        (None, None) => target,
-    }
+        match (found_lo, found_hi) {
+            (Some(l), Some(h)) => Some(if target - l <= h - target { l } else { h }),
+            (Some(l), None) => Some(l),
+            (None, Some(h)) => Some(h),
+            (None, None) => None,
+        }
+    };
+
+    search(&|i| is_boundary(i) && fits(i))
+        .or_else(|| search(&fits))
+        .or_else(|| search(&is_boundary))
+        .unwrap_or(target)
 }
 
 #[repr(u8)]
@@ -944,7 +975,7 @@ impl<const FAN_OUT: usize,
                         .collect_vec();
 
                     let joined_len = joined.len();
-                    let middle = nearest_key_boundary(&joined, joined_len / 2, |r| r.key());
+                    let middle = nearest_key_boundary(&joined, joined_len / 2, simba_max_units, |r| r.key());
                     let (first, second)
                         = joined.split_at_mut(middle);
 
@@ -1189,7 +1220,7 @@ impl<const FAN_OUT: usize,
                         .sorted_by_key(|r| r.key())
                         .collect_vec();
 
-                    let middle = nearest_key_boundary(&sorted_block, sorted_block.len() / 2, |r| r.key());
+                    let middle = nearest_key_boundary(&sorted_block, sorted_block.len() / 2, capacity, |r| r.key());
                     let (first, second) = sorted_block
                         .split_at_mut(middle);
 
