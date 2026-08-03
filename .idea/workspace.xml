@@ -16,12 +16,8 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Updated tree visualizer and plot code">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Updated the split/merge logic accounting for weakened fresh node rule">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/rand_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/rand_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -32,7 +28,7 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="14700" />
+    <option name="cachedIndexableFilesCount" value="14733" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
@@ -76,61 +72,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0" />
-      <entry key="MS500" value="1.0" />
-      <entry key="S2" value="1.0000165306409536" />
-      <entry key="S5" value="1.0122843980707745" />
-      <entry key="S10" value="1.1181671311357406" />
-      <entry key="S30" value="1.7433093802282773" />
-      <entry key="S60" value="3.004608580386634" />
-      <entry key="M2" value="8.262987393919982" />
-      <entry key="M5" value="30.807198740825307" />
-      <entry key="M10" value="54.91479941317114" />
-      <entry key="M15" value="76.62952040170401" />
-      <entry key="M30" value="172.67021516249525" />
-      <entry key="H1" value="353.84398655541463" />
-      <entry key="H2" value="553.1703041609113" />
-      <entry key="H4" value="758.6477112273453" />
-      <entry key="D1" value="2654.1858643713545" />
-      <entry key="W1" value="9763.170156164748" />
+      <entry key="MS100" value="1.011156292881393" />
+      <entry key="MS500" value="1.8029089116194978" />
+      <entry key="S2" value="5.560911131641905" />
+      <entry key="S5" value="11.160318437700077" />
+      <entry key="S10" value="16.277815555104326" />
+      <entry key="S30" value="25.290049843002194" />
+      <entry key="S60" value="31.63874624479661" />
+      <entry key="M2" value="39.40691252900297" />
+      <entry key="M5" value="62.08447567554979" />
+      <entry key="M10" value="87.79324234562209" />
+      <entry key="M15" value="110.27630069038362" />
+      <entry key="M30" value="205.78084319683342" />
+      <entry key="H1" value="386.91226959941787" />
+      <entry key="H2" value="588.0009285689441" />
+      <entry key="H4" value="795.4268477852805" />
+      <entry key="D1" value="2692.7428556460145" />
+      <entry key="W1" value="9802.88952502776" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
       <entry key="MS500" value="0.0" />
       <entry key="S2" value="0.0" />
       <entry key="S5" value="0.0" />
-      <entry key="S10" value="1.0071875356136546E-163" />
-      <entry key="S30" value="7.357413383965661E-55" />
-      <entry key="S60" value="1.2124614885015765E-27" />
-      <entry key="M2" value="4.923756011375904E-14" />
-      <entry key="M5" value="7.2031759176173995E-6" />
-      <entry key="M10" value="0.0037960291806636956" />
-      <entry key="M15" value="0.03074342604804816" />
-      <entry key="M30" value="0.26359465302390583" />
-      <entry key="H1" value="0.9226980031328529" />
-      <entry key="H2" value="2.1940950227706306" />
-      <entry key="H4" value="8.328483718487687" />
-      <entry key="D1" value="210.5849139262574" />
-      <entry key="W1" value="960.0268482885033" />
+      <entry key="S10" value="3.6410251695982276E-167" />
+      <entry key="S30" value="5.241186385288584E-56" />
+      <entry key="S60" value="3.236086905028654E-28" />
+      <entry key="M2" value="2.543739509910162E-14" />
+      <entry key="M5" value="5.530882929200749E-6" />
+      <entry key="M10" value="0.0033263256485977803" />
+      <entry key="M15" value="0.028151988636174973" />
+      <entry key="M30" value="0.25224060758725375" />
+      <entry key="H1" value="0.902607181147888" />
+      <entry key="H2" value="2.1700764507776196" />
+      <entry key="H4" value="8.282772673308628" />
+      <entry key="D1" value="210.39183867929032" />
+      <entry key="W1" value="959.9010556009811" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="2.3345381079032547E-12" />
-      <entry key="MS500" value="0.004716721060494126" />
-      <entry key="S2" value="0.2620744682197174" />
-      <entry key="S5" value="0.5948403785764255" />
-      <entry key="S10" value="0.86872260130028" />
-      <entry key="S30" value="1.6238100632750725" />
-      <entry key="S60" value="2.9265087964445775" />
-      <entry key="M2" value="8.210733428757106" />
-      <entry key="M5" value="30.776528175345295" />
-      <entry key="M10" value="54.89972756655612" />
-      <entry key="M15" value="76.64654043797708" />
-      <entry key="M30" value="172.92595704812456" />
-      <entry key="H1" value="354.76214257460714" />
-      <entry key="H2" value="555.3617092199449" />
-      <entry key="H4" value="766.9737985157442" />
-      <entry key="D1" value="2864.7645776626587" />
-      <entry key="W1" value="10723.193147975655" />
+      <entry key="MS100" value="0.021899112630689922" />
+      <entry key="MS500" value="1.205291702823447" />
+      <entry key="S2" value="5.354531188189319" />
+      <entry key="S5" value="11.070150406528386" />
+      <entry key="S10" value="16.230707372634967" />
+      <entry key="S30" value="25.26507658389186" />
+      <entry key="S60" value="31.609458914196445" />
+      <entry key="M2" value="39.37561837432206" />
+      <entry key="M5" value="62.059182997891035" />
+      <entry key="M10" value="87.77915975842885" />
+      <entry key="M15" value="110.29130128274602" />
+      <entry key="M30" value="206.02527637937771" />
+      <entry key="H1" value="387.8102871096507" />
+      <entry key="H2" value="590.1682711778077" />
+      <entry key="H4" value="803.7072005106" />
+      <entry key="D1" value="2903.128493262476" />
+      <entry key="W1" value="10762.78672378315" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -429,9 +425,9 @@
     </list>
     <recent_temporary>
       <list>
-        <item itemvalue="Cargo.Test ycsb_schema::tests" />
         <item itemvalue="Python.plot_suite" />
         <item itemvalue="Python.compare_engines" />
+        <item itemvalue="Cargo.Test ycsb_schema::tests" />
         <item itemvalue="Cargo.Test tx_context::tests" />
         <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
       </list>
@@ -1394,15 +1390,13 @@
       <workItem from="1785403320758" duration="5826000" />
       <workItem from="1785417507909" duration="123000" />
       <workItem from="1785417714750" duration="2252000" />
-      <workItem from="1785490211804" duration="2034000" />
-    </task>
-    <task id="LOCAL-00158" summary="Init">
-      <option name="closed" value="true" />
-      <created>1776676952054</created>
-      <option name="number" value="00158" />
-      <option name="presentableId" value="LOCAL-00158" />
-      <option name="project" value="LOCAL" />
-      <updated>1776676952054</updated>
+      <workItem from="1785490211804" duration="3504000" />
+      <workItem from="1785500081335" duration="8108000" />
+      <workItem from="1785516918915" duration="4723000" />
+      <workItem from="1785524166532" duration="684000" />
+      <workItem from="1785573692292" duration="313000" />
+      <workItem from="1785620604929" duration="2032000" />
+      <workItem from="1785673822073" duration="5205000" />
     </task>
     <task id="LOCAL-00159" summary="Commit for exps">
       <option name="closed" value="true" />
@@ -1788,7 +1782,15 @@
       <option name="project" value="LOCAL" />
       <updated>1785417566722</updated>
     </task>
-    <option name="localTasksCounter" value="207" />
+    <task id="LOCAL-00207" summary="Updated the split/merge logic accounting for weakened fresh node rule">
+      <option name="closed" value="true" />
+      <created>1785492360294</created>
+      <option name="number" value="00207" />
+      <option name="presentableId" value="LOCAL-00207" />
+      <option name="project" value="LOCAL" />
+      <updated>1785492360295</updated>
+    </task>
+    <option name="localTasksCounter" value="208" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1809,7 +1811,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Add YCSB and CH (TPC-C + TPC-H) Q1, Q6, Q4, Q5." />
     <MESSAGE value="Add HTAP" />
     <MESSAGE value="Refine experiments and add plot scripts" />
     <MESSAGE value="Refine all" />
@@ -1834,18 +1835,8 @@
     <MESSAGE value="Updated Tpcc find first" />
     <MESSAGE value="Added Tree Visualizer, including block tracer and live viewer" />
     <MESSAGE value="Updated tree visualizer and plot code" />
-    <option name="LAST_COMMIT_MESSAGE" value="Updated tree visualizer and plot code" />
-  </component>
-  <component name="XDebuggerManager">
-    <breakpoint-manager>
-      <breakpoints>
-        <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
-          <url>file://$PROJECT_DIR$/src/mv_query/rand_query.rs</url>
-          <line>142</line>
-          <option name="timeStamp" value="1" />
-        </line-breakpoint>
-      </breakpoints>
-    </breakpoint-manager>
+    <MESSAGE value="Updated the split/merge logic accounting for weakened fresh node rule" />
+    <option name="LAST_COMMIT_MESSAGE" value="Updated the split/merge logic accounting for weakened fresh node rule" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
