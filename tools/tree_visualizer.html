@@ -13,6 +13,7 @@
     --text-dim: #8891a3;
     --accent: #5b8cff;
     --accent-2: #ffbf5b;
+    --fence: #78aefc;
     --leaf: #3aa876;
     --internal: #5b8cff;
     --dead: #e5586a;
@@ -52,8 +53,24 @@
   }
   #childPageInput {
     background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 6px 6px; font-size: calc(13px * var(--font-scale));
+    border-radius: 6px; padding: 6px; width: 52px; font-size: calc(13px * var(--font-scale));
   }
+  .toolbar-popover { position: relative; }
+  .toolbar-popover > summary { list-style: none; }
+  .toolbar-popover > summary::-webkit-details-marker { display: none; }
+  .toolbar-popover-panel {
+    position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; min-width: 230px;
+    padding: 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel); box-shadow: 0 10px 28px rgba(0,0,0,.45);
+  }
+  .toolbar-popover-row { display: flex; align-items: center; gap: 8px; }
+  .toolbar-popover-row input[type="range"] { flex: 1; min-width: 130px; accent-color: var(--accent); }
+  .toolbar-popover-row input[type="number"] {
+    width: 74px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px;
+  }
+  .toolbar-action-list { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; min-width: 260px; }
+  .toolbar-action-list .btn { padding: 7px 10px; font-size: calc(12px * var(--font-scale)); }
   .btn {
     background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 9px 16px; cursor: pointer; font-size: calc(15px * var(--font-scale));
@@ -66,7 +83,7 @@
   .btn.primary { border-color: var(--accent); color: #cfe0ff; }
   .btn.hidden { display: none; }
   .sep { width: 1px; height: 30px; background: var(--border); margin: 0 6px; }
-  #search {
+  #search, #keyTracerInput, #nodeIdInput {
     background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 9px 12px; font-size: calc(15px * var(--font-scale)); width: 170px;
   }
@@ -155,6 +172,20 @@
     padding: 2px 6px; color: #cfe0ff;
   }
   #empty.hidden { display: none; }
+  #loadingOverlay {
+    position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+    background: rgba(15,18,25,.82); backdrop-filter: blur(2px);
+  }
+  #loadingOverlay.hidden { display: none; }
+  .loading-card {
+    width: min(420px, 82%); padding: 20px 22px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--border); box-shadow: 0 12px 36px rgba(0,0,0,.45);
+  }
+  #loadingLabel { color: var(--text); font-size: calc(13px * var(--font-scale)); margin-bottom: 11px; }
+  .loading-track { height: 8px; overflow: hidden; border-radius: 999px; background: #11151d; border: 1px solid var(--border); }
+  #loadingBar { height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--active)); transition: width .12s linear; }
+  #loadingBar.indeterminate { width: 34%; animation: loading-slide 1s ease-in-out infinite; }
+  @keyframes loading-slide { from { transform: translateX(-110%); } to { transform: translateX(305%); } }
   #fileBrowser {
     width: min(720px, 92%); background: var(--panel-2); border: 1px solid var(--border);
     border-radius: 12px; padding: 22px 26px; text-align: left;
@@ -190,7 +221,7 @@
   .side-panel {
     position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 90%;
     background: var(--panel); border-left: 1px solid var(--border);
-    box-shadow: -8px 0 24px rgba(0,0,0,.4); display: flex; flex-direction: column; z-index: 5;
+    box-shadow: -8px 0 24px rgba(0,0,0,.4); display: flex; flex-direction: column; z-index: 7;
   }
   .side-panel.hidden { display: none; }
   #keyTracerBody {
@@ -226,6 +257,36 @@
   }
   .trace-header .spacer { flex: 1; min-width: 0; }
   .trace-header .btn { font-weight: 400; }
+  .trace-header .map2d-nav-btn { min-width: 78px; min-height: 34px; font-size: calc(12px * var(--font-scale)); font-weight: 600; }
+  #map2dBreadcrumb, #map2dEntryInfo, #map2dLegend {
+    padding: 6px 12px; border-bottom: 1px solid var(--border); color: var(--text-dim);
+    font-size: calc(10.5px * var(--font-scale));
+  }
+  #map2dBreadcrumb { color: #cfe0ff; font-family: ui-monospace, monospace; }
+  #map2dEntryInfo.hidden { display: none; }
+  #map2dLegend { display: flex; gap: 12px; flex-wrap: wrap; }
+  .legend-item { display: inline-flex; align-items: center; gap: 5px; }
+  .legend-box { width: 13px; height: 9px; border: 2px solid; }
+  #utilityBody { padding: 12px; overflow-y: auto; font-size: calc(12px * var(--font-scale)); }
+  .utility-controls { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 10px; }
+  .utility-controls input {
+    width: 110px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px;
+  }
+  .analysis-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; padding: 9px; margin-bottom: 8px; }
+  .analysis-card h3 { margin: 0 0 6px; font-size: calc(12px * var(--font-scale)); }
+  .validation-error { color: var(--dead); }
+  .validation-warn { color: var(--accent-2); }
+  .validation-ok { color: var(--active); }
+  #minimap {
+    position: absolute; left: 12px; bottom: 12px; width: 210px; height: 135px; z-index: 4;
+    background: rgba(20,23,28,.9); border: 1px solid var(--border); border-radius: 7px;
+    box-shadow: 0 5px 18px rgba(0,0,0,.35); overflow: hidden; cursor: crosshair;
+  }
+  #minimap.hidden { display: none; }
+  .node-box.diff-added { outline: 3px solid var(--active); }
+  .node-box.diff-changed { outline: 3px solid var(--accent-2); }
+  .node-box.keyboard-selected { box-shadow: 0 0 0 3px var(--accent), 0 2px 6px rgba(0,0,0,.35); }
   #traceBody { padding: 10px 12px; overflow-y: auto; font-size: calc(12px * var(--font-scale)); }
   #traceBody code { color: #cfe0ff; word-break: break-all; }
   .trace-section { margin-bottom: 12px; }
@@ -319,12 +380,22 @@
     border: 1px solid var(--border); border-radius: 3px; padding: 0 3px;
   }
   .trace-btn:hover { color: var(--accent-2); border-color: var(--accent-2); }
+  .mark-toggle {
+    width: 24px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; color: var(--text-dim); background: transparent; border: 1px solid var(--border);
+    border-radius: 5px; font-size: calc(15px * var(--font-scale)); line-height: 1;
+  }
+  .mark-toggle:hover { color: var(--accent-2); border-color: var(--accent-2); }
+  .mark-toggle.active {
+    color: var(--accent-2); border-color: var(--accent-2); background: rgba(255,191,91,.14);
+    box-shadow: 0 0 5px rgba(255,191,91,.3);
+  }
   .node-body { padding: 0 8px 7px; font-size: calc(11px * var(--font-scale)); color: var(--text-dim); }
   .node-body .birth { color: var(--text-dim); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
     margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .node-body .range { color: var(--keys); font-family: ui-monospace, monospace; font-size: calc(10.5px * var(--font-scale));
     font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
-  .node-body .fence { color: var(--accent-2); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
+  .node-body .fence { color: var(--fence); font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
     font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
   .fence-usage { color: var(--text-dim); font-weight: 400; }
   .capacity {
@@ -338,6 +409,7 @@
     display: flex; align-items: center; gap: 5px; font-size: calc(10px * var(--font-scale));
     margin-top: 2px; font-weight: 600;
   }
+  .node-head .safeness { margin-top: 0; white-space: nowrap; min-width: 0; }
   .safeness-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .safeness-safe { color: var(--active); }
   .safeness-safe .safeness-dot { background: var(--active); box-shadow: 0 0 4px var(--active); }
@@ -392,10 +464,6 @@
   path.edge { stroke: #3a4152; stroke-width: 1.5px; fill: none; }
   path.edge.live { stroke: var(--active); stroke-width: 2px; }
   path.edge.dead { stroke: var(--dead); stroke-width: 1.5px; stroke-dasharray: 4 3; opacity: .75; }
-  text.edge-label {
-    fill: var(--text-dim); font-size: calc(9px * var(--font-scale)); font-family: ui-monospace, monospace;
-  }
-
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: #3a4152; border-radius: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -421,21 +489,52 @@
         <button class="btn" id="fontIncBtn" title="Larger text">A+</button>
         <button class="btn" id="fontResetBtn" title="Reset text size">100%</button>
         <div class="sep"></div>
-        <label for="childPageInput" style="font-size:calc(12px * var(--font-scale));color:var(--text-dim);white-space:nowrap;">Children shown:</label>
-        <input type="number" id="childPageInput" min="1" max="500"
-               title="How many children of an expanded internal node render before a '+N more' box appears">
-        <label for="nodeWidthInput" style="font-size:calc(12px * var(--font-scale));color:var(--text-dim);white-space:nowrap;">Node width:</label>
-        <input type="number" id="nodeWidthInput" min="120" max="600" step="10" title="Width of every node box, in pixels">
-        <label for="recordsHeightInput" style="font-size:calc(12px * var(--font-scale));color:var(--text-dim);white-space:nowrap;">Leaf records height:</label>
-        <input type="number" id="recordsHeightInput" min="80" max="2000" step="20"
-               title="Max height of an expanded leaf's record list before it scrolls internally, in pixels">
-        <div class="sep"></div>
-        <button class="btn" id="expandAllBtn">Expand all</button>
-        <button class="btn" id="collapseAllBtn">Collapse all</button>
-        <div class="sep"></div>
-        <button class="btn" id="expandMarkedBtn">Expand marked</button>
-        <button class="btn" id="collapseMarkedBtn">Collapse marked</button>
-        <button class="btn" id="clearMarkedBtn">Clear marks</button>
+        <details class="toolbar-popover">
+          <summary class="btn" id="childrenShownSummary">Children: 4</summary>
+          <div class="toolbar-popover-panel">
+            <div class="toolbar-popover-row">
+              <input type="range" id="childPageRange" min="1" max="500" step="1"
+                     title="Children shown before a '+N more' box appears">
+              <input type="number" id="childPageInput" min="1" max="500" step="1"
+                     title="Exact number of children shown">
+            </div>
+          </div>
+        </details>
+        <details class="toolbar-popover">
+          <summary class="btn" id="nodeWidthSummary">Node width: 280px</summary>
+          <div class="toolbar-popover-panel">
+            <div class="toolbar-popover-row">
+              <input type="range" id="nodeWidthRange" min="120" max="600" step="10"
+                     title="Width of every node box">
+              <input type="number" id="nodeWidthInput" min="120" max="600" step="10"
+                     title="Exact node width in pixels">
+            </div>
+          </div>
+        </details>
+        <details class="toolbar-popover">
+          <summary class="btn" id="recordsHeightSummary">Leaf height: 600px</summary>
+          <div class="toolbar-popover-panel">
+            <div class="toolbar-popover-row">
+              <input type="range" id="recordsHeightRange" min="80" max="2000" step="20"
+                     title="Maximum height of an expanded leaf's record list">
+              <input type="number" id="recordsHeightInput" min="80" max="2000" step="20"
+                     title="Leaf record-list height in pixels">
+            </div>
+          </div>
+        </details>
+        <details class="toolbar-popover">
+          <summary class="btn">Tree actions &#9662;</summary>
+          <div class="toolbar-popover-panel toolbar-action-list">
+            <button class="btn" id="expandAllBtn">Expand all</button>
+            <button class="btn" id="collapseAllBtn">Collapse all</button>
+            <button class="btn" id="expandMarkedBtn">Expand marked</button>
+            <button class="btn" id="collapseMarkedBtn">Collapse marked</button>
+            <button class="btn" id="clearMarkedBtn">Clear marks</button>
+            <button class="btn" id="expandDepthBtn">Expand to depth…</button>
+            <button class="btn" id="performanceModeBtn">Performance mode</button>
+            <button class="btn" id="cancelCountsBtn">Stop root counts</button>
+          </div>
+        </details>
       </div>
       <div class="toolbar-group" id="grpDataView">
         <span class="toolbar-group-label">Data view</span>
@@ -443,6 +542,13 @@
                 title="Show leaf records as a list - click again while already on List to toggle Created ts / worker / delete details">List</button>
         <button class="btn" id="recordGridBtn" title="Show leaf records as compact boxes">Grid</button>
         <div class="sep"></div>
+        <button class="btn" id="liveViewBtn"
+                title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
+        <button class="btn" id="hideDeadBtn" disabled
+                title="Live view only: prune every dead/obsolete branch and record out of the render entirely, showing just the live tree">Hide dead</button>
+      </div>
+      <div class="toolbar-group" id="grpKeyOperations">
+        <span class="toolbar-group-label">Key operations</span>
         <input type="text" id="search" placeholder="key to find...">
         <button class="btn" id="searchBtn" title="Find this key in the currently selected root* (and snapshot version, if one is active)">Find key</button>
         <div class="sep"></div>
@@ -450,10 +556,8 @@
         <button class="btn" id="keyTracerBtn"
                 title="Trace every created/updated/deleted event for one key across the whole dump">Key tracer</button>
         <div class="sep"></div>
-        <button class="btn" id="liveViewBtn"
-                title="Jump to the latest root* and highlight which entries are still live vs. dead/obsolete">Live view</button>
-        <button class="btn" id="hideDeadBtn" disabled
-                title="Live view only: prune every dead/obsolete branch and record out of the render entirely, showing just the live tree">Hide dead</button>
+        <input type="text" id="nodeIdInput" placeholder="node id...">
+        <button class="btn" id="nodeIdBtn" title="Locate a node by its id">Find node</button>
       </div>
       <div class="toolbar-group" id="grpPlayback">
         <span class="toolbar-group-label">Playback</span>
@@ -466,6 +570,23 @@
           <option value="600">Fast</option>
         </select>
         <span id="playbackStatus"></span>
+      </div>
+      <div class="toolbar-group" id="grpAnalysis">
+        <span class="toolbar-group-label">Analysis</span>
+        <button class="btn" id="compareBtn">Compare snapshots</button>
+        <button class="btn" id="validateBtn">Validate dump</button>
+        <button class="btn" id="minimapBtn">Minimap</button>
+        <button class="btn" id="shortcutsBtn">Shortcuts</button>
+        <details class="toolbar-popover">
+          <summary class="btn">Export &#9662;</summary>
+          <div class="toolbar-popover-panel toolbar-action-list">
+            <button class="btn" id="exportTreeSvgBtn">Tree SVG</button>
+            <button class="btn" id="exportTreePngBtn">Tree PNG</button>
+            <button class="btn" id="exportMapSvgBtn">2D map SVG</button>
+            <button class="btn" id="exportMapPngBtn">2D map PNG</button>
+            <button class="btn" id="exportNodeJsonBtn">Node JSON</button>
+          </div>
+        </details>
       </div>
       <div class="spacer"></div>
       <input type="file" id="fileInput" accept=".json" style="display:none">
@@ -517,6 +638,12 @@
           </div>
         </div>
       </div>
+      <div id="loadingOverlay" class="hidden" role="status" aria-live="polite" aria-busy="true">
+        <div class="loading-card">
+          <div id="loadingLabel">Loading tree dump…</div>
+          <div class="loading-track"><div id="loadingBar" class="indeterminate"></div></div>
+        </div>
+      </div>
       <div id="snapshotBanner" class="hidden">
         <span>&#128247; Snapshot view &mdash; version <b id="snapshotVersionLabel"></b>: only nodes/records that existed and weren't yet superseded at this version are shown.</span>
         <button class="btn" id="exitSnapshotBtn">Exit snapshot view</button>
@@ -543,16 +670,37 @@
         <div class="trace-header">
           <span id="map2dTitle">2D entry map</span>
           <span class="spacer"></span>
+          <button class="btn map2d-nav-btn" id="map2dBackBtn" title="Previous 2D map" disabled>&larr; Back</button>
+          <button class="btn map2d-nav-btn" id="map2dForwardBtn" title="Next 2D map" disabled>Forward &rarr;</button>
+          <div class="sep"></div>
           <button class="btn" id="map2dOnlyLiveBtn" title="Only draw entries that are still live (uncontested)">Only live entries</button>
           <div class="sep"></div>
           <button class="btn" id="map2dZoomOutBtn" title="Zoom out">&minus;</button>
           <button class="btn" id="map2dZoomInBtn" title="Zoom in">+</button>
           <button class="btn" id="map2dResetZoomBtn" title="Reset zoom">Reset</button>
+          <button class="btn" id="map2dLocateBtn" title="Locate this node in the tree">Locate in tree</button>
           <div class="sep"></div>
           <button class="btn" id="map2dCloseBtn" title="Close">&#10005;</button>
         </div>
+        <div id="map2dBreadcrumb">Root</div>
+        <div id="map2dEntryInfo" class="hidden"></div>
+        <div id="map2dLegend">
+          <span class="legend-item"><span class="legend-box" style="background:rgba(58,168,118,.35);border-color:#3aa876"></span>live</span>
+          <span class="legend-item"><span class="legend-box" style="background:rgba(229,88,106,.22);border-color:#e5586a"></span>superseded</span>
+          <span class="legend-item"><span class="legend-box" style="background:rgba(93,112,153,.12);border-color:#596985"></span>context</span>
+          <span class="legend-item"><span class="legend-box" style="border-color:var(--fence)"></span>selected fence</span>
+        </div>
         <div id="map2dSvgWrap"></div>
       </div>
+      <div id="utilityPanel" class="side-panel hidden">
+        <div class="trace-header">
+          <span id="utilityTitle">Analysis</span>
+          <span class="spacer"></span>
+          <button class="btn" id="utilityCloseBtn" title="Close">&#10005;</button>
+        </div>
+        <div id="utilityBody"></div>
+      </div>
+      <div id="minimap" class="hidden" title="Click to center the tree at this position"></div>
     </div>
   </div>
   <div id="measure" aria-hidden="true"></div>
@@ -582,6 +730,7 @@
   const checked = new Set();   // node ids currently "marked" via checkbox
   const reachableCache = new Map(); // rootNodeId -> count of nodes reachable from it
   const liveDeadCache = new Map();  // rootNodeId -> {live, dead} node counts for that root's whole tree (sidebar display)
+  let rootListGeneration = 0;       // cancels deferred sidebar-count work when another dump/list replaces it
   const childLimit = new Map();     // internal node id -> how many of its children are laid out (Infinity = all)
   const heightCache = new Map();    // "<id>:<isExpanded>" -> measured box height in px (see measureNodeHeight)
   let liveViewMode = false;         // "Live view" toggle: jumps to the latest root* and highlights live vs. dead entries
@@ -600,8 +749,24 @@
   let currentMap2dNodeId = null;    // internal node id the 2D entry map panel is currently showing
   let currentMap2dFenceLower = null; // that node's actual fence bounds - entries must exactly tile this, not a range inferred from their own historical key values; null (only for a rendered root, which has no parent-imposed fence) means "derive from the union of this node's own children instead"
   let currentMap2dFenceUpper = null;
+  let currentMap2dVersionLower = null; // parent-slot/root lifetime bounds for this rendered node instance
+  let currentMap2dVersionUpper = null;
   let map2dDomain = null;           // {vMin, vMax, kMin, kMax} - the currently visible window (zoom/pan state); null = not yet computed for this node
   let map2dFullExtent = null;       // {vMin, vMax, kMin, kMax} - the node's full data extent, i.e. what "Reset zoom" returns to
+  let map2dContextExtent = null;    // maximum zoom-out extent: all keys/versions represented by the dump
+  let currentMap2dIsRoot = false;   // roots deliberately cannot zoom out beyond their own complete map
+  let map2dGlobalLatestVersionCache = null;
+  let map2dContextDataCache = null;
+  let map2dHistory = [];
+  let map2dHistoryIndex = -1;
+  let currentMap2dEntryInfo = null;
+  const diffAddedNodes = new Set();
+  const diffChangedNodes = new Set();
+  let minimapEnabled = localStorage.getItem("cmvbt-viz-minimap") === "1";
+  let performanceMode = localStorage.getItem("cmvbt-viz-performance") === "1";
+  let keyboardSelectedNodeId = null;
+  let minimapPositions = null;
+  let currentFileName = "tree";
 
   const view = { x: 0, y: 0, k: 1 };
   // Both adjustable at runtime via the toolbar's Appearance group - not consts.
@@ -614,7 +779,7 @@
   // reasonable zoom level) unreadable. Cap how many render per node until
   // the user explicitly asks for the rest via the "+N more" box. Adjustable
   // at runtime via the toolbar's "Children shown" input - not a const.
-  let DEFAULT_CHILD_PAGE = 12;
+  let DEFAULT_CHILD_PAGE = parseInt(localStorage.getItem("cmvbt-viz-child-page"), 10) || 4;
   const MORE_PREFIX = "more::";
   const MAP2D_W = 640, MAP2D_H = 420, MAP2D_PAD = 40;
 
@@ -639,24 +804,62 @@
   const traceBody = document.getElementById("traceBody");
   const keyTracerPanel = document.getElementById("keyTracerPanel");
   const map2dPanel = document.getElementById("map2dPanel");
+  const utilityPanel = document.getElementById("utilityPanel");
+  const utilityBody = document.getElementById("utilityBody");
 
   // ---------------------------------------------------------------------
   // Data loading
   // ---------------------------------------------------------------------
+  function setLoadingState(label, progress) {
+    const overlay = document.getElementById("loadingOverlay");
+    const bar = document.getElementById("loadingBar");
+    document.getElementById("loadingLabel").textContent = label;
+    overlay.classList.remove("hidden");
+    if (progress === null) {
+      bar.classList.add("indeterminate");
+      bar.style.width = "34%";
+    } else {
+      bar.classList.remove("indeterminate");
+      bar.style.transform = "none";
+      bar.style.width = Math.max(0, Math.min(100, progress)) + "%";
+    }
+  }
+
+  function hideLoadingState() {
+    document.getElementById("loadingOverlay").classList.add("hidden");
+  }
+
   function loadFile(file) {
     fileLabel.textContent = "Parsing " + file.name + " (" + (file.size / 1e6).toFixed(1) + " MB)...";
+    setLoadingState("Reading " + file.name + "…", 0);
     const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        dump = JSON.parse(reader.result);
-      } catch (e) {
-        alert("Failed to parse JSON: " + e.message);
-        fileLabel.textContent = "Failed to load " + file.name;
-        return;
-      }
-      onDumpLoaded(file.name);
+    reader.onprogress = (e) => {
+      if (e.lengthComputable) setLoadingState("Reading " + file.name + "…", e.loaded / e.total * 100);
     };
-    reader.onerror = () => alert("Failed to read file.");
+    reader.onload = () => {
+      setLoadingState("Parsing " + file.name + "…", null);
+      // Yield once so the parsing message paints before JSON.parse blocks
+      // the main thread, then yield once more before the initial layout.
+      setTimeout(() => {
+        try {
+          dump = JSON.parse(reader.result);
+        } catch (e) {
+          hideLoadingState();
+          alert("Failed to parse JSON: " + e.message);
+          fileLabel.textContent = "Failed to load " + file.name;
+          return;
+        }
+        setLoadingState("Building the initial tree…", null);
+        setTimeout(() => {
+          onDumpLoaded(file.name);
+          requestAnimationFrame(() => requestAnimationFrame(hideLoadingState));
+        }, 0);
+      }, 0);
+    };
+    reader.onerror = () => {
+      hideLoadingState();
+      alert("Failed to read file.");
+    };
     reader.readAsText(file);
   }
 
@@ -728,6 +931,7 @@
   document.getElementById("chooseFileBtn").addEventListener("click", () => fileInput.click());
 
   function onDumpLoaded(name) {
+    currentFileName = name.replace(/\.json$/i, "") || "tree";
     stopPlayback();
     exitSnapshotMode();
     playbackIndex = -1;
@@ -741,18 +945,25 @@
     tracePanel.classList.add("hidden");
     keyTracerPanel.classList.add("hidden");
     map2dPanel.classList.add("hidden");
+    utilityPanel.classList.add("hidden");
     currentMap2dNodeId = null;
+    map2dGlobalLatestVersionCache = null;
+    map2dContextDataCache = null;
+    map2dHistory = [];
+    map2dHistoryIndex = -1;
+    diffAddedNodes.clear();
+    diffChangedNodes.clear();
+    keyboardSelectedNodeId = null;
 
     fileLabel.textContent = name + " - " + Object.keys(dump.nodes).length + " unique nodes";
     document.getElementById("statRoots").textContent = "roots: " + dump.roots.length;
     document.getElementById("statNodes").textContent = "unique nodes in file: " + Object.keys(dump.nodes).length;
 
-    renderRootList();
-
     if (dump.roots.length) {
-      const latest = latestRoot();
-      selectRoot(latest.node_id, latest);
-    }
+      const savedRootId = localStorage.getItem("cmvbt-viz-selected-root");
+      const initial = dump.roots.find(r => r.node_id === savedRootId) || latestRoot();
+      selectRoot(initial.node_id, initial);
+    } else renderRootList();
   }
 
   /// The root* with the highest version - i.e. the current, live view of the
@@ -817,7 +1028,8 @@
     liveLegend.classList.add("hidden");
     render();
   });
-  document.getElementById("exitSnapshotBtn").addEventListener("click", () => {
+  document.getElementById("exitSnapshotBtn").addEventListener("click", (e) => {
+    e.stopPropagation();
     exitSnapshotMode();
     heightCache.clear();
     render();
@@ -841,16 +1053,17 @@
   // ---------------------------------------------------------------------
   function renderRootList() {
     rootListEl.innerHTML = "";
+    const generation = ++rootListGeneration;
     const latest = latestRoot();
     const ascending = sortedRootsAsc();
     // Display newest-first regardless of the underlying root-index's own
     // enumeration order (see latestRoot()'s doc) - most users expect the
     // current version at the top.
     const sorted = [...dump.roots].sort((a, b) => b.version - a.version);
+    const countJobs = [];
     sorted.forEach((r) => {
       const row = document.createElement("div");
       row.className = "root-row" + (r.node_id === currentRootId ? " selected" : "");
-      const counts = computeLiveDeadCounts(r.node_id);
       // This root* is "in effect" (what root_for(si)/a version-pinned range
       // query would resolve to) for any snapshot version in [r.version,
       // nextVersion) - half-open, since the *next* root* is exactly the
@@ -866,13 +1079,31 @@
         '</div>' +
         '<div class="root-row-meta"><span class="rh">Height ' + r.height + '</span></div>' +
         '<div class="root-row-meta">' +
-        '<span class="rlive">' + counts.live + ' live</span>' +
-        '<span class="rdead">' + counts.dead + ' dead</span>' +
+        '<span class="rlive">… live</span>' +
+        '<span class="rdead">… dead</span>' +
         '</div>' +
         '<div class="root-row-snapshot">snapshot [' + r.version + ', ' + (nextVersion !== null ? nextVersion : '*') + ')</div>';
       row.addEventListener("click", () => selectRoot(r.node_id, r));
       rootListEl.appendChild(row);
+      countJobs.push({ rootId: r.node_id, row });
     });
+
+    // Counting every reachable node for every historical root can dominate
+    // file loading on large dumps. Render/select the latest root first, then
+    // fill one sidebar row per idle turn so the UI remains usable.
+    let jobIndex = 0;
+    const fillNextCount = () => {
+      if (generation !== rootListGeneration || jobIndex >= countJobs.length) return;
+      const job = countJobs[jobIndex++];
+      const counts = computeLiveDeadCounts(job.rootId);
+      if (generation !== rootListGeneration || !job.row.isConnected) return;
+      job.row.querySelector(".rlive").textContent = counts.live + " live";
+      job.row.querySelector(".rdead").textContent = counts.dead + " dead";
+      if (typeof requestIdleCallback === "function") requestIdleCallback(fillNextCount, { timeout: 250 });
+      else setTimeout(fillNextCount, 0);
+    };
+    if (typeof requestIdleCallback === "function") requestIdleCallback(fillNextCount, { timeout: 250 });
+    else setTimeout(fillNextCount, 0);
   }
 
   /// Leaves version-snapshot mode (see `effectiveChildren`/the "jump to
@@ -895,8 +1126,9 @@
     stopPlayback(); // any manual navigation cancels an in-progress evolution playback
     exitSnapshotMode();
     currentRootId = nodeId;
+    localStorage.setItem("cmvbt-viz-selected-root", nodeId);
     expanded.clear(); // start fully collapsed (just the root box) - a wide root
-                       // (e.g. FAN_OUT=125 children) would otherwise force an
+                       // (e.g. a near-capacity FAN_OUT page) would otherwise force an
                        // unreadably tiny "fit" scale right away.
     checked.clear();
     childLimit.clear();
@@ -1278,6 +1510,7 @@
 
   function openTrace(nodeId, parentId, supersessionPoint) {
     keyTracerPanel.classList.add("hidden"); // mutually exclusive with the key tracer panel
+    utilityPanel.classList.add("hidden");
     currentTrace = computeTrace(nodeId, parentId, supersessionPoint);
     renderCurrentTrace();
     tracePanel.classList.remove("hidden");
@@ -1415,6 +1648,7 @@
 
   function openKeyTracer(keyStr, current) {
     tracePanel.classList.add("hidden"); // mutually exclusive with the node trace panel
+    utilityPanel.classList.add("hidden");
     const events = computeKeyHistory(keyStr);
     const body = document.getElementById("keyTracerBody");
     body.innerHTML = renderKeyTrace(keyStr, events, current);
@@ -1463,25 +1697,6 @@
     return b !== null ? Number(b) : Number(v);
   }
 
-  /// Like `currentReferenceVersion()`, but *not* gated behind the Live view
-  /// toggle: the 2D map is itself an explicit, opt-in, per-node view (opened
-  /// by clicking that node's own map2d button), so it should always be
-  /// scoped to whichever root is actually selected, not only when the user
-  /// separately remembered to flip Live view on too. Returns null exactly
-  /// when raw `c.live`/the full `children` array are already correct on
-  /// their own: no snapshot pinned, and the selected root already is the
-  /// latest one (see `currentReferenceVersion`'s doc for exactly why that
-  /// second case matters - a root* page keeps accumulating child slots long
-  /// after its own version stamp, so any *other*, non-latest root's own
-  /// version is the only correct cutoff for "what did this page's history
-  /// look like as of that root").
-  function map2dReferenceVersion() {
-    if (snapshotVersion !== null) return snapshotVersion;
-    if (currentRootId === latestRoot().node_id) return null;
-    const meta = dump.roots.find(r => r.node_id === currentRootId);
-    return meta ? BigInt(meta.version) : null;
-  }
-
   /// A key-split (or version bump) is one atomic event: the moment *any*
   /// later sibling's range overlaps this slot at all, this slot's physical
   /// page has already been superseded as a whole - a read for any key in
@@ -1491,22 +1706,14 @@
   /// later overlapping sibling, not just across whichever narrower portion
   /// that one sibling's own range happens to cover.
   ///
-  /// When `map2dReferenceVersion()` returns non-null, both the candidate
-  /// pool and "later" are restricted to slots that existed by that version
-  /// (`c.version <= ref`) - a slot born *after* the reference point isn't
-  /// part of this page's history as of then, and can't be what superseded
-  /// anything either. Liveness is then re-derived from that same restricted
-  /// view (no later-and-qualifying overlap => still live as of `ref`),
-  /// exactly like `qualifyingChildrenAsOf` does for the main tree render -
-  /// raw `c.live` alone can't be used here since it's computed once against
-  /// the page's absolute latest state, not any earlier point in time.
-  function computeMap2dData(nodeId) {
+  /// Build the stored child rectangles, clipped to the lifetime of this
+  /// particular rendered node instance. A physical page can contain entries
+  /// older than the parent slot that currently points to it; drawing those
+  /// earlier versions is invalid because this node/fence did not exist yet.
+  function computeMap2dData(nodeId, fenceLower = null, fenceUpper = null, versionLower = null, versionUpper = null) {
     const node = getNode(nodeId);
-    const refVersion = map2dReferenceVersion();
-    const children = refVersion !== null
-      ? node.children.filter(c => { const v = tryBigInt(c.version); return v !== null && v <= refVersion; })
-      : node.children;
-    return children.map((c, i) => {
+    const children = node.children;
+    return children.flatMap((c, i) => {
       let minVersion = null;
       children.slice(i + 1).forEach(later => {
         if (!intervalsOverlap(c, later)) return;
@@ -1514,15 +1721,149 @@
         if (v === null) return;
         if (minVersion === null || v < minVersion) minVersion = v;
       });
-      return {
+      const born = numOf(c.version);
+      const rawEnd = minVersion !== null ? numOf(minVersion) : null;
+      if (versionUpper !== null && born > versionUpper) return [];
+      if (versionLower !== null && rawEnd !== null && rawEnd <= versionLower) return [];
+      const start = versionLower !== null ? Math.max(born, versionLower) : born;
+      const end = versionUpper !== null && (rawEnd === null || rawEnd > versionUpper) ? null : rawEnd;
+      const lower = fenceLower !== null ? Math.max(numOf(c.key_lower), fenceLower) : numOf(c.key_lower);
+      const upper = fenceUpper !== null ? Math.min(numOf(c.key_upper), fenceUpper) : numOf(c.key_upper);
+      if (lower > upper) return [];
+      return [{
         idx: i,
+        ownerId: nodeId,
         node_id: c.node_id,
-        lower: numOf(c.key_lower), upper: numOf(c.key_upper),
-        version: numOf(c.version),
-        endVersion: minVersion !== null ? numOf(minVersion) : null,
-        live: refVersion !== null ? minVersion === null : c.live !== false,
-      };
+        slotLowerRaw: String(c.key_lower),
+        slotUpperRaw: String(c.key_upper),
+        birthVersionRaw: String(c.version),
+        lower, upper,
+        version: start,
+        endVersion: end,
+        live: end === null,
+      }];
     });
+  }
+
+  function map2dLatestChildVersion(nodeId) {
+    const node = getNode(nodeId);
+    return node && node.type === "internal" && node.children.length
+      ? Math.max(...node.children.map(c => numOf(c.version)))
+      : 1;
+  }
+
+  function map2dGlobalLatestVersion() {
+    if (map2dGlobalLatestVersionCache !== null) return map2dGlobalLatestVersionCache;
+    let latest = 1;
+    Object.values(dump.nodes).forEach(node => {
+      if (!node || node.type !== "internal" || !Array.isArray(node.children)) return;
+      node.children.forEach(c => { latest = Math.max(latest, numOf(c.version)); });
+    });
+    map2dGlobalLatestVersionCache = latest;
+    return latest;
+  }
+
+  function map2dSlotEndVersion(parent, slotIndex) {
+    const mine = parent.children[slotIndex];
+    let end = null;
+    parent.children.slice(slotIndex + 1).forEach(later => {
+      if (!intervalsOverlap(mine, later)) return;
+      const v = numOf(later.version);
+      if (end === null || v < end) end = v;
+    });
+    return end;
+  }
+
+  function map2dInstanceVersionBounds(parentId, nodeId, fence, birthVersion) {
+    const lower = birthVersion !== null && birthVersion !== undefined ? numOf(birthVersion) : null;
+    if (parentId === null || parentId === undefined) {
+      return { lower, upper: map2dLatestChildVersion(nodeId) };
+    }
+    const parent = getNode(parentId);
+    if (!parent || parent.type !== "internal") return { lower, upper: map2dLatestChildVersion(nodeId) };
+    const index = parent.children.findIndex(c =>
+      c.node_id === nodeId &&
+      String(c.version) === String(birthVersion) &&
+      (!fence || (String(c.key_lower) === String(fence.lower) && String(c.key_upper) === String(fence.upper)))
+    );
+    return {
+      lower,
+      upper: index >= 0 ? (map2dSlotEndVersion(parent, index) ?? map2dGlobalLatestVersion()) : map2dGlobalLatestVersion(),
+    };
+  }
+
+  // A physical internal page can outlive one particular parent slot. Keep
+  // this final intersection as a safety invariant: every rendered fragment
+  // of a non-root instance must remain inside its parent-imposed fence.
+  function map2dEntriesInsideCurrentFence(entries) {
+    if (currentMap2dFenceLower === null || currentMap2dFenceUpper === null) return entries;
+    return entries.flatMap(e => {
+      const lower = Math.max(e.lower, currentMap2dFenceLower);
+      const upper = Math.min(e.upper, currentMap2dFenceUpper);
+      return lower <= upper ? [{ ...e, lower, upper }] : [];
+    });
+  }
+
+  // The contextual map is intentionally dump-wide.  It is only revealed
+  // outside a non-root node's own reset extent, where it supplies the
+  // neighbouring page fragments the user is zooming out to inspect.
+  function computeMap2dContextData() {
+    if (map2dContextDataCache !== null) return map2dContextDataCache;
+    const result = [];
+    const seen = new Set();
+    Object.values(dump.nodes).forEach(parent => {
+      if (!parent || parent.type !== "internal" || !Array.isArray(parent.children)) return;
+      parent.children.forEach((c, slotIndex) => {
+        const child = getNode(c.node_id);
+        if (!child || child.type !== "internal") return;
+        const lo = numOf(c.key_lower), hi = numOf(c.key_upper);
+        const vLo = numOf(c.version);
+        const vHi = map2dSlotEndVersion(parent, slotIndex) ?? map2dGlobalLatestVersion();
+        const signature = c.node_id + "|" + lo + "|" + hi + "|" + vLo + "|" + vHi;
+        if (seen.has(signature)) return;
+        seen.add(signature);
+        result.push(...computeMap2dData(c.node_id, lo, hi, vLo, vHi));
+      });
+    });
+    dump.roots.forEach(root => {
+      const node = getNode(root.node_id);
+      if (!node || node.type !== "internal" || seen.has(root.node_id + "|root")) return;
+      seen.add(root.node_id + "|root");
+      result.push(...computeMap2dData(root.node_id, null, null, numOf(root.version), map2dLatestChildVersion(root.node_id)));
+    });
+    map2dContextDataCache = result;
+    return result;
+  }
+
+  function map2dComputeContextExtent() {
+    let highestRealKey = 1;
+    Object.values(dump.nodes).forEach(node => {
+      if (!node || node.type !== "internal" || !Array.isArray(node.children)) return;
+      node.children.forEach(c => {
+        const lo = numOf(c.key_lower), hi = numOf(c.key_upper);
+        if (lo !== U64_MAX_NUM) highestRealKey = Math.max(highestRealKey, lo);
+        if (hi !== U64_MAX_NUM) highestRealKey = Math.max(highestRealKey, hi);
+      });
+    });
+    const keyMax = highestRealKey + Math.max(1, highestRealKey) * 0.08;
+    const latestChildVersion = map2dGlobalLatestVersion();
+    const versionSpan = Math.max(1, latestChildVersion - 1);
+    return {
+      vMin: 1,
+      // Keep the latest real version as a tick inside the plot, with the
+      // same small open-ended padding used by an individual node map.
+      vMax: Math.max(1, latestChildVersion) + versionSpan * 0.08,
+      kMin: 0,
+      kMax: keyMax,
+      kMinIsSentinel: false,
+      kMaxIsSentinel: true,
+    };
+  }
+
+  function map2dDomainShowsContext(a, own) {
+    const epsilon = 1e-7;
+    return a.vMin < own.vMin - epsilon || a.vMax > own.vMax + epsilon ||
+      a.kMin < own.kMin - epsilon || a.kMax > own.kMax + epsilon;
   }
 
   /// The node's whole data extent (used as the zoomed-out/reset view, and as
@@ -1607,9 +1948,17 @@
     const nodeId = currentMap2dNodeId;
     const wrap = document.getElementById("map2dSvgWrap");
     if (!nodeId) return;
-    const refVersion = map2dReferenceVersion();
+    const refVersion = null;
     const scopeSuffix = refVersion !== null ? " — as of v" + refVersion : "";
-    const entries = computeMap2dData(nodeId);
+    const entries = map2dEntriesInsideCurrentFence(
+      computeMap2dData(
+        nodeId,
+        currentMap2dFenceLower,
+        currentMap2dFenceUpper,
+        currentMap2dVersionLower,
+        currentMap2dVersionUpper
+      )
+    );
     document.getElementById("map2dOnlyLiveBtn").classList.toggle("primary", map2dOnlyLive);
 
     if (!entries.length) {
@@ -1619,8 +1968,23 @@
     }
     if (!map2dFullExtent) {
       map2dFullExtent = map2dComputeFullExtent(entries, currentMap2dFenceLower, currentMap2dFenceUpper);
+      if (currentMap2dVersionLower !== null) map2dFullExtent.vMin = currentMap2dVersionLower;
+      if (currentMap2dVersionUpper !== null) {
+        const instanceSpan = Math.max(1, currentMap2dVersionUpper - map2dFullExtent.vMin);
+        map2dFullExtent.vMax = currentMap2dVersionUpper + instanceSpan * 0.08;
+      }
+      map2dContextExtent = currentMap2dIsRoot
+        ? { ...map2dFullExtent }
+        : map2dComputeContextExtent();
       map2dDomain = { ...map2dFullExtent };
     }
+
+    // Context belongs only outside the selected node's reset rectangle.
+    // Zooming further into that rectangle must never summon other nodes.
+    const showingContext = !currentMap2dIsRoot && map2dDomainShowsContext(map2dDomain, map2dFullExtent);
+    const contextEntries = showingContext
+      ? computeMap2dContextData().filter(e => e.ownerId !== nodeId && (!map2dOnlyLive || e.live))
+      : [];
 
     const visible = map2dOnlyLive ? entries.filter(e => e.live) : entries;
     document.getElementById("map2dTitle").textContent =
@@ -1639,13 +2003,18 @@
 
     // Tick candidates always come from the *full* (unfiltered) entry set, so
     // toggling "Only live entries" never rescales or relabels the axes.
-    const versionBreaks = [...new Set(entries.flatMap(e => e.endVersion !== null ? [e.version, e.endVersion] : [e.version]))]
+    const tickEntries = entries.concat(contextEntries);
+    const versionBreaks = [...new Set(tickEntries.flatMap(e => e.endVersion !== null ? [e.version, e.endVersion] : [e.version])
+      .concat(currentMap2dVersionLower !== null ? [currentMap2dVersionLower] : [])
+      .concat(currentMap2dVersionUpper !== null ? [currentMap2dVersionUpper] : []))]
       .sort((a, b) => a - b);
     // The fence's own edges (map2dFullExtent.kMin/kMax) are always included so the
     // chart's actual top/bottom boundary is labeled even when no entry's own key
     // value happens to land exactly there.
-    const keyBreaks = [...new Set(entries.flatMap(e => [e.lower, e.upper])
-      .concat([map2dFullExtent.kMin, map2dFullExtent.kMax]))].sort((a, b) => a - b);
+    const axisExtent = showingContext ? map2dContextExtent : map2dFullExtent;
+    const keyBreaks = [...new Set(tickEntries.flatMap(e => [e.lower, e.upper])
+      .map(k => Math.min(k, axisExtent.kMax))
+      .concat([axisExtent.kMin, axisExtent.kMax]))].sort((a, b) => a - b);
     const versionTicks = map2dPickTicks(versionBreaks, dom.vMin, dom.vMax, plotW, 42);
     const keyTicks = map2dPickTicks(keyBreaks, dom.kMin, dom.kMax, plotH, 22);
 
@@ -1666,8 +2035,8 @@
     // label has to say what that edge actually *is* - this node's own fence
     // data already says so exactly (see map2dComputeFullExtent's doc).
     const formatAxisKey = k =>
-      ((map2dFullExtent.kMaxIsSentinel && k === map2dFullExtent.kMax) ||
-       (map2dFullExtent.kMinIsSentinel && k === map2dFullExtent.kMin))
+      ((axisExtent.kMaxIsSentinel && k === axisExtent.kMax) ||
+       (axisExtent.kMinIsSentinel && k === axisExtent.kMin))
         ? "MAX" : formatKey(k);
     keyTicks.forEach(k => {
       const y = yOf(k);
@@ -1686,35 +2055,93 @@
       '" fill="#8891a3" font-size="10" text-anchor="middle" transform="rotate(-90 14 ' + (MAP2D_H / 2) + ')">key</text>';
 
     svgHtml += '<g clip-path="url(#map2dClip)">';
-    visible.forEach(e => {
+    const drawEntry = (e, contextual) => {
       const x1 = xOf(e.version);
-      const x2 = xOf(e.endVersion !== null ? e.endVersion : map2dFullExtent.vMax);
-      // Clamp a sentinel-bounded key edge (see map2dComputeFullExtent) to the
-      // same padded edge its tick axis uses, rather than the raw (often absurdly
-      // large) literal value.
-      const y1 = yOf(Math.min(e.upper, map2dFullExtent.kMax));
-      const y2 = yOf(Math.max(e.lower, map2dFullExtent.kMin));
+      const x2 = xOf(e.endVersion !== null ? e.endVersion : (contextual ? map2dContextExtent.vMax : map2dFullExtent.vMax));
+      // Intersect with the active drawing extent on both edges.  Selected
+      // entries were already intersected with their node fence above;
+      // contextual entries are intersected here with the global viewport.
+      const drawingExtent = contextual ? map2dContextExtent : map2dFullExtent;
+      const selectedMaxIsGlobal = !contextual && showingContext && currentMap2dFenceUpper === U64_MAX_NUM;
+      const upperPlotLimit = selectedMaxIsGlobal ? map2dContextExtent.kMax : drawingExtent.kMax;
+      const clippedLower = Math.max(e.lower, drawingExtent.kMin);
+      const plottedUpper = e.upper === U64_MAX_NUM ? upperPlotLimit : e.upper;
+      const clippedUpper = Math.min(plottedUpper, upperPlotLimit);
+      if (clippedLower > clippedUpper) return;
+      const y1 = yOf(clippedUpper);
+      const y2 = yOf(clippedLower);
       const w = x2 - x1, h = y2 - y1;
       // Entirely outside the current zoom/pan window in at least one axis - skip
       // (the clip-path would hide it anyway; this just keeps the SVG smaller).
       if (x2 < MAP2D_PAD || x1 > MAP2D_W - MAP2D_PAD || y2 < MAP2D_PAD || y1 > MAP2D_H - MAP2D_PAD) return;
-      const fill = e.live ? "rgba(58,168,118,.35)" : "rgba(229,88,106,.22)";
-      const stroke = e.live ? "#3aa876" : "#e5586a";
+      const fill = contextual ? "rgba(93,112,153,.12)" : (e.live ? "rgba(58,168,118,.35)" : "rgba(229,88,106,.22)");
+      const stroke = contextual ? "#596985" : (e.live ? "#3aa876" : "#e5586a");
+      const targetNode = getNode(e.node_id);
+      const canNavigate = targetNode && targetNode.type === "internal";
       const title = "I_" + e.idx + " — keys [" + escapeHtml(formatKey(e.lower)) + " .. " + escapeHtml(formatKey(e.upper)) +
         "], born v" + escapeHtml(String(e.version)) +
         (e.endVersion !== null ? ", superseded v" + escapeHtml(String(e.endVersion)) : ", still live");
       const showLabel = w > 16 && h > 10;
       svgHtml += '<g><title>' + title + '</title>' +
         '<rect x="' + x1 + '" y="' + y1 + '" width="' + Math.max(1, w) + '" height="' + Math.max(1, h) +
-        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1.2"/>' +
-        (showLabel
+        '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + (contextual ? '.7' : '1.2') + '"' +
+        (canNavigate
+          ? ' data-map-entry-child="' + escapeHtml(e.node_id) + '" data-map-entry-parent="' + escapeHtml(e.ownerId) +
+            '" data-map-entry-lower="' + escapeHtml(e.slotLowerRaw) + '" data-map-entry-upper="' + escapeHtml(e.slotUpperRaw) +
+            '" data-map-entry-birth="' + escapeHtml(e.birthVersionRaw) + '" data-map-entry-index="' + e.idx +
+            '" data-map-entry-end="' + escapeHtml(e.endVersion === null ? "live" : String(e.endVersion)) +
+            '" data-map-entry-target-type="' + escapeHtml(targetNode.type) + '" style="cursor:pointer"'
+          : '') + '/>' +
+        (showLabel && !contextual
           ? '<text x="' + (x1 + 3) + '" y="' + (y1 + 12) +
-            '" fill="#d8dee9" font-size="9" font-family="ui-monospace,monospace">I_' + e.idx + '</text>'
+            '" fill="#d8dee9" font-size="9" font-family="ui-monospace,monospace" style="pointer-events:none">I_' + e.idx + '</text>'
           : '') +
         '</g>';
-    });
+    };
+    contextEntries.forEach(e => drawEntry(e, true));
+    visible.forEach(e => drawEntry(e, false));
+
+    // Keep the selected page unmistakable while its neighbours are visible.
+    // This is its actual parent-imposed key fence and its own version extent,
+    // not a rectangle inferred from whatever contextual fragments happen to
+    // share the viewport.
+    if (showingContext) {
+      const boundaryVMin = currentMap2dVersionLower ?? map2dFullExtent.vMin;
+      const boundaryVMax = currentMap2dVersionUpper ?? map2dFullExtent.vMax;
+      const bx1 = xOf(boundaryVMin), bx2 = xOf(boundaryVMax);
+      const boundaryKMin = currentMap2dFenceLower ?? map2dFullExtent.kMin;
+      const boundaryKMax = currentMap2dFenceUpper === U64_MAX_NUM
+        ? map2dContextExtent.kMax
+        : (currentMap2dFenceUpper ?? map2dFullExtent.kMax);
+      const by1 = yOf(boundaryKMax), by2 = yOf(boundaryKMin);
+      svgHtml += '<rect x="' + bx1 + '" y="' + by1 + '" width="' + Math.max(1, bx2 - bx1) +
+        '" height="' + Math.max(1, by2 - by1) + '" fill="none" stroke="var(--fence)" stroke-width="3"/>';
+    }
     svgHtml += '</g></svg>';
     wrap.innerHTML = svgHtml;
+    wrap.querySelectorAll("[data-map-entry-child]").forEach(rect => {
+      rect.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (map2dDidDrag) return;
+        openMap2d(
+          rect.getAttribute("data-map-entry-child"),
+          rect.getAttribute("data-map-entry-lower"),
+          rect.getAttribute("data-map-entry-upper"),
+          rect.getAttribute("data-map-entry-parent"),
+          rect.getAttribute("data-map-entry-birth"),
+          true,
+          {
+            idx: rect.getAttribute("data-map-entry-index"),
+            parentId: rect.getAttribute("data-map-entry-parent"),
+            lower: rect.getAttribute("data-map-entry-lower"),
+            upper: rect.getAttribute("data-map-entry-upper"),
+            birth: rect.getAttribute("data-map-entry-birth"),
+            end: rect.getAttribute("data-map-entry-end"),
+            targetType: rect.getAttribute("data-map-entry-target-type"),
+          }
+        );
+      });
+    });
   }
 
   function parseFenceBound(v) {
@@ -1722,19 +2149,92 @@
     return b !== null ? Number(b) : null;
   }
 
-  function openMap2d(nodeId, fenceLowerStr, fenceUpperStr) {
+  function updateMap2dHistoryButtons() {
+    document.getElementById("map2dBackBtn").disabled = map2dHistoryIndex <= 0;
+    document.getElementById("map2dForwardBtn").disabled = map2dHistoryIndex < 0 || map2dHistoryIndex >= map2dHistory.length - 1;
+  }
+
+  function updateMap2dNavigationInfo() {
+    const breadcrumb = document.getElementById("map2dBreadcrumb");
+    breadcrumb.textContent = map2dHistory.slice(0, map2dHistoryIndex + 1).map((state, index) => {
+      const fence = state.fenceLowerStr !== null
+        ? " [" + formatKey(state.fenceLowerStr) + ".." + formatKey(state.fenceUpperStr) + "]"
+        : "";
+      return (index === 0 ? "Root / " : "") + state.nodeId + fence;
+    }).join("  ›  ");
+    const info = document.getElementById("map2dEntryInfo");
+    if (!currentMap2dEntryInfo) {
+      info.classList.add("hidden");
+      info.textContent = "";
+    } else {
+      info.classList.remove("hidden");
+      info.textContent = "Opened from entry I_" + currentMap2dEntryInfo.idx +
+        " · parent " + currentMap2dEntryInfo.parentId +
+        " · keys " + formatKey(currentMap2dEntryInfo.lower) + ".." + formatKey(currentMap2dEntryInfo.upper) +
+        " · " + currentMap2dEntryInfo.targetType +
+        " · born v" + currentMap2dEntryInfo.birth +
+        (currentMap2dEntryInfo.end === "live" ? " · live" : " · superseded v" + currentMap2dEntryInfo.end);
+    }
+  }
+
+  function openMap2d(nodeId, fenceLowerStr, fenceUpperStr, parentId, birthVersion, recordHistory = true, entryInfo = null) {
+    // Inspectors are mutually exclusive: map zoom and keyboard controls must
+    // never leak into a side panel that is still sitting underneath this one.
+    tracePanel.classList.add("hidden");
+    keyTracerPanel.classList.add("hidden");
+    utilityPanel.classList.add("hidden");
+    const state = {
+      nodeId,
+      fenceLowerStr: fenceLowerStr ?? null,
+      fenceUpperStr: fenceUpperStr ?? null,
+      parentId: parentId ?? null,
+      birthVersion: birthVersion ?? null,
+      entryInfo,
+    };
+    if (recordHistory) {
+      map2dHistory = map2dHistory.slice(0, map2dHistoryIndex + 1);
+      map2dHistory.push(state);
+      map2dHistoryIndex = map2dHistory.length - 1;
+    }
+    currentMap2dEntryInfo = entryInfo;
+    updateMap2dHistoryButtons();
+    updateMap2dNavigationInfo();
     currentMap2dNodeId = nodeId;
+    currentMap2dIsRoot = nodeId === currentRootId;
     // null (both attributes absent) means "no real fence - this is a
     // rendered root" - map2dComputeFullExtent then derives the domain from
     // the union of this node's own children instead of assuming a bound
     // that was never actually true for this specific root.
     currentMap2dFenceLower = fenceLowerStr != null ? parseFenceBound(fenceLowerStr) : null;
     currentMap2dFenceUpper = fenceUpperStr != null ? parseFenceBound(fenceUpperStr) : null;
+    const versionBounds = map2dInstanceVersionBounds(
+      parentId,
+      nodeId,
+      fenceLowerStr != null && fenceUpperStr != null ? { lower: fenceLowerStr, upper: fenceUpperStr } : null,
+      birthVersion
+    );
+    currentMap2dVersionLower = versionBounds.lower;
+    currentMap2dVersionUpper = versionBounds.upper;
     map2dFullExtent = null; // force a fresh full-extent/reset-zoom computation for this node
+    map2dContextExtent = null;
     map2dDomain = null;
+    document.getElementById("map2dZoomOutBtn").disabled = false;
+    document.getElementById("map2dZoomOutBtn").title = currentMap2dIsRoot
+      ? "Zoom out, up to this root map's initial extent"
+      : "Zoom out to see neighbouring inner-node entries";
     map2dPanel.classList.remove("hidden");
     renderMap2d();
   }
+  document.getElementById("map2dBackBtn").addEventListener("click", () => {
+    if (map2dHistoryIndex <= 0) return;
+    const state = map2dHistory[--map2dHistoryIndex];
+    openMap2d(state.nodeId, state.fenceLowerStr, state.fenceUpperStr, state.parentId, state.birthVersion, false, state.entryInfo);
+  });
+  document.getElementById("map2dForwardBtn").addEventListener("click", () => {
+    if (map2dHistoryIndex >= map2dHistory.length - 1) return;
+    const state = map2dHistory[++map2dHistoryIndex];
+    openMap2d(state.nodeId, state.fenceLowerStr, state.fenceUpperStr, state.parentId, state.birthVersion, false, state.entryInfo);
+  });
   document.getElementById("map2dCloseBtn").addEventListener("click", () => map2dPanel.classList.add("hidden"));
   document.getElementById("map2dOnlyLiveBtn").addEventListener("click", () => {
     map2dOnlyLive = !map2dOnlyLive;
@@ -1742,20 +2242,39 @@
   });
 
   /// Zooms the visible domain by `factor` (>1 = in, <1 = out) around the
-  /// data point (dataX, dataY), clamped to [1%, 4x] of the node's full
-  /// extent so the user can't zoom into numerical nothing or pan away to
-  /// an empty void.
+  /// data point (dataX, dataY). Zoom-in is limited relative to the selected
+  /// node; zoom-out is clamped to the dump-wide context extent and is only
+  /// available for non-root inner nodes.
+  function map2dClampDomain(domain) {
+    const limit = map2dContextExtent;
+    if (!limit) return domain;
+    const vSpan = Math.min(domain.vMax - domain.vMin, limit.vMax - limit.vMin);
+    const kSpan = Math.min(domain.kMax - domain.kMin, limit.kMax - limit.kMin);
+    let vMin = domain.vMin, kMin = domain.kMin;
+    if (vMin < limit.vMin) vMin = limit.vMin;
+    if (vMin + vSpan > limit.vMax) vMin = limit.vMax - vSpan;
+    if (kMin < limit.kMin) kMin = limit.kMin;
+    if (kMin + kSpan > limit.kMax) kMin = limit.kMax - kSpan;
+    return { vMin, vMax: vMin + vSpan, kMin, kMax: kMin + kSpan };
+  }
+
   function map2dZoomAt(dataX, dataY, factor) {
-    if (!map2dDomain || !map2dFullExtent) return;
+    if (!map2dDomain || !map2dFullExtent || !map2dContextExtent) return;
     const dom = map2dDomain;
     const fullVSpan = map2dFullExtent.vMax - map2dFullExtent.vMin;
     const fullKSpan = map2dFullExtent.kMax - map2dFullExtent.kMin;
     const vFrac = (dataX - dom.vMin) / (dom.vMax - dom.vMin);
     const kFrac = (dataY - dom.kMin) / (dom.kMax - dom.kMin);
-    const newVSpan = Math.min(fullVSpan * 4, Math.max(fullVSpan * 0.01, (dom.vMax - dom.vMin) / factor));
-    const newKSpan = Math.min(fullKSpan * 4, Math.max(fullKSpan * 0.01, (dom.kMax - dom.kMin) / factor));
-    dom.vMin = dataX - vFrac * newVSpan; dom.vMax = dom.vMin + newVSpan;
-    dom.kMin = dataY - kFrac * newKSpan; dom.kMax = dom.kMin + newKSpan;
+    const contextVSpan = map2dContextExtent.vMax - map2dContextExtent.vMin;
+    const contextKSpan = map2dContextExtent.kMax - map2dContextExtent.kMin;
+    const newVSpan = Math.min(contextVSpan, Math.max(fullVSpan * 0.01, (dom.vMax - dom.vMin) / factor));
+    const newKSpan = Math.min(contextKSpan, Math.max(fullKSpan * 0.01, (dom.kMax - dom.kMin) / factor));
+    map2dDomain = map2dClampDomain({
+      vMin: dataX - vFrac * newVSpan,
+      vMax: dataX - vFrac * newVSpan + newVSpan,
+      kMin: dataY - kFrac * newKSpan,
+      kMax: dataY - kFrac * newKSpan + newKSpan,
+    });
     renderMap2d();
   }
 
@@ -1798,10 +2317,11 @@
   // Drag-to-pan, mirroring the main canvas's own pan (see canvasWrap's
   // pointerdown/move/up below) but shifting the data-space domain window
   // instead of a CSS transform.
-  let map2dDragging = false, map2dDragStart = null, map2dDomainStart = null;
+  let map2dDragging = false, map2dDidDrag = false, map2dDragStart = null, map2dDomainStart = null;
   map2dWrapEl.addEventListener("pointerdown", (e) => {
     if (!map2dDomain) return;
     map2dDragging = true;
+    map2dDidDrag = false;
     map2dWrapEl.classList.add("grabbing");
     map2dDragStart = { x: e.clientX, y: e.clientY };
     map2dDomainStart = { ...map2dDomain };
@@ -1811,13 +2331,14 @@
     if (!map2dDragging) return;
     const plotW = MAP2D_W - MAP2D_PAD * 2, plotH = MAP2D_H - MAP2D_PAD * 2;
     const dx = e.clientX - map2dDragStart.x, dy = e.clientY - map2dDragStart.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) map2dDidDrag = true;
     const vSpan = map2dDomainStart.vMax - map2dDomainStart.vMin;
     const kSpan = map2dDomainStart.kMax - map2dDomainStart.kMin;
     const vShift = -dx / plotW * vSpan, kShift = dy / plotH * kSpan;
-    map2dDomain = {
+    map2dDomain = map2dClampDomain({
       vMin: map2dDomainStart.vMin + vShift, vMax: map2dDomainStart.vMax + vShift,
       kMin: map2dDomainStart.kMin + kShift, kMax: map2dDomainStart.kMax + kShift,
-    };
+    });
     renderMap2d();
   });
   ["pointerup", "pointercancel"].forEach(evt => map2dWrapEl.addEventListener(evt, () => {
@@ -2280,7 +2801,7 @@
         '<div class="node-box more" data-more-parent="' + node.parentId + '">' +
         '<div class="node-head">' +
         '<span class="kind">+' + node.remaining + ' more &hellip;</span>' +
-        '</div><div class="node-body">click to show the next page' +
+        '</div><div class="node-body">Click to show the next ' + DEFAULT_CHILD_PAGE + ' pages' +
         '<div class="more-actions"><button class="btn" data-more-all-parent="' + node.parentId + '">Show all</button></div>' +
         '</div>' +
         '</div>'
@@ -2289,6 +2810,7 @@
 
     const isExpanded = expanded.has(id);
     const isMarked = checked.has(id);
+    const isRenderedRoot = parentId === null;
     const caret = node.type === "leaf" || node.type === "internal" ? (isExpanded ? "▾" : "▸") : "";
     const kindLabel = node.type === "internal" ? "Internal" : node.type === "leaf" ? "Leaf" : "Internal (truncated)";
 
@@ -2332,6 +2854,8 @@
       }
     }
 
+    let headerSafenessHtml = "";
+
     // Capacity/Safeness: leaf and internal nodes (see blockSafeness's doc) -
     // uses the same activeCount/deadCount already resolved above, so this
     // stays correct under snapshot mode too, not just against the dump's
@@ -2351,10 +2875,10 @@
         body += '<div class="capacity capacity-' + safeness.level + '" title="(active + dead) slots filled, out of this ' +
           (isLeaf ? "leaf" : "internal node") + '\'s ' + mu + '-' + capNoun + ' capacity">' +
           'Capacity: ' + used + ' / ' + mu + ' (' + usedPct + '% used)</div>';
-        body += '<div class="safeness safeness-' + safeness.level + '" ' +
+        headerSafenessHtml = '<span class="safeness safeness-' + safeness.level + '" ' +
           'title="Mirrors the engine\'s own unsafe_degree' + (isRoot ? "_root" : "") +
           ' SMO check for this block">' +
-          '<span class="safeness-dot"></span>Safeness: ' + escapeHtml(safeness.label) + '</div>';
+          '<span class="safeness-dot"></span>' + escapeHtml(safeness.label) + '</span>';
       }
     }
 
@@ -2395,16 +2919,25 @@
     // parent-imposed Fence above. For a leaf, only shown once expanded -
     // right above the record list it summarizes, not cluttering the
     // collapsed view with a line that's otherwise a near-duplicate of Fence.
-    if (node.type !== "leaf" || isExpanded) {
-      body += '<div class="range" title="' + escapeHtml(formatKey(rangeLo)) + ' .. ' + escapeHtml(formatKey(rangeHi)) + '">' +
-        'Keys: ' + escapeHtml(formatKey(rangeLo)) + ' .. ' + escapeHtml(formatKey(rangeHi)) + '</div>';
+    const keysEqualFence = fence &&
+      tryBigInt(rangeLo) !== null && tryBigInt(rangeHi) !== null &&
+      tryBigInt(rangeLo) === tryBigInt(fence.lower) && tryBigInt(rangeHi) === tryBigInt(fence.upper);
+    if ((node.type !== "leaf" || isExpanded) && (isRenderedRoot || !keysEqualFence)) {
+      body += '<div class="' + (isRenderedRoot ? "fence" : "range") + '" title="' +
+        escapeHtml(formatKey(rangeLo)) + ' .. ' + escapeHtml(formatKey(rangeHi)) + '">' +
+        (isRenderedRoot ? "Fence: " : "Keys: ") +
+        escapeHtml(formatKey(rangeLo)) + ' .. ' + escapeHtml(formatKey(rangeHi)) + '</div>';
     }
 
     body += '<div class="counts">' +
       '<span class="count-active">&#9679; ' + activeCount + ' active</span>' +
       '<span class="count-dead">&#9679; ' + deadCount + ' dead</span>' +
-      (node.type === "internal" ? '<span>' + effectiveChildren(node).length + ' child(ren)</span>' : '') +
-      (node.type === "internal_truncated" ? '<span>' + node.child_count + ' child(ren) not dumped</span>' : '') +
+      (node.type === "internal"
+        ? '<span>' + effectiveChildren(node).length + ' ' + (effectiveChildren(node).length === 1 ? 'child' : 'children') + '</span>'
+        : '') +
+      (node.type === "internal_truncated"
+        ? '<span>' + node.child_count + ' ' + (node.child_count === 1 ? 'child' : 'children') + ' not dumped</span>'
+        : '') +
       '</div>';
 
     if (node.type === "internal_truncated") {
@@ -2418,6 +2951,8 @@
     body += '</div>';
 
     const liveClass = liveViewMode ? (isLive ? " live-glow" : " dead-glow") : "";
+    const analysisClass = diffAddedNodes.has(id) ? " diff-added" : diffChangedNodes.has(id) ? " diff-changed" : "";
+    const keyboardClass = keyboardSelectedNodeId === id ? " keyboard-selected" : "";
 
     // Embedded directly rather than looked up later by the (possibly
     // ambiguous - see collect()'s doc) bare node id: a dead slot's block can
@@ -2431,12 +2966,12 @@
       (supersessionPoint
         ? ' data-trace-super-id="' + supersessionPoint.id + '" data-trace-super-parent="' + supersessionPoint.parentId + '"'
         : '');
-
     return (
-      '<div class="node-box ' + node.type.replace("_truncated", " truncated") + (isMarked ? " marked" : "") + liveClass + '" data-id="' + id + '">' +
+      '<div class="node-box ' + node.type.replace("_truncated", " truncated") + (isMarked ? " marked" : "") + liveClass + analysisClass + keyboardClass + '" data-id="' + id + '">' +
       '<div class="node-head" data-toggle="' + id + '">' +
       '<span class="caret">' + caret + '</span>' +
       '<span class="kind">' + kindLabel + '</span>' +
+      headerSafenessHtml +
       '<span class="mark">' +
       '<span class="trace-btn"' + traceAttrs + ' title="Trace this node\'s previous/overriding nodes">&#8646;</span>' +
       (node.type === "internal"
@@ -2449,9 +2984,17 @@
           (fence
             ? ' data-map2d-fence-lower="' + escapeHtml(fence.lower) + '" data-map2d-fence-upper="' + escapeHtml(fence.upper) + '"'
             : '') +
+          (parentId !== null && parentId !== undefined
+            ? ' data-map2d-parent="' + escapeHtml(String(parentId)) + '"'
+            : '') +
+          (birthVersion !== null && birthVersion !== undefined
+            ? ' data-map2d-birth="' + escapeHtml(String(birthVersion)) + '"'
+            : '') +
           ' title="View this node\'s entries in a 2D version/key map">&#9638;</span>'
         : '') +
-      '<input type="checkbox" data-mark="' + id + '" ' + (isMarked ? "checked" : "") + '>' +
+      '<button type="button" class="mark-toggle' + (isMarked ? " active" : "") + '" data-mark="' + id +
+      '" aria-pressed="' + (isMarked ? "true" : "false") + '" title="' + (isMarked ? "Unmark this node" : "Mark this node") + '">' +
+      (isMarked ? '&#9733;' : '&#9734;') + '</button>' +
       '</span>' +
       '</div>' + body + '</div>'
     );
@@ -2489,10 +3032,24 @@
     let h = heightCache.get(key);
     if (h === undefined) {
       measureEl.innerHTML = nodeInnerHtml(id, node, fence, true, undefined, undefined, birthVersion);
-      h = measureEl.firstElementChild.offsetHeight;
+      // foreignObject clips strictly at its assigned height. Browser text
+      // metrics and scaled font sizes can leave offsetHeight fractionally
+      // shorter than the painted bottom border, most visibly on the first
+      // row of internal children. Round the visual box up and leave a tiny
+      // allowance for that border instead of clipping its last pixels.
+      h = Math.ceil(measureEl.firstElementChild.getBoundingClientRect().height) + 2;
       heightCache.set(key, h);
     }
     return h;
+  }
+
+  function positionIsNearViewport(id, position) {
+    if (!performanceMode || id === currentRootId || id === keyboardSelectedNodeId || checked.has(id)) return true;
+    const canvas = canvasWrap.getBoundingClientRect(), margin = 350;
+    const left = view.x + (position.x - NODE_W / 2) * view.k;
+    const top = view.y + position.y * view.k;
+    const right = left + NODE_W * view.k, bottom = top + position.h * view.k;
+    return right >= -margin && left <= canvas.width + margin && bottom >= -margin && top <= canvas.height + margin;
   }
 
   function render() {
@@ -2508,9 +3065,11 @@
     emptyEl.classList.add("hidden");
 
     const { positions, edges } = buildLayout(currentRootId);
+    const renderedIds = new Set([...positions.entries()].filter(([id, p]) => positionIsNearViewport(id, p)).map(([id]) => id));
 
     // Edges (drawn first, under nodes)
     edges.forEach(e => {
+      if (!renderedIds.has(e.from) || !renderedIds.has(e.to)) return;
       const a = positions.get(e.from), b = positions.get(e.to);
       if (!a || !b) return;
       const x1 = a.x, y1 = a.y + a.h, x2 = b.x, y2 = b.y;
@@ -2520,17 +3079,11 @@
       path.setAttribute("class", "edge" + liveClass);
       path.setAttribute("d", `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`);
       edgesG.appendChild(path);
-
-      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      label.setAttribute("class", "edge-label");
-      label.setAttribute("x", (x1 + x2) / 2 + 4);
-      label.setAttribute("y", midY);
-      label.textContent = e.label;
-      edgesG.appendChild(label);
     });
 
     // Nodes
     positions.forEach((pos, id) => {
+      if (!renderedIds.has(id)) return;
       const fo = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
       fo.setAttribute("x", pos.x - NODE_W / 2);
       fo.setAttribute("y", pos.y);
@@ -2544,9 +3097,11 @@
     });
 
     lastPositions = positions; // for the trace feature, looked up on a later, separate click
+    minimapPositions = positions;
+    renderMinimap();
 
     wireNodeEvents();
-    updateStatusVisible(positions.size);
+    updateStatusVisible(renderedIds.size);
   }
 
   function updateStatusVisible(n) {
@@ -2555,21 +3110,81 @@
       currentRootId ? "nodes in current root: " + computeReachable(currentRootId) : "nodes in current root: -";
   }
 
+  function renderMinimap() {
+    const host = document.getElementById("minimap");
+    host.classList.toggle("hidden", !minimapEnabled || !minimapPositions || !minimapPositions.size);
+    document.getElementById("minimapBtn").classList.toggle("primary", minimapEnabled);
+    if (!minimapEnabled || !minimapPositions || !minimapPositions.size) return;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    minimapPositions.forEach(p => {
+      minX = Math.min(minX, p.x - NODE_W / 2); maxX = Math.max(maxX, p.x + NODE_W / 2);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y + p.h);
+    });
+    const width = 210, height = 135, pad = 7;
+    const sx = (width - pad * 2) / Math.max(1, maxX - minX), sy = (height - pad * 2) / Math.max(1, maxY - minY);
+    const scale = Math.min(sx, sy);
+    const ox = pad + (width - pad * 2 - (maxX - minX) * scale) / 2;
+    const oy = pad + (height - pad * 2 - (maxY - minY) * scale) / 2;
+    host._miniTransform = { minX, minY, scale, ox, oy };
+    let html = '<svg width="210" height="135" xmlns="http://www.w3.org/2000/svg">';
+    minimapPositions.forEach((p, id) => {
+      const x = ox + (p.x - NODE_W / 2 - minX) * scale, y = oy + (p.y - minY) * scale;
+      const w = Math.max(2, NODE_W * scale), h = Math.max(2, p.h * scale);
+      const color = p.node.type === "leaf" ? "#3aa876" : "#5b8cff";
+      html += '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" fill="' + color + '" opacity=".7"/>';
+    });
+    html += '<rect id="minimapViewport" fill="rgba(255,255,255,.05)" stroke="#ffbf5b" stroke-width="1.5"/></svg>';
+    host.innerHTML = html;
+    updateMinimapViewport();
+  }
+
+  function updateMinimapViewport() {
+    const host = document.getElementById("minimap"), rect = document.getElementById("minimapViewport");
+    if (!minimapEnabled || !host._miniTransform || !rect) return;
+    const t = host._miniTransform, canvas = canvasWrap.getBoundingClientRect();
+    const worldX1 = -view.x / view.k, worldY1 = -view.y / view.k;
+    const worldX2 = (canvas.width - view.x) / view.k, worldY2 = (canvas.height - view.y) / view.k;
+    rect.setAttribute("x", t.ox + (worldX1 - t.minX) * t.scale);
+    rect.setAttribute("y", t.oy + (worldY1 - t.minY) * t.scale);
+    rect.setAttribute("width", Math.max(1, (worldX2 - worldX1) * t.scale));
+    rect.setAttribute("height", Math.max(1, (worldY2 - worldY1) * t.scale));
+  }
+
+  document.getElementById("minimapBtn").addEventListener("click", () => {
+    minimapEnabled = !minimapEnabled;
+    localStorage.setItem("cmvbt-viz-minimap", minimapEnabled ? "1" : "0");
+    renderMinimap();
+  });
+  document.getElementById("minimap").addEventListener("click", e => {
+    const host = e.currentTarget, t = host._miniTransform;
+    if (!t) return;
+    const bounds = host.getBoundingClientRect();
+    const worldX = t.minX + (e.clientX - bounds.left - t.ox) / t.scale;
+    const worldY = t.minY + (e.clientY - bounds.top - t.oy) / t.scale;
+    centerOn(worldX, worldY);
+  });
+
   function wireNodeEvents() {
     nodesG.querySelectorAll("[data-toggle]").forEach(el => {
       el.addEventListener("click", (e) => {
-        if (e.target.matches("input[type=checkbox]") || e.target.closest(".trace-btn") || e.target.closest(".map2d-btn")) return;
+        if (e.target.closest(".mark-toggle") || e.target.closest(".trace-btn") || e.target.closest(".map2d-btn")) return;
         const id = el.getAttribute("data-toggle");
+        keyboardSelectedNodeId = id;
         toggleExpand(id);
       });
     });
     nodesG.querySelectorAll("[data-mark]").forEach(el => {
-      el.addEventListener("click", (e) => e.stopPropagation());
-      el.addEventListener("change", (e) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
         const id = el.getAttribute("data-mark");
-        if (e.target.checked) checked.add(id); else checked.delete(id);
+        const isNowMarked = !checked.has(id);
+        if (isNowMarked) checked.add(id); else checked.delete(id);
+        el.classList.toggle("active", isNowMarked);
+        el.setAttribute("aria-pressed", isNowMarked ? "true" : "false");
+        el.setAttribute("title", isNowMarked ? "Unmark this node" : "Mark this node");
+        el.innerHTML = isNowMarked ? "&#9733;" : "&#9734;";
         const box = el.closest(".node-box");
-        if (box) box.classList.toggle("marked", e.target.checked);
+        if (box) box.classList.toggle("marked", isNowMarked);
       });
     });
     nodesG.querySelectorAll("[data-trace]").forEach(el => {
@@ -2585,7 +3200,13 @@
     nodesG.querySelectorAll("[data-map2d]").forEach(el => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
-        openMap2d(el.getAttribute("data-map2d"), el.getAttribute("data-map2d-fence-lower"), el.getAttribute("data-map2d-fence-upper"));
+        openMap2d(
+          el.getAttribute("data-map2d"),
+          el.getAttribute("data-map2d-fence-lower"),
+          el.getAttribute("data-map2d-fence-upper"),
+          el.getAttribute("data-map2d-parent"),
+          el.getAttribute("data-map2d-birth")
+        );
       });
     });
     // Clicking a record (list row or grid chip) opens the key tracer for its
@@ -2669,15 +3290,34 @@
   // before a "+N more" box takes over (see DEFAULT_CHILD_PAGE's doc).
   // ---------------------------------------------------------------------
   const childPageInput = document.getElementById("childPageInput");
+  const childPageRange = document.getElementById("childPageRange");
+  const childrenShownSummary = document.getElementById("childrenShownSummary");
   childPageInput.value = DEFAULT_CHILD_PAGE;
-  childPageInput.addEventListener("change", () => {
-    const v = parseInt(childPageInput.value, 10);
-    if (!Number.isFinite(v) || v < 1) { childPageInput.value = DEFAULT_CHILD_PAGE; return; }
+  childPageRange.value = DEFAULT_CHILD_PAGE;
+  childrenShownSummary.textContent = "Children: " + DEFAULT_CHILD_PAGE;
+  let childPageFrame = null;
+  function applyChildPageSize(value) {
+    const v = parseInt(value, 10);
+    if (!Number.isFinite(v) || v < 1 || v > 500) {
+      childPageInput.value = DEFAULT_CHILD_PAGE;
+      childPageRange.value = DEFAULT_CHILD_PAGE;
+      return;
+    }
     DEFAULT_CHILD_PAGE = v;
+    localStorage.setItem("cmvbt-viz-child-page", String(v));
+    childPageInput.value = v;
+    childPageRange.value = v;
+    childrenShownSummary.textContent = "Children: " + v;
     childLimit.clear(); // per-node pagination overrides are relative to the old page size - reset them
-    heightCache.clear();
-    render();
-  });
+    if (childPageFrame !== null) cancelAnimationFrame(childPageFrame);
+    childPageFrame = requestAnimationFrame(() => {
+      childPageFrame = null;
+      heightCache.clear();
+      render();
+    });
+  }
+  childPageRange.addEventListener("input", () => applyChildPageSize(childPageRange.value));
+  childPageInput.addEventListener("change", () => applyChildPageSize(childPageInput.value));
 
   // ---------------------------------------------------------------------
   // Node box width / leaf records height - both a CSS variable (drives the
@@ -2685,28 +3325,64 @@
   // spacing math in buildLayout, which CSS alone can't touch).
   // ---------------------------------------------------------------------
   const nodeWidthInput = document.getElementById("nodeWidthInput");
+  const nodeWidthRange = document.getElementById("nodeWidthRange");
+  const nodeWidthSummary = document.getElementById("nodeWidthSummary");
   nodeWidthInput.value = NODE_W;
-  nodeWidthInput.addEventListener("change", () => {
-    const v = parseInt(nodeWidthInput.value, 10);
-    if (!Number.isFinite(v) || v < 60) { nodeWidthInput.value = NODE_W; return; }
+  nodeWidthRange.value = NODE_W;
+  nodeWidthSummary.textContent = "Node width: " + NODE_W + "px";
+  let nodeWidthFrame = null;
+  function applyNodeWidth(value) {
+    const v = parseInt(value, 10);
+    if (!Number.isFinite(v) || v < 120 || v > 600) {
+      nodeWidthInput.value = NODE_W;
+      nodeWidthRange.value = NODE_W;
+      return;
+    }
     NODE_W = v;
+    nodeWidthInput.value = v;
+    nodeWidthRange.value = v;
+    nodeWidthSummary.textContent = "Node width: " + v + "px";
     document.documentElement.style.setProperty("--node-w", v + "px");
     localStorage.setItem("cmvbt-viz-node-w", String(v));
-    heightCache.clear(); // wrapping depends on box width
-    render();
-  });
+    if (nodeWidthFrame !== null) cancelAnimationFrame(nodeWidthFrame);
+    nodeWidthFrame = requestAnimationFrame(() => {
+      nodeWidthFrame = null;
+      heightCache.clear(); // wrapping depends on box width
+      render();
+    });
+  }
+  nodeWidthRange.addEventListener("input", () => applyNodeWidth(nodeWidthRange.value));
+  nodeWidthInput.addEventListener("change", () => applyNodeWidth(nodeWidthInput.value));
 
   const recordsHeightInput = document.getElementById("recordsHeightInput");
+  const recordsHeightRange = document.getElementById("recordsHeightRange");
+  const recordsHeightSummary = document.getElementById("recordsHeightSummary");
   recordsHeightInput.value = RECORDS_H;
-  recordsHeightInput.addEventListener("change", () => {
-    const v = parseInt(recordsHeightInput.value, 10);
-    if (!Number.isFinite(v) || v < 40) { recordsHeightInput.value = RECORDS_H; return; }
+  recordsHeightRange.value = RECORDS_H;
+  recordsHeightSummary.textContent = "Leaf height: " + RECORDS_H + "px";
+  let recordsHeightFrame = null;
+  function applyRecordsHeight(value) {
+    const v = parseInt(value, 10);
+    if (!Number.isFinite(v) || v < 80 || v > 2000) {
+      recordsHeightInput.value = RECORDS_H;
+      recordsHeightRange.value = RECORDS_H;
+      return;
+    }
     RECORDS_H = v;
+    recordsHeightInput.value = v;
+    recordsHeightRange.value = v;
+    recordsHeightSummary.textContent = "Leaf height: " + v + "px";
     document.documentElement.style.setProperty("--records-h", v + "px");
     localStorage.setItem("cmvbt-viz-records-h", String(v));
-    heightCache.clear();
-    render();
-  });
+    if (recordsHeightFrame !== null) cancelAnimationFrame(recordsHeightFrame);
+    recordsHeightFrame = requestAnimationFrame(() => {
+      recordsHeightFrame = null;
+      heightCache.clear();
+      render();
+    });
+  }
+  recordsHeightRange.addEventListener("input", () => applyRecordsHeight(recordsHeightRange.value));
+  recordsHeightInput.addEventListener("change", () => applyRecordsHeight(recordsHeightInput.value));
 
   // ---------------------------------------------------------------------
   // Expand/collapse controls
@@ -2751,6 +3427,41 @@
   document.getElementById("clearMarkedBtn").addEventListener("click", () => {
     checked.clear();
     render();
+  });
+  document.getElementById("expandDepthBtn").addEventListener("click", () => {
+    if (!currentRootId) return;
+    const raw = prompt("Expand the tree through which depth?\n0 = root only, 1 = root and its children", "2");
+    if (raw === null) return;
+    const maxDepth = parseInt(raw, 10);
+    if (!Number.isFinite(maxDepth) || maxDepth < 0) { alert("Enter a non-negative depth."); return; }
+    expanded.clear(); childLimit.clear();
+    const stack = [[currentRootId, 0]], seen = new Set();
+    while (stack.length) {
+      const [id, depth] = stack.pop();
+      if (seen.has(id)) continue; seen.add(id);
+      if (depth <= maxDepth) expanded.add(id);
+      if (depth >= maxDepth) continue;
+      const node = getNode(id);
+      if (node && node.type === "internal") effectiveChildren(node).forEach(c => stack.push([c.node_id, depth + 1]));
+    }
+    heightCache.clear(); render(); requestAnimationFrame(fitToView);
+  });
+  const performanceModeBtn = document.getElementById("performanceModeBtn");
+  performanceModeBtn.classList.toggle("primary", performanceMode);
+  performanceModeBtn.addEventListener("click", () => {
+    performanceMode = !performanceMode;
+    performanceModeBtn.classList.toggle("primary", performanceMode);
+    localStorage.setItem("cmvbt-viz-performance", performanceMode ? "1" : "0");
+    render();
+  });
+  document.getElementById("cancelCountsBtn").addEventListener("click", () => {
+    rootListGeneration++;
+    document.querySelectorAll(".root-row .rlive, .root-row .rdead").forEach(el => {
+      if (!/^\d/.test(el.textContent.trim())) el.textContent = "paused";
+    });
+  });
+  document.querySelectorAll(".toolbar-action-list .btn").forEach(button => {
+    button.addEventListener("click", () => button.closest("details").removeAttribute("open"));
   });
 
   // ---------------------------------------------------------------------
@@ -2840,7 +3551,7 @@
   /// #viewport's pan/zoom transform, and native scroll APIs have already
   /// proven unreliable in that context once this session, see the
   /// leaf-scrollbar-drag fix), and flashes that one row - flashAndCenter
-  /// already centers/flashes the whole *box*, but with up to 125 records in
+  /// already centers/flashes the whole *box*, but with a near-capacity leaf
   /// one leaf the matching key could still be scrolled out of sight inside
   /// it.
   function highlightRecordRow(leafId, keyStr) {
@@ -2867,6 +3578,260 @@
     }
   }
 
+  function pathToNode(rootId, targetId) {
+    const stack = [rootId];
+    const parent = new Map([[rootId, null]]);
+    while (stack.length) {
+      const id = stack.pop();
+      if (id === targetId) {
+        const path = [];
+        for (let cur = id; cur !== null; cur = parent.get(cur)) path.push(cur);
+        return path.reverse();
+      }
+      const node = getNode(id);
+      if (!node || node.type !== "internal") continue;
+      node.children.forEach(c => {
+        if (!parent.has(c.node_id)) { parent.set(c.node_id, id); stack.push(c.node_id); }
+      });
+    }
+    return null;
+  }
+
+  function locateNodeInTree(nodeId) {
+    if (!dump || !getNode(nodeId)) { alert("Node " + nodeId + " is not present in this dump."); return; }
+    let rootMeta = dump.roots.find(r => r.node_id === currentRootId);
+    let path = currentRootId ? pathToNode(currentRootId, nodeId) : null;
+    if (!path) {
+      for (const candidate of sortedRootsAsc().slice().reverse()) {
+        path = pathToNode(candidate.node_id, nodeId);
+        if (path) { rootMeta = candidate; break; }
+      }
+    }
+    if (!path || !rootMeta) { alert("Node " + nodeId + " is not reachable from any dumped root."); return; }
+    if (currentRootId !== rootMeta.node_id) selectRoot(rootMeta.node_id, rootMeta);
+    path.slice(0, -1).forEach(id => { expanded.add(id); childLimit.set(id, Infinity); });
+    keyboardSelectedNodeId = nodeId;
+    tracePanel.classList.add("hidden");
+    keyTracerPanel.classList.add("hidden");
+    utilityPanel.classList.add("hidden");
+    map2dPanel.classList.add("hidden");
+    heightCache.clear();
+    render();
+    requestAnimationFrame(() => flashAndCenter(nodeId));
+  }
+
+  document.getElementById("nodeIdBtn").addEventListener("click", () => {
+    const id = document.getElementById("nodeIdInput").value.trim();
+    if (id) locateNodeInTree(id);
+  });
+  document.getElementById("nodeIdInput").addEventListener("keydown", e => {
+    if (e.key === "Enter") document.getElementById("nodeIdBtn").click();
+  });
+  document.getElementById("map2dLocateBtn").addEventListener("click", () => {
+    if (currentMap2dNodeId) locateNodeInTree(currentMap2dNodeId);
+  });
+
+  function showUtilityPanel(title, html) {
+    tracePanel.classList.add("hidden");
+    keyTracerPanel.classList.add("hidden");
+    map2dPanel.classList.add("hidden");
+    document.getElementById("utilityTitle").textContent = title;
+    utilityBody.innerHTML = html;
+    utilityPanel.classList.remove("hidden");
+  }
+  document.getElementById("utilityCloseBtn").addEventListener("click", e => {
+    e.stopPropagation();
+    utilityPanel.classList.add("hidden");
+  });
+  document.getElementById("shortcutsBtn").addEventListener("click", () => {
+    showUtilityPanel("Keyboard shortcuts",
+      '<div class="analysis-card"><h3>Tree navigation</h3>' +
+      '<b>Arrow keys</b> move between parent, child, and neighbouring nodes.<br>' +
+      '<b>Enter</b> expands or collapses the selected node.<br>' +
+      '<b>/</b> focuses key search.</div>' +
+      '<div class="analysis-card"><h3>2D map</h3>' +
+      '<b>Alt + Left</b> goes back.<br><b>Alt + Right</b> goes forward.</div>' +
+      '<div class="analysis-card"><h3>Panels</h3><b>Escape</b> closes the open map or inspector.</div>');
+  });
+
+  function collectSnapshotState(version) {
+    const root = rootForVersion(version);
+    const nodes = new Set(), signatures = new Map();
+    const stack = [root.node_id];
+    while (stack.length) {
+      const id = stack.pop();
+      if (nodes.has(id)) continue;
+      nodes.add(id);
+      const node = getNode(id);
+      if (!node || node.type !== "internal") continue;
+      const children = qualifyingChildrenAsOf(node, version);
+      signatures.set(id, children.map(c => [c.node_id, c.key_lower, c.key_upper, c.version].join(":" )).join("|"));
+      children.forEach(c => stack.push(c.node_id));
+    }
+    return { root, nodes, signatures };
+  }
+
+  function runSnapshotComparison(fromRaw, toRaw) {
+    const from = tryBigInt(fromRaw), to = tryBigInt(toRaw);
+    if (from === null || to === null) { alert("Enter two whole-number snapshot versions."); return; }
+    const a = collectSnapshotState(from), b = collectSnapshotState(to);
+    const added = [...b.nodes].filter(id => !a.nodes.has(id));
+    const removed = [...a.nodes].filter(id => !b.nodes.has(id));
+    const changed = [...b.nodes].filter(id => a.nodes.has(id) && (a.signatures.get(id) || "") !== (b.signatures.get(id) || ""));
+    let inserted = 0, deleted = 0;
+    const lo = from < to ? from : to, hi = from < to ? to : from;
+    Object.values(dump.nodes).forEach(node => {
+      if (!node || node.type !== "leaf" || !Array.isArray(node.records)) return;
+      node.records.forEach(record => {
+        const ins = tryBigInt(record.insert_ts), del = tryBigInt(record.delete_ts);
+        if (ins !== null && ins > lo && ins <= hi) inserted++;
+        if (record.deleted && del !== null && del > lo && del <= hi) deleted++;
+      });
+    });
+    diffAddedNodes.clear(); diffChangedNodes.clear();
+    added.forEach(id => diffAddedNodes.add(id));
+    changed.forEach(id => diffChangedNodes.add(id));
+    render();
+    utilityBody.innerHTML =
+      '<div class="utility-controls"><input id="compareFrom" value="' + escapeHtml(fromRaw) + '"><input id="compareTo" value="' + escapeHtml(toRaw) + '">' +
+      '<button class="btn primary" id="runCompareBtn">Compare</button><button class="btn" id="clearCompareBtn">Clear highlights</button></div>' +
+      '<div class="analysis-card"><h3>Roots</h3>v' + from + ': ' + escapeHtml(a.root.node_id) + '<br>v' + to + ': ' + escapeHtml(b.root.node_id) + '</div>' +
+      '<div class="analysis-card"><h3>Structure</h3><span class="validation-ok">+' + added.length + ' nodes</span><br>' +
+      '<span class="validation-error">−' + removed.length + ' nodes</span><br><span class="validation-warn">' + changed.length + ' changed internal nodes</span></div>' +
+      '<div class="analysis-card"><h3>Records in interval</h3>' + inserted + ' inserted · ' + deleted + ' deleted</div>' +
+      '<div class="analysis-card"><h3>Height</h3>' + a.root.height + ' → ' + b.root.height + '</div>';
+    wireComparisonControls();
+  }
+
+  function wireComparisonControls() {
+    document.getElementById("runCompareBtn")?.addEventListener("click", () =>
+      runSnapshotComparison(document.getElementById("compareFrom").value, document.getElementById("compareTo").value));
+    document.getElementById("clearCompareBtn")?.addEventListener("click", () => {
+      diffAddedNodes.clear(); diffChangedNodes.clear(); render();
+    });
+  }
+
+  document.getElementById("compareBtn").addEventListener("click", () => {
+    if (!dump || !dump.roots.length) return;
+    const roots = sortedRootsAsc();
+    const from = roots[Math.max(0, roots.length - 2)].version, to = roots[roots.length - 1].version;
+    showUtilityPanel("Snapshot comparison",
+      '<div class="utility-controls"><input id="compareFrom" value="' + from + '"><input id="compareTo" value="' + to + '">' +
+      '<button class="btn primary" id="runCompareBtn">Compare</button><button class="btn" id="clearCompareBtn">Clear highlights</button></div>' +
+      '<p>Compare node reachability, routing changes, height, and record activity between two versions.</p>');
+    wireComparisonControls();
+  });
+
+  function validateDumpStructure() {
+    const issues = [];
+    const add = (level, message) => issues.push({ level, message });
+    const reachable = new Set(), stack = dump.roots.map(r => r.node_id);
+    while (stack.length) {
+      const id = stack.pop();
+      if (reachable.has(id)) continue;
+      reachable.add(id);
+      const node = getNode(id);
+      if (node && node.type === "internal") node.children.forEach(c => stack.push(c.node_id));
+    }
+    dump.roots.forEach(root => { if (!getNode(root.node_id)) add("error", "Root references missing node " + root.node_id); });
+    Object.entries(dump.nodes).forEach(([id, node]) => {
+      if (node.type === "internal") {
+        for (let i = 1; i < node.children.length; i++) {
+          if (tryBigInt(node.children[i].version) < tryBigInt(node.children[i - 1].version)) {
+            add("error", id + ": child versions are not append-ordered at I_" + i); break;
+          }
+        }
+        node.children.forEach((c, i) => {
+          if (!getNode(c.node_id)) add("error", id + ": I_" + i + " references missing node " + c.node_id);
+          if (tryBigInt(c.key_lower) > tryBigInt(c.key_upper)) add("error", id + ": I_" + i + " has an inverted key fence");
+        });
+        if (Number(node.active) + Number(node.dead) !== node.children.length)
+          add("warn", id + ": active + dead does not equal child count");
+        const live = node.children.filter(c => c.live !== false).sort((a, b) => tryBigInt(a.key_lower) < tryBigInt(b.key_lower) ? -1 : 1);
+        for (let i = 1; i < live.length; i++) {
+          const previousUpper = tryBigInt(live[i - 1].key_upper), nextLower = tryBigInt(live[i].key_lower);
+          if (previousUpper === null || nextLower === null) { add("error", id + ": unparseable live fence"); continue; }
+          if (nextLower <= previousUpper) add("error", id + ": live fences overlap near key " + live[i].key_lower);
+          else if (nextLower !== previousUpper + 1n) add("warn", id + ": live fence gap before key " + live[i].key_lower);
+        }
+      } else if (node.type === "leaf" && Array.isArray(node.records)) {
+        if (Number(node.active) + Number(node.dead) !== node.records.length)
+          add("warn", id + ": active + dead does not equal record count");
+      }
+      if (!reachable.has(id)) add("warn", id + ": unreachable from every dumped root");
+    });
+    return issues;
+  }
+
+  document.getElementById("validateBtn").addEventListener("click", () => {
+    if (!dump) return;
+    setLoadingState("Validating dump structure…", null);
+    setTimeout(() => {
+      const issues = validateDumpStructure();
+      hideLoadingState();
+      const counts = { error: 0, warn: 0 };
+      issues.forEach(i => counts[i.level]++);
+      const rows = issues.slice(0, 250).map(issue =>
+        '<div class="analysis-card validation-' + issue.level + '">' + escapeHtml(issue.message) + '</div>').join("");
+      showUtilityPanel("Dump validation",
+        '<div class="analysis-card"><h3>Result</h3>' +
+        (issues.length ? counts.error + ' errors · ' + counts.warn + ' warnings' : '<span class="validation-ok">No structural problems found.</span>') +
+        (issues.length > 250 ? '<br>Showing the first 250 findings.' : '') + '</div>' + rows);
+    }, 0);
+  });
+
+  function downloadBlob(name, blob) {
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }
+
+  function serializedSvg(element) {
+    const clone = element.cloneNode(true);
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    const bounds = element.getBoundingClientRect();
+    clone.setAttribute("width", Math.max(1, Math.ceil(bounds.width)));
+    clone.setAttribute("height", Math.max(1, Math.ceil(bounds.height)));
+    return new XMLSerializer().serializeToString(clone);
+  }
+
+  function exportSvgElement(element, suffix) {
+    if (!element) { alert("Nothing is currently available to export."); return; }
+    downloadBlob(currentFileName + "-" + suffix + ".svg", new Blob([serializedSvg(element)], { type: "image/svg+xml" }));
+  }
+
+  function exportSvgAsPng(element, suffix) {
+    if (!element) { alert("Nothing is currently available to export."); return; }
+    const source = serializedSvg(element), image = new Image();
+    const url = URL.createObjectURL(new Blob([source], { type: "image/svg+xml" }));
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width; canvas.height = image.height;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#14171c"; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(image, 0, 0);
+      canvas.toBlob(blob => { if (blob) downloadBlob(currentFileName + "-" + suffix + ".png", blob); }, "image/png");
+      URL.revokeObjectURL(url);
+    };
+    image.onerror = () => { URL.revokeObjectURL(url); alert("This browser could not rasterize the SVG export."); };
+    image.src = url;
+  }
+
+  document.getElementById("exportTreeSvgBtn").addEventListener("click", () => exportSvgElement(svg, "tree"));
+  document.getElementById("exportTreePngBtn").addEventListener("click", () => exportSvgAsPng(svg, "tree"));
+  document.getElementById("exportMapSvgBtn").addEventListener("click", () => exportSvgElement(document.querySelector("#map2dSvgWrap svg"), "map"));
+  document.getElementById("exportMapPngBtn").addEventListener("click", () => exportSvgAsPng(document.querySelector("#map2dSvgWrap svg"), "map"));
+  document.getElementById("exportNodeJsonBtn").addEventListener("click", () => {
+    if (!dump) return;
+    const id = currentMap2dNodeId || keyboardSelectedNodeId || [...checked][0] || currentRootId;
+    const node = id ? getNode(id) : null;
+    if (!node) { alert("Select or open a node first."); return; }
+    downloadBlob(currentFileName + "-node-" + id + ".json", new Blob([JSON.stringify({ node_id: id, ...node }, null, 2)], { type: "application/json" }));
+  });
+
   // ---------------------------------------------------------------------
   // Zoom / pan
   // ---------------------------------------------------------------------
@@ -2879,9 +3844,23 @@
   // nothing in it visibly responds to a real mouse click (a synthetic `.click()`
   // call skips this whole pointerdown/capture path, which is why this doesn't show
   // up in automated testing that only ever dispatches synthetic clicks).
-  const OVERLAY_SELECTOR = ".node-box, .side-panel, #empty, #map2dPanel";
+  const OVERLAY_SELECTOR = ".node-box, .side-panel, #empty, #snapshotBanner, #map2dPanel, #loadingOverlay, #minimap";
+  let performanceRenderFrame = null;
+  function openInspectorKind() {
+    if (!map2dPanel.classList.contains("hidden")) return "map2d";
+    if (!tracePanel.classList.contains("hidden") || !keyTracerPanel.classList.contains("hidden") ||
+        !utilityPanel.classList.contains("hidden")) return "side";
+    return null;
+  }
   function applyTransform() {
     viewport.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`);
+    updateMinimapViewport();
+    if (performanceMode && currentRootId && performanceRenderFrame === null) {
+      performanceRenderFrame = requestAnimationFrame(() => {
+        performanceRenderFrame = null;
+        render();
+      });
+    }
   }
 
   function zoomAt(clientX, clientY, factor) {
@@ -2901,24 +3880,36 @@
     // directory-picker modal), handle their wheel events natively - otherwise
     // scrolling/zooming them always hijacks into zooming the whole canvas
     // instead (preventDefault below would block that entirely).
-    if (e.target.closest(".records") || e.target.closest(OVERLAY_SELECTOR)) return;
+    if (openInspectorKind() || e.target.closest(".records") || e.target.closest(OVERLAY_SELECTOR)) return;
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
     zoomAt(e.clientX, e.clientY, factor);
   }, { passive: false });
 
   document.getElementById("zoomInBtn").addEventListener("click", () => {
+    const inspector = openInspectorKind();
+    if (inspector === "map2d") { document.getElementById("map2dZoomInBtn").click(); return; }
+    if (inspector === "side") return;
     const r = canvasWrap.getBoundingClientRect();
     zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1.25);
   });
   document.getElementById("zoomOutBtn").addEventListener("click", () => {
+    const inspector = openInspectorKind();
+    if (inspector === "map2d") { document.getElementById("map2dZoomOutBtn").click(); return; }
+    if (inspector === "side") return;
     const r = canvasWrap.getBoundingClientRect();
     zoomAt(r.left + r.width / 2, r.top + r.height / 2, 1 / 1.25);
   });
   document.getElementById("resetZoomBtn").addEventListener("click", () => {
+    const inspector = openInspectorKind();
+    if (inspector === "map2d") { document.getElementById("map2dResetZoomBtn").click(); return; }
+    if (inspector === "side") return;
     view.k = 1; applyTransform();
   });
-  document.getElementById("fitBtn").addEventListener("click", fitToView);
+  document.getElementById("fitBtn").addEventListener("click", () => {
+    if (openInspectorKind()) return;
+    fitToView();
+  });
 
   // ---------------------------------------------------------------------
   // Font size: a CSS variable (--font-scale) every font-size rule in this
@@ -2986,7 +3977,7 @@
   // doc above for why every floating overlay must be excluded here too.
   let dragging = false, dragStart = null, viewStart = null;
   canvasWrap.addEventListener("pointerdown", (e) => {
-    if (e.target.closest(OVERLAY_SELECTOR)) return;
+    if (openInspectorKind() || e.target.closest(OVERLAY_SELECTOR)) return;
     dragging = true;
     canvasWrap.classList.add("grabbing");
     dragStart = { x: e.clientX, y: e.clientY };
@@ -3039,6 +4030,51 @@
   });
   ["pointerup", "pointercancel"].forEach(evt =>
     nodesG.addEventListener(evt, () => { scrollDrag = null; }));
+
+  function focusKeyboardNode(id, center = false) {
+    if (!id || !lastPositions || !lastPositions.has(id)) return;
+    keyboardSelectedNodeId = id;
+    nodesG.querySelectorAll(".keyboard-selected").forEach(el => el.classList.remove("keyboard-selected"));
+    const box = nodesG.querySelector(`.node-box[data-id="${id}"]`);
+    if (box) box.classList.add("keyboard-selected");
+    if (center) {
+      const p = lastPositions.get(id);
+      centerOn(p.x, p.y + p.h / 2);
+    }
+  }
+
+  document.addEventListener("keydown", e => {
+    const editing = e.target.matches("input, textarea, select") || e.target.isContentEditable;
+    if (e.key === "Escape") {
+      map2dPanel.classList.add("hidden"); tracePanel.classList.add("hidden");
+      keyTracerPanel.classList.add("hidden"); utilityPanel.classList.add("hidden");
+      document.querySelectorAll("details[open]").forEach(d => d.removeAttribute("open"));
+      return;
+    }
+    if (e.altKey && e.key === "ArrowLeft" && !map2dPanel.classList.contains("hidden")) {
+      e.preventDefault(); document.getElementById("map2dBackBtn").click(); return;
+    }
+    if (e.altKey && e.key === "ArrowRight" && !map2dPanel.classList.contains("hidden")) {
+      e.preventDefault(); document.getElementById("map2dForwardBtn").click(); return;
+    }
+    if (editing) return;
+    if (e.key === "/") { e.preventDefault(); document.getElementById("search").focus(); return; }
+    if (!lastPositions || !lastPositions.size) return;
+    if (!keyboardSelectedNodeId || !lastPositions.has(keyboardSelectedNodeId)) keyboardSelectedNodeId = currentRootId;
+    const current = lastPositions.get(keyboardSelectedNodeId);
+    if (e.key === "Enter") { e.preventDefault(); toggleExpand(keyboardSelectedNodeId); return; }
+    let target = null;
+    if (e.key === "ArrowUp") target = current.parentId;
+    else if (e.key === "ArrowDown") {
+      target = [...lastPositions.entries()].filter(([, p]) => p.parentId === keyboardSelectedNodeId)
+        .sort((a, b) => a[1].x - b[1].x)[0]?.[0] || null;
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      const row = [...lastPositions.entries()].filter(([, p]) => p.depth === current.depth).sort((a, b) => a[1].x - b[1].x);
+      const index = row.findIndex(([id]) => id === keyboardSelectedNodeId);
+      target = row[index + (e.key === "ArrowLeft" ? -1 : 1)]?.[0] || null;
+    }
+    if (target) { e.preventDefault(); focusKeyboardNode(target, true); }
+  });
 
   window.addEventListener("resize", () => { /* svg is 100%/100%, no-op */ });
 
