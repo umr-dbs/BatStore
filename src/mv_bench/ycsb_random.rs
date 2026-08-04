@@ -63,13 +63,33 @@ impl KeySampler {
     /// (`1..=record_count`); `current_max_key` is the highest key inserted
     /// so far (`>= record_count` once inserts start happening) — only used
     /// by `Latest`, to bias towards the newest rows.
+    ///
+    /// `Zipfian` scrambles the raw Zipf rank through `fnv_hash64` before
+    /// treating it as a key (matching real YCSB's `ScrambledZipfianGenerator`,
+    /// which every `requestdistribution=zipfian` run actually uses, and the
+    /// `ScrambledZipfGenerator` the LeanStore/WiredTiger comparison engines
+    /// already apply — see `scripts/engines/leanstore_build.py`'s doc).
+    /// Without this, rank 1 (most popular) *is* key 1, rank 2 is key 2, etc.,
+    /// so the whole hot set sits in the lowest few thousand keys - physically
+    /// the same handful of leftmost leaf pages in this B-tree, for the whole
+    /// run. That gives this engine free cache/latch locality the comparison
+    /// engines don't get (their buffer pool has to actually keep a hot set
+    /// scattered across the full key range warm under a fixed `dram_gib`
+    /// budget), making cross-engine Zipfian throughput not comparable.
+    /// Scrambling keeps the same skew (rank 1 is still hashed to one fixed
+    /// key for the whole run, and is still drawn most often) but spreads
+    /// which physical keys are hot across the whole range instead.
+    /// Deliberately not applied to `Latest`: that mode's whole point is
+    /// bias towards the physically-newest keys, which real YCSB's own
+    /// `SkewedLatestGenerator` also leaves unscrambled.
     pub fn sample(&self, record_count: u64, current_max_key: u64) -> YcsbKey {
         with_fast_rng(|rng| match self.dist {
             RequestDistribution::Uniform =>
                 rng.random_range(1..=record_count.max(1)),
             RequestDistribution::Zipfian { .. } => {
-                let k = self.zipf.as_ref().unwrap().sample(rng) as u64;
-                k.clamp(1, record_count.max(1))
+                let rank = self.zipf.as_ref().unwrap().sample(rng) as u64;
+                let rank = rank.clamp(1, record_count.max(1));
+                1 + fnv_hash64(rank) % record_count.max(1)
             }
             RequestDistribution::Latest { .. } => {
                 // Zipf sample in [1, record_count]; treated as a 0-based
@@ -80,6 +100,28 @@ impl KeySampler {
             }
         })
     }
+}
+
+/// FNV-1 (64-bit) — same algorithm/constants as YCSB's own `Utils.fnvhash64`,
+/// reused here so `KeySampler::sample`'s `Zipfian` scrambling matches real
+/// YCSB's `ScrambledZipfianGenerator` bit-for-bit in spirit (not literally,
+/// since Java's version folds a `Math.abs` over a signed `long` - pointless
+/// here, `u64` has no sign to fix up). Deliberately not `std`'s
+/// `DefaultHasher`/`SipHash`: this only needs a cheap, well-mixed permutation
+/// of `[1, record_count]`, not collision resistance, and this runs on every
+/// single `Zipfian` key draw.
+#[inline]
+fn fnv_hash64(mut val: u64) -> u64 {
+    const OFFSET_BASIS: u64 = 0xCBF29CE484222325;
+    const PRIME: u64 = 0x0000_0100_0000_01B3;
+    let mut hash = OFFSET_BASIS;
+    for _ in 0..8 {
+        let octet = val & 0xFF;
+        val >>= 8;
+        hash ^= octet;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 /// YCSB op-type proportions (must sum to ~1.0); a driver worker picks one
