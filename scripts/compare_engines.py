@@ -160,8 +160,14 @@ def main() -> None:
     print(f"NUMA pinning  : numactl --cpubind={common.NUMA_NODE} --membind={common.NUMA_NODE} "
           f"(every engine subprocess; the Postgres *server* itself is not pinned - see "
           f"engines/postgres_benchbase.py's module docstring)")
+    dram_gib_desc = (
+        f"--dram-gib={args.dram_gib} (explicit, applied to every workload/threads point unchanged)"
+        if args.dram_gib is not None else
+        f"auto, sized per-workload to ~4x its own estimated dataset (see common.dram_gib_for), "
+        f"capped at {common.default_dram_gib()} (this machine's NUMA-node-safe ceiling)"
+    )
     print(f"in-memory only: SCRATCH_ROOT={common.SCRATCH_ROOT} (tmpfs-verified; LeanStore/WiredTiger/"
-          f"libmdbx/vWeaver_ermia data never touches a real disk) dram_gib={scale.dram_gib} "
+          f"libmdbx/vWeaver_ermia data never touches a real disk) dram_gib: {dram_gib_desc} "
           f"(LeanStore/WiredTiger buffer pool - not used by cmvbt, which has no on-disk WAL in this "
           f"harness's config, or postgres, whose shared_buffers isn't managed by this script)")
     print(f"planned runs  : {total_runs} (>= {total_secs / 60:.1f} min of measured time alone, "
@@ -215,6 +221,15 @@ def main() -> None:
                 scale_variant = dataclasses.replace(
                     scale, tpcc_terminals=threads, tpcc_warehouses=tpcc_warehouses, ycsb_threads=threads,
                 )
+                if args.dram_gib is None:
+                    # No explicit --dram-gib: re-size the buffer pool to THIS workload's own
+                    # (tiny) dataset instead of leaving it at default_dram_gib()'s flat,
+                    # machine-wide ceiling - see common.dram_gib_for's docstring for why an
+                    # oversized buffer pool makes peak_rss_mb stop reflecting genuine usage.
+                    # Recomputed every threads point since tpcc_warehouses grows with it above.
+                    scale_variant = dataclasses.replace(
+                        scale_variant, dram_gib=common.dram_gib_for(workload, scale_variant),
+                    )
                 for gc_variant in gc_variants:
                     # gc_variant is the literal string "n/a" for engines without a GC
                     # toggle - the "/" is a path separator, so f"gc_{gc_variant}" used
@@ -222,7 +237,8 @@ def main() -> None:
                     # (gc_n/a/) instead of one, leaving gc_n/ looking empty at a glance.
                     gc_dir_name = f"gc_{gc_variant}".replace("/", "_")
                     out_dir = run_dir / workload / engine_name / f"threads_{threads}" / gc_dir_name
-                    print(f"=== {workload} / {engine_name} / threads={threads} / gc={gc_variant} ===")
+                    print(f"=== {workload} / {engine_name} / threads={threads} / gc={gc_variant} / "
+                          f"dram_gib={scale_variant.dram_gib} ===")
                     try:
                         result = module.run(workload, scale_variant, out_dir, gc=gc_variant, reload=first_call)
                     except Exception as e:  # noqa: BLE001 - one engine's failure shouldn't abort the whole matrix

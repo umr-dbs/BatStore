@@ -174,6 +174,42 @@ def default_dram_gib(headroom_gib: float = 16.0, min_gib: float = 2.0) -> float:
     return max(min_gib, round((node_total - headroom_gib) / 2, 1))
 
 
+def workload_dataset_gib(workload: str, scale: "Scale") -> float:
+    """Rough, order-of-magnitude estimate (GiB) of a workload's own raw data size - the
+    standard, widely-cited rules of thumb for these two benchmarks (~100MB/warehouse for
+    TPC-C at this schema's table cardinalities; ~1KB/record for YCSB's default field_count
+    x field_length), NOT a byte-exact accounting of any one engine's actual on-disk
+    encoding (indexes, MVCC-version chains, page-header waste all vary by engine and
+    aren't represented here - this is a cross-engine-comparable proxy, not a measurement).
+    Good enough to size a buffer pool proportional to what a workload actually needs
+    instead of one fixed value applied to every scale regardless of how small the loaded
+    data actually is - see dram_gib_for.
+    """
+    if workload in (["tpcc"] + HTAP_WORKLOADS):
+        return scale.tpcc_warehouses * 0.1
+    return scale.ycsb_records * 1024 / (1024 ** 3)
+
+
+def dram_gib_for(workload: str, scale: "Scale", safety_factor: float = 4.0) -> float:
+    """The --dram-gib value to actually use for a SPECIFIC (workload, scale) combination -
+    proportional to that workload's own estimated dataset (workload_dataset_gib x
+    safety_factor, comfortably covering it so LeanStore/WiredTiger never evict) rather
+    than default_dram_gib's flat, machine-wide ceiling applied identically regardless of
+    how small the loaded data actually is. Still capped at default_dram_gib() so a large
+    --warehouses/--ycsb-records override can't request more than this machine can safely
+    give a single --membind-pinned process.
+
+    This is what keeps peak_rss_mb representative of the engine's genuine working-set
+    memory use rather than dominated by a buffer pool sized off total machine memory: each
+    buffer frame's own bookkeeping (lock, page id, dirty flag, ...) is real memory
+    proportional to dram_gib itself in many LeanStore-family engines, paid upfront
+    independent of how much data actually ends up loaded - a dram_gib picked to fit the
+    workload keeps that overhead proportional too, instead of ballooning it to whatever a
+    500GB server happens to have free.
+    """
+    return min(default_dram_gib(), max(2.0, round(workload_dataset_gib(workload, scale) * safety_factor, 1)))
+
+
 def check_release_build(build_dir: Path, label: str) -> None:
     """Fails loudly if a CMake build directory isn't configured as
     CMAKE_BUILD_TYPE=Release - every engine here must be release/optimized, never a stray
