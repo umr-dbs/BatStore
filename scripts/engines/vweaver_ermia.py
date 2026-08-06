@@ -84,8 +84,9 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     output_dir.mkdir(parents=True, exist_ok=True)
     # Fixed, wiped-before-every-run path, same disk-hygiene treatment as leanstore.py/
     # wiredtiger.py's ssd_path - ERMIA's own run.sh uses a fixed /dev/shm path for the same
-    # reason (a tmpfs target for its log buffer flush); this harness keeps everything
-    # under one consistent WORKSPACE_ROOT-relative scratch tree instead.
+    # reason (a tmpfs target for its log buffer flush); fresh_scratch_dir is tmpfs-backed
+    # too (see common.SCRATCH_ROOT), so this now matches upstream's own recommendation
+    # instead of just approximating it.
     log_dir = common.fresh_scratch_dir("vweaver_ermia_log")
     stdout_path = output_dir / "stdout.log"
     enable_gc = "true" if gc == "on" else "false"

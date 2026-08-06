@@ -11,6 +11,7 @@ import dataclasses
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
@@ -55,28 +56,122 @@ PG_DATABASE = os.environ.get("PG_DATABASE", "benchbase")
 # would invalidate the whole point of this flag on the server.
 NUMA_NODE = 0
 
+# Every engine's on-disk DATA directory (LeanStore/WiredTiger's ssd image, libmdbx's
+# environment, ERMIA's log dir - see fresh_scratch_dir below) is created under here, not
+# under WORKSPACE_ROOT/scratch on real disk - this harness is in-memory-only: every one of
+# those engines still does real file I/O (page eviction, WAL flush, mmap writeback), and
+# the only way to guarantee none of it ever reaches a physical disk, regardless of how
+# --dram-gib/buffer-pool sizing is set, is to back that I/O with tmpfs (RAM) instead of a
+# real filesystem. /dev/shm is tmpfs on every mainstream Linux distro by default.
+SCRATCH_ROOT = Path(os.environ.get("SCRATCH_ROOT", "/dev/shm/cmvbt_bench_scratch"))
+
 
 def numactl_prefix() -> list:
     return ["numactl", f"--cpubind={NUMA_NODE}", f"--membind={NUMA_NODE}"]
 
 
+def _mount_fstype(path: Path) -> str:
+    """The fstype of the mount `path` actually lives under - the longest /proc/mounts
+    mountpoint that's a prefix of `path` (path itself need not exist yet)."""
+    path_str = str(path)
+    best_mnt, best_fstype = "", ""
+    with open("/proc/mounts") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            mnt, fstype = parts[1], parts[2]
+            if (path_str == mnt or path_str.startswith(mnt.rstrip("/") + "/")) and len(mnt) > len(best_mnt):
+                best_mnt, best_fstype = mnt, fstype
+    return best_fstype
+
+
 def fresh_scratch_dir(name: str) -> Path:
-    """Returns WORKSPACE_ROOT/scratch/<name>, entirely deleted and recreated first - the
-    SAME path every call, for every engine's on-disk data (ssd images, mdbx/DB
-    directories, WAL/log dirs). Called at the start of every single run(), so disk usage
-    never accumulates across a long thread/workload sweep the way a fresh uniquely-named
-    directory per sweep point would - only the current experiment's data ever exists on
-    disk, never every prior one's too.
+    """Returns SCRATCH_ROOT/<name>, entirely deleted and recreated first - the SAME path
+    every call, for every engine's on-disk data (ssd images, mdbx/DB directories, WAL/log
+    dirs). Called at the start of every single run(), so disk usage never accumulates
+    across a long thread/workload sweep the way a fresh uniquely-named directory per sweep
+    point would - only the current experiment's data ever exists at all, never every prior
+    one's too.
+
+    Fails loudly (sys.exit) if SCRATCH_ROOT isn't tmpfs-backed, rather than silently
+    running against real disk - same reasoning as numactl_prefix()'s unconditional NUMA
+    pinning above: a silent fallback here would quietly turn an "in-memory-only" run into a
+    disk-bound one with no indication in the results.
 
     Deliberately separate from a run's own `output_dir` (under the timestamped
-    comparison_results/run_<ts>/ tree) - that keeps holding the small per-run artifacts
-    (stdout.log, result CSVs) worth preserving for post-hoc inspection; only the heavy
-    data files live here.
+    comparison_results/run_<ts>/ tree, on real disk) - that keeps holding the small
+    per-run artifacts (stdout.log, result CSVs) worth preserving for post-hoc inspection;
+    only the heavy data files live here.
     """
-    scratch_dir = WORKSPACE_ROOT / "scratch" / name
+    fstype = _mount_fstype(SCRATCH_ROOT)
+    if fstype != "tmpfs":
+        sys.exit(
+            f"SCRATCH_ROOT={SCRATCH_ROOT} is not tmpfs-backed (mount fstype={fstype!r}) - refusing to "
+            f"run, since every engine's on-disk data directory must be RAM-backed for this harness's "
+            f"in-memory-only benchmarking (see manual.txt section 4). Either unset SCRATCH_ROOT to use "
+            f"the /dev/shm default, or point it at a tmpfs mount yourself, e.g. "
+            f"`sudo mount -t tmpfs -o size=64G tmpfs {SCRATCH_ROOT}` (mkdir it first)."
+        )
+    scratch_dir = SCRATCH_ROOT / name
     shutil.rmtree(scratch_dir, ignore_errors=True)
     scratch_dir.mkdir(parents=True, exist_ok=True)
     return scratch_dir
+
+
+def _node_mem_total_gib(node: int) -> float:
+    """Total memory (GiB) local to NUMA node `node`, from
+    /sys/devices/system/node/node<N>/meminfo's "Node N MemTotal:" line - present on any
+    Linux kernel, single-node machines included (they still expose node0 with the whole
+    system's memory). Falls back to /proc/meminfo's system-wide MemTotal if the per-node
+    file is missing for some reason (e.g. a kernel without NUMA support compiled in)."""
+    node_meminfo = Path(f"/sys/devices/system/node/node{node}/meminfo")
+    if node_meminfo.exists():
+        prefix, source = f"Node {node} MemTotal:", node_meminfo
+    else:
+        prefix, source = "MemTotal:", Path("/proc/meminfo")
+    if not source.exists():
+        return 0.0
+    for line in source.read_text().splitlines():
+        if line.strip().startswith(prefix):
+            return float(line.split()[-2]) / (1024 * 1024)  # kB -> GiB
+    return 0.0
+
+
+def total_system_mem_gib() -> float:
+    """Whole-machine memory (GiB), from /proc/meminfo's system-wide MemTotal - unlike
+    _node_mem_total_gib, always the FULL total across every NUMA node combined (hugepage
+    reservations via `sysctl vm.nr_hugepages` aren't confined to one node the way
+    --membind pins the actual benchmark subprocesses - see setup_environment.py's
+    step_vweaver_hugepages, the one caller that needs the whole-machine figure)."""
+    path = Path("/proc/meminfo")
+    if not path.exists():
+        return 0.0
+    for line in path.read_text().splitlines():
+        if line.strip().startswith("MemTotal:"):
+            return float(line.split()[-2]) / (1024 * 1024)  # kB -> GiB
+    return 0.0
+
+
+def default_dram_gib(headroom_gib: float = 16.0, min_gib: float = 2.0) -> float:
+    """A --dram-gib default that scales with the ACTUAL machine this runs on (32GB
+    workstation or the ~500GB/2-NUMA-node real server) instead of a number hardcoded for
+    one of them - reads NUMA_NODE's own local memory (not total system memory: every
+    subprocess here is `--membind=NUMA_NODE`-pinned, so on the 2-socket server only that
+    one node's local share, roughly half the machine's total, is ever actually available
+    to it; sizing off system-wide total there would let LeanStore/WiredTiger request more
+    than membind permits).
+
+    Halves what's left after `headroom_gib` (OS, JVM/BenchBase, other non-pinned
+    processes) because fresh_scratch_dir's tmpfs backing means the SAME data is resident in
+    RAM twice at once at steady state: once as the buffer pool's own cached pages, once
+    again as the "disk" file underneath it (also tmpfs, i.e. RAM) - a dram_gib sized off
+    the full node total would double-book memory the tmpfs copy already claimed.
+    """
+    node_total = _node_mem_total_gib(NUMA_NODE)
+    if node_total <= 0:
+        return min_gib  # couldn't read either meminfo source - stay conservative, don't guess
+    return max(min_gib, round((node_total - headroom_gib) / 2, 1))
 
 
 def check_release_build(build_dir: Path, label: str) -> None:
@@ -87,8 +182,6 @@ def check_release_build(build_dir: Path, label: str) -> None:
     against the wrong source tree (a leftover CLionProjects-relative CMakeCache), one of
     them in plain Debug, before this check existed.
     """
-    import sys
-
     cache = build_dir / "CMakeCache.txt"
     if not cache.exists():
         return  # not configured yet - the caller's own cmake -S/-B step will set it up
@@ -108,7 +201,13 @@ def check_release_build(build_dir: Path, label: str) -> None:
 
 @dataclasses.dataclass
 class Scale:
-    """Workstation-sized scale (24 cores / 32GB), not the paper's 64-core/512GB server."""
+    """The default (non-TINY_SCALE) data volume/duration - used unchanged on both this
+    24-core/32GB workstation and the real 64-core/512GB-ish 2-NUMA-node server (see
+    compare_engines.py's module docstring: the default thread sweep is sized for that
+    server). Only `dram_gib` actually adapts to which machine it's running on (see
+    default_dram_gib) - every other field here is machine-independent data volume, tune it
+    yourself via --warehouses/--ycsb-records/etc. if 8 warehouses / 2M YCSB records isn't
+    the scale you want on the bigger box."""
 
     tpcc_warehouses: int = 8
     tpcc_terminals: int = 16
@@ -117,14 +216,28 @@ class Scale:
     ycsb_threads: int = 16
     ycsb_duration: int = 30
     ycsb_theta: float = 0.99
-    dram_gib: float = 8.0  # LeanStore/WiredTiger buffer pool / cache size; unused by cmvbt and postgres
+    # LeanStore/WiredTiger buffer pool / cache size; unused by cmvbt and postgres (cmvbt has
+    # no comparable cap and runs fully in-memory already - see cmvbt.py's wal_enabled
+    # default; postgres's shared_buffers is configured on the server directly, outside this
+    # harness). Computed from the ACTUAL machine's own NUMA-node-local memory (see
+    # default_dram_gib) rather than a number hardcoded for one specific box - this Scale is
+    # used unchanged on both the 32GB workstation and the real ~500GB/2-NUMA-node server
+    # (compare_engines.py's own module docstring - the default thread sweep is sized for
+    # that server), and those two need very different buffer-pool sizes to both (a) never
+    # evict under the default warehouse/records sweep and (b) not overcommit memory once
+    # fresh_scratch_dir's tmpfs backing is accounted for (see that function's docstring -
+    # every page lives in RAM twice at once: once as tmpfs "disk", once as buffer-pool
+    # cache). Bump via --dram-gib if you raise --warehouses/--ycsb-records enough to
+    # outgrow whatever this computes on your machine (printed in compare_engines.py's
+    # startup banner).
+    dram_gib: float = dataclasses.field(default_factory=default_dram_gib)
     label: str = "workstation"
 
 
 TINY_SCALE = Scale(
     tpcc_warehouses=1, tpcc_terminals=2, tpcc_duration=10,
     ycsb_records=10_000, ycsb_threads=2, ycsb_duration=10,
-    dram_gib=1.0, label="tiny",
+    dram_gib=2.0, label="tiny",
 )
 
 

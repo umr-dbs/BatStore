@@ -160,6 +160,10 @@ def main() -> None:
     print(f"NUMA pinning  : numactl --cpubind={common.NUMA_NODE} --membind={common.NUMA_NODE} "
           f"(every engine subprocess; the Postgres *server* itself is not pinned - see "
           f"engines/postgres_benchbase.py's module docstring)")
+    print(f"in-memory only: SCRATCH_ROOT={common.SCRATCH_ROOT} (tmpfs-verified; LeanStore/WiredTiger/"
+          f"libmdbx/vWeaver_ermia data never touches a real disk) dram_gib={scale.dram_gib} "
+          f"(LeanStore/WiredTiger buffer pool - not used by cmvbt, which has no on-disk WAL in this "
+          f"harness's config, or postgres, whose shared_buffers isn't managed by this script)")
     print(f"planned runs  : {total_runs} (>= {total_secs / 60:.1f} min of measured time alone, "
           f"excluding load/build/BenchBase-client overhead)")
     print("#########################################################\n")
