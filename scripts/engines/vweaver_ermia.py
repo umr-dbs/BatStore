@@ -93,8 +93,13 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     # Same "memory budget" knob LeanStore/WiredTiger get via -dram-gib, sized to
     # config::node_memory_gb (dbcore/sm-alloc.cpp) - this is a hard preallocated pool, not
     # an evictable cache, so unlike those two engines running it too small aborts the run
-    # rather than just degrading throughput; bump --dram-gib if that happens.
-    node_memory_gb = max(1, int(scale.dram_gib))
+    # rather than just degrading throughput; bump --dram-gib if that happens. Doubled here
+    # specifically: scale.dram_gib is now sized proportional to the workload's own raw
+    # row-data estimate (see common.dram_gib_for), which is fine as a soft buffer-pool cap
+    # for LeanStore/WiredTiger but doesn't budget for ERMIA's own internal overhead
+    # (indexes, undo/version-chain buffers, ...) - undersizing THIS specific value is a
+    # hard crash, not degraded throughput, so it gets extra headroom the other two don't.
+    node_memory_gb = max(2, int(scale.dram_gib * 2))
 
     if workload == "tpcc":
         duration = scale.tpcc_duration

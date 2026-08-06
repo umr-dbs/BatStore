@@ -222,12 +222,22 @@ Options:
   --ycsb-duration SECS
   --theta FLOAT              YCSB Zipfian skew parameter
   --dram-gib FLOAT           LeanStore/WiredTiger buffer pool size, and vWeaver_ermia's
-                            -node_memory_gb (unused by cmvbt/postgres/libmdbx). Omit it
-                            and this auto-computes from the machine's own NUMA-node-local
-                            memory (common.py::default_dram_gib) - scales automatically
-                            between this 32GB workstation and the real ~500GB server, no
-                            need to pass this yourself unless you've raised
-                            --warehouses/--ycsb-records enough to outgrow it.
+                            -node_memory_gb (unused by cmvbt/postgres/libmdbx). Omit it and
+                            this auto-computes PER WORKLOAD/THREADS POINT, proportional to
+                            that point's own estimated dataset size (common.py::
+                            dram_gib_for - ~4x a rough ~100MB/warehouse or ~1KB/record
+                            estimate), capped at this machine's own NUMA-node-safe ceiling
+                            (common.py::default_dram_gib, which scales between the 32GB
+                            workstation and the real ~500GB server automatically). This
+                            matters for more than just avoiding eviction: an oversized
+                            buffer pool's own per-frame bookkeeping is real resident memory
+                            proportional to dram_gib itself, independent of how much data
+                            is actually loaded - sizing it to the workload instead of a
+                            flat machine-wide number is what keeps peak_rss_mb in
+                            manifest.csv representative of genuine usage rather than
+                            dominated by that overhead. Pass --dram-gib explicitly to pin
+                            one fixed value across every workload/threads point instead
+                            (applied unchanged, no auto-sizing).
 
 Output layout per run:
 
@@ -260,11 +270,13 @@ WAL is disabled by default in every workload this harness drives (see cmvbt.py),
 already 100% in-process-memory. See section 5 below for PostgreSQL, which this harness
 does NOT control the storage of.
 
-Also still sizes `--dram-gib` (LeanStore/WiredTiger's buffer pool cap, default now 32 -
-see common.py::Scale) comfortably above the default scale's working set: even against
-tmpfs, an undersized buffer pool still pays real eviction/reload CPU overhead simulating
-disk pressure that isn't there, which would confound an in-memory-only comparison. Bump
---dram-gib if you raise --warehouses/--ycsb-records enough to outgrow it.
+Also still sizes `--dram-gib` (LeanStore/WiredTiger's buffer pool cap - see section 3's
+--dram-gib entry) comfortably above each workload's own working set, computed fresh per
+workload/threads point rather than one flat number: even against tmpfs, an undersized
+buffer pool still pays real eviction/reload CPU overhead simulating disk pressure that
+isn't there, which would confound an in-memory-only comparison - and an OVERSIZED one
+inflates peak_rss_mb with buffer-pool bookkeeping that has nothing to do with the
+workload's actual memory use (see common.py::dram_gib_for's docstring).
 
 Disk usage (RAM usage, really) never accumulates across a long thread/workload sweep the
 way a fresh uniquely-named directory per sweep point would - only the CURRENT experiment's
