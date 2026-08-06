@@ -99,6 +99,17 @@ re-running after fixing just one failure):
 
 Example: `python3 scripts/setup_environment.py --skip-postgres --skip-benchbase`
 
+One step is the reverse - opt-IN, not run by default:
+
+    --postgres-tmpfs   Relocates PostgreSQL's real data directory onto tmpfs, so it gets
+                       the same in-memory-only guarantee as every other engine (see
+                       section 5's "In-memory only and PostgreSQL" bullet, and
+                       step_postgres_tmpfs's docstring in this file). Stops/restarts your
+                       actual PostgreSQL service and does NOT survive a reboot unattended -
+                       read the docstring before pointing this at a Postgres install you
+                       care about. Run step_postgres first (the default, role/db creation)
+                       so there's something real to copy onto tmpfs.
+
 
 MAVEN: mvn, not mvnw
 -----------------------
@@ -210,8 +221,13 @@ Options:
   --ycsb-records N
   --ycsb-duration SECS
   --theta FLOAT              YCSB Zipfian skew parameter
-  --dram-gib FLOAT           LeanStore/WiredTiger buffer pool size (unused by
-                            cmvbt/postgres/libmdbx/vweaver_ermia)
+  --dram-gib FLOAT           LeanStore/WiredTiger buffer pool size, and vWeaver_ermia's
+                            -node_memory_gb (unused by cmvbt/postgres/libmdbx). Omit it
+                            and this auto-computes from the machine's own NUMA-node-local
+                            memory (common.py::default_dram_gib) - scales automatically
+                            between this 32GB workstation and the real ~500GB server, no
+                            need to pass this yourself unless you've raised
+                            --warehouses/--ycsb-records enough to outgrow it.
 
 Output layout per run:
 
@@ -223,19 +239,36 @@ Note the engine's actual on-disk DATA (LeanStore/WiredTiger's ssd image, libmdbx
 environment, ERMIA's log dir) does NOT live under this per-combo tree - see section 4.
 
 
-4. DISK HYGIENE: FIXED, WIPED-BEFORE-EVERY-RUN DATA DIRECTORIES
---------------------------------------------------------------------
+4. IN-MEMORY ONLY: TMPFS-BACKED, WIPED-BEFORE-EVERY-RUN DATA DIRECTORIES
+--------------------------------------------------------------------------
 
 Every engine's own on-disk DATA (not its small result artifacts - those still live under
-the per-combo tree above) lives at a FIXED path, entirely deleted and recreated before
-every single run:
+the per-combo tree above) lives at a FIXED, tmpfs-backed path, entirely deleted and
+recreated before every single run:
 
-    <workspace>/scratch/<engine>_data/     (leanstore, wiredtiger, libmdbx)
-    <workspace>/scratch/vweaver_ermia_log/
+    <SCRATCH_ROOT>/<engine>_data/     (leanstore, wiredtiger, libmdbx)
+    <SCRATCH_ROOT>/vweaver_ermia_log/
 
-This means disk usage never accumulates across a long thread/workload sweep the way a
-fresh uniquely-named directory per sweep point would - only the CURRENT experiment's data
-ever exists on disk, never every prior one's too. The tradeoff: you can't go back and
+SCRATCH_ROOT (env var, default /dev/shm/cmvbt_bench_scratch) MUST be tmpfs -
+common.py::fresh_scratch_dir checks this on every call and sys.exit's loudly if it isn't,
+rather than silently falling back to a real disk-backed directory. This is what makes
+"in-memory only" an actual guarantee rather than a hope: LeanStore/WiredTiger/libmdbx/
+vWeaver_ermia all still perform real file I/O (page eviction, WAL flush, mmap writeback)
+regardless of buffer-pool/cache sizing - backing that I/O with tmpfs (RAM) is the only way
+to ensure none of it ever reaches a physical disk. cMVBT needs no such measure - its own
+WAL is disabled by default in every workload this harness drives (see cmvbt.py), so it's
+already 100% in-process-memory. See section 5 below for PostgreSQL, which this harness
+does NOT control the storage of.
+
+Also still sizes `--dram-gib` (LeanStore/WiredTiger's buffer pool cap, default now 32 -
+see common.py::Scale) comfortably above the default scale's working set: even against
+tmpfs, an undersized buffer pool still pays real eviction/reload CPU overhead simulating
+disk pressure that isn't there, which would confound an in-memory-only comparison. Bump
+--dram-gib if you raise --warehouses/--ycsb-records enough to outgrow it.
+
+Disk usage (RAM usage, really) never accumulates across a long thread/workload sweep the
+way a fresh uniquely-named directory per sweep point would - only the CURRENT experiment's
+data ever exists at all, never every prior one's too. The tradeoff: you can't go back and
 inspect e.g. run #47's raw ssd image after run #48 has started (it's been wiped) - only
 the small per-combo artifacts (stdout.log, result CSVs) survive for later inspection.
 
@@ -310,6 +343,22 @@ this rather than papering over it:
   system service, not spawned by this harness, so it is NOT NUMA-pinned by any of this -
   only the BenchBase JDBC client that talks to it is. Pinning the Postgres server itself
   would need a systemd unit override, outside this harness's scope.
+
+- In-memory only (section 4) and PostgreSQL: SCRATCH_ROOT's tmpfs guarantee covers
+  LeanStore/WiredTiger/libmdbx/vWeaver_ermia because this harness owns their data
+  directories directly. Getting PostgreSQL there too needs `setup_environment.py
+  --postgres-tmpfs` (opt-in, not run by default - see section 2 and
+  step_postgres_tmpfs's docstring): it stops the real PostgreSQL service, moves its actual
+  PGDATA onto tmpfs (preserving the original on real disk as `<PGDATA>.diskbackup`), and
+  restarts it. Without that flag, PostgreSQL's storage stays wherever it already was
+  (almost certainly real disk) and is NOT part of the in-memory-only guarantee the other
+  four engines now have. One caveat even after running it: tmpfs is volatile, so a reboot
+  wipes it and PostgreSQL will fail to start until you re-run `--postgres-tmpfs` (it
+  restores from the `.diskbackup` automatically - there's no systemd-level auto-restore on
+  boot, by design, see the docstring). At minimum, without --postgres-tmpfs, sizing
+  `shared_buffers`/`effective_cache_size` to cover the whole loaded dataset keeps reads
+  cache-resident (writes still reach disk via WAL fsync either way, unless PGDATA itself is
+  tmpfs).
 
 - Low-warehouse-count TPC-C contention: at very small scale (e.g. --tiny's 1 warehouse),
   TPC-C throughput can drop sharply once the terminal/thread count exceeds the warehouse

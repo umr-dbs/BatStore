@@ -93,6 +93,10 @@ APT_PACKAGES = [
 
 PG_ROLE = common.PG_ROLE
 PG_PASSWORD = common.PG_PASSWORD
+# Only used by --postgres-tmpfs (see step_postgres_tmpfs) - lives under the same
+# tmpfs-verified SCRATCH_ROOT every other engine's data now uses (see common.py::
+# fresh_scratch_dir), so PostgreSQL's storage gets the identical in-memory-only guarantee.
+PG_TMPFS_DATA_DIR = common.SCRATCH_ROOT / "postgresql_data"
 PG_DATABASE = common.PG_DATABASE
 
 
@@ -195,6 +199,24 @@ def step_vweaver_hugepages() -> None:
     # (sudo sysctl -w vm.nr_hugepages=N) if you override --dram-gib higher than the default.
     log("Reserving hugepages for vWeaver_ermia's node-memory pool")
     needed_gb = int(common.Scale().dram_gib) * 4
+    # Unlike everything else Scale.dram_gib sizes (a per-run buffer pool, freed the moment
+    # that run's process exits), a hugepage reservation is a MACHINE-WIDE, PERSISTENT claim
+    # that outlives this one step - it stays in effect for the rest of this comparison run
+    # across every other engine too (LeanStore/WiredTiger's tmpfs-backed buffer pools,
+    # Postgres, BenchBase's JVM all still need regular, non-huge memory afterward). Now that
+    # Scale.dram_gib itself scales with the real server's ~500GB (see default_dram_gib), the
+    # naive 4x here could try to reserve most of the machine - cap it well below the actual
+    # total so ERMIA's one-time preallocation can't starve every engine that runs after it.
+    total_gib = common.total_system_mem_gib()
+    if total_gib > 0:
+        cap_gb = int(total_gib * 0.4)
+        if needed_gb > cap_gb:
+            print(f"Computed hugepage request (~{needed_gb}GB, from dram_gib x4) exceeds 40% of "
+                  f"this machine's {total_gib:.0f}GB total - capping at {cap_gb}GB so the rest of "
+                  f"this comparison run isn't starved by a reservation that outlives this one step. "
+                  f"Raise it yourself (`sudo sysctl -w vm.nr_hugepages=N`) if ERMIA actually needs "
+                  f"more than that.")
+            needed_gb = cap_gb
     needed_pages = (needed_gb * 1024) // 2  # kernel default Hugepagesize is 2048kB
     current = subprocess.run(
         ["sysctl", "-n", "vm.nr_hugepages"], capture_output=True, text=True, check=True,
@@ -298,6 +320,110 @@ def step_postgres() -> None:
         run(["sudo", "systemctl", "restart", "postgresql"])
     else:
         print(f"max_connections already {max_conn.stdout.strip()}, skipping.")
+
+
+def _pg_data_directory() -> Path:
+    """Data directory of the (first) PostgreSQL cluster, via `pg_lsclusters` - unlike
+    `SHOW data_directory` over psql, this doesn't need the server to actually be up, which
+    matters for step_postgres_tmpfs's post-reboot recovery path (the server is down at
+    exactly the point this needs to find where to restore its data TO)."""
+    result = subprocess.run(["pg_lsclusters", "-h"], capture_output=True, text=True, check=True)
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        sys.exit("pg_lsclusters found no PostgreSQL cluster - is PostgreSQL installed (see step above)?")
+    fields = lines[0].split()
+    return Path(fields[5])
+
+
+def step_postgres_tmpfs() -> None:
+    """Moves the real PostgreSQL server's data directory onto tmpfs (PG_TMPFS_DATA_DIR,
+    under common.SCRATCH_ROOT - the same tmpfs-verified root every other engine's data now
+    uses, see common.py::fresh_scratch_dir), so PostgreSQL gets the same in-memory-only
+    guarantee LeanStore/WiredTiger/libmdbx/vWeaver_ermia already have from that function,
+    and cMVBT already has by construction (no on-disk WAL in this harness's config).
+
+    Opt-in only (--postgres-tmpfs, not run by default like the other steps) - unlike every
+    other step here, this one STOPS your real, already-running PostgreSQL SERVER (not a
+    subprocess this harness spawns and owns) and relocates its actual data. Run
+    step_postgres() (role/db/max_connections) first - this rsyncs whatever's already in
+    the real data directory, so the `admin` role and `benchbase` database created there
+    carry over automatically.
+
+    Idempotent and safe to re-run: the ORIGINAL on-disk data directory is renamed aside to
+    `<original>.diskbackup`, never deleted, and stays the authoritative on-disk copy -
+    tmpfs is repopulated from it (via rsync) whenever PG_TMPFS_DATA_DIR is missing or
+    doesn't already look like a valid cluster (no PG_VERSION file), which is exactly the
+    state you'll find it in after a reboot (tmpfs is volatile and comes back empty).
+
+    KNOWN LIMITATION: this does NOT survive a reboot unattended - there is no systemd unit
+    installed to auto-restore PG_TMPFS_DATA_DIR before postgresql.service starts (that
+    would mean authoring/testing a systemd dependency override against a real production
+    Postgres install, which this harness deliberately does not attempt sight-unseen). If
+    the machine reboots, PostgreSQL will fail to start (empty tmpfs dir) until you re-run
+    `python3 scripts/setup_environment.py --skip-apt --skip-wiredtiger --skip-leanstore
+    --skip-hugepages --skip-vweaver --skip-benchbase --skip-cmvbt --skip-venv
+    --postgres-tmpfs` (or the full script) - which restores tmpfs from `.diskbackup`
+    automatically, the same as a first run.
+    """
+    log("Relocating PostgreSQL's data directory onto tmpfs (--postgres-tmpfs)")
+    if shutil.which("psql") is None:
+        sys.exit("psql not found - install the 'postgresql' apt package first (see step above).")
+
+    real_datadir = _pg_data_directory()
+    backup_dir = real_datadir.with_name(real_datadir.name + ".diskbackup")
+
+    already_linked = real_datadir.is_symlink() and real_datadir.resolve() == PG_TMPFS_DATA_DIR.resolve()
+    tmpfs_populated = (PG_TMPFS_DATA_DIR / "PG_VERSION").exists()
+
+    if already_linked and tmpfs_populated:
+        print(f"{real_datadir} is already a symlink into tmpfs and looks populated - skipping.")
+        return
+
+    if not already_linked and not backup_dir.exists():
+        # First run: the data directory is still the real, disk-backed cluster. Stop the
+        # server before moving anything out from under it.
+        log(f"Stopping PostgreSQL and moving {real_datadir} -> {backup_dir} (permanent on-disk backup)")
+        run(["sudo", "systemctl", "stop", "postgresql"])
+        run(["sudo", "mv", str(real_datadir), str(backup_dir)])
+    elif not already_linked:
+        # real_datadir exists as a real directory AND a .diskbackup already exists too -
+        # an inconsistent state (e.g. a previous run died between the mv above and creating
+        # the symlink below) - don't guess, let the user look at it.
+        sys.exit(
+            f"{real_datadir} is a real directory AND {backup_dir} already exists - refusing to "
+            f"guess which one is authoritative. Inspect both manually, then either remove "
+            f"{real_datadir} and re-run (if {backup_dir} is the good copy) or remove {backup_dir}."
+        )
+    else:
+        # Already symlinked from a prior run, just not currently running (service stopped,
+        # or tmpfs came back empty after a reboot) - stop it if it's up before rsyncing.
+        run(["sudo", "systemctl", "stop", "postgresql"], check=False)
+
+    if not backup_dir.exists():
+        sys.exit(f"{backup_dir} (the on-disk backup) doesn't exist - can't restore tmpfs from it.")
+
+    if not (PG_TMPFS_DATA_DIR / "PG_VERSION").exists():
+        log(f"Populating {PG_TMPFS_DATA_DIR} (tmpfs) from {backup_dir}")
+        PG_TMPFS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        run(["sudo", "rsync", "-a", "--delete", f"{backup_dir}/", f"{PG_TMPFS_DATA_DIR}/"])
+        run(["sudo", "chown", "-R", "postgres:postgres", str(PG_TMPFS_DATA_DIR)])
+        run(["sudo", "chmod", "700", str(PG_TMPFS_DATA_DIR)])
+
+    if real_datadir.exists() or real_datadir.is_symlink():
+        run(["sudo", "rm", "-f" if real_datadir.is_symlink() else "-rf", str(real_datadir)])
+    run(["sudo", "ln", "-s", str(PG_TMPFS_DATA_DIR), str(real_datadir)])
+
+    run(["sudo", "systemctl", "start", "postgresql"])
+    fstype = common._mount_fstype(PG_TMPFS_DATA_DIR)
+    if fstype != "tmpfs":
+        sys.exit(f"{PG_TMPFS_DATA_DIR} isn't tmpfs (fstype={fstype!r}) - SCRATCH_ROOT misconfigured?")
+    verify = subprocess.run(
+        ["sudo", "-u", "postgres", "psql", "-tAc", "SELECT 1;"], capture_output=True, text=True,
+    )
+    if verify.returncode != 0 or verify.stdout.strip() != "1":
+        sys.exit(f"PostgreSQL didn't come back up after the move - see: {verify.stderr}")
+    print(f"PostgreSQL data directory is now {real_datadir} -> {PG_TMPFS_DATA_DIR} (tmpfs); "
+          f"on-disk backup preserved at {backup_dir}.")
 
 
 # Non-essential quality-gate plugins (code-style checks, static analysis) that: (a) aren't
@@ -407,6 +533,14 @@ def main() -> None:
     parser.add_argument("--skip-benchbase", action="store_true")
     parser.add_argument("--skip-cmvbt", action="store_true")
     parser.add_argument("--skip-venv", action="store_true")
+    parser.add_argument(
+        "--postgres-tmpfs", action="store_true",
+        help="Opt-in, NOT run by default (unlike every other step here): relocates the real "
+             "PostgreSQL server's data directory onto tmpfs (see step_postgres_tmpfs's docstring) "
+             "so it gets the same in-memory-only guarantee as every other engine. Stops/restarts "
+             "your actual PostgreSQL service and does not survive a reboot unattended - read the "
+             "docstring before using this on a Postgres install you care about.",
+    )
     args = parser.parse_args()
 
     steps = [
@@ -432,6 +566,17 @@ def main() -> None:
         except subprocess.CalledProcessError as e:
             sys.exit(f"\nStep '{name}' failed ({e}). Fix the issue above and re-run - "
                      f"earlier steps will be skipped since they're already done.")
+
+    if args.postgres_tmpfs:
+        try:
+            step_postgres_tmpfs()
+        except subprocess.CalledProcessError as e:
+            sys.exit(f"\nStep 'postgres-tmpfs' failed ({e}). Your PostgreSQL service may currently be "
+                     f"stopped or mid-move - check `systemctl status postgresql` and the step's "
+                     f"docstring before re-running.")
+    else:
+        print("\n>>> Skipping postgres-tmpfs (pass --postgres-tmpfs to relocate PostgreSQL's data "
+              "directory onto tmpfs too - opt-in, see --help)")
 
     print("\n########## setup complete ##########")
     print(f"Run the comparison with: python3 scripts/compare_engines.py --tiny")
