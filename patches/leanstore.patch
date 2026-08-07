@@ -44,6 +44,19 @@ index 43a220f..6aabb42 100644
        os << std::string_view(reinterpret_cast<const char*>(payload.value), size);
        return os;
     }
+diff --git a/frontend/shared/WiredTigerAdapter.hpp b/frontend/shared/WiredTigerAdapter.hpp
+index a8f5a12..5ebb9ac 100644
+--- a/frontend/shared/WiredTigerAdapter.hpp
++++ b/frontend/shared/WiredTigerAdapter.hpp
+@@ -29,7 +29,7 @@ struct WiredTigerDB {
+ 
+    WiredTigerDB()
+    {
+-      std::string config_string("create, direct_io=[data, log, checkpoint], log=(enabled=false), statistics_log=(wait=1), statistics=(all, clear), session_max=2000, eviction=(threads_max=4), cache_size=" +
++      std::string config_string("create, direct_io=[data, log, checkpoint], log=(enabled=true), statistics_log=(wait=1), statistics=(all, clear), session_max=2000, eviction=(threads_max=4), cache_size=" +
+                                 std::to_string(u64(FLAGS_dram_gib * 1024)) + "M");
+       std::string cmd("rm -rf " + FLAGS_ssd_path);
+       cmd = std::string("mkdir -p " + FLAGS_ssd_path);
 diff --git a/frontend/tpc-c/TPCCWorkload.hpp b/frontend/tpc-c/TPCCWorkload.hpp
 index 575cc43..33a31eb 100644
 --- a/frontend/tpc-c/TPCCWorkload.hpp

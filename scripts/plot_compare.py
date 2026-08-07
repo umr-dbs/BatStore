@@ -30,6 +30,14 @@ Note: PostgreSQL's peak_rss_mb is always 0 (see engines/postgres_benchbase.py's
 docstring for why) - the memory plot excludes it rather than showing a
 misleading zero bar.
 
+The threads-sweep plots (x=threads, y=throughput, one line per engine - the whole point
+of compare_engines.py's thread sweep) are split by workload group rather than one giant
+figure or one-file-per-workload: threads_sweep_tpcc.svg (TPC-C, its own figure),
+threads_sweep_ycsb.svg (ONE figure, all loaded YCSB A-F workloads as subplots, so the
+whole YCSB sweep reads off a single file), and threads_sweep_htap_q1.svg /
+threads_sweep_htap_q6.svg (HTAP, kept as separate figures per query rather than combined -
+see plot_throughput_vs_threads_htap's docstring).
+
 Requires: pandas, matplotlib (see requirements.txt).
 """
 import argparse
@@ -48,6 +56,7 @@ ENGINE_COLORS = {
     "vweaver_ermia": "tab:purple", "libmdbx": "tab:brown",
 }
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
+HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
 # Engines with a real, working GC on/off toggle (see engines/*.py's SUPPORTS_GC_TOGGLE) -
 # leanstore/wiredtiger only ever report gc_enabled="n/a" (no working toggle in this
 # checkout, see the plan's Context section), so they're excluded from GC-comparison plots.
@@ -211,32 +220,97 @@ def plot_summary_all(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str, 
     _save(fig, out_dir, f"summary_all_workloads_gc_{gc_choice}")
 
 
-def plot_throughput_vs_threads(manifest: pd.DataFrame, out_dir: Path):
-    """One figure per workload: x=threads, y=primary_metric_value, one line per
-    engine/gc_enabled combo (solid for gc=on/n/a, dashed for gc=off) - the whole point of
-    the thread sweep, so results can be read directly off an x-axis of thread count."""
-    for workload in sorted(manifest["workload"].unique(), key=lambda w: (w != "tpcc", w)):
+def _plot_engine_lines(ax, df: pd.DataFrame):
+    """x=threads, y=primary_metric_value, one line per engine/gc_enabled combo (solid for
+    gc=on/n/a, dashed for gc=off) drawn onto `ax` - the shared building block behind every
+    threads_sweep_* figure below, so a single workload's worth of lines can be placed
+    either on its own figure (TPC-C, HTAP) or as one subplot among several (YCSB)."""
+    for engine in sorted(df["engine"].unique(), key=_engine_sort_key):
+        edf = df[df["engine"] == engine]
+        for gc_variant, linestyle in (("on", "-"), ("n/a", "-"), ("off", "--")):
+            gdf = edf[edf["gc_enabled"] == gc_variant].sort_values("threads")
+            if gdf.empty:
+                continue
+            label = ENGINE_LABELS.get(engine, engine)
+            if gc_variant == "off":
+                label += " (gc off)"
+            ax.plot(gdf["threads"], gdf["primary_metric_value"], marker="o", linestyle=linestyle,
+                    label=label, color=ENGINE_COLORS.get(engine, "tab:gray"))
+    ax.set_xscale("log", base=2)
+    # Tick locations/labels pinned to the actual thread counts in `df` (e.g. 2,4,8,...128)
+    # rather than matplotlib's default log-scale formatter, which would otherwise render
+    # them as "2^1", "2^2", ... - plain integers read directly as the thread counts they are.
+    thread_values = sorted(df["threads"].unique())
+    if thread_values:
+        ax.set_xticks(thread_values)
+        ax.set_xticklabels([str(int(t)) for t in thread_values])
+        ax.minorticks_off()
+    ax.set_xlabel("Threads / terminals")
+    ax.grid(alpha=0.3)
+
+
+def plot_throughput_vs_threads_tpcc(manifest: pd.DataFrame, out_dir: Path):
+    """TPC-C: one figure, x=threads, y=new_order_per_sec, one line per engine."""
+    df = manifest[manifest["workload"] == "tpcc"]
+    if df.empty:
+        print("No tpcc rows in manifest.csv — skipping TPC-C threads-sweep plot.")
+        return
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    _plot_engine_lines(ax, df)
+    ax.set_ylabel(df["primary_metric_name"].iloc[0])
+    ax.set_title("TPC-C: throughput vs. thread count")
+    ax.legend(fontsize=8)
+    _save(fig, out_dir, "threads_sweep_tpcc")
+
+
+def plot_throughput_vs_threads_ycsb(manifest: pd.DataFrame, out_dir: Path):
+    """YCSB: ONE figure covering every loaded workload (A-F), each as its own subplot -
+    x=threads, y=ops_per_sec, one line per engine - so the whole YCSB sweep reads off a
+    single figure instead of six separate files."""
+    workloads = [w for w in YCSB_WORKLOADS if w in manifest["workload"].unique()]
+    if not workloads:
+        print("No YCSB rows in manifest.csv — skipping YCSB threads-sweep plot.")
+        return
+    # cols scales down with however many YCSB workloads actually ran (e.g. 2 if only A/E
+    # were requested) rather than always reserving 3, which left empty, wasted subplot
+    # slots for any subset smaller than the full A-F sweep.
+    cols = min(3, len(workloads))
+    rows = (len(workloads) + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4.2 * rows), squeeze=False)
+    for idx, workload in enumerate(workloads):
+        ax = axes[idx // cols][idx % cols]
+        df = manifest[manifest["workload"] == workload]
+        _plot_engine_lines(ax, df)
+        ax.set_ylabel(df["primary_metric_name"].iloc[0])
+        ax.set_title(workload.replace("ycsb_", "").upper())
+        # Legend on the first subplot only (same convention as plot_gc_comparison below) -
+        # every subplot shares the same engine->color mapping, so one legend identifies
+        # all of them without a fragile figure-level legend fighting the bottom row's own
+        # x-axis labels for space.
+        if idx == 0:
+            ax.legend(fontsize=8)
+    for idx in range(len(workloads), rows * cols):
+        axes[idx // cols][idx % cols].axis("off")
+
+    fig.suptitle("YCSB: throughput vs. thread count")
+    _save(fig, out_dir, "threads_sweep_ycsb")
+
+
+def plot_throughput_vs_threads_htap(manifest: pd.DataFrame, out_dir: Path):
+    """HTAP: one figure per query (htap_q1, htap_q6) - x=threads, y=new_order_per_sec (the
+    OLTP side of the mix), one line per engine. Kept as separate figures rather than one
+    combined plot since each query's own interference/scan-cost profile is what's
+    interesting here, not a side-by-side average."""
+    for workload in HTAP_WORKLOADS:
         df = manifest[manifest["workload"] == workload]
         if df.empty:
+            print(f"No {workload} rows in manifest.csv — skipping HTAP threads-sweep plot.")
             continue
         fig, ax = plt.subplots(figsize=(8, 5.5))
-        for engine in sorted(df["engine"].unique(), key=_engine_sort_key):
-            edf = df[df["engine"] == engine]
-            for gc_variant, linestyle in (("on", "-"), ("n/a", "-"), ("off", "--")):
-                gdf = edf[edf["gc_enabled"] == gc_variant].sort_values("threads")
-                if gdf.empty:
-                    continue
-                label = ENGINE_LABELS.get(engine, engine)
-                if gc_variant == "off":
-                    label += " (gc off)"
-                ax.plot(gdf["threads"], gdf["primary_metric_value"], marker="o", linestyle=linestyle,
-                        label=label, color=ENGINE_COLORS.get(engine, "tab:gray"))
-        ax.set_xscale("log", base=2)
-        ax.set_xlabel("Threads / terminals")
+        _plot_engine_lines(ax, df)
         ax.set_ylabel(df["primary_metric_name"].iloc[0])
         ax.set_title(f"{workload}: throughput vs. thread count")
         ax.legend(fontsize=8)
-        ax.grid(alpha=0.3)
         _save(fig, out_dir, f"threads_sweep_{workload}")
 
 
@@ -420,7 +494,9 @@ def main():
         plot_ycsb_throughput(ref_slice, ref_threads, gc_choice, out_dir)
         plot_memory_usage(ref_slice, ref_threads, gc_choice, out_dir)
         plot_summary_all(ref_slice, ref_threads, gc_choice, out_dir)
-    plot_throughput_vs_threads(manifest, out_dir)
+    plot_throughput_vs_threads_ycsb(manifest, out_dir)
+    plot_throughput_vs_threads_tpcc(manifest, out_dir)
+    plot_throughput_vs_threads_htap(manifest, out_dir)
     plot_gc_comparison(manifest, ref_threads, out_dir)
     plot_scan_latency(manifest, ref_threads, out_dir)
     plot_cmvbt_olap_scan_latency(run_dir, ref_threads, out_dir)
