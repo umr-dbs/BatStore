@@ -168,7 +168,8 @@ def step_leanstore() -> None:
         run(["git", "clone", LEANSTORE_URL, str(LEANSTORE_REPO)])
         run(["git", "checkout", LEANSTORE_PATCH_COMMIT], cwd=LEANSTORE_REPO)
         log(f"Applying {LEANSTORE_PATCH_PATH.name} (CH-benCHmark Q1/Q6 analytical queries, "
-            f"YCSB-E/HTAP scan-latency instrumentation, New-Order-only counters)")
+            f"YCSB-E/HTAP scan-latency instrumentation, New-Order-only counters, WiredTiger "
+            f"adapter log=(enabled=true) so its WAL isn't silently off in this comparison)")
         run(["git", "apply", str(LEANSTORE_PATCH_PATH)], cwd=LEANSTORE_REPO)
 
     LEANSTORE_BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -476,12 +477,18 @@ def step_benchbase() -> None:
     # console instead of being interleaved with (or hidden by) the wrapper's own
     # download/bootstrap output - and no `-q`, for the same reason: full Maven output
     # visible here to debug plugin/dependency failures on sight.
-    # BenchBase's pom.xml targets Java 23; override to whatever JDK is
-    # actually installed (verified fine with 21 in prior runs) rather than
-    # requiring a JDK 23 install.
+    # BenchBase's pom.xml targets Java 23; override to whatever JDK is actually installed
+    # (verified fine with 21) rather than requiring a JDK 23 install. `-Dmaven.compiler.
+    # release=21` (not separate source/target) matters here: plain source/target 21 on a
+    # newer JDK (e.g. 25) makes javac emit "system modules path not set in conjunction with
+    # -source 21" - a WARNING everywhere else, but BenchBase's own pom.xml enables
+    # -Werror, turning it into a hard build failure. -Dmaven.compiler.release uses the
+    # JDK's bundled ct.sym API data for the target release instead, which avoids the
+    # warning entirely (confirmed: plain source/target 21 fails on JDK 25 here, release=21
+    # builds clean).
     run([
         "mvn", "clean", "package", "-P", "postgres",
-        "-DskipTests", "-Dmaven.compiler.source=21", "-Dmaven.compiler.target=21", "-Djava.version=21",
+        "-DskipTests", "-Dmaven.compiler.release=21",
     ], cwd=BENCHBASE_REPO)
 
     tgz = BENCHBASE_REPO / "target" / "benchbase-postgres.tgz"

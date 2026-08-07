@@ -256,7 +256,7 @@ Every engine's own on-disk DATA (not its small result artifacts - those still li
 the per-combo tree above) lives at a FIXED, tmpfs-backed path, entirely deleted and
 recreated before every single run:
 
-    <SCRATCH_ROOT>/<engine>_data/     (leanstore, wiredtiger, libmdbx)
+    <SCRATCH_ROOT>/<engine>_data/     (leanstore, wiredtiger, libmdbx, cmvbt)
     <SCRATCH_ROOT>/vweaver_ermia_log/
 
 SCRATCH_ROOT (env var, default /dev/shm/cmvbt_bench_scratch) MUST be tmpfs -
@@ -265,10 +265,13 @@ rather than silently falling back to a real disk-backed directory. This is what 
 "in-memory only" an actual guarantee rather than a hope: LeanStore/WiredTiger/libmdbx/
 vWeaver_ermia all still perform real file I/O (page eviction, WAL flush, mmap writeback)
 regardless of buffer-pool/cache sizing - backing that I/O with tmpfs (RAM) is the only way
-to ensure none of it ever reaches a physical disk. cMVBT needs no such measure - its own
-WAL is disabled by default in every workload this harness drives (see cmvbt.py), so it's
-already 100% in-process-memory. See section 5 below for PostgreSQL, which this harness
-does NOT control the storage of.
+to ensure none of it ever reaches a physical disk. cMVBT's own WAL is forced ON,
+unconditionally, in every workload this harness drives (see cmvbt.py) and written to this
+same tmpfs-backed scratch dir - LeanStore's WAL (baked into its B-tree core,
+WALMacros.hpp) can't be disabled either, so leaving cMVBT's off by default would compare a
+durable-logging engine against a non-durable one; forcing it on everywhere means the only
+overhead this adds anywhere is genuine serialization/fsync cost, never real disk I/O. See
+section 5 below for PostgreSQL, which this harness does NOT control the storage of.
 
 Also still sizes `--dram-gib` (LeanStore/WiredTiger's buffer pool cap - see section 3's
 --dram-gib entry) comfortably above each workload's own working set, computed fresh per
@@ -290,6 +293,15 @@ the small per-combo artifacts (stdout.log, result CSVs) survive for later inspec
 
 Not every engine supports every dimension identically - the harness is explicit about
 this rather than papering over it:
+
+- WAL: cMVBT's WAL is forced ON unconditionally (see section 4) to match LeanStore, whose
+  WAL (baked into its B-tree core) can't be disabled either. The WiredTigerAdapter this
+  harness drives (frontend/shared/WiredTigerAdapter.hpp) originally opened its connection
+  with `log=(enabled=false)` - WiredTiger's own WAL silently OFF, an asymmetry against
+  both of those - patches/leanstore.patch now flips it to `log=(enabled=true)` so all
+  three durability-capable engines are on equal footing. libmdbx has no separate WAL
+  concept (its own copy-on-write meta-page double-buffering is its durability mechanism);
+  PostgreSQL's WAL is always on and can't be disabled either.
 
 - GC on/off: cMVBT (real --gc flag), PostgreSQL (via `autovacuum`, toggled with
   `ALTER SYSTEM` + `pg_reload_conf()`, no restart needed), and vWeaver_ermia (real

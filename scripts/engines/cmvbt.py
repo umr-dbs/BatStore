@@ -2,6 +2,14 @@
 since `cargo run -- tpcc|ycsb ...` always writes its CSVs to the current
 working directory — see src/mv_bench/tpcc_driver.rs::main_tpcc /
 ycsb_driver.rs::main_ycsb, both hardcode `output_dir: PathBuf::from(".")`).
+
+WAL is forced on, unconditionally, for every run here (see the wal_path/args wiring
+in run() below) - LeanStore's own WAL (WALMacros.hpp, baked into its B-tree core)
+can't be turned off either, so leaving cMVBT's WAL off by default would compare a
+durable-logging engine against a non-durable one. Written to a tmpfs-backed
+scratch dir (common.fresh_scratch_dir), same treatment as every other engine's
+on-disk DATA - see common.SCRATCH_ROOT's docstring - so the only overhead this adds
+is genuine serialization/fsync cost, not real disk I/O.
 """
 from __future__ import annotations
 
@@ -36,16 +44,24 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
     gc_bool = "false" if gc == "off" else "true"
+    # Fixed, wiped-before-every-run path (matches leanstore.py/wiredtiger.py's ssd_path
+    # treatment) - the driver's own `fs::remove_file(wal_path)` before opening it means
+    # this only needs to exist, not start empty, but wiping it here keeps behavior
+    # identical to every other engine's on-disk DATA dir regardless.
+    wal_path = common.fresh_scratch_dir("cmvbt_data") / "wal.log"
 
     if workload == "tpcc":
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
-        # Positions 0-4: warehouses/terminals/duration. Rust's arg() is strictly
-        # positional (parms.get(idx)), so slot 5 (affinity) must be filled explicitly to
-        # reach slot 6 (gc) - "false" matches the driver's own default for affinity.
+        # Positions 7-14 filled with the driver's own defaults (update_in_place=false,
+        # root_star_index="fg", olap_mode_str="scan_sweep", num_olap_threads=1,
+        # olap_param=10.0, num_items/customers_per_district/initial_orders_per_district)
+        # so that positions 15-17 (wal_enabled/wal_path/wal_flush_ms) are reachable -
+        # Rust's arg() is strictly positional (parms.get(idx)).
         args = [
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
-            "false", gc_bool,
+            "false", gc_bool, "false", "fg", "scan_sweep", "1", "10.0",
+            "100000", "3000", "3000", "true", str(wal_path), "5",
         ]
         metric_name = "new_order_per_sec"
         ts_file, ts_column = "tpcc_oltp_timeseries.csv", "new_order_committed"
@@ -61,7 +77,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         args = [
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
             "false", gc_bool, "false", "fg", "ch", "1", "10.0",
-            "100000", "3000", "3000", "false", "tpcc_wal.log", "5", "EUROPE", "10000",
+            "100000", "3000", "3000", "true", str(wal_path), "5", "EUROPE", "10000",
         ]
         metric_name = "new_order_per_sec"
         ts_file, ts_column = "tpcc_oltp_timeseries.csv", "new_order_committed"
@@ -69,12 +85,13 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         letter = workload.split("_", 1)[1]
         duration = scale.ycsb_duration
         threads = scale.ycsb_threads
-        # Positions 8-11 (field_count/field_length/max_scan_length/root_star_index) filled
-        # with the driver's own defaults so position 12 (gc) is reachable.
+        # Positions 8-11 (field_count/field_length/max_scan_length/root_star_index) and 13
+        # (update_in_place) filled with the driver's own defaults so positions 14-16
+        # (wal_enabled/wal_path/wal_flush_ms) are reachable.
         args = [
             str(BINARY), "ycsb", letter, str(scale.ycsb_records), str(threads),
             str(duration), "default", str(scale.ycsb_theta),
-            "10", "100", "100", "fg", gc_bool,
+            "10", "100", "100", "fg", gc_bool, "false", "true", str(wal_path), "5",
         ]
         metric_name = "ops_per_sec"
         ts_file, ts_column = "ycsb_timeseries.csv", "ops_completed"

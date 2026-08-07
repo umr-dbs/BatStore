@@ -57,12 +57,13 @@ PG_DATABASE = os.environ.get("PG_DATABASE", "benchbase")
 NUMA_NODE = 0
 
 # Every engine's on-disk DATA directory (LeanStore/WiredTiger's ssd image, libmdbx's
-# environment, ERMIA's log dir - see fresh_scratch_dir below) is created under here, not
-# under WORKSPACE_ROOT/scratch on real disk - this harness is in-memory-only: every one of
-# those engines still does real file I/O (page eviction, WAL flush, mmap writeback), and
-# the only way to guarantee none of it ever reaches a physical disk, regardless of how
-# --dram-gib/buffer-pool sizing is set, is to back that I/O with tmpfs (RAM) instead of a
-# real filesystem. /dev/shm is tmpfs on every mainstream Linux distro by default.
+# environment, ERMIA's log dir, cMVBT's WAL file - see fresh_scratch_dir below) is created
+# under here, not under WORKSPACE_ROOT/scratch on real disk - this harness is
+# in-memory-only: every one of those engines still does real file I/O (page eviction, WAL
+# flush, mmap writeback), and the only way to guarantee none of it ever reaches a physical
+# disk, regardless of how --dram-gib/buffer-pool sizing is set, is to back that I/O with
+# tmpfs (RAM) instead of a real filesystem. /dev/shm is tmpfs on every mainstream Linux
+# distro by default.
 SCRATCH_ROOT = Path(os.environ.get("SCRATCH_ROOT", "/dev/shm/cmvbt_bench_scratch"))
 
 

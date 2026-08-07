@@ -167,9 +167,10 @@ def main() -> None:
         f"capped at {common.default_dram_gib()} (this machine's NUMA-node-safe ceiling)"
     )
     print(f"in-memory only: SCRATCH_ROOT={common.SCRATCH_ROOT} (tmpfs-verified; LeanStore/WiredTiger/"
-          f"libmdbx/vWeaver_ermia data never touches a real disk) dram_gib: {dram_gib_desc} "
-          f"(LeanStore/WiredTiger buffer pool - not used by cmvbt, which has no on-disk WAL in this "
-          f"harness's config, or postgres, whose shared_buffers isn't managed by this script)")
+          f"libmdbx/vWeaver_ermia/cmvbt data never touches a real disk) dram_gib: {dram_gib_desc} "
+          f"(LeanStore/WiredTiger buffer pool - not used by cmvbt, whose WAL is forced on but "
+          f"unbounded like every other in-memory structure here, or postgres, whose shared_buffers "
+          f"isn't managed by this script)")
     print(f"planned runs  : {total_runs} (>= {total_secs / 60:.1f} min of measured time alone, "
           f"excluding load/build/BenchBase-client overhead)")
     print("#########################################################\n")
