@@ -19,11 +19,15 @@
 //! expected characteristic of path-copying/CoW MVCC to surface honestly, not
 //! a driver bug.
 //!
-//! Durability: `SyncMode::SafeNoSync` (not full fsync-per-commit durability)
-//! by default - matching the earlier libmdbx comparison tool
-//! (`mdbx_crud_load.c`, see project memory)'s own finding that full
-//! per-commit fsync durability is impractically slow for a benchmark where
-//! every op is its own transaction.
+//! Durability: `SyncMode::UtterlyNoSync` - no fsync/flush at all, matching
+//! the in-memory-only guarantee already forced on every other engine here
+//! (see `common.fresh_scratch_dir`, tmpfs-backed). `SyncMode::SafeNoSync`
+//! was tried first, but per libmdbx's own docs it issues exactly the same
+//! number/volume of disk IOPs as full `Durable` sync - it only removes the
+//! *correctness* risk of those flushes, not the flushes themselves - so it
+//! wasn't actually cheaper. `WriteMap` is used for the same reason: writes
+//! go directly into the mmap'd region instead of through a `write()`
+//! syscall into the page cache.
 
 use std::fs;
 use std::fs::OpenOptions;
@@ -34,7 +38,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use libmdbx::{Database, DatabaseOptions, Mode, NoWriteMap, ReadWriteOptions, SyncMode, TableFlags, WriteFlags};
+use libmdbx::{Database, DatabaseOptions, Mode, ReadWriteOptions, SyncMode, TableFlags, WriteFlags, WriteMap};
 
 use crate::mv_bench::mem_stats::{MemSampler, DEFAULT_SAMPLE_INTERVAL};
 use crate::mv_bench::ycsb_random::{pick_op, random_row, random_scan_length, KeySampler, RequestDistribution, YcsbMix, YcsbOpType};
@@ -69,7 +73,7 @@ const RMW: usize = 4;
 const NUM_COUNTERS: usize = 5;
 const COUNTER_NAMES: [&str; NUM_COUNTERS] = ["read", "update", "insert", "scan", "read_modify_write"];
 
-fn open_db(path: &std::path::Path, num_threads: usize) -> Database<NoWriteMap> {
+fn open_db(path: &std::path::Path, num_threads: usize) -> Database<WriteMap> {
     fs::create_dir_all(path).unwrap_or_else(|e| panic!("mdbx_ycsb: failed to create db dir {}: {e}", path.display()));
     // libmdbx's reader-slot table defaults to 61 (MDBX_READERS_FULL beyond that) -
     // below our own thread-count sweep (up to 128), which was silently aborting/
@@ -77,10 +81,10 @@ fn open_db(path: &std::path::Path, num_threads: usize) -> Database<NoWriteMap> {
     // thread count plus headroom for the table-creation txn and any internal use.
     let options = DatabaseOptions {
         max_readers: Some((num_threads as std::ffi::c_uint).saturating_add(8)),
-        mode: Mode::ReadWrite(ReadWriteOptions { sync_mode: SyncMode::SafeNoSync, ..Default::default() }),
+        mode: Mode::ReadWrite(ReadWriteOptions { sync_mode: SyncMode::UtterlyNoSync, ..Default::default() }),
         ..Default::default()
     };
-    let db = Database::<NoWriteMap>::open_with_options(path, options)
+    let db = Database::<WriteMap>::open_with_options(path, options)
         .unwrap_or_else(|e| panic!("mdbx_ycsb: failed to open database at {}: {e}", path.display()));
     // The unnamed/default table needs one RW transaction to exist before any reader can
     // open it.
@@ -97,13 +101,13 @@ fn encode_row(cfg: &YcsbConfig) -> Vec<u8> {
     buf
 }
 
-fn mdbx_read(db: &Database<NoWriteMap>, key: YcsbKey) -> bool {
+fn mdbx_read(db: &Database<WriteMap>, key: YcsbKey) -> bool {
     let txn = db.begin_ro_txn().expect("mdbx_ycsb: begin_ro_txn");
     let table = txn.open_table(None).expect("mdbx_ycsb: open_table");
     txn.get::<Vec<u8>>(&table, &key.to_be_bytes()).expect("mdbx_ycsb: get").is_some()
 }
 
-fn mdbx_update(db: &Database<NoWriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> bool {
+fn mdbx_update(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> bool {
     let txn = db.begin_rw_txn().expect("mdbx_ycsb: begin_rw_txn");
     let table = txn.open_table(None).expect("mdbx_ycsb: open_table");
     let exists = txn.get::<Vec<u8>>(&table, &key.to_be_bytes()).expect("mdbx_ycsb: get").is_some();
@@ -115,7 +119,7 @@ fn mdbx_update(db: &Database<NoWriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> boo
     exists
 }
 
-fn mdbx_insert(db: &Database<NoWriteMap>, cfg: &YcsbConfig, key: YcsbKey) {
+fn mdbx_insert(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) {
     let txn = db.begin_rw_txn().expect("mdbx_ycsb: begin_rw_txn");
     let table = txn.open_table(None).expect("mdbx_ycsb: open_table");
     let buf = encode_row(cfg);
@@ -125,7 +129,7 @@ fn mdbx_insert(db: &Database<NoWriteMap>, cfg: &YcsbConfig, key: YcsbKey) {
 
 /// Returns the number of rows actually scanned (can be `< len` near the end of the loaded
 /// key range) - same contract as `ycsb_txn::scan`.
-fn mdbx_scan(db: &Database<NoWriteMap>, start_key: YcsbKey, len: u64) -> usize {
+fn mdbx_scan(db: &Database<WriteMap>, start_key: YcsbKey, len: u64) -> usize {
     let txn = db.begin_ro_txn().expect("mdbx_ycsb: begin_ro_txn");
     let table = txn.open_table(None).expect("mdbx_ycsb: open_table");
     let mut cursor = txn.cursor(&table).expect("mdbx_ycsb: cursor");
@@ -143,12 +147,12 @@ fn mdbx_scan(db: &Database<NoWriteMap>, start_key: YcsbKey, len: u64) -> usize {
     count as usize
 }
 
-fn mdbx_read_modify_write(db: &Database<NoWriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> bool {
+fn mdbx_read_modify_write(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> bool {
     let _ = mdbx_read(db, key);
     mdbx_update(db, cfg, key)
 }
 
-fn populate(db: &Database<NoWriteMap>, cfg: &YcsbConfig) {
+fn populate(db: &Database<WriteMap>, cfg: &YcsbConfig) {
     for key in 1..=cfg.record_count {
         mdbx_insert(db, cfg, key as YcsbKey);
     }
@@ -163,7 +167,7 @@ struct WorkerStats {
 
 #[allow(clippy::too_many_arguments)]
 fn worker_thread(
-    db: Arc<Database<NoWriteMap>>,
+    db: Arc<Database<WriteMap>>,
     cfg: YcsbConfig,
     mix: YcsbMix,
     sampler: Arc<KeySampler>,
