@@ -72,14 +72,17 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         metric_name = "ops_per_sec"
         ts_file, ts_column = "ycsb_timeseries.csv", "ops_completed"
 
+    timeout = common.default_subprocess_timeout(duration)
     returncode, _peak_rss_unused = common.run_and_track_rss(
-        args, cwd=output_dir, stdout_path=output_dir / "stdout.log",
+        args, cwd=output_dir, stdout_path=output_dir / "stdout.log", timeout=timeout,
     )
     if returncode != 0:
+        notes = f"TIMEOUT after {timeout:.0f}s, see stdout.log" if returncode is None else \
+            f"FAILED exit={returncode}, see stdout.log"
         return common.NormalizedResult(
             "libmdbx", workload, scale.label, duration, metric_name, 0.0, 0.0,
             threads=threads, gc_enabled="n/a",
-            notes=f"FAILED exit={returncode}, see stdout.log",
+            notes=notes,
         )
 
     total_ops = common.sum_csv_column(output_dir / ts_file, ts_column)

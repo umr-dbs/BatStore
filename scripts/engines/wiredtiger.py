@@ -106,14 +106,17 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         ]
         metric_name, metric_column = "ops_per_sec", "oltp_committed"
 
+    timeout = common.default_subprocess_timeout(duration)
     returncode, peak_rss_mb = common.run_and_track_rss(
-        args, cwd=output_dir, env=env, stdout_path=stdout_path,
+        args, cwd=output_dir, env=env, stdout_path=stdout_path, timeout=timeout,
     )
     if returncode != 0:
+        notes = f"TIMEOUT after {timeout:.0f}s, see stdout.log" if returncode is None else \
+            f"FAILED exit={returncode}, see stdout.log"
         return common.NormalizedResult(
             "wiredtiger", workload, scale.label, duration, metric_name, 0.0, peak_rss_mb,
             threads=threads, gc_enabled="n/a",
-            notes=f"FAILED exit={returncode}, see stdout.log",
+            notes=notes,
         )
 
     total = _sum_stdout_column(stdout_path, metric_column)

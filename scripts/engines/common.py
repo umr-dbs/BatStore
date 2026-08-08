@@ -10,6 +10,7 @@ import csv
 import dataclasses
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -69,6 +70,18 @@ SCRATCH_ROOT = Path(os.environ.get("SCRATCH_ROOT", "/dev/shm/cmvbt_bench_scratch
 
 def numactl_prefix() -> list:
     return ["numactl", f"--cpubind={NUMA_NODE}", f"--membind={NUMA_NODE}"]
+
+
+def default_subprocess_timeout(duration: float) -> float:
+    """A generous `run_and_track_rss(..., timeout=...)` bound for a run whose measured
+    phase is `duration` seconds: `4x duration + 300s` headroom for population/load,
+    connection setup, and warm-up, none of which count against `duration` itself but
+    have been observed to stall for minutes under host contention (this is a shared
+    server, not dedicated hardware - see NUMA_NODE's docstring for the isolation
+    assumption this only partially holds). Bounded rather than unlimited so one stuck
+    engine fails that one (workload, threads) point instead of hanging the entire
+    sweep - see run_and_track_rss's own docstring for what "stuck" looked like."""
+    return duration * 4 + 300
 
 
 def _mount_fstype(path: Path) -> str:
@@ -407,10 +420,25 @@ def run_and_track_rss(cmd, cwd=None, env=None, stdout_path: Optional[Path] = Non
 
     Returns (returncode, peak_rss_mb). stdout+stderr are merged and written to
     stdout_path if given (for post-hoc debugging), else discarded.
+
+    `timeout` (seconds) bounds how long a single subprocess may run. Without it, a
+    genuinely stuck engine (observed: libmdbx's population phase stalling indefinitely
+    under host contention - see task notes) blocks this ENTIRE call forever, and since
+    every caller here runs sequentially in one sweep (compare_engines.py), one stuck
+    data point silently hangs the whole multi-hour comparison with no way to recover
+    short of someone noticing and killing it by hand. On timeout, the whole process
+    group is force-killed (not just `cmd`'s own PID) and `(None, peak_rss_mb)` is
+    returned - `None` is the caller's signal to record this point as a timeout rather
+    than treat it as a crash (returncode would otherwise collide with a real negative
+    signal-exit code). `start_new_session=True` puts `cmd` in its own process group
+    specifically so this cleanup can reach any children numactl/the engine itself
+    spawns, rather than relying on numactl having exec'd in place of forking.
     """
     cmd = numactl_prefix() + [str(c) for c in cmd]
     stdout_file = open(stdout_path, "wb") if stdout_path else subprocess.DEVNULL
-    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=stdout_file, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env, stdout=stdout_file, stderr=subprocess.STDOUT, start_new_session=True,
+    )
     peak_kb = 0.0
     stop = threading.Event()
 
@@ -422,15 +450,23 @@ def run_and_track_rss(cmd, cwd=None, env=None, stdout_path: Optional[Path] = Non
 
     t = threading.Thread(target=sampler, daemon=True)
     t.start()
+    timed_out = False
     try:
         proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
     finally:
         stop.set()
         t.join()
         if stdout_path:
             stdout_file.close()
 
-    return proc.returncode, peak_kb / 1024.0
+    return (None if timed_out else proc.returncode), peak_kb / 1024.0
 
 
 def sum_csv_column(csv_path: Path, column: str) -> float:
