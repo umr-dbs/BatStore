@@ -47,6 +47,7 @@ BENCHBASE_DIST = common.BENCHBASE_HOME
 BENCHBASE_REPO = BENCHBASE_DIST.parent.parent
 VWEAVER_REPO = common.VWEAVER_REPO
 VWEAVER_BUILD_DIR = VWEAVER_REPO / "build"
+VWEAVER_FRUGAL_BUILD_DIR = VWEAVER_REPO / "build_frugal"
 
 CMVBT_OSIC_URL = "https://github.com/umr-dbs/cMVBT-OSIC.git"
 CMVBT_WORKSPACE_CLONE = WORKSPACE_ROOT / "cmvbt"
@@ -65,6 +66,17 @@ VWEAVER_URL = "https://github.com/SNU-DBXLab-papers/vWeaver_ermia.git"
 # vWeaver_ermia) that doesn't share this history at all.
 VWEAVER_PATCH_COMMIT = "82a287bff035169ef7c751a84df5df83038aec5f"
 VWEAVER_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "vweaver_ermia.patch"
+# Fixes two upstream bugs in the pure "just frugal lists" build (-DCMAKE_BUILD_PARAM=
+# Eval_skiplist, i.e. -DHYU_SKIPLIST with no -DHYU_VWEAVER - see engines/
+# vweaver_ermia_frugal.py's module docstring for the full root-cause writeup): a missing
+# MM::deallocate_skiplist() definition (declared and called, never defined - a hard link
+# error) and MM::gc_version_chain()'s dedicated HYU_SKIPLIST branch being present in the
+# source but commented out (silently leaking each reclaimed version's Lv-pointer array via
+# the vanilla masstree branch instead). Entirely guarded by #ifdef HYU_SKIPLIST, so it's a
+# no-op for the plain "Vweaver" build - applied unconditionally onto this one shared
+# checkout right alongside vweaver_ermia.patch, regardless of which variant(s) actually
+# get built from it.
+VWEAVER_FRUGAL_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "vweaver_ermia_frugal.patch"
 # dbcore/burt-hash.cpp is gitignored upstream (dbcore/.gitignore) and meant to be generated
 # fresh at build time by `python2 dbcore/burt-hash.py` (see dbcore/CMakeLists.txt) - no
 # python2 on this system, so this repo ships a Python 3 port instead (see that file's header).
@@ -241,6 +253,10 @@ def step_vweaver_ermia() -> None:
         run(["git", "checkout", VWEAVER_PATCH_COMMIT], cwd=VWEAVER_REPO)
         log(f"Applying {VWEAVER_PATCH_PATH.name} (dead sys/vtimes.h include)")
         run(["git", "apply", str(VWEAVER_PATCH_PATH)], cwd=VWEAVER_REPO)
+        log(f"Applying {VWEAVER_FRUGAL_PATCH_PATH.name} (missing deallocate_skiplist() "
+            f"definition + disabled HYU_SKIPLIST GC branch - no-op for this Vweaver build, "
+            f"needed by the separate vweaver_ermia_frugal build below)")
+        run(["git", "apply", str(VWEAVER_FRUGAL_PATCH_PATH)], cwd=VWEAVER_REPO)
 
     burt_hash_cpp = VWEAVER_REPO / "dbcore" / "burt-hash.cpp"
     if not burt_hash_cpp.exists() or burt_hash_cpp.stat().st_size == 0:
@@ -260,6 +276,40 @@ def step_vweaver_ermia() -> None:
              "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_BUILD_PARAM=Vweaver"],
             env=_clang_env())
     run(["cmake", "--build", str(VWEAVER_BUILD_DIR), "--target", "ermia_SI",
+         "--parallel", str(shutil_cpu_count())])
+
+
+def step_vweaver_ermia_frugal() -> None:
+    log("Building vweaver_ermia_frugal (ERMIA, plain frugal-list version chain, no vWeaver) "
+        "- ermia_SI target only, into its own build_frugal/ dir")
+    binary = VWEAVER_FRUGAL_BUILD_DIR / "ermia_SI"
+    if binary.exists():
+        print(f"{binary} already built, skipping.")
+        return
+    if not VWEAVER_REPO.exists():
+        sys.exit(f"{VWEAVER_REPO} doesn't exist yet - run the 'vweaver' step first "
+                  f"(it clones + patches the shared checkout both variants build from).")
+
+    burt_hash_cpp = VWEAVER_REPO / "dbcore" / "burt-hash.cpp"
+    if not burt_hash_cpp.exists() or burt_hash_cpp.stat().st_size == 0:
+        log(f"Generating {burt_hash_cpp} via {VWEAVER_BURT_HASH_GEN.name} (Python 3 port - "
+            f"see that file's header)")
+        with open(burt_hash_cpp, "w") as f:
+            subprocess.run(["python3", str(VWEAVER_BURT_HASH_GEN)], stdout=f, check=True)
+
+    # CMAKE_BUILD_PARAM=Eval_skiplist -> -DHYU_SKIPLIST -O3 (no -DHYU_VWEAVER) - the plain
+    # frugal-list version chain, with neither vWeaver's own compaction nor the Eval_frugal
+    # variant's HYU_VWEAVER-dependent side-by-side stat collection. Needs
+    # patches/vweaver_ermia_frugal.patch (applied by step_vweaver_ermia() onto this same
+    # checkout) to even link - see that patch and engines/vweaver_ermia_frugal.py's module
+    # docstring.
+    VWEAVER_FRUGAL_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    common.check_release_build(VWEAVER_FRUGAL_BUILD_DIR, "vweaver_ermia_frugal")
+    if not (VWEAVER_FRUGAL_BUILD_DIR / "CMakeCache.txt").exists():
+        run(["cmake", "-S", str(VWEAVER_REPO), "-B", str(VWEAVER_FRUGAL_BUILD_DIR),
+             "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_BUILD_PARAM=Eval_skiplist"],
+            env=_clang_env())
+    run(["cmake", "--build", str(VWEAVER_FRUGAL_BUILD_DIR), "--target", "ermia_SI",
          "--parallel", str(shutil_cpu_count())])
 
 
@@ -362,9 +412,9 @@ def step_postgres_tmpfs() -> None:
     Postgres install, which this harness deliberately does not attempt sight-unseen). If
     the machine reboots, PostgreSQL will fail to start (empty tmpfs dir) until you re-run
     `python3 scripts/setup_environment.py --skip-apt --skip-wiredtiger --skip-leanstore
-    --skip-hugepages --skip-vweaver --skip-benchbase --skip-cmvbt --skip-venv
-    --postgres-tmpfs` (or the full script) - which restores tmpfs from `.diskbackup`
-    automatically, the same as a first run.
+    --skip-hugepages --skip-vweaver --skip-vweaver-frugal --skip-benchbase --skip-cmvbt
+    --skip-venv --postgres-tmpfs` (or the full script) - which restores tmpfs from
+    `.diskbackup` automatically, the same as a first run.
     """
     log("Relocating PostgreSQL's data directory onto tmpfs (--postgres-tmpfs)")
     if shutil.which("psql") is None:
@@ -535,6 +585,7 @@ def main() -> None:
     parser.add_argument("--skip-wiredtiger", action="store_true")
     parser.add_argument("--skip-leanstore", action="store_true")
     parser.add_argument("--skip-vweaver", action="store_true")
+    parser.add_argument("--skip-vweaver-frugal", action="store_true")
     parser.add_argument("--skip-hugepages", action="store_true")
     parser.add_argument("--skip-postgres", action="store_true")
     parser.add_argument("--skip-benchbase", action="store_true")
@@ -556,6 +607,7 @@ def main() -> None:
         ("leanstore", args.skip_leanstore, step_leanstore),
         ("hugepages", args.skip_hugepages, step_vweaver_hugepages),
         ("vweaver", args.skip_vweaver, step_vweaver_ermia),
+        ("vweaver-frugal", args.skip_vweaver_frugal, step_vweaver_ermia_frugal),
         ("postgres", args.skip_postgres, step_postgres),
         ("benchbase", args.skip_benchbase, step_benchbase),
         ("cmvbt", args.skip_cmvbt, step_cmvbt),

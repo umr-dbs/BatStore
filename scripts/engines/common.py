@@ -332,7 +332,7 @@ YCSB_WORKLOADS = ["ycsb_a", "ycsb_b", "ycsb_c", "ycsb_d", "ycsb_e", "ycsb_f"]
 # reference implementation this ports.
 HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
 ALL_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_WORKLOADS
-ENGINES = ["cmvbt", "leanstore", "wiredtiger", "postgres", "vweaver_ermia", "libmdbx"]
+ENGINES = ["cmvbt", "leanstore", "wiredtiger", "postgres", "vweaver_ermia", "vweaver_ermia_frugal", "libmdbx"]
 
 
 def _read_vmhwm_kb(pid: int) -> float:

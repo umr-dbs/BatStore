@@ -1,10 +1,14 @@
 CROSS-ENGINE BENCHMARK HARNESS - MANUAL
 ========================================
 
-This harness runs matched TPC-C, YCSB (A-F), and HTAP/CH-benCHmark workloads against six
+This harness runs matched TPC-C, YCSB (A-F), and HTAP/CH-benCHmark workloads against seven
 storage engines - cMVBT (its own MVBTree, and a second libmdbx-backed comparison point),
 LeanStore, LeanStore's WiredTiger adapter, PostgreSQL (via BenchBase), and vWeaver_ermia
-(ERMIA) - and produces one normalized manifest.csv plus a set of comparison plots. It
+(ERMIA) built two ways: `-DCMAKE_BUILD_PARAM=Vweaver` (vWeaver's own "weaving" version-chain
+compaction, engines/vweaver_ermia.py) and `-DCMAKE_BUILD_PARAM=Eval_skiplist` (the plain
+frugal-list version chain with neither vWeaver nor its own compaction enabled, engines/
+vweaver_ermia_frugal.py) - and produces one normalized manifest.csv plus a set of
+comparison plots. It
 lives in this repo under scripts/ (compare_engines.py, setup_environment.py,
 plot_compare.py, engines/*.py) and is designed to run identically on this workstation and
 on the real 2x AMD EPYC 7742 server (2 NUMA nodes, 64 cores/128 threads per socket).
@@ -17,7 +21,8 @@ scripts work starting from nothing, on any machine:
         leanstore/                 LeanStore checkout + build/ (CMake)
         wiredtiger/                 WiredTiger checkout + cmake-build-debug/ (CMake)
         benchbase/                   BenchBase checkout + target/benchbase-postgres/
-        vWeaver_ermia/                 ERMIA checkout + build/ (CMake)
+        vWeaver_ermia/                 ERMIA checkout + build/ (Vweaver) + build_frugal/
+                                          (Eval_skiplist) - one shared checkout, two builds
         cmvbt/                          only if umr-dbs/cMVBT-OSIC was reachable to clone
         scratch/<engine>/                 reused, wiped-before-every-run data directories
 
@@ -76,26 +81,32 @@ What it does, in order:
      vm.nr_hugepages=N, sized off common.Scale().dram_gib - see section 5).
   5. Clones (if missing) vWeaver_ermia, checks out the pinned commit patches/
      vweaver_ermia.patch was generated against, applies it (a dead include - see section
-     5), generates dbcore/burt-hash.cpp via patches/vweaver_burt_hash_gen.py (a Python 3
-     port of upstream's Python-2-only generator), then builds `ermia_SI` (CC=clang
-     CXX=clang++, -DCMAKE_BUILD_PARAM=Vweaver).
-  6. Creates the `admin` (superuser) role and `benchbase` database in PostgreSQL.
-  7. Clones (if missing) BenchBase and builds it with plain `mvn` (not the bundled
+     5), applies patches/vweaver_ermia_frugal.patch (fixes two upstream bugs that only
+     affect the frugal-list build below - a no-op for this one, see section 5), generates
+     dbcore/burt-hash.cpp via patches/vweaver_burt_hash_gen.py (a Python 3 port of
+     upstream's Python-2-only generator), then builds `ermia_SI` (CC=clang CXX=clang++,
+     -DCMAKE_BUILD_PARAM=Vweaver) into <workspace>/vWeaver_ermia/build.
+  6. Builds a SECOND `ermia_SI` from that same checkout (CC=clang CXX=clang++,
+     -DCMAKE_BUILD_PARAM=Eval_skiplist - "just frugal lists", no vWeaver) into
+     <workspace>/vWeaver_ermia/build_frugal - see engines/vweaver_ermia_frugal.py and
+     section 5 for why this needed patches/vweaver_ermia_frugal.patch to even link.
+  7. Creates the `admin` (superuser) role and `benchbase` database in PostgreSQL.
+  8. Clones (if missing) BenchBase and builds it with plain `mvn` (not the bundled
      ./mvnw). Before building, the script PATCHES BenchBase's pom.xml to strip out
      `com.spotify.fmt:fmt-maven-plugin` - see "MAVEN PLUGIN WORKAROUND" below. This step
      is idempotent too (safe to re-run, detects if the plugin block is already gone).
-  8. Attempts to clone cMVBT itself (umr-dbs/cMVBT-OSIC) into the workspace; if that
+  9. Attempts to clone cMVBT itself (umr-dbs/cMVBT-OSIC) into the workspace; if that
      fails (e.g. the repo is private and you don't have access here), falls back to
      building the checkout this script is already part of instead - see "CMVBT_REPO
      RESOLUTION" below for exactly how this is decided and a gotcha to know about.
-  9. Sets up the Python venv at scripts/.venv with pandas + matplotlib (needed only for
+  10. Sets up the Python venv at scripts/.venv with pandas + matplotlib (needed only for
      plot_compare.py, not for running experiments).
 
 Flags to skip individual steps (useful if you already have one piece set up, or are
 re-running after fixing just one failure):
 
     --skip-apt --skip-wiredtiger --skip-leanstore --skip-hugepages --skip-vweaver
-    --skip-postgres --skip-benchbase --skip-cmvbt --skip-venv
+    --skip-vweaver-frugal --skip-postgres --skip-benchbase --skip-cmvbt --skip-venv
 
 Example: `python3 scripts/setup_environment.py --skip-postgres --skip-benchbase`
 
@@ -203,7 +214,8 @@ Options:
   --output-root DIR        where run_<timestamp>/ directories go (default:
                             comparison_results)
   --engines LIST            comma-separated subset of: cmvbt, leanstore, wiredtiger,
-                            postgres, vweaver_ermia, libmdbx (default: all six)
+                            postgres, vweaver_ermia, vweaver_ermia_frugal, libmdbx
+                            (default: all seven)
   --workloads LIST           comma-separated subset of: tpcc, ycsb_a..ycsb_f, htap_q1,
                             htap_q6 (default: all)
   --tiny                    small/fast smoke-test scale (1 warehouse, 10k YCSB records,
@@ -258,6 +270,7 @@ recreated before every single run:
 
     <SCRATCH_ROOT>/<engine>_data/     (leanstore, wiredtiger, libmdbx, cmvbt)
     <SCRATCH_ROOT>/vweaver_ermia_log/
+    <SCRATCH_ROOT>/vweaver_ermia_frugal_log/
 
 SCRATCH_ROOT (env var, default /dev/shm/cmvbt_bench_scratch) MUST be tmpfs -
 common.py::fresh_scratch_dir checks this on every call and sys.exit's loudly if it isn't,
@@ -324,8 +337,9 @@ this rather than papering over it:
   aren't part of this cross-engine comparison - only Q1/Q6 rows get read out of cMVBT's
   own output). LeanStore/WiredTiger's analyticalQuery() was a literal "TODO: implement CH
   analytical queries" stub before this harness added real Q1/Q6 bodies to it (see
-  frontend/tpc-c/TPCCWorkload.hpp in the LeanStore checkout). libmdbx and vWeaver_ermia
-  have NO CH-benCHmark/HTAP support at all - htap_q1/htap_q6 simply skip both.
+  frontend/tpc-c/TPCCWorkload.hpp in the LeanStore checkout). libmdbx and both
+  vWeaver_ermia variants (vweaver_ermia, vweaver_ermia_frugal) have NO CH-benCHmark/HTAP
+  support at all - htap_q1/htap_q6 simply skip all three.
 
 - libmdbx's single-writer model: unlike every other engine here, libmdbx (like LMDB)
   allows only ONE read-write transaction active process-wide at a time - there is no
@@ -354,6 +368,31 @@ this rather than papering over it:
   (SNU-DBXLab-papers/vWeaver_ermia) - that fork has a real masstree scan() overload-arity
   bug this repo does NOT have; the wrong pin/patch/docstring describing it have all been
   replaced with ones verified against the correct upstream.
+  A reported "vWeaver doesn't work" was root-caused to the `os_error` above - verified
+  IDENTICAL for every CMAKE_BUILD_PARAM (prepare_node_memory() doesn't branch on
+  HYU_VWEAVER/HYU_SKIPLIST at all), i.e. plain insufficient reserved hugepages, not a
+  vWeaver-specific bug. `ermia_SI` itself builds and starts identically either way.
+
+- vweaver_ermia_frugal (ERMIA, "just frugal lists") build status: same checkout as
+  vweaver_ermia, built instead with `-DCMAKE_BUILD_PARAM=Eval_skiplist` (`-DHYU_SKIPLIST`,
+  no `-DHYU_VWEAVER`) into its own vWeaver_ermia/build_frugal - the plain frugal-list
+  version chain this fork's own CMakeLists.txt offers, with neither vWeaver's own
+  "weaving" compaction nor the Eval_frugal variant's HYU_VWEAVER-dependent stat collection
+  enabled. Unlike the Vweaver build, this one does NOT build out of the box: `-DHYU_SKIPLIST`
+  alone calls `MM::deallocate_skiplist()` (dbcore/sm-alloc.h/sm-oid.cpp/sm-oid.h) which was
+  declared and called but never defined anywhere upstream - a hard link error - and
+  `MM::gc_version_chain()`'s dedicated `#elif defined(HYU_SKIPLIST)` branch (which would
+  recycle a reclaimed version's Lv-pointer array) was present in dbcore/sm-alloc.cpp but
+  commented out, silently falling through to the plain-masstree `#else` branch instead (a
+  memory leak, not a crash). patches/vweaver_ermia_frugal.patch fixes both by restoring
+  the vendor's own disabled reference code for the GC branch (renamed to the real
+  `gc_version_chain` entry point actually called from sm-oid.cpp) and adding
+  `deallocate_skiplist()` following the same recycle-into-`tls_free_object_pool` pattern
+  `deallocate()` already uses. Entirely guarded by `#ifdef HYU_SKIPLIST` - a no-op for the
+  plain Vweaver build - so it's applied unconditionally onto the one shared checkout.
+  Verified: builds cleanly via setup_environment.py's step_vweaver_ermia_frugal(), and
+  engines/vweaver_ermia_frugal.py's ensure_built()/run() work end to end (same known
+  hugepages-on-this-workstation limitation as vweaver_ermia above, not a new issue).
 
 - Peak memory (peak_rss_mb): tracks PostgreSQL's actual SERVER process tree now
   (postmaster + checkpointer + bgwriter + walwriter + every per-connection backend -
@@ -443,6 +482,16 @@ python3 patches/vweaver_burt_hash_gen.py > <workspace>/vWeaver_ermia/dbcore/burt
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_BUILD_PARAM=Vweaver
     cmake --build <workspace>/vWeaver_ermia/build --target ermia_SI --parallel $(nproc)
 
+vweaver_ermia_frugal (same checkout, same prerequisites - ALSO needs
+patches/vweaver_ermia_frugal.patch applied first, or `-DHYU_SKIPLIST` won't even link, see
+section 5):
+    CC=clang CXX=clang++ \
+    CXXFLAGS="-I/usr/include/c++/13 -I/usr/include/x86_64-linux-gnu/c++/13" \
+    LDFLAGS="-L/usr/lib/gcc/x86_64-linux-gnu/13" \
+    cmake -S <workspace>/vWeaver_ermia -B <workspace>/vWeaver_ermia/build_frugal \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_BUILD_PARAM=Eval_skiplist
+    cmake --build <workspace>/vWeaver_ermia/build_frugal --target ermia_SI --parallel $(nproc)
+
 BenchBase (from <workspace>/benchbase):
     mvn clean package -P postgres -DskipTests \
         -Dmaven.compiler.source=21 -Dmaven.compiler.target=21 -Djava.version=21
@@ -496,7 +545,8 @@ were the default). Every such figure's title says which thread count it's pinned
 
 manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
 
-    engine                cmvbt | leanstore | wiredtiger | postgres | vweaver_ermia | libmdbx
+    engine                cmvbt | leanstore | wiredtiger | postgres | vweaver_ermia |
+                            vweaver_ermia_frugal | libmdbx
     workload               tpcc | ycsb_a..ycsb_f | htap_q1 | htap_q6
     config_label            scale label ("tiny" or "server")
     threads                 thread/terminal count for this row
