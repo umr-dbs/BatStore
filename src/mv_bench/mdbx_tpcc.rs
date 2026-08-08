@@ -98,10 +98,15 @@ fn record(totals: &mut [u64; NUM_COUNTERS], base: usize, outcome: TxnOutcome) {
 // transaction's lifetime, so it can't be cached across them anyway).
 // ---------------------------------------------------------------------
 
-fn open_db(path: &std::path::Path) -> Database<NoWriteMap> {
+fn open_db(path: &std::path::Path, num_terminals: usize) -> Database<NoWriteMap> {
     fs::create_dir_all(path).unwrap_or_else(|e| panic!("mdbx_tpcc: failed to create db dir {}: {e}", path.display()));
+    // libmdbx's reader-slot table defaults to 61 (MDBX_READERS_FULL beyond that) -
+    // below our own terminal-count sweep, which was silently aborting/hanging
+    // worker threads via the `.expect` calls below. Size it to the actual
+    // terminal count plus headroom for the table-creation txn and any internal use.
     let options = DatabaseOptions {
         max_tables: Some(Table::ALL.len() as u64),
+        max_readers: Some((num_terminals as std::ffi::c_uint).saturating_add(8)),
         mode: Mode::ReadWrite(ReadWriteOptions { sync_mode: SyncMode::SafeNoSync, ..Default::default() }),
         ..Default::default()
     };
@@ -664,8 +669,8 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
         .unwrap_or_else(|e| panic!("mdbx_tpcc: failed to create output_dir {}: {e}", cfg.output_dir.display()));
     let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
-    let db = Arc::new(open_db(&cfg.db_path));
     let num_terminals = cfg.num_terminals.max(1);
+    let db = Arc::new(open_db(&cfg.db_path, num_terminals));
 
     println!(
         "libmdbx TPC-C benchmark\n\
