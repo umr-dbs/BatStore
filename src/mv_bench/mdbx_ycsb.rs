@@ -69,9 +69,14 @@ const RMW: usize = 4;
 const NUM_COUNTERS: usize = 5;
 const COUNTER_NAMES: [&str; NUM_COUNTERS] = ["read", "update", "insert", "scan", "read_modify_write"];
 
-fn open_db(path: &std::path::Path) -> Database<NoWriteMap> {
+fn open_db(path: &std::path::Path, num_threads: usize) -> Database<NoWriteMap> {
     fs::create_dir_all(path).unwrap_or_else(|e| panic!("mdbx_ycsb: failed to create db dir {}: {e}", path.display()));
+    // libmdbx's reader-slot table defaults to 61 (MDBX_READERS_FULL beyond that) -
+    // below our own thread-count sweep (up to 128), which was silently aborting/
+    // hanging worker threads via the `.expect` calls below. Size it to the actual
+    // thread count plus headroom for the table-creation txn and any internal use.
     let options = DatabaseOptions {
+        max_readers: Some((num_threads as std::ffi::c_uint).saturating_add(8)),
         mode: Mode::ReadWrite(ReadWriteOptions { sync_mode: SyncMode::SafeNoSync, ..Default::default() }),
         ..Default::default()
     };
@@ -225,8 +230,8 @@ pub fn run_mdbx_ycsb(cfg: MdbxYcsbConfig) -> MdbxYcsbRunSummary {
         .unwrap_or_else(|e| panic!("mdbx_ycsb: failed to create output_dir {}: {e}", cfg.output_dir.display()));
     let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
-    let db = Arc::new(open_db(&cfg.db_path));
     let num_threads = cfg.num_threads.max(1);
+    let db = Arc::new(open_db(&cfg.db_path, num_threads));
 
     println!(
         "libmdbx YCSB benchmark\n\
