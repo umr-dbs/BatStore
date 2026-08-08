@@ -2,4 +2,5 @@
 Cargo.lock
 /scripts/.venv
 /comparison_results
+/tx_tests
 __pycache__/

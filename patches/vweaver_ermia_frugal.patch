@@ -1,0 +1,51 @@
+diff --git a/dbcore/sm-alloc.cpp b/dbcore/sm-alloc.cpp
+index f4a2356..647436f 100755
+--- a/dbcore/sm-alloc.cpp
++++ b/dbcore/sm-alloc.cpp
+@@ -161,8 +161,12 @@ void gc_version_chain(fat_ptr *oid_entry) {
+     }
+   }
+ }
+-/*#elif defined(HYU_SKIPLIST)
+-void gc_version_chain_skiplist(fat_ptr *oid_entry) {
++#elif defined(HYU_SKIPLIST) /* HYU_SKIPLIST, no HYU_VWEAVER: pure frugal-list build.
++   Was dead code (commented out, calling a nonexistent gc_version_chain_skiplist symbol
++   nothing invoked) - the only caller (sm-oid.cpp's MM::gc_version_chain(ptr)) always
++   resolved to the plain masstree branch below instead, silently leaking every version's
++   Lv-pointer array on reclaim. Restored under the real entry-point name and wired up. */
++void gc_version_chain(fat_ptr *oid_entry) {
+   fat_ptr ptr = *oid_entry;
+   Object *cur_obj = (Object *)ptr.offset();
+   dbtuple *candidate = nullptr;
+@@ -225,7 +229,6 @@ void gc_version_chain_skiplist(fat_ptr *oid_entry) {
+     }
+   }
+ }
+-*/
+ #else  /* HYU_VWEAVER */
+ void gc_version_chain(fat_ptr *oid_entry) {
+   fat_ptr ptr = *oid_entry;
+@@ -392,6 +395,23 @@ void deallocate(fat_ptr p) {
+   tls_free_object_pool->Put(p);
+ }
+ 
++#ifdef HYU_SKIPLIST /* HYU_SKIPLIST */
++// Declared in sm-alloc.h, called from sm-oid.cpp/sm-oid.h to recycle a sentinel array
++// (the raw fat_ptr[SKIPLIST_MAX_LEVEL] allocated via MM::allocate in PrimaryTupleUpdate,
++// not an Object) - was declared and called but never defined anywhere, a hard link error
++// for any pure HYU_SKIPLIST build. Just a raw allocation, so recycle it the same way
++// deallocate() does minus the Object-field resets, which don't apply here.
++void deallocate_skiplist(fat_ptr p) {
++  ASSERT(p != NULL_PTR);
++  ASSERT(p.size_code());
++  ASSERT(p.size_code() != INVALID_SIZE_CODE);
++  if (!tls_free_object_pool) {
++    tls_free_object_pool = new TlsFreeObjectPool;
++  }
++  tls_free_object_pool->Put(p);
++}
++#endif /* HYU_SKIPLIST */
++
+ // epoch mgr callbacks
+ void global_init(void *) {
+   volatile_write(gc_lsn, 0);

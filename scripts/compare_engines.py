@@ -42,7 +42,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from engines import cmvbt, common, leanstore, libmdbx, postgres_benchbase, vweaver_ermia, wiredtiger
+from engines import (
+    cmvbt, common, leanstore, libmdbx, postgres_benchbase, vweaver_ermia,
+    vweaver_ermia_frugal, wiredtiger,
+)
 
 ENGINE_MODULES = {
     "cmvbt": cmvbt,
@@ -50,6 +53,7 @@ ENGINE_MODULES = {
     "wiredtiger": wiredtiger,
     "postgres": postgres_benchbase,
     "vweaver_ermia": vweaver_ermia,
+    "vweaver_ermia_frugal": vweaver_ermia_frugal,
     "libmdbx": libmdbx,
 }
 
