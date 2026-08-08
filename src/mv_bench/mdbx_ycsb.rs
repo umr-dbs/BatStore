@@ -152,9 +152,26 @@ fn mdbx_read_modify_write(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKe
     mdbx_update(db, cfg, key)
 }
 
+/// Records per load transaction. Unlike the timed phase's ops (each deliberately its own
+/// transaction, to match the workload's per-op semantics), population isn't part of the
+/// measured throughput - it was previously committing all 2M+ default records one at a
+/// time, paying libmdbx's single-writer-lock/commit overhead 2M times over before the
+/// timed phase even started. Batching amortizes that setup cost without touching how the
+/// timed phase itself measures ops.
+const LOAD_BATCH_SIZE: u64 = 10_000;
+
 fn populate(db: &Database<WriteMap>, cfg: &YcsbConfig) {
-    for key in 1..=cfg.record_count {
-        mdbx_insert(db, cfg, key as YcsbKey);
+    let mut key = 1u64;
+    while key <= cfg.record_count {
+        let batch_end = (key + LOAD_BATCH_SIZE - 1).min(cfg.record_count);
+        let txn = db.begin_rw_txn().expect("mdbx_ycsb: begin_rw_txn (load)");
+        let table = txn.open_table(None).expect("mdbx_ycsb: open_table (load)");
+        for k in key..=batch_end {
+            let buf = encode_row(cfg);
+            txn.put(&table, k.to_be_bytes(), &buf, WriteFlags::UPSERT).expect("mdbx_ycsb: put (load)");
+        }
+        txn.commit().expect("mdbx_ycsb: commit (load)");
+        key = batch_end + 1;
     }
 }
 
