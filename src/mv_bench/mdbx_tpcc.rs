@@ -37,7 +37,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use libmdbx::{Database, DatabaseOptions, Mode, NoWriteMap, ReadWriteOptions, SyncMode, Table as MdbxTable, TableFlags, Transaction, TransactionKind, WriteFlags, RO, RW};
+use libmdbx::{Database, DatabaseOptions, Mode, ReadWriteOptions, SyncMode, Table as MdbxTable, TableFlags, Transaction, TransactionKind, WriteFlags, WriteMap, RO, RW};
 use rand::prelude::*;
 
 use crate::mv_bench::mem_stats::{MemSampler, DEFAULT_SAMPLE_INTERVAL};
@@ -98,7 +98,7 @@ fn record(totals: &mut [u64; NUM_COUNTERS], base: usize, outcome: TxnOutcome) {
 // transaction's lifetime, so it can't be cached across them anyway).
 // ---------------------------------------------------------------------
 
-fn open_db(path: &std::path::Path, num_terminals: usize) -> Database<NoWriteMap> {
+fn open_db(path: &std::path::Path, num_terminals: usize) -> Database<WriteMap> {
     fs::create_dir_all(path).unwrap_or_else(|e| panic!("mdbx_tpcc: failed to create db dir {}: {e}", path.display()));
     // libmdbx's reader-slot table defaults to 61 (MDBX_READERS_FULL beyond that) -
     // below our own terminal-count sweep, which was silently aborting/hanging
@@ -107,10 +107,10 @@ fn open_db(path: &std::path::Path, num_terminals: usize) -> Database<NoWriteMap>
     let options = DatabaseOptions {
         max_tables: Some(Table::ALL.len() as u64),
         max_readers: Some((num_terminals as std::ffi::c_uint).saturating_add(8)),
-        mode: Mode::ReadWrite(ReadWriteOptions { sync_mode: SyncMode::SafeNoSync, ..Default::default() }),
+        mode: Mode::ReadWrite(ReadWriteOptions { sync_mode: SyncMode::UtterlyNoSync, ..Default::default() }),
         ..Default::default()
     };
-    let db = Database::<NoWriteMap>::open_with_options(path, options)
+    let db = Database::<WriteMap>::open_with_options(path, options)
         .unwrap_or_else(|e| panic!("mdbx_tpcc: failed to open database at {}: {e}", path.display()));
     let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (table creation)");
     for t in Table::ALL {
@@ -120,30 +120,30 @@ fn open_db(path: &std::path::Path, num_terminals: usize) -> Database<NoWriteMap>
     db
 }
 
-fn tbl<'txn, K: TransactionKind>(txn: &'txn Transaction<'_, K, NoWriteMap>, table: Table) -> MdbxTable<'txn> {
+fn tbl<'txn, K: TransactionKind>(txn: &'txn Transaction<'_, K, WriteMap>, table: Table) -> MdbxTable<'txn> {
     txn.open_table(Some(table.as_str())).expect("mdbx_tpcc: open_table")
 }
 
-fn get_row<K: TransactionKind>(txn: &Transaction<K, NoWriteMap>, table: Table, key: TpccKey) -> Option<TpccRow> {
+fn get_row<K: TransactionKind>(txn: &Transaction<K, WriteMap>, table: Table, key: TpccKey) -> Option<TpccRow> {
     let t = tbl(txn, table);
     let bytes = txn.get::<Vec<u8>>(&t, &key.to_be_bytes()).expect("mdbx_tpcc: get")?;
     TpccRow::wal_decode(&bytes)
 }
 
-fn put_row(txn: &Transaction<RW, NoWriteMap>, table: Table, key: TpccKey, row: &TpccRow) {
+fn put_row(txn: &Transaction<RW, WriteMap>, table: Table, key: TpccKey, row: &TpccRow) {
     let t = tbl(txn, table);
     let mut buf = Vec::new();
     row.wal_encode(&mut buf);
     txn.put(&t, key.to_be_bytes(), &buf, WriteFlags::UPSERT).expect("mdbx_tpcc: put");
 }
 
-fn delete_row(txn: &Transaction<RW, NoWriteMap>, table: Table, key: TpccKey) -> bool {
+fn delete_row(txn: &Transaction<RW, WriteMap>, table: Table, key: TpccKey) -> bool {
     let t = tbl(txn, table);
     txn.del(&t, key.to_be_bytes(), None).expect("mdbx_tpcc: del")
 }
 
 /// Range scan `[lo, hi]` inclusive - mirrors `TpccTxn::range`'s eager-collect contract.
-fn range_rows<K: TransactionKind>(txn: &Transaction<K, NoWriteMap>, table: Table, lo: TpccKey, hi: TpccKey) -> Vec<(TpccKey, TpccRow)> {
+fn range_rows<K: TransactionKind>(txn: &Transaction<K, WriteMap>, table: Table, lo: TpccKey, hi: TpccKey) -> Vec<(TpccKey, TpccRow)> {
     let t = tbl(txn, table);
     let mut cursor = txn.cursor(&t).expect("mdbx_tpcc: cursor");
     let mut out = Vec::new();
@@ -171,7 +171,7 @@ fn pick_middle_by_name(matches: &[(TpccKey, TpccRow)]) -> u32 {
 // REGION - not needed here, see module docs).
 // ---------------------------------------------------------------------
 
-fn populate_warehouse(db: &Database<NoWriteMap>, cfg: &TpccConfig, w_id: u32, history_seq: &AtomicU64) {
+fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, history_seq: &AtomicU64) {
     let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (load)");
 
     put_row(&txn, Table::Warehouse, k_warehouse(w_id), &TpccRow::Warehouse(Box::new(Warehouse {
@@ -301,7 +301,7 @@ fn populate_warehouse(db: &Database<NoWriteMap>, cfg: &TpccConfig, w_id: u32, hi
     txn.commit().expect("mdbx_tpcc: commit (load warehouse)");
 }
 
-fn populate_items(db: &Database<NoWriteMap>, cfg: &TpccConfig) {
+fn populate_items(db: &Database<WriteMap>, cfg: &TpccConfig) {
     let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (load items)");
     for i_id in 1..=cfg.num_items {
         put_row(&txn, Table::Item, k_item(i_id), &TpccRow::Item(Box::new(Item {
@@ -320,7 +320,7 @@ fn populate_items(db: &Database<NoWriteMap>, cfg: &TpccConfig) {
 // missing-row checks).
 // ---------------------------------------------------------------------
 
-fn new_order(db: &Database<NoWriteMap>, cfg: &TpccConfig, home_w_id: u32) -> TxnOutcome {
+fn new_order(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> TxnOutcome {
     let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
     let c_id = nu_rand_customer_id(cfg.customers_per_district);
     let ol_cnt = rand::rng().random_range(5..=15u8);
@@ -408,7 +408,7 @@ fn new_order(db: &Database<NoWriteMap>, cfg: &TpccConfig, home_w_id: u32) -> Txn
     TxnOutcome::Committed
 }
 
-fn payment(db: &Database<NoWriteMap>, cfg: &TpccConfig, home_w_id: u32, history_seq: &AtomicU64) -> TxnOutcome {
+fn payment(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32, history_seq: &AtomicU64) -> TxnOutcome {
     let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
     let amount = rand::rng().random_range(100..=500_000) as f64 / 100.0;
     let by_last_name = rand::rng().random_range(1..=100) <= 60;
@@ -474,7 +474,7 @@ fn payment(db: &Database<NoWriteMap>, cfg: &TpccConfig, home_w_id: u32, history_
     TxnOutcome::Committed
 }
 
-fn order_status(db: &Database<NoWriteMap>, cfg: &TpccConfig, home_w_id: u32) -> TxnOutcome {
+fn order_status(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> TxnOutcome {
     let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
     let by_last_name = rand::rng().random_range(1..=100) <= 60;
 
@@ -514,7 +514,7 @@ struct DeliveryOutcome {
     conflicts: u32,
 }
 
-fn delivery(db: &Database<NoWriteMap>, cfg: &TpccConfig, home_w_id: u32) -> DeliveryOutcome {
+fn delivery(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> DeliveryOutcome {
     let carrier_id = rand::rng().random_range(1..=10u32);
     let mut out = DeliveryOutcome { delivered_districts: 0, conflicts: 0 };
 
@@ -528,7 +528,7 @@ fn delivery(db: &Database<NoWriteMap>, cfg: &TpccConfig, home_w_id: u32) -> Deli
     out
 }
 
-fn deliver_one_district(db: &Database<NoWriteMap>, w_id: u32, d_id: u8, carrier_id: u32) -> TxnOutcome {
+fn deliver_one_district(db: &Database<WriteMap>, w_id: u32, d_id: u8, carrier_id: u32) -> TxnOutcome {
     let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (delivery)");
 
     let (lo, hi) = k_new_order_district_bounds(w_id, d_id);
@@ -580,7 +580,7 @@ fn deliver_one_district(db: &Database<NoWriteMap>, w_id: u32, d_id: u8, carrier_
     TxnOutcome::Committed
 }
 
-fn stock_level(db: &Database<NoWriteMap>, cfg: &TpccConfig, home_w_id: u32, threshold: i32) -> TxnOutcome {
+fn stock_level(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32, threshold: i32) -> TxnOutcome {
     let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
     let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (stock_level)");
 
@@ -623,7 +623,7 @@ struct TerminalStats {
 }
 
 fn terminal_thread(
-    db: Arc<Database<NoWriteMap>>,
+    db: Arc<Database<WriteMap>>,
     cfg: TpccConfig,
     duration: Duration,
     stop: Arc<AtomicBool>,
