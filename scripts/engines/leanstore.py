@@ -85,14 +85,17 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         ]
         metric_name, metric_column = "ops_per_sec", "tx"
 
+    timeout = common.default_subprocess_timeout(duration)
     returncode, peak_rss_mb = common.run_and_track_rss(
-        args, cwd=output_dir, env=env, stdout_path=output_dir / "stdout.log",
+        args, cwd=output_dir, env=env, stdout_path=output_dir / "stdout.log", timeout=timeout,
     )
     if returncode != 0:
+        notes = f"TIMEOUT after {timeout:.0f}s, see stdout.log" if returncode is None else \
+            f"FAILED exit={returncode}, see stdout.log"
         return common.NormalizedResult(
             "leanstore", workload, scale.label, duration, metric_name, 0.0, peak_rss_mb,
             threads=threads, gc_enabled="n/a",
-            notes=f"FAILED exit={returncode}, see stdout.log",
+            notes=notes,
         )
 
     total = common.sum_csv_column(Path(f"{csv_prefix}_cr.csv"), metric_column)

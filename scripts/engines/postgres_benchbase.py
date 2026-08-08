@@ -354,8 +354,9 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         *create_load, "--execute=true",
         "-d", str(results_dir),
     ]
+    timeout = common.default_subprocess_timeout(duration)
     returncode, _client_rss_unused = common.run_and_track_rss(
-        args, cwd=BENCHBASE_HOME, stdout_path=output_dir / "stdout.log",
+        args, cwd=BENCHBASE_HOME, stdout_path=output_dir / "stdout.log", timeout=timeout,
     )
 
     server_peak_rss_mb = 0.0
@@ -366,10 +367,12 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         server_peak_rss_mb = peak_box["mb"]
 
     if returncode != 0:
+        notes = f"TIMEOUT after {timeout:.0f}s, see stdout.log" if returncode is None else \
+            f"FAILED exit={returncode}, see stdout.log"
         return common.NormalizedResult(
             "postgres", workload, scale.label, duration, metric_name, 0.0, server_peak_rss_mb,
             threads=threads, gc_enabled=gc,
-            notes=f"FAILED exit={returncode}, see stdout.log",
+            notes=notes,
         )
 
     if workload in ("tpcc", "htap_q1", "htap_q6"):
