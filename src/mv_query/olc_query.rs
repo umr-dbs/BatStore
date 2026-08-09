@@ -59,9 +59,9 @@ impl<const FAN_OUT: usize,
                     sched_yield(attempt);
                 }
                 Ok(guard) => {
-                    // RESTARTS_COUNTER
-                    //     .get(attempt as usize)
-                    //     .inspect(|a| { a.fetch_add(1, Relaxed); });
+                    if mv_test::RESTART_TRACE {
+                        mv_test::record_write_attempts(attempt as usize);
+                    }
                     break guard
                 },
             }
@@ -162,7 +162,12 @@ impl<const FAN_OUT: usize,
             if master_guard.upgrade_write_lock() && root_guard.upgrade_write_lock() =>
                 self.merge_root(master_guard, root_guard, root.height()),
             BlockUnsafeDegree::Ok => Ok(root_guard),
-            _ => Err(()),
+            _ => {
+                if mv_test::RESTART_TRACE {
+                    mv_test::ROOT_RESTARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(())
+            }
         }
     }
 
@@ -216,7 +221,12 @@ impl<const FAN_OUT: usize,
                     // what can be observed.
                     let curr_version_before = match curr_guard.checked_live_version() {
                         Some(v) => v,
-                        None => return Err(attempts + 1),
+                        None => {
+                            if mv_test::RESTART_TRACE {
+                                mv_test::record_restart(curr_guard.inner().0 as usize, &key, "checked_live_version");
+                            }
+                            return Err(attempts + 1)
+                        },
                     };
 
                     let keys_page = internal_page
@@ -241,6 +251,9 @@ impl<const FAN_OUT: usize,
                         if VERBOSE {
                             println!("traversal_write_internal_olc: None Index");
                         }
+                        if mv_test::RESTART_TRACE {
+                            mv_test::record_restart(curr_guard.inner().0 as usize, &key, "index_lookup_miss");
+                        }
                         return Err(attempts + 1);
                     }
 
@@ -260,6 +273,9 @@ impl<const FAN_OUT: usize,
                         if VERBOSE {
                             println!("traversal_write_internal_olc: curr_guard changed during index lookup");
                         }
+                        if mv_test::RESTART_TRACE {
+                            mv_test::record_restart(curr_guard.inner().0 as usize, &key, "index_lookup_race");
+                        }
                         return Err(attempts + 1);
                     }
 
@@ -275,6 +291,11 @@ impl<const FAN_OUT: usize,
                             _ => {}
                         }
                     }
+                    let curr_page_addr = if mv_test::RESTART_TRACE {
+                        curr_guard.inner().0 as usize
+                    } else {
+                        0
+                    };
                     match next_curr_guard.unsafe_degree() {
                         // `next_curr_guard` deliberately stays an
                         // unexcluded `Reader` here — `on_overflow_node`
@@ -289,6 +310,9 @@ impl<const FAN_OUT: usize,
                                 Err(..) => {
                                     if VERBOSE {
                                         println!("traversal_write_internal_olc: on_overflow_node Err()");
+                                    }
+                                    if mv_test::RESTART_TRACE {
+                                        mv_test::record_restart(curr_page_addr, &key, "on_overflow_node");
                                     }
                                     return Err(attempts + 1)
                                 }
@@ -307,20 +331,38 @@ impl<const FAN_OUT: usize,
                                     if VERBOSE {
                                         println!("traversal_write_internal_olc: on_underflow_node Err()");
                                     }
+                                    if mv_test::RESTART_TRACE {
+                                        mv_test::record_restart(curr_page_addr, &key, "on_underflow_node");
+                                    }
                                     return Err(attempts + 1)
                                 }
                             },
                         BlockUnsafeDegree::Ok => curr_guard = next_curr_guard,
-                        _ => return Err(attempts + 1)
+                        _ => {
+                            if mv_test::RESTART_TRACE {
+                                mv_test::record_restart(curr_page_addr, &key, "parent_fix_write_lock");
+                            }
+                            return Err(attempts + 1)
+                        }
                     }
                 }
-                _ => return if curr_guard.upgrade_write_lock() {
-                    Ok(curr_guard)
-                } else {
-                    if VERBOSE {
-                        println!("traversal_write_internal_olc: upgrade_write_lock Err()");
+                _ => {
+                    let leaf_addr = if mv_test::RESTART_TRACE {
+                        curr_guard.inner().0 as usize
+                    } else {
+                        0
+                    };
+                    return if curr_guard.upgrade_write_lock() {
+                        Ok(curr_guard)
+                    } else {
+                        if VERBOSE {
+                            println!("traversal_write_internal_olc: upgrade_write_lock Err()");
+                        }
+                        if mv_test::RESTART_TRACE {
+                            mv_test::record_restart(leaf_addr, &key, "leaf_write_lock");
+                        }
+                        Err(attempts + 1)
                     }
-                    Err(attempts + 1)
                 }
             }
         }

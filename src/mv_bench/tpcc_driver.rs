@@ -366,6 +366,17 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
 
     mem_sampler.stop();
 
+    // All terminal/OLAP worker threads are joined above, so every thread's
+    // `RestartLocal` TLS has already torn down and merged into the global
+    // aggregate by this point (see `mv_test::RestartLocal`'s doc) — safe to
+    // dump now. No-op (writes an empty file) when `RESTART_TRACE` is off.
+    if crate::mv_test::RESTART_TRACE {
+        crate::mv_test::dump_restart_trace(
+            cfg.output_dir.join("tpcc_restart_trace.csv").to_str().unwrap());
+        crate::mv_test::dump_attempt_histogram(
+            cfg.output_dir.join("tpcc_attempt_histogram.csv").to_str().unwrap());
+    }
+
     write_results(&terminal_stats, &scan_results, duration, actual_wall, baseline_tpm_c, &cfg.output_dir)
 }
 
