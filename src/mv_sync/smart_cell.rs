@@ -108,10 +108,40 @@ impl AtomicElisionExt for AtomicVersion {
 /// lockstep forever: both back off by the same amount, both re-acquire
 /// their own side at the same cadence, neither ever lines up with the
 /// other's release. Randomizing the delay desynchronizes them, the same
-/// idea as Ethernet/TCP backoff jitter. Left low enough that ordinary,
-/// quickly-resolving contention (the overwhelming majority of retries)
-/// never reaches it and keeps spinning/yielding exactly as before.
-const JITTER_BACKOFF_THRESHOLD: Attempts = 1000;
+/// idea as Ethernet/TCP backoff jitter.
+///
+/// Lowered from 1000 (2026-08-09): `mv_test::RESTART_TRACE` attempt-count
+/// profiling under TPC-C showed retries are sharply bimodal — 98.6% of
+/// writes never retry at all, but the ~1.4% that do retry often do so deep
+/// into the hundreds of attempts. Under the old threshold, that entire
+/// stretch (attempts 4 through 1000) was spent calling plain
+/// `sched_yield()`/`yield_now()` with no growth at all; under a saturated
+/// machine (all cores busy) that syscall frequently returns almost
+/// immediately, so the tail was effectively a tight retry loop hammering
+/// the same contended cache line (root's `cell_version`, or a hot internal
+/// page's) at close to full speed, not a backoff. Real jittered backoff now
+/// starts far sooner for exactly the writes that need it, while ordinary,
+/// quickly-resolving contention (still the overwhelming majority) never
+/// reaches it.
+const JITTER_BACKOFF_THRESHOLD: Attempts = 64;
+
+/// Above this many attempts, stop growing the busy-spin and hand the CPU to
+/// the scheduler instead (`sched_yield`/`yield_now`) — spinning
+/// `2^attempt` times would already be excessive by here, so further
+/// attempts get a flat, capped spin count instead of unbounded growth.
+const EXP_SPIN_CAP: Attempts = 6;
+
+/// Busy-spins `2.min(2^attempt.min(EXP_SPIN_CAP))` times — exponential
+/// growth for the first few attempts (most contention resolves within a
+/// handful of spins, and a spin is far cheaper than a syscall), capped so a
+/// genuinely contended attempt doesn't spin indefinitely before falling
+/// through to `sched_yield`/jittered sleep.
+#[inline(always)]
+fn exp_spin(attempt: Attempts) {
+    for _ in 0..(1u32 << attempt.min(EXP_SPIN_CAP) as u32) {
+        hint::spin_loop();
+    }
+}
 
 #[inline(always)]
 #[cfg(target_os = "linux")]
@@ -119,14 +149,12 @@ pub fn sched_yield(attempt: Attempts) {
     if attempt > JITTER_BACKOFF_THRESHOLD {
         let jitter_micros = rand::random_range(1..=attempt.min(5_000));
         std::thread::sleep(std::time::Duration::from_micros(jitter_micros as u64));
-    } else if attempt > 3 {
+    } else if attempt > FORCE_YIELD {
         unsafe {
-            // COUNTERS.1.fetch_add(1, Relaxed);
             libc::sched_yield();
         }
     } else {
-        // unsafe { COUNTERS.0.fetch_add(1, Relaxed); }
-        hint::spin_loop();
+        exp_spin(attempt);
     }
 }
 
@@ -138,10 +166,10 @@ pub fn sched_yield(attempt: Attempts) {
     if attempt > JITTER_BACKOFF_THRESHOLD {
         let jitter_micros = rand::random_range(1..=attempt.min(5_000));
         std::thread::sleep(std::time::Duration::from_micros(jitter_micros as u64));
-    } else if attempt > 3 {
+    } else if attempt > FORCE_YIELD {
         std::thread::yield_now();
     } else {
-        hint::spin_loop();
+        exp_spin(attempt);
     }
 }
 

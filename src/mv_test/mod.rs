@@ -7,8 +7,10 @@ use std::fs::OpenOptions;
 use std::sync::atomic::{ AtomicU64, AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::{fs, mem, thread};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
+use std::fmt::Display;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::thread::{spawn, ThreadId};
@@ -92,6 +94,185 @@ pub static SPLITS_ROOT_COUNTER: Mutex<Vec<SnapShot>> = Mutex::new(vec![]);
 //     AtomicUsize::new(0), AtomicUsize::new(0),
 //     AtomicUsize::new(0), AtomicUsize::new(0),
 // ];
+
+/// Diagnostic: attributes OLC write-traversal restarts (failed optimistic
+/// validations / lock-CAS failures) to the page and key that caused them.
+/// The question this answers: does contention concentrate on a *few pages
+/// each hosting many distinct keys* (a LeanStore-style contention-split
+/// candidate), or on *one key repeatedly* (e.g. TPC-C's Warehouse.YTD /
+/// District.NEXT_O_ID) — a page split can't help the latter, since it can't
+/// separate a key from itself. Off by default (and, being a `const bool`,
+/// dead-code-eliminated at every call site when off — same idiom as
+/// `LOG_REORG`/`VERBOSE` above). Flip to `true`, run a benchmark, join all
+/// worker threads, then call `dump_restart_trace`.
+pub const RESTART_TRACE: bool = false;
+
+/// How many attempts a `traversal_write_olc` call took before it finally
+/// succeeded, bucketed (index = `attempts.min(ATTEMPT_HISTOGRAM_CAP - 1)`,
+/// so the last bucket is "this many or more"). Answers a different question
+/// than the per-page trace above: not *where* contention concentrates, but
+/// *how many times* a typical write actually has to retry before winning —
+/// i.e. whether `sched_yield`'s backoff curve (`smart_cell.rs`:
+/// `JITTER_BACKOFF_THRESHOLD` and its spin/`sched_yield`/jittered-sleep
+/// tiers) is actually well-matched to the attempt counts writes see in
+/// practice, or whether most contention resolves well inside one tier while
+/// the others are dead weight (or vice versa: attempts routinely blow past
+/// the tiers, meaning the backoff itself might be part of the problem, not
+/// just downstream of it). Plain atomics, not thread-sharded, since each
+/// bucket is a single counter incremented rarely enough (once per completed
+/// write, not once per restart) that cross-thread contention on it isn't a
+/// concern the way per-restart recording above would be.
+pub const ATTEMPT_HISTOGRAM_CAP: usize = 64;
+pub static WRITE_ATTEMPTS_HISTOGRAM: [AtomicU64; ATTEMPT_HISTOGRAM_CAP] =
+    [const { AtomicU64::new(0) }; ATTEMPT_HISTOGRAM_CAP];
+
+#[inline(always)]
+pub fn record_write_attempts(attempts: usize) {
+    if !RESTART_TRACE {
+        return;
+    }
+    WRITE_ATTEMPTS_HISTOGRAM[attempts.min(ATTEMPT_HISTOGRAM_CAP - 1)].fetch_add(1, Relaxed);
+}
+
+/// Writes the attempts-to-success histogram to `path` as CSV
+/// (`attempts,count`, last row is `{CAP-1}+`), and prints p50/p90/p99/max
+/// bucket to stdout for a quick look without opening the file.
+pub fn dump_attempt_histogram(path: &str) {
+    let counts: Vec<u64> = WRITE_ATTEMPTS_HISTOGRAM.iter().map(|a| a.load(Relaxed)).collect();
+    let total: u64 = counts.iter().sum();
+
+    let mut f = BufWriter::new(
+        fs::File::create(path).expect("dump_attempt_histogram: failed to create output file"),
+    );
+    writeln!(f, "attempts,count").unwrap();
+    for (i, c) in counts.iter().enumerate() {
+        if i == ATTEMPT_HISTOGRAM_CAP - 1 {
+            writeln!(f, "{i}+,{c}").unwrap();
+        } else {
+            writeln!(f, "{i},{c}").unwrap();
+        }
+    }
+
+    let percentile = |p: f64| -> Option<usize> {
+        let target = (total as f64 * p).ceil() as u64;
+        let mut running = 0u64;
+        for (i, c) in counts.iter().enumerate() {
+            running += c;
+            if running >= target {
+                return Some(i);
+            }
+        }
+        None
+    };
+
+    println!(
+        "dump_attempt_histogram: wrote {path} ({total} completed writes; p50={:?} p90={:?} p99={:?} p100_bucket={:?})",
+        percentile(0.50), percentile(0.90), percentile(0.99),
+        counts.iter().rposition(|&c| c > 0),
+    );
+}
+
+/// Count of write-traversal restarts caused by root contention specifically
+/// (every writer touches the root, so this is expected to be nonzero; it's
+/// tracked separately from per-page attribution below since there's only
+/// ever one root and no "key" is available at that call site).
+pub static ROOT_RESTARTS: AtomicU64 = AtomicU64::new(0);
+
+struct RestartPageStats {
+    total: u64,
+    by_site_key: HashMap<(&'static str, String), u64>,
+}
+
+/// Per-thread, so recording a restart never contends with any other
+/// thread's own recording — merged into `RESTART_GLOBAL` only once, when
+/// this thread's TLS is torn down (see `Drop` below). Correct only if
+/// `dump_restart_trace` is called after every worker thread that might have
+/// recorded a restart has already been `join`ed.
+struct RestartLocal(HashMap<usize, RestartPageStats>);
+
+impl Drop for RestartLocal {
+    fn drop(&mut self) {
+        if self.0.is_empty() {
+            return;
+        }
+        let mut global = RESTART_GLOBAL.lock();
+        for (addr, stats) in self.0.drain() {
+            let entry = global.entry(addr).or_insert_with(|| RestartPageStats {
+                total: 0,
+                by_site_key: HashMap::new(),
+            });
+            entry.total += stats.total;
+            for (k, c) in stats.by_site_key {
+                *entry.by_site_key.entry(k).or_insert(0) += c;
+            }
+        }
+    }
+}
+
+static RESTART_GLOBAL: std::sync::LazyLock<Mutex<HashMap<usize, RestartPageStats>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+thread_local! {
+    static RESTART_LOCAL: RefCell<RestartLocal> = RefCell::new(RestartLocal(HashMap::new()));
+}
+
+/// Records one restart attributed to `page_addr` (a stable identity for the
+/// life of the run today, since block-reclaim GC is off by default — see
+/// `SmartCell`'s doc) and `key`, tagged with the call site (`"leaf_write_lock"`,
+/// `"on_overflow_node"`, etc.) that observed it. No-op, and dead-code
+/// eliminated, unless `RESTART_TRACE` is `true`.
+#[inline(always)]
+pub fn record_restart(page_addr: usize, key: &impl Display, site: &'static str) {
+    if !RESTART_TRACE {
+        return;
+    }
+    let key = key.to_string();
+    RESTART_LOCAL.with(|local| {
+        let mut local = local.borrow_mut();
+        let entry = local.0.entry(page_addr).or_insert_with(|| RestartPageStats {
+            total: 0,
+            by_site_key: HashMap::new(),
+        });
+        entry.total += 1;
+        *entry.by_site_key.entry((site, key)).or_insert(0) += 1;
+    });
+}
+
+/// Writes the merged restart attribution to `path` as CSV
+/// (`page_addr,page_total_restarts,page_distinct_site_keys,site,key,count`),
+/// one row per (page, site, key) triple, sorted by page total descending.
+/// Must be called after every worker thread has been `join`ed (see
+/// `RestartLocal`'s doc) — a thread still running has its data sitting in
+/// that thread's own TLS, not yet merged into `RESTART_GLOBAL`.
+pub fn dump_restart_trace(path: &str) {
+    let global = RESTART_GLOBAL.lock();
+
+    let mut pages: Vec<(&usize, &RestartPageStats)> = global.iter().collect();
+    pages.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+
+    let mut f = BufWriter::new(
+        fs::File::create(path).expect("dump_restart_trace: failed to create output file"),
+    );
+    writeln!(f, "page_addr,page_total_restarts,page_distinct_site_keys,site,key,count").unwrap();
+    for (addr, stats) in pages {
+        let mut entries: Vec<(&(&'static str, String), &u64)> = stats.by_site_key.iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(a.1));
+        for ((site, key), count) in entries {
+            writeln!(
+                f,
+                "0x{:x},{},{},{},{},{}",
+                addr, stats.total, stats.by_site_key.len(), site, key, count
+            ).unwrap();
+        }
+    }
+
+    println!(
+        "dump_restart_trace: wrote {path} ({} distinct pages, root_restarts={})",
+        global.len(),
+        ROOT_RESTARTS.load(Relaxed)
+    );
+}
+
 pub struct ThreadWorkerInfo {
     pub thread_id: ThreadId,
     pub crud: CRUDOperation<Key, Payload>,
