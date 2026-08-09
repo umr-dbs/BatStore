@@ -11,92 +11,277 @@
 //! distributions (% remote, % rollback, % by-name), and atomicity are
 //! faithful to the spec.
 
+use std::cell::RefCell;
 use std::fmt::Display;
 
 use crate::mv_bench::tpcc_random::*;
 use crate::mv_bench::tpcc_schema::*;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_db::{DbTransaction, TableId};
+use crate::mv_db::TransactionState;
+use crate::mv_db::transaction::{
+    delete_on_tree, insert_on_tree, point_on_tree, range_min_on_tree, range_on_tree, update_on_tree,
+};
 use crate::mv_query::interval::Interval;
 use crate::mv_record_model::record_point::RecordPointResult;
-use crate::mv_record_model::tx_stamp::WorkerId;
+use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::Version;
 
 type Res<'a> = CRUDOperationResult<'a, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 
 /// A multi-table OSIC transaction over a [`TpccDatabase`], one fixed
 /// snapshot shared by every read/write it issues across any of its 14
-/// tables, committed exactly once at the end — a thin, `Table`-addressed
-/// wrapper over [`mv_db::DbTransaction`] (`self.inner`), which does all the
-/// actual work: this type just resolves each `Table` to the `TableId`
-/// `TpccDatabase` cached for it (see `TpccDatabase::table_ids`) and
-/// delegates. See `DbTransaction`'s doc for the shared OSIC/WAL semantics
-/// (fire-and-forget logging, one Commit marker per transaction regardless
-/// of how many tables it touched) and abort behavior (dropping without
-/// `commit()` reverts every write, across every table touched) — inherited
-/// here automatically, since dropping `self.inner` runs `DbTransaction`'s
-/// own `Drop` impl.
+/// tables, committed exactly once at the end.
+///
+/// Unlike the pre-size-class-dispatch design, this does *not* wrap
+/// `mv_db::DbTransaction`: `Table::Warehouse`/`Table::District` resolve to a
+/// `TreeClass::Big` tree with a different `NUM_RECORDS` than the other 12
+/// (see `tpcc_schema::TreeClass`'s doc), and `DbTransaction<FAN_OUT,
+/// NUM_RECORDS, ..>`'s `tree(&self, table)` lookup is uniformly typed —
+/// it can't resolve a `TableId` to two different concrete tree types. So
+/// `TpccTxn` calls the same `mv_db::transaction::{insert_on_tree, ...}`
+/// free functions `DbTransaction`'s own methods are built on directly
+/// (reusing their exact insert/update/self-overwrite/WAL-tagging logic, not
+/// a hand-rolled duplicate of it — see those functions' own doc), against
+/// whichever concrete tree `table.class()` says to use, and owns its own
+/// snapshot/write-tracking/abort state instead of delegating it.
+///
+/// `written` is the one piece that has to be genuinely different from
+/// `DbTransaction`'s: it records every write in true chronological order
+/// *across both tree classes*, not per-class. `abort`/`Drop` walk it in
+/// reverse (LIFO — see `mv_db::transaction::DbTransaction::abort`'s doc for
+/// why forward order can expose a partially-unwound transaction to a
+/// concurrent one) — if a big-class and a standard-class write were tracked
+/// in two separate lists instead, reverting "each list in its own reverse
+/// order" would not reproduce the transaction's *true* combined reverse
+/// order whenever the two classes were interleaved (e.g. New-Order writes
+/// District — big — then Stock/OrderLine/Orders — standard — in that
+/// order), which is exactly the ordering `DbTransaction::abort`'s doc warns
+/// is load-bearing.
 pub struct TpccTxn<'a> {
     db: &'a TpccDatabase,
-    inner: DbTransaction<'a, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>,
+    worker_id: WorkerId,
+    ts_start: Version,
+    committed: TransactionState,
+    written: RefCell<Vec<(Table, TpccKey)>>,
+}
+
+/// `BigTreeOp` implementors for each `TpccTxn` operation — see
+/// `tpcc_schema::BigTreeOp`'s doc for why these exist (one static dispatch
+/// site, `TpccDatabase::dispatch_big`, instead of a 5-way match per
+/// operation) and each one just forwards to the exact same
+/// `mv_db::transaction::{point_on_tree, ..}` free function `TpccTxn`'s
+/// `TreeClass::Standard` arm already calls, so `Big`-class tables get
+/// identical semantics, normalized back to `Res`/`Option<RecordPointResult>`
+/// (see `normalize`'s doc).
+struct PointOp { worker_id: WorkerId, ts_start: Version, key: TpccKey }
+impl BigTreeOp for PointOp {
+    type Output = Res<'static>;
+    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Res<'static> {
+        normalize(point_on_tree(tree, self.worker_id, self.ts_start, self.key))
+    }
+}
+
+struct RangeOp { worker_id: WorkerId, ts_start: Version, range: Interval<TpccKey> }
+impl BigTreeOp for RangeOp {
+    type Output = Res<'static>;
+    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Res<'static> {
+        normalize(range_on_tree(tree, self.worker_id, self.ts_start, self.range))
+    }
+}
+
+struct RangeMinOp { worker_id: WorkerId, ts_start: Version, range: Interval<TpccKey> }
+impl BigTreeOp for RangeMinOp {
+    type Output = Option<RecordPointResult<TpccKey, TpccRow>>;
+    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
+        range_min_on_tree(tree, self.worker_id, self.ts_start, self.range)
+    }
+}
+
+struct InsertOp { worker_id: WorkerId, ts_start: Version, key: TpccKey, payload: TpccRow }
+impl BigTreeOp for InsertOp {
+    type Output = (Res<'static>, bool);
+    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
+        let (r, track) = insert_on_tree(tree, self.worker_id, self.ts_start, self.key, self.payload);
+        (normalize(r), track)
+    }
+}
+
+struct UpdateOp { worker_id: WorkerId, ts_start: Version, key: TpccKey, payload: TpccRow }
+impl BigTreeOp for UpdateOp {
+    type Output = (Res<'static>, bool);
+    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
+        let (r, track) = update_on_tree(tree, self.worker_id, self.ts_start, self.key, self.payload);
+        (normalize(r), track)
+    }
+}
+
+struct DeleteOp { worker_id: WorkerId, ts_start: Version, key: TpccKey }
+impl BigTreeOp for DeleteOp {
+    type Output = (Res<'static>, bool);
+    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
+        let (r, track) = delete_on_tree(tree, self.worker_id, self.ts_start, self.key);
+        (normalize(r), track)
+    }
+}
+
+struct WalCommitOp { stamp: TxStamp, ts_commit: Version }
+impl BigTreeOp for WalCommitOp {
+    type Output = ();
+    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) {
+        tree.wal_log_commit(self.stamp, self.ts_commit)
+    }
+}
+
+struct AbortWriteOp { key: TpccKey, stamp: TxStamp }
+impl BigTreeOp for AbortWriteOp {
+    type Output = ();
+    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) {
+        tree.abort_write(self.key, self.stamp)
+    }
 }
 
 impl<'a> TpccTxn<'a> {
+    /// Draws `ts_start` from the database's shared `TxContext` and
+    /// registers it as an active snapshot once, covering every table this
+    /// transaction may go on to touch, standard- or big-class alike (both
+    /// share the same `ctx` — see `TpccDatabase::make_big_trees`).
     pub fn begin(db: &'a TpccDatabase) -> Self {
-        Self { db, inner: DbTransaction::begin(&db.db) }
-    }
-
-    #[inline(always)]
-    fn resolve(&self, table: Table) -> TableId {
-        self.db.table_ids[table as usize]
+        let worker_id = db.db.worker_id();
+        let ts_start = db.db.begin_snapshot();
+        Self { db, worker_id, ts_start, committed: TransactionState::InFlight, written: RefCell::new(Vec::new()) }
     }
 
     #[inline(always)]
     pub const fn ts_start(&self) -> Version {
-        self.inner.ts_start()
+        self.ts_start
     }
 
     #[inline(always)]
     pub const fn worker_id(&self) -> WorkerId {
-        self.inner.worker_id()
+        self.worker_id
     }
 
     /// Point read against this transaction's fixed snapshot, on `table`.
     pub fn point(&self, table: Table, key: TpccKey) -> Res<'_> {
-        self.inner.point(self.resolve(table), key)
+        match table.class() {
+            TreeClass::Standard => point_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key),
+            TreeClass::Big => self.db.dispatch_big(table, PointOp { worker_id: self.worker_id, ts_start: self.ts_start, key }),
+        }
     }
 
     /// Range read against this transaction's fixed snapshot, on `table`.
-    /// `force_read_all` is kept only for call-site compatibility —
-    /// `DbTransaction::range` is always eager (see its doc); every real
-    /// call site in this crate already passes `true`.
+    /// `force_read_all` is kept only for call-site compatibility — the
+    /// underlying `range_on_tree` is always eager; every real call site in
+    /// this crate already passes `true`.
     pub fn range(&self, table: Table, range: Interval<TpccKey>, _force_read_all: bool) -> Res<'_> {
-        self.inner.range(self.resolve(table), range)
+        match table.class() {
+            TreeClass::Standard => range_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, range),
+            TreeClass::Big => self.db.dispatch_big(table, RangeOp { worker_id: self.worker_id, ts_start: self.ts_start, range }),
+        }
     }
 
     /// Like `range`, but only the smallest-key match — see
-    /// `DbTransaction::range_min`'s doc.
+    /// `mv_db::transaction::range_min_on_tree`'s doc. No normalization
+    /// needed: unlike `Res`, `Option<RecordPointResult<..>>` carries no
+    /// `NUM_RECORDS`/`FAN_OUT` at all.
     pub fn range_min(&self, table: Table, range: Interval<TpccKey>) -> Option<RecordPointResult<TpccKey, TpccRow>> {
-        self.inner.range_min(self.resolve(table), range)
+        match table.class() {
+            TreeClass::Standard => range_min_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, range),
+            TreeClass::Big => self.db.dispatch_big(table, RangeMinOp { worker_id: self.worker_id, ts_start: self.ts_start, range }),
+        }
     }
 
     pub fn insert(&self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'_> {
-        self.inner.insert(self.resolve(table), key, payload)
+        let (result, track) = match table.class() {
+            TreeClass::Standard => insert_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key, payload),
+            TreeClass::Big => self.db.dispatch_big(table, InsertOp { worker_id: self.worker_id, ts_start: self.ts_start, key, payload }),
+        };
+        if track {
+            self.written.borrow_mut().push((table, key));
+        }
+        result
     }
 
     pub fn update(&self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'_> {
-        self.inner.update(self.resolve(table), key, payload)
+        let (result, track) = match table.class() {
+            TreeClass::Standard => update_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key, payload),
+            TreeClass::Big => self.db.dispatch_big(table, UpdateOp { worker_id: self.worker_id, ts_start: self.ts_start, key, payload }),
+        };
+        if track {
+            self.written.borrow_mut().push((table, key));
+        }
+        result
     }
 
     pub fn delete(&self, table: Table, key: TpccKey) -> Res<'_> {
-        self.inner.delete(self.resolve(table), key)
+        let (result, track) = match table.class() {
+            TreeClass::Standard => delete_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key),
+            TreeClass::Big => self.db.dispatch_big(table, DeleteOp { worker_id: self.worker_id, ts_start: self.ts_start, key }),
+        };
+        if track {
+            self.written.borrow_mut().push((table, key));
+        }
+        result
     }
 
-    /// Instant commit — see `DbTransaction::commit`'s doc: exactly one WAL
-    /// Commit marker for the whole transaction (every table on this
-    /// database shares one WAL), not one marker per touched table.
-    pub fn commit(self) -> Option<Version> {
-        self.inner.commit()
+    /// Instant commit: appends `ts_commit` to this worker's (shared)
+    /// `CommitLog` — making every write this transaction made, across every
+    /// table and both tree classes, visible at once — then logs exactly
+    /// **one** WAL Commit marker, through whichever table this transaction
+    /// happened to write first (every table on this database, big-class
+    /// included, shares the same `Arc<WalWriter>` — see
+    /// `TpccDatabase::enable_wal`/`make_big_trees`). No-op if this
+    /// transaction never wrote anything.
+    pub fn commit(mut self) -> Option<Version> {
+        if let TransactionState::InFlight = self.committed {
+            self.committed = TransactionState::Committed;
+
+            let ts_commit = self.db.db.ctx.commit_tx(self.worker_id);
+
+            if let Some(&(table, _)) = self.written.borrow().first() {
+                let stamp = TxStamp::new(self.worker_id, self.ts_start);
+                match table.class() {
+                    TreeClass::Standard => self.db.tree_for(table).wal_log_commit(stamp, ts_commit),
+                    TreeClass::Big => self.db.dispatch_big(table, WalCommitOp { stamp, ts_commit }),
+                }
+            }
+
+            self.db.db.end_snapshot(self.ts_start);
+            Some(ts_commit)
+        } else {
+            None
+        }
+    }
+
+    /// Reverts every write this transaction made, in true chronological
+    /// reverse (LIFO) order across both tree classes — see this type's own
+    /// doc for why that combined ordering (not two independently-reversed
+    /// per-class lists) is the one that matters. Shared by `Drop` (the
+    /// normal path: dropping an in-flight `TpccTxn` without `commit()`) and
+    /// nothing else today, since `TpccTxn` — like the pre-size-class-dispatch
+    /// design — exposes no separate public `abort()`; every real call site
+    /// just lets an unwanted transaction fall out of scope.
+    fn revert_all(&self) {
+        let stamp = TxStamp::new(self.worker_id, self.ts_start);
+        for &(table, key) in self.written.borrow().iter().rev() {
+            match table.class() {
+                TreeClass::Standard => self.db.tree_for(table).abort_write(key, stamp),
+                TreeClass::Big => self.db.dispatch_big(table, AbortWriteOp { key, stamp }),
+            }
+        }
+    }
+}
+
+impl<'a> Drop for TpccTxn<'a> {
+    fn drop(&mut self) {
+        // An explicit `commit()` already reverted-or-not and released the
+        // snapshot itself (see `commit`'s `TransactionState` guard) — skip
+        // here, not just belt-and-suspenders: re-running would double
+        // `end_snapshot` this transaction's `ts_start`.
+        if let TransactionState::InFlight = self.committed {
+            self.revert_all();
+            self.db.db.end_snapshot(self.ts_start);
+        }
     }
 }
 

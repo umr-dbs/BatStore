@@ -15,9 +15,31 @@ use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 
+/// Generic over `NUM_RECORDS` so the same helper populates every
+/// `TreeClass::Standard` table (see `tpcc_schema::TreeClass`) — loading
+/// never goes through `TpccTxn`/size-class dispatch at all, since each row
+/// here is already its own tiny auto-committing `dispatch_crud` transaction
+/// with no cross-table atomicity to preserve. `Table::Warehouse`/
+/// `Table::District` use `insert_big` instead, since their concrete tree
+/// type depends on this database's `BigTreeSize` at construction (see
+/// `tpcc_schema::BigTrees`'s doc) rather than being fixed like `TpccTree`.
 #[inline]
-fn insert(tree: &TpccTree, key: TpccKey, row: TpccRow) {
+fn insert<const NUM_RECORDS: usize>(
+    tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    key: TpccKey,
+    row: TpccRow,
+) {
     match tree.dispatch_crud(CRUDOperation::Insert(key, row)) {
+        CRUDOperationResult::Inserted(_) => {}
+        other => panic!("tpcc load: unexpected insert result for key {key}: {other}"),
+    }
+}
+
+/// `insert`'s counterpart for `Table::Warehouse`/`Table::District` — see
+/// `tpcc_schema::dispatch_crud_big`'s doc.
+#[inline]
+fn insert_big(db: &TpccDatabase, table: Table, key: TpccKey, row: TpccRow) {
+    match dispatch_crud_big(db, table, CRUDOperation::Insert(key, row)) {
         CRUDOperationResult::Inserted(_) => {}
         other => panic!("tpcc load: unexpected insert result for key {key}: {other}"),
     }
@@ -96,7 +118,7 @@ pub fn populate_items(db: &TpccDatabase, cfg: &TpccConfig) {
 /// its per-item stock. `history_seq` is a process-wide counter shared by
 /// every loader thread so History keys never collide across warehouses.
 pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, history_seq: &AtomicU64) {
-    insert(&db.tree_for(Table::Warehouse), k_warehouse(w_id), TpccRow::Warehouse(Box::new(Warehouse {
+    insert_big(db, Table::Warehouse, k_warehouse(w_id), TpccRow::Warehouse(Box::new(Warehouse {
         w_name: rnd_astring(6, 10),
         w_street_1: rnd_astring(10, 20),
         w_street_2: rnd_astring(10, 20),
@@ -108,7 +130,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
     })));
 
     for d_id in 1..=cfg.districts_per_warehouse {
-        insert(&db.tree_for(Table::District), k_district(w_id, d_id), TpccRow::District(Box::new(District {
+        insert_big(db, Table::District, k_district(w_id, d_id), TpccRow::District(Box::new(District {
             d_name: rnd_astring(6, 10),
             d_street_1: rnd_astring(10, 20),
             d_street_2: rnd_astring(10, 20),

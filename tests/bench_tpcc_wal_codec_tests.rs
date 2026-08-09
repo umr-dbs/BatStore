@@ -217,7 +217,7 @@ fn tpcc_database_crash_recovery_round_trip_across_tables() {
         db.enable_wal(&base_path, std::time::Duration::from_millis(2)).unwrap();
 
         assert!(matches!(
-            db.tree_for(Table::Warehouse).dispatch_crud(CRUDOperation::Insert(warehouse_key, TpccRow::Warehouse(Box::new(Warehouse {
+            crate::mv_bench::tpcc_schema::dispatch_crud_big(&db, Table::Warehouse, CRUDOperation::Insert(warehouse_key, TpccRow::Warehouse(Box::new(Warehouse {
                 w_name: "Marburg".into(), w_street_1: "Uniplatz".into(), w_street_2: "".into(),
                 w_city: "Marburg".into(), w_state: "HE".into(), w_zip: "350321111".into(),
                 w_tax: 0.07, w_ytd: 300_000.0,
@@ -241,7 +241,7 @@ fn tpcc_database_crash_recovery_round_trip_across_tables() {
     let recovered = TpccDatabase::open_recovered(RootIndexType::default(), &base_path, std::time::Duration::from_millis(2)).unwrap();
     let version = recovered.current_version();
 
-    match recovered.tree_for(Table::Warehouse).dispatch_crud(CRUDOperation::Point(warehouse_key, version)) {
+    match crate::mv_bench::tpcc_schema::dispatch_crud_big(&recovered, Table::Warehouse, CRUDOperation::Point(warehouse_key, version)) {
         CRUDOperationResult::MatchedRecords(r) if r.len() == 1 => {
             let w = r[0].payload.as_warehouse();
             assert_eq!(w.w_name, "Marburg");

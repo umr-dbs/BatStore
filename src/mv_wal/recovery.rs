@@ -198,6 +198,87 @@ pub fn replay_database<
     Ok(offset as u64)
 }
 
+/// `replay_database` counterpart for a small, fixed set of trees that live
+/// outside a `Database`'s own homogeneous table list — e.g.
+/// `mv_bench::tpcc_schema`'s size-class "Big" trees, which need their own
+/// `NUM_RECORDS` and so can't sit in `Database`'s uniformly-typed
+/// `&[&MVBTSt<FAN_OUT, NUM_RECORDS, ..>]` slice alongside the rest. Takes
+/// each tree with its own concrete `NUM_RECORDS` and its own reserved
+/// `TableId` tag directly (the caller picks tags disjoint from whatever
+/// range `Database::create_table` already assigned its own tables, since
+/// every tree here shares one physical log file — see
+/// `mv_bench::tpcc_schema`'s reserved-id constants). Otherwise identical to
+/// `replay_database`: one full scan of the same shared log file,
+/// commit-gated (a write only replays if some `Commit` marker anywhere in
+/// the file — not just among entries tagged for these two trees, since a
+/// multi-table transaction's marker doesn't care which table logged first —
+/// resolves its stamp), replayed in `(ts_commit, seq)` order. An entry
+/// tagged with neither `id_a` nor `id_b` is silently skipped — it belongs to
+/// some other tree this function doesn't know about (`Database`'s own
+/// `replay_database` call over the same file handles those).
+pub fn replay_two_tables<
+    const FAN_OUT: usize,
+    const NUM_RECORDS_A: usize,
+    const NUM_RECORDS_B: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + record::WalPayload,
+>(
+    tree_a: &MVBTSt<FAN_OUT, NUM_RECORDS_A, Key, Payload>,
+    id_a: record::TableId,
+    tree_b: &MVBTSt<FAN_OUT, NUM_RECORDS_B, Key, Payload>,
+    id_b: record::TableId,
+    path: &Path,
+) -> io::Result<u64> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+
+    let mut writes: Vec<(record::TableId, WalRecord<Key, Payload>, usize)> = Vec::new();
+    let mut commits: HashMap<(WorkerId, Version), Version> = HashMap::new();
+
+    let mut offset = 0usize;
+    while let Some((body, consumed)) = record::read_frame(&bytes[offset..]) {
+        let Some((table_id, entry)) = record::decode_entry_for_table::<Key, Payload>(body) else {
+            break;
+        };
+
+        match entry {
+            WalEntry::Write(record) => {
+                let seq = writes.len();
+                writes.push((table_id, record, seq));
+            }
+            WalEntry::Commit { stamp, ts_commit } => {
+                commits.insert((stamp.worker_id(), stamp.ts_start()), ts_commit);
+            }
+        }
+
+        offset += consumed;
+    }
+
+    let mut committed: Vec<(Version, usize, record::TableId, WalRecord<Key, Payload>)> = writes
+        .into_iter()
+        .filter_map(|(table_id, record, seq)| {
+            commits
+                .get(&(record.stamp.worker_id(), record.stamp.ts_start()))
+                .map(|&ts_commit| (ts_commit, seq, table_id, record))
+        })
+        .collect();
+
+    committed.sort_by_key(|(ts_commit, seq, _, _)| (*ts_commit, *seq));
+
+    for (_, _, table_id, record) in committed {
+        if table_id == id_a {
+            tree_a.replay_apply(record.op);
+        } else if table_id == id_b {
+            tree_b.replay_apply(record.op);
+        }
+    }
+
+    Ok(offset as u64)
+}
+
 impl<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,

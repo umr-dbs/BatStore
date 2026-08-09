@@ -40,6 +40,8 @@
 //! touched by transaction logic, so `dead_code` is silenced module-wide.
 #![allow(dead_code)]
 
+use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
+use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::mv_db::Database;
 use crate::mv_query::interval::Interval;
 use crate::mv_root::index_root::RootIndexType;
@@ -73,6 +75,230 @@ pub const TPCC_FAN_OUT: usize       = FAN_OUT;
 pub const TPCC_NUM_RECORDS: usize   = crate::mv_tree::mvbt::NUM_RECORDS;
 
 pub type TpccTree = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
+
+/// Deliberately much larger than `TPCC_NUM_RECORDS`: Warehouse and District
+/// are TPC-C's smallest tables by row count (one row per warehouse / ten per
+/// warehouse) yet among its hottest by write volume (every New-Order hits
+/// `district.next_o_id`, every Payment hits `warehouse.ytd`/`district.ytd`)
+/// — in a multiversion tree, that combination means a leaf holding only a
+/// handful of *logical* keys still accumulates a physical version chain
+/// that crosses the base tree's leaf capacity every few dozen writes,
+/// forcing a compaction that briefly write-locks the one page nearly every
+/// concurrent transaction routes through. That capacity
+/// (`overflow_records_count() == NUM_RECORDS`, see `mv_block::block_handle`)
+/// is already the hard, physically-full ceiling — no slack left to tune
+/// without more room to begin with (see `mv_tree::smo::unsafe_degree`/
+/// `unsafe_degree_root`'s doc). Measured: under the default TPC-C config,
+/// `district`+`warehouse` alone accounted for ~99.97% of all root-page
+/// write-traversal restarts (`mv_test::ROOT_RESTARTS`/
+/// `record_root_restart_for_table`'s per-table breakdown).
+///
+/// This isn't just a bump to `TPCC_NUM_RECORDS` itself: that would inflate
+/// every one of the other 12 tables' leaves too, and undo the exact 4KB
+/// page-alignment tuning `NUM_RECORDS` was chosen for (see its own doc) —
+/// wasted for tables that were never the problem. Giving only these two
+/// tables their own, much larger leaf capacity is a deliberate,
+/// memory-for-contention trade-off that only makes sense because they're
+/// this small and this hot; see `TreeClass`'s doc for how "which table"
+/// resolves to which of the two tree types with no dynamic dispatch.
+///
+/// **Bigger capacity is not free**, though: `overflow_records_count() ==
+/// NUM_RECORDS` is also *when a leaf's dead/superseded versions get
+/// compacted away*, and `mv_query::iter_query::RangeQueryIter` scans a
+/// leaf's *entire* physical record array (`LeafPage::as_records()`,
+/// `len() == active + dead`) filtering live-vs-dead per record — so a
+/// bigger `NUM_RECORDS` means more accumulated dead-version garbage sits in
+/// the leaf between compactions, and every range scan over that table (the
+/// default TPC-C run's `scan_delay_sweep`/`fresh_full_scan` OLAP modes both
+/// scan `warehouse`/`district`) pays for wading through it. Measured on the
+/// same default config: OLAP scan throughput dropped from ~100% of baseline
+/// at the untouched 123-record size down to ~21% at a 512KiB leaf, while
+/// root-restart reduction only improved from ~4x to ~32x over that same
+/// range — steeply diminishing returns. There's no way to decouple "avoid
+/// frequent compactions" from "keep dead-version garbage bounded" within
+/// this design: they're the same operation. `BigTreeSize` exists to make
+/// that trade-off an explicit, chosen point instead of a hand-picked
+/// number.
+///
+/// Each variant's `NUM_RECORDS` is chosen the same way the base tree's 123
+/// was (see that constant's doc): empirically, so `OptCell<Block<..>>`
+/// (`Block` plus its 8B `cell_version`) lands exactly on a page-size
+/// multiple with zero waste, rather than spilling into the next allocator
+/// size class the way a round number (256, 1024, ...) would (confirmed:
+/// `size_of::<OptCell<Block<TPCC_FAN_OUT, 256, ..>>>()` is 8384B, not
+/// 8192B — it *overshoots* the boundary it looks like it should hit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BigTreeSize {
+    /// 251 records/leaf, exactly 8KiB. Cheapest, but only trims
+    /// district/warehouse root restarts ~1.2-1.3x over the untouched
+    /// 123-record leaf — barely more than "off," kept as a reference point.
+    Tiny,
+    /// 507 records/leaf, exactly 16KiB. ~2x/~1.6x root-restart reduction.
+    Small,
+    /// 1019 records/leaf, exactly 32KiB. The measured sweet spot: OLAP scan
+    /// throughput fully recovered (~100% of the untouched-leaf baseline)
+    /// while district/warehouse root restarts are still down ~4.4x/~2.6x.
+    #[default]
+    Medium,
+    /// 2043 records/leaf, exactly 64KiB. ~8x/~4.6x root-restart reduction,
+    /// at a real but moderate OLAP scan cost (~82% of baseline).
+    Large,
+    /// 16379 records/leaf, exactly 512KiB. Maximum measured contention
+    /// reduction (~32x/~18x), at a steep OLAP scan cost (~21% of baseline
+    /// — see this constant group's own doc for the mechanism).
+    Huge,
+}
+
+pub const TPCC_BIG_TINY_NUM_RECORDS: usize = 251;
+pub const TPCC_BIG_SMALL_NUM_RECORDS: usize = 507;
+pub const TPCC_BIG_MEDIUM_NUM_RECORDS: usize = 1019;
+pub const TPCC_BIG_LARGE_NUM_RECORDS: usize = 2043;
+pub const TPCC_BIG_HUGE_NUM_RECORDS: usize = 16379;
+
+/// One concrete tree type per `BigTreeSize` variant — see that enum's doc.
+/// Built via `MVBTSt::make_with_shared_ctx` sharing the very same
+/// `Arc<TxContext>` as `TpccDatabase::db` (see `TpccDatabase::make_big_trees`)
+/// — only the physical leaf capacity differs from `TpccTree`, not the
+/// transactional core, so a `TpccTxn` spanning both a standard and a big
+/// table still commits/aborts as one atomic, snapshot-isolated unit.
+pub type TpccBigTreeTiny = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_TINY_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeSmall = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_SMALL_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeMedium = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_MEDIUM_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeLarge = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_LARGE_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeHuge = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_HUGE_NUM_RECORDS, TpccKey, TpccRow>;
+
+/// The two `TreeClass::Big` trees actually built for one `TpccDatabase`,
+/// at whichever `BigTreeSize` it was constructed with. A closed enum over
+/// concrete monomorphizations — like `RootIndexType` already is for root
+/// indexing — not a `dyn Trait`: `NUM_RECORDS` is a `const` generic and
+/// must be fixed at compile time, so "choose a size at runtime" means
+/// "choose among a handful of pre-compiled candidates," not "pick an
+/// arbitrary integer." See `TpccDatabase::dispatch_big` for how an
+/// operation reaches the right variant's trees without a 5-way match at
+/// every call site.
+pub(crate) enum BigTrees {
+    Tiny { warehouse: Arc<TpccBigTreeTiny>, district: Arc<TpccBigTreeTiny> },
+    Small { warehouse: Arc<TpccBigTreeSmall>, district: Arc<TpccBigTreeSmall> },
+    Medium { warehouse: Arc<TpccBigTreeMedium>, district: Arc<TpccBigTreeMedium> },
+    Large { warehouse: Arc<TpccBigTreeLarge>, district: Arc<TpccBigTreeLarge> },
+    Huge { warehouse: Arc<TpccBigTreeHuge>, district: Arc<TpccBigTreeHuge> },
+}
+
+/// Picks `warehouse` or `district` out of one `BigTrees` arm — generic over
+/// the arm's own concrete tree type, so this one function serves all 5
+/// variants. Panics for any other `Table`; only ever called from a
+/// `TreeClass::Big`-guarded path.
+fn pick_big<'x, T>(table: Table, warehouse: &'x Arc<T>, district: &'x Arc<T>) -> &'x T {
+    match table {
+        Table::Warehouse => warehouse,
+        Table::District => district,
+        _ => unreachable!("pick_big: {table:?} is not a TreeClass::Big table"),
+    }
+}
+
+/// One `TreeClass::Big`-only operation, generic over whichever concrete
+/// `NUM_RECORDS` `TpccDatabase::dispatch_big` resolves it against — see
+/// that method's doc. Implementors are small, single-use structs holding
+/// an operation's parameters (e.g. `TpccTxn`'s `InsertOp { worker_id,
+/// ts_start, key, payload }`), each implementing `run` by calling straight
+/// into the same `mv_db::transaction::{insert_on_tree, ..}` free functions
+/// `DbTransaction` itself uses.
+pub(crate) trait BigTreeOp {
+    type Output;
+    fn run<const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) -> Self::Output;
+}
+
+/// Re-wraps a `CRUDOperationResult` produced against a `TreeClass::Big`
+/// tree (a different `NUM_RECORDS` than the database's standard tables)
+/// under the standard tree's own const generics, so callers that need to
+/// return/compare results across both classes (`TpccTxn`'s methods,
+/// `dispatch_crud_big` below) see one uniform type. Sound because nothing
+/// that goes through `BigTreeOp`/`dispatch_big` ever produces
+/// `MatchedRecordIter` — the one variant that actually carries
+/// `NUM_RECORDS`/`FAN_OUT`-shaped data (a live, zero-copy `RangeQueryIter`
+/// borrowing from the tree's own blocks — see `mv_db::transaction`'s module
+/// doc: "range is always eager"). Every other variant carries no such data,
+/// so re-wrapping it under different const generics changes nothing about
+/// its actual content.
+pub(crate) fn normalize<'a, const NUM_RECORDS_FROM: usize>(
+    r: CRUDOperationResult<'a, TPCC_FAN_OUT, NUM_RECORDS_FROM, TpccKey, TpccRow>,
+) -> CRUDOperationResult<'static, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow> {
+    match r {
+        CRUDOperationResult::MatchedRecords(v) => CRUDOperationResult::MatchedRecords(v),
+        CRUDOperationResult::Inserted(v) => CRUDOperationResult::Inserted(v),
+        CRUDOperationResult::Updated(v) => CRUDOperationResult::Updated(v),
+        CRUDOperationResult::Deleted(v) => CRUDOperationResult::Deleted(v),
+        CRUDOperationResult::InsertedRand(k, v) => CRUDOperationResult::InsertedRand(k, v),
+        CRUDOperationResult::UpdatedRand(k, v) => CRUDOperationResult::UpdatedRand(k, v),
+        CRUDOperationResult::DeletedRand(k, v) => CRUDOperationResult::DeletedRand(k, v),
+        CRUDOperationResult::ZeroAffected(reason) => CRUDOperationResult::ZeroAffected(reason),
+        CRUDOperationResult::Conflict => CRUDOperationResult::Conflict,
+        CRUDOperationResult::Error => CRUDOperationResult::Error,
+        CRUDOperationResult::MatchedRecordIter(_) => unreachable!(
+            "tpcc_schema::normalize: size-class dispatch never produces a lazy MatchedRecordIter (range is always eager)"
+        ),
+    }
+}
+
+/// `MVBTSt::dispatch_crud`'s counterpart for `TreeClass::Big` tables — a
+/// single-op, auto-committing convenience for callers that don't need a
+/// full `TpccTxn` (population via `mv_bench::tpcc_load`, tests seeding a
+/// row directly). `mv_bench::tpcc_txn`'s own business-transaction logic
+/// never calls this — it always dispatches through `TpccDatabase::dispatch_big`
+/// via a purpose-built `BigTreeOp` impl instead, since a business
+/// transaction needs write-tracking/abort semantics this convenience
+/// doesn't provide.
+pub fn dispatch_crud_big(
+    db: &TpccDatabase,
+    table: Table,
+    op: crate::mv_crud_model::crud_operation::CRUDOperation<TpccKey, TpccRow>,
+) -> CRUDOperationResult<'static, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow> {
+    struct DispatchCrudOp(crate::mv_crud_model::crud_operation::CRUDOperation<TpccKey, TpccRow>);
+    impl BigTreeOp for DispatchCrudOp {
+        type Output = CRUDOperationResult<'static, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
+        fn run<const NUM_RECORDS: usize>(
+            self,
+            tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+        ) -> Self::Output {
+            normalize(tree.dispatch_crud(self.0))
+        }
+    }
+    db.dispatch_big(table, DispatchCrudOp(op))
+}
+
+/// WAL table-id tags for the two `TreeClass::Big` trees. They live outside
+/// `Database`'s own table list (see `TreeClass`'s doc), so they need their
+/// own reserved slice of the one shared log file's `TableId` tag space,
+/// disjoint from whatever `Database::create_table` assigns its own 12
+/// standard tables (0..12, one per non-`Big` `Table` variant, in
+/// `Table::ALL` order). Continuing right after that range keeps the whole
+/// tag space simple and non-overlapping. Independent of `BigTreeSize`: the
+/// tag identifies *which table* a WAL entry belongs to, not which size its
+/// tree happened to be built at (recovery can freely replay into a
+/// differently-sized tree than the one that originally logged the entry —
+/// `NUM_RECORDS` never appears in the wire format).
+const WAREHOUSE_BIG_TABLE_ID: TableId = 12;
+const DISTRICT_BIG_TABLE_ID: TableId = 13;
+
+/// Which physical tree type a `Table` resolves to — see `BigTreeSize`'s
+/// doc for why `Warehouse`/`District` specifically need `Big`. `TpccTxn`
+/// matches on this (a plain enum tag, not a `dyn Trait` — no
+/// vtable/virtual dispatch, and since a given `Table` always resolves to
+/// the same variant for the life of the program, branch prediction settles
+/// almost immediately) to route each operation to the right concrete tree,
+/// reusing the exact same `mv_db::transaction::{insert_on_tree,
+/// update_on_tree, ...}` free functions `DbTransaction` itself is built
+/// on, just instantiated at a different `NUM_RECORDS` — so `Big`-class
+/// tables get identical self-overwrite/abort/WAL semantics, not a
+/// hand-rolled parallel implementation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TreeClass {
+    Standard,
+    Big,
+}
 
 /// Database scale/shape — the TPC-C spec's standard cardinalities, with
 /// warehouse count and a few sizes made configurable for quicker benchmark
@@ -165,6 +391,15 @@ impl Table {
             Table::Region => "region",
         }
     }
+
+    /// See `TreeClass`'s doc.
+    #[inline(always)]
+    pub(crate) const fn class(self) -> TreeClass {
+        match self {
+            Table::Warehouse | Table::District => TreeClass::Big,
+            _ => TreeClass::Standard,
+        }
+    }
 }
 
 /// All 14 TPC-C/CH-benCHmark tables — a thin, domain-named wrapper over a
@@ -172,64 +407,172 @@ impl Table {
 pub struct TpccDatabase {
     pub(crate) db: Database<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>,
     /// `Table -> TableId`, resolved once at construction and indexed by
-    /// `Table as usize` — see `Table`'s doc.
+    /// `Table as usize` — see `Table`'s doc. Meaningless (left `0`, never
+    /// read) for `Table::Warehouse`/`Table::District`: those two resolve
+    /// through `big_trees` instead, entirely outside `db`'s own table list
+    /// — see `TreeClass`'s doc.
     pub(crate) table_ids: [TableId; 14],
+    /// `Table::Warehouse`/`Table::District`'s trees, at whichever
+    /// `BigTreeSize` this database was built with — see `BigTrees`'s doc.
+    pub(crate) big_trees: BigTrees,
 }
 
 fn inc_key(k: TpccKey) -> TpccKey { k.checked_add(1).unwrap_or(TpccKey::MAX) }
 fn dec_key(k: TpccKey) -> TpccKey { k.checked_sub(1).unwrap_or(TpccKey::MIN) }
 
 impl TpccDatabase {
+    /// Same as `new_with_big_tree_size`, at `BigTreeSize::default()`
+    /// (`Medium` — the measured sweet spot, see that enum's doc). Kept as
+    /// the default constructor so every pre-existing caller (tests, the
+    /// TPC-C driver's own default path) keeps working unchanged.
     pub fn new(root_index_type: RootIndexType) -> Self {
-        let db = Database::new(root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX);
-        let table_ids = Self::create_all_tables(&db);
-        Self { db, table_ids }
+        Self::new_with_big_tree_size(root_index_type, BigTreeSize::default())
     }
 
-    /// Creates every one of the 14 tables, in `Table::ALL`'s fixed order —
-    /// or, for a database recovered from an already-populated catalog,
-    /// simply looks each one up (`Database::create_table` is idempotent by
-    /// name, see its doc) — and returns the resulting `Table -> TableId`
-    /// cache. Shared by `new` (always actually creates) and `open_recovered`
-    /// (recreates from the catalog `Database::open_recovered` already read;
-    /// this loop is then a no-op lookup for every name already present, or
-    /// a real create for a genuinely fresh — no prior WAL — database).
+    pub fn new_with_big_tree_size(root_index_type: RootIndexType, big_tree_size: BigTreeSize) -> Self {
+        let db = Database::new(root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX);
+        let table_ids = Self::create_all_tables(&db);
+        let big_trees = Self::make_big_trees(root_index_type, &db, big_tree_size);
+        Self { db, table_ids, big_trees }
+    }
+
+    /// Creates every one of the 12 *standard-class* tables (see
+    /// `TreeClass`), in `Table::ALL`'s fixed order — or, for a database
+    /// recovered from an already-populated catalog, simply looks each one up
+    /// (`Database::create_table` is idempotent by name, see its doc) — and
+    /// returns the resulting `Table -> TableId` cache. Shared by `new`
+    /// (always actually creates) and `open_recovered` (recreates from the
+    /// catalog `Database::open_recovered` already read; this loop is then a
+    /// no-op lookup for every name already present, or a real create for a
+    /// genuinely fresh — no prior WAL — database). `Warehouse`/`District`
+    /// are deliberately skipped here — `db`'s own catalog only ever needs to
+    /// know about its own 12 tables; the big trees are built separately by
+    /// `make_big_trees` and never touch `db.create_table` at all, so their
+    /// existence can't shift any standard table's `TableId` regardless of
+    /// which order this loop visits `Table::ALL` in.
     fn create_all_tables(db: &Database<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>) -> [TableId; 14] {
         let mut table_ids = [0 as TableId; 14];
         for t in Table::ALL {
-            table_ids[t as usize] = db.create_table(t.as_str())
-                .table_id()
-                .expect("mv_db::Database::create_table always assigns its new table a TableId");
+            if t.class() == TreeClass::Standard {
+                table_ids[t as usize] = db.create_table(t.as_str())
+                    .table_id()
+                    .expect("mv_db::Database::create_table always assigns its new table a TableId");
+            }
         }
         table_ids
     }
 
+    /// Builds the two `TreeClass::Big` trees at `size`, sharing `db`'s own
+    /// `Arc<TxContext>` (see `BigTreeSize`'s doc) so a `TpccTxn` spanning a
+    /// big and a standard table still commits/aborts atomically. Called by
+    /// both `new_with_big_tree_size` (fresh) and `open_recovered_with_big_tree_size`
+    /// (recovery then replays into the result separately — see
+    /// `TreeClass`'s doc — since these two trees aren't part of `db`'s own
+    /// catalog for `Database::open_recovered` to have already
+    /// recreated/replayed).
+    fn make_big_trees(
+        root_index_type: RootIndexType,
+        db: &Database<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>,
+        size: BigTreeSize,
+    ) -> BigTrees {
+        let ctx = db.ctx.clone();
+        macro_rules! build {
+            ($ty:ty) => {
+                (
+                    Arc::new(<$ty>::make_with_shared_ctx(
+                        root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
+                        ctx.clone(), Some(WAREHOUSE_BIG_TABLE_ID))),
+                    Arc::new(<$ty>::make_with_shared_ctx(
+                        root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
+                        ctx, Some(DISTRICT_BIG_TABLE_ID))),
+                )
+            };
+        }
+        match size {
+            BigTreeSize::Tiny => { let (warehouse, district) = build!(TpccBigTreeTiny); BigTrees::Tiny { warehouse, district } }
+            BigTreeSize::Small => { let (warehouse, district) = build!(TpccBigTreeSmall); BigTrees::Small { warehouse, district } }
+            BigTreeSize::Medium => { let (warehouse, district) = build!(TpccBigTreeMedium); BigTrees::Medium { warehouse, district } }
+            BigTreeSize::Large => { let (warehouse, district) = build!(TpccBigTreeLarge); BigTrees::Large { warehouse, district } }
+            BigTreeSize::Huge => { let (warehouse, district) = build!(TpccBigTreeHuge); BigTrees::Huge { warehouse, district } }
+        }
+    }
+
+    /// Runs a `TreeClass::Big`-only operation against whichever concrete
+    /// tree `table` resolves to, for whatever `BigTreeSize` this database
+    /// was built with — the one place that matches on `BigTrees`'s variant,
+    /// so `TpccTxn`'s operations don't each repeat a 5-way match. `op.run`
+    /// is generic over `NUM_RECORDS`, monomorphized once per variant at
+    /// compile time — still no dynamic dispatch, just one static dispatch
+    /// site instead of many. Panics (via `pick_big`) if `table` isn't
+    /// `Table::Warehouse`/`Table::District`.
+    pub(crate) fn dispatch_big<Op: BigTreeOp>(&self, table: Table, op: Op) -> Op::Output {
+        match &self.big_trees {
+            BigTrees::Tiny { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::Small { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::Medium { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::Large { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::Huge { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+        }
+    }
+
+    /// Only for `TreeClass::Standard` tables — see `TreeClass`'s doc.
+    /// Panics (rather than silently indexing `table_ids`' meaningless `0`
+    /// default) if called with `Table::Warehouse`/`Table::District`, whose
+    /// trees live outside `db`'s table list entirely; use `dispatch_big`
+    /// for those instead.
     #[inline(always)]
     pub fn tree_for(&self, table: Table) -> Arc<TpccTree> {
+        assert_eq!(table.class(), TreeClass::Standard,
+            "TpccDatabase::tree_for: {table:?} is a TreeClass::Big table — use dispatch_big instead");
         self.db.table(self.table_ids[table as usize])
-            .expect("TpccDatabase creates every Table::ALL entry at construction")
+            .expect("TpccDatabase creates every standard-class Table::ALL entry at construction")
     }
 
     /// Reads off the shared clock — same value regardless of which table's
-    /// tree it's read through, since every table shares this database's one
-    /// `ctx`.
+    /// tree it's read through, since every table (including the two
+    /// `TreeClass::Big` ones) shares this database's one `ctx`.
     pub fn current_version(&self) -> crate::mv_record_model::version_info::Version {
         self.db.current_version()
     }
 
     /// Toggles block reclaim uniformly across every table on this database
     /// — see `MVBTSt::enable_gc`'s doc for why partial/per-table toggling
-    /// would make pruning the shared commit logs unsound.
+    /// would make pruning the shared commit logs unsound. Includes the two
+    /// `TreeClass::Big` trees: they share `ctx`'s pruning flag with every
+    /// standard table (see `make_big_trees`), so leaving their own
+    /// `block_reclaim_enabled` out of step would be exactly the unsound
+    /// half-toggled state `MVBTSt::enable_gc`'s doc warns about.
     pub fn enable_gc(&self, update_in_place: bool) {
         self.db.enable_gc(update_in_place);
+        match &self.big_trees {
+            BigTrees::Tiny { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::Small { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::Medium { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::Large { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::Huge { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+        }
     }
 
     pub fn disable_gc(&self) {
         self.db.disable_gc();
+        match &self.big_trees {
+            BigTrees::Tiny { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::Small { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::Medium { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::Large { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::Huge { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+        }
     }
 
     pub fn truncate_commit_log(&self, enabled: bool) {
         self.db.allow_historic_query(enabled);
+        match &self.big_trees {
+            BigTrees::Tiny { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::Small { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::Medium { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::Large { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::Huge { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+        }
     }
 
     pub fn root_star_index(&self) -> RootIndexType {
@@ -249,24 +592,80 @@ impl TpccDatabase {
     /// `mv_db::DbTransaction::commit`'s doc), so recovery no longer has the
     /// old "a crash between two tables' markers can leave one table's share
     /// of a transaction replayed and another's not" gap.
+    /// Same as `open_recovered_with_big_tree_size`, at `BigTreeSize::default()`.
+    /// `NUM_RECORDS` never appears in the WAL wire format (see
+    /// `WAREHOUSE_BIG_TABLE_ID`'s doc), so recovering at a *different*
+    /// `BigTreeSize` than whatever originally wrote the log is completely
+    /// safe — every logged op just replays into a freshly-sized tree.
     pub fn open_recovered(
         root_index_type: RootIndexType,
         wal_path: &std::path::Path,
         flush_interval: std::time::Duration,
+    ) -> std::io::Result<Self> {
+        Self::open_recovered_with_big_tree_size(root_index_type, wal_path, flush_interval, BigTreeSize::default())
+    }
+
+    pub fn open_recovered_with_big_tree_size(
+        root_index_type: RootIndexType,
+        wal_path: &std::path::Path,
+        flush_interval: std::time::Duration,
+        big_tree_size: BigTreeSize,
     ) -> std::io::Result<Self> {
         let db = Database::open_recovered(
             root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
             wal_path, flush_interval,
         )?;
         let table_ids = Self::create_all_tables(&db);
-        Ok(Self { db, table_ids })
+
+        // `db`'s own `open_recovered` only knows about (and only replayed)
+        // its own 12-table catalog — the two `TreeClass::Big` trees live
+        // outside it entirely (see `TreeClass`'s doc) and need their own
+        // replay pass over the same shared log file, routed by their own
+        // reserved `TableId` tags. `db`'s replay already truncated the file
+        // to its valid prefix, so this second, independent scan of that same
+        // (now-stable) prefix finds the identical valid length — nothing
+        // left to truncate again here.
+        let big_trees = Self::make_big_trees(root_index_type, &db, big_tree_size);
+        macro_rules! replay_and_attach {
+            ($warehouse:expr, $district:expr) => {{
+                crate::mv_wal::recovery::replay_two_tables(
+                    $warehouse, WAREHOUSE_BIG_TABLE_ID, $district, DISTRICT_BIG_TABLE_ID, wal_path,
+                )?;
+                if let Some(writer) = db.wal_writer() {
+                    $warehouse.attach_wal(writer.clone());
+                    $district.attach_wal(writer);
+                }
+            }};
+        }
+        match &big_trees {
+            BigTrees::Tiny { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::Small { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::Medium { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::Large { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::Huge { warehouse, district } => replay_and_attach!(warehouse, district),
+        }
+
+        Ok(Self { db, table_ids, big_trees })
     }
 
     /// Attaches one shared live WAL at `wal_path` — for a fresh (not
     /// recovered) database; use `open_recovered` instead when the log might
-    /// already contain data from a prior run.
+    /// already contain data from a prior run. Attaches the *same* shared
+    /// writer to the two `TreeClass::Big` trees too, tagged with their own
+    /// reserved `TableId`s, so their writes land in the one shared file
+    /// right alongside every standard table's.
     pub fn enable_wal(&self, wal_path: &std::path::Path, flush_interval: std::time::Duration) -> std::io::Result<()> {
-        self.db.enable_wal(wal_path, flush_interval)
+        self.db.enable_wal(wal_path, flush_interval)?;
+        if let Some(writer) = self.db.wal_writer() {
+            match &self.big_trees {
+                BigTrees::Tiny { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::Small { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::Medium { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::Large { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::Huge { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+            }
+        }
+        Ok(())
     }
 }
 

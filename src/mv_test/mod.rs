@@ -178,6 +178,76 @@ pub fn dump_attempt_histogram(path: &str) {
 /// ever one root and no "key" is available at that call site).
 pub static ROOT_RESTARTS: AtomicU64 = AtomicU64::new(0);
 
+/// Same event as `ROOT_RESTARTS`, but broken down by *which table's* root —
+/// keyed by the table's own tree address (`&MVBTSt<..>`'s address, identical
+/// to `Arc::as_ptr` of the `Arc<MVBTSt<..>>` `Database` holds for that table
+/// — see `record_root_restart_for_table`'s call site), since a bare total
+/// can't distinguish "every table contends on root about equally" from "one
+/// table's root dominates everything else." Same thread-local-then-merge-
+/// on-drop shape as `RestartLocal` above, just without the per-key
+/// breakdown (every writer to a table touches that table's root regardless
+/// of key, so a per-key split wouldn't be informative here).
+struct RootRestartsLocal(HashMap<usize, u64>);
+
+static ROOT_RESTARTS_BY_TABLE: std::sync::LazyLock<Mutex<HashMap<usize, u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+impl Drop for RootRestartsLocal {
+    fn drop(&mut self) {
+        if self.0.is_empty() {
+            return;
+        }
+        let mut global = ROOT_RESTARTS_BY_TABLE.lock();
+        for (addr, count) in self.0.drain() {
+            *global.entry(addr).or_insert(0) += count;
+        }
+    }
+}
+
+thread_local! {
+    static ROOT_RESTARTS_LOCAL: RefCell<RootRestartsLocal> = RefCell::new(RootRestartsLocal(HashMap::new()));
+}
+
+/// Records one root-contention restart attributed to `tree_addr` (a
+/// table's tree address — see this field's own doc). No-op, and dead-code
+/// eliminated, unless `RESTART_TRACE` is `true`.
+#[inline(always)]
+pub fn record_root_restart_for_table(tree_addr: usize) {
+    if !RESTART_TRACE {
+        return;
+    }
+    ROOT_RESTARTS_LOCAL.with(|local| {
+        *local.borrow_mut().0.entry(tree_addr).or_insert(0) += 1;
+    });
+}
+
+/// Writes the per-table root-restart breakdown to `path` as CSV
+/// (`table_name,tree_addr,root_restarts`), sorted by count descending.
+/// `table_names` resolves a tree address to a name (e.g.
+/// `Database::table_names_by_addr()`) — an address with no matching name
+/// (table dropped, or the caller didn't pass a mapping) is printed as its
+/// raw hex address instead. Must be called after every worker thread that
+/// might have recorded a root restart has already been `join`ed (same
+/// caveat as `dump_restart_trace`).
+pub fn dump_root_restarts_by_table(path: &str, table_names: &[(usize, String)]) {
+    let global = ROOT_RESTARTS_BY_TABLE.lock();
+    let names: HashMap<usize, &str> = table_names.iter().map(|(a, n)| (*a, n.as_str())).collect();
+
+    let mut rows: Vec<(&usize, &u64)> = global.iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(a.1));
+
+    let mut f = BufWriter::new(
+        fs::File::create(path).expect("dump_root_restarts_by_table: failed to create output file"),
+    );
+    writeln!(f, "table_name,tree_addr,root_restarts").unwrap();
+    for (addr, count) in rows {
+        let name = names.get(addr).copied().unwrap_or("<unresolved>");
+        writeln!(f, "{name},0x{addr:x},{count}").unwrap();
+    }
+
+    println!("dump_root_restarts_by_table: wrote {path} ({} tables)", global.len());
+}
+
 struct RestartPageStats {
     total: u64,
     by_site_key: HashMap<(&'static str, String), u64>,

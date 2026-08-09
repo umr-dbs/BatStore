@@ -30,5 +30,5 @@ pub mod database;
 pub mod transaction;
 
 pub use database::Database;
-pub use transaction::DbTransaction;
+pub use transaction::{DbTransaction, TransactionState};
 pub use crate::mv_wal::record::TableId;

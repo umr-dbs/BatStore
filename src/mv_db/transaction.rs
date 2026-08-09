@@ -76,6 +76,221 @@ pub enum TransactionState {
     Aborted
 }
 
+/// Shared by `DbTransaction::insert` and any other per-table-tree write path
+/// that needs the exact same insert semantics against a tree it holds
+/// directly, without a `DbTransaction` wrapping it — e.g.
+/// `mv_bench::tpcc_schema`'s size-class dispatch, where "which table" can
+/// mean a tree with a different `NUM_RECORDS` than the rest of the
+/// database, so it can't go through one `DbTransaction<FAN_OUT, NUM_RECORDS,
+/// ..>`'s uniformly-typed `tree(&self, table)` lookup. Returns whether the
+/// caller should record a `written` entry for this write — always `true`
+/// here (unlike `update_on_tree`, insert has no self-overwrite short-circuit
+/// that needs zero new entries).
+pub(crate) fn insert_on_tree<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + WalPayload,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    ts_start: Version,
+    key: Key,
+    payload: Payload,
+) -> (CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>, bool) {
+    let leaf_guard = tree.traversal_write_olc(key);
+    let leaf_deref_mut = leaf_guard.deref_mut();
+    let leaf_page = leaf_deref_mut.as_leaf_page();
+
+    if let Some(crud_error) = leaf_page
+        .as_records()
+        .iter()
+        .rfind(|r| r.key == key)
+        .filter(|r| r.version.is_live())
+        .map(|r|
+            if r.version.insertion_stamp().worker_id() != worker_id {
+                CRUDOperationResult::Conflict
+            } else {
+                CRUDOperationResult::ZeroAffected(KeyAlreadyExists)
+            })
+    {
+        return (crud_error, false)
+    }
+
+    let stamp = TxStamp::new(worker_id, ts_start);
+    tree.wal_log_write(stamp, |_| CRUDOperation::Insert(key, payload.clone()));
+
+    let current_len = leaf_page.len();
+
+    leaf_page.push_uncommitted(
+        RecordPoint::new(key, VersionInfo::new(stamp), payload),
+        current_len);
+
+    leaf_page.commit_delta(1, 0);
+
+    (CRUDOperationResult::Inserted(stamp.ts_start()), true)
+}
+
+/// See `insert_on_tree`'s doc. Returns `false` (no new `written` entry
+/// needed) for the self-overwrite fast path — mutating an already-open
+/// transaction's own uncommitted record in place mints no new physical
+/// version, so the `written` entry an earlier write in the same transaction
+/// already pushed for this key still covers it (see the inline comment
+/// below, carried over from the pre-extraction code).
+pub(crate) fn update_on_tree<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + WalPayload,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    ts_start: Version,
+    key: Key,
+    payload: Payload,
+) -> (CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>, bool) {
+    let leaf_guard = tree.traversal_write_olc(key);
+    let leaf_deref_mut = leaf_guard.deref_mut();
+    let leaf_page = leaf_deref_mut.as_leaf_page();
+
+    // See `DbTransaction::update`'s original inline comment (git history)
+    // for the full rationale: skip a physically-newest but `invalid`
+    // (since-aborted) entry, since its permanently-invisible stamp would
+    // otherwise report a spurious `Conflict` for every later writer of this
+    // key.
+    match leaf_page
+        .as_records_mut()
+        .iter_mut()
+        .rfind(|r| r.key() == key && !r.version.insertion_stamp().is_invalid())
+    {
+        Some(record) =>
+            if tree.is_visible_stamp(worker_id, ts_start, record.version.insertion_stamp()) {
+                let stamp = TxStamp::new(worker_id, ts_start);
+
+                tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
+
+                // Self-overwrite fast path — see `insert_on_tree`'s doc.
+                if record.version.insertion_stamp() == stamp {
+                    record.set_payload(payload);
+                    return (CRUDOperationResult::Updated(stamp.ts_start()), false);
+                }
+
+                if !record.version.delete(stamp) {
+                    return (CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted), false)
+                }
+
+                let current_len = leaf_page.len();
+
+                leaf_page.push_uncommitted(
+                    RecordPoint::new(key, VersionInfo::new(stamp), payload),
+                    current_len);
+
+                leaf_page.commit_delta(0, 1);
+
+                (CRUDOperationResult::Updated(stamp.ts_start()), true)
+            }
+            else {
+                (CRUDOperationResult::Conflict, false)
+            },
+        None => (CRUDOperationResult::ZeroAffected(KeyDoesNotExist), false),
+    }
+}
+
+/// See `insert_on_tree`'s doc.
+pub(crate) fn delete_on_tree<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + WalPayload,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    ts_start: Version,
+    key: Key,
+) -> (CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>, bool) {
+    let leaf_guard = tree.traversal_write_olc(key);
+    let leaf_deref_mut = leaf_guard.deref_mut();
+    let leaf_page = leaf_deref_mut.as_leaf_page();
+
+    match leaf_page
+        .as_records_mut()
+        .iter_mut()
+        .rfind(|r| r.key == key && !r.version.insertion_stamp().is_invalid())
+    {
+        Some(record) => if tree.is_visible_stamp(
+            worker_id,
+            ts_start,
+            record.version.insertion_stamp())
+        {
+            let stamp = TxStamp::new(worker_id, ts_start);
+            tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));
+
+            if record.version.delete(stamp) {
+                leaf_page.commit_delta(-1, 1);
+                (CRUDOperationResult::Deleted(stamp.ts_start()), true)
+            }
+            else {
+                (CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted), false)
+            }
+        }
+        else {
+            (CRUDOperationResult::Conflict, false)
+        },
+        None => (CRUDOperationResult::ZeroAffected(KeyDoesNotExist), false),
+    }
+}
+
+/// See `insert_on_tree`'s doc — the read-side counterpart. Always eager
+/// (`MatchedRecords`), same as `DbTransaction::point`.
+pub(crate) fn point_on_tree<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + WalPayload,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    ts_start: Version,
+    key: Key,
+) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
+    match tree.key_point_read_from_root(tree.retrieve_root_for(ts_start), key, worker_id, ts_start) {
+        CRUDOperationResult::MatchedRecords(v) => CRUDOperationResult::MatchedRecords(v),
+        other => panic!("mv_db::point_on_tree: expected MatchedRecords, got {other}"),
+    }
+}
+
+/// See `insert_on_tree`'s doc. Always eager, same as `DbTransaction::range`.
+pub(crate) fn range_on_tree<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + WalPayload,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    ts_start: Version,
+    range: Interval<Key>,
+) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
+    let scan = RangeQueryIter::new(tree, ts_start, range, false, worker_id);
+    CRUDOperationResult::MatchedRecords(scan.collect())
+}
+
+/// See `insert_on_tree`'s doc; see `DbTransaction::range_min`'s doc for why
+/// this needs a real in-leaf comparison rather than just `next()`.
+pub(crate) fn range_min_on_tree<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + WalPayload,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    ts_start: Version,
+    range: Interval<Key>,
+) -> Option<RecordPointResult<Key, Payload>> {
+    RangeQueryIter::new(tree, ts_start, range, false, worker_id).min_by_key()
+}
+
 pub struct DbTransaction<
     'a,
     const FAN_OUT: usize,
@@ -136,19 +351,13 @@ impl<
     /// function-local `Arc`, not a field borrowed for `'a` — see the module
     /// doc.
     pub fn point(&self, table: TableId, key: Key) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let tree = self.tree(table);
-        match tree.key_point_read_from_root(tree.retrieve_root_for(self.ts_start), key, self.worker_id, self.ts_start) {
-            CRUDOperationResult::MatchedRecords(v) => CRUDOperationResult::MatchedRecords(v),
-            other => panic!("mv_db::DbTransaction::point: expected MatchedRecords, got {other}"),
-        }
+        point_on_tree(&self.tree(table), self.worker_id, self.ts_start, key)
     }
 
     /// Range read against this transaction's fixed snapshot, on `table` —
     /// always eager, see the module doc for why.
     pub fn range(&self, table: TableId, range: Interval<Key>) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let tree = self.tree(table);
-        let scan = RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id);
-        CRUDOperationResult::MatchedRecords(scan.collect())
+        range_on_tree(&self.tree(table), self.worker_id, self.ts_start, range)
     }
 
     /// Like `range`, but only ever finds the record with the smallest key
@@ -162,8 +371,7 @@ impl<
     /// `mv_bench::tpcc_txn::deliver_one_district`'s "find the oldest queued
     /// new-order") no longer have to collect the entire range to get it.
     pub fn range_min(&self, table: TableId, range: Interval<Key>) -> Option<RecordPointResult<Key, Payload>> {
-        let tree = self.tree(table);
-        RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id).min_by_key()
+        range_min_on_tree(&self.tree(table), self.worker_id, self.ts_start, range)
     }
 
     // /// First-writer-wins check, on `table`: the physically newest version at
@@ -187,174 +395,29 @@ impl<
 
     pub fn insert(&self, table: TableId, key: Key, payload: Payload) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let tree = self.tree(table);
-        let leaf_guard = tree.traversal_write_olc(key);
-        let leaf_deref_mut = leaf_guard.deref_mut();
-        let leaf_page = leaf_deref_mut.as_leaf_page();
-
-        // if !self.newest_visible_to_me(&tree, leaf_page, key) {
-        //     return CRUDOperationResult::Conflict;
-        // }
-
-        if let Some(crud_error) = leaf_page
-            .as_records()
-            .iter()
-            .rfind(|r| r.key == key)
-            .filter(|r| r.version.is_live())
-            .map(|r|
-                if r.version.insertion_stamp().worker_id() != self.worker_id {
-                    CRUDOperationResult::Conflict
-                } else {
-                    CRUDOperationResult::ZeroAffected(KeyAlreadyExists)
-                })
-        {
-            return crud_error
+        let (result, track) = insert_on_tree(&tree, self.worker_id, self.ts_start, key, payload);
+        if track {
+            self.written.borrow_mut().push((table, key));
         }
-
-        let stamp = TxStamp::new(self.worker_id, self.ts_start);
-        tree.wal_log_write(stamp, |_| CRUDOperation::Insert(key, payload.clone()));
-
-        let current_len = leaf_page.len();
-
-        leaf_page.push_uncommitted(
-            RecordPoint::new(key, VersionInfo::new(stamp), payload),
-            current_len);
-
-        leaf_page.commit_delta(1, 0);
-
-        self.written.borrow_mut().push((table, key));
-        CRUDOperationResult::Inserted(stamp.ts_start())
+        result
     }
 
     pub fn update(&self, table: TableId, key: Key, payload: Payload) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let tree = self.tree(table);
-        let leaf_guard = tree.traversal_write_olc(key);
-        let leaf_deref_mut = leaf_guard.deref_mut();
-        let leaf_page = leaf_deref_mut.as_leaf_page();
-
-        // if !self.newest_visible_to_me(&tree, leaf_page, key) {
-        //     return CRUDOperationResult::Conflict;
-        // }
-
-        // Skip a physically-newest entry that's `invalid` (a since-aborted
-        // transaction's `Insert`/`Update`, left in place until the next SMO —
-        // see `LeafPage::apply_invalidate`'s doc): `is_visible_stamp` always
-        // reports an invalid stamp as *not visible, to anyone* (see
-        // `visibility::is_visible`'s doc — its own aborting writer included),
-        // since a reader must never see an aborted write. That's the right
-        // answer for a *read*, but wrong here — this is asking "is the
-        // current live state safe for me to overwrite", and treating a dead
-        // entry's invisibility as "someone else committed something newer"
-        // would report `Conflict` forever after any abort touched this key,
-        // even though `abort_write` already restored the true live
-        // predecessor underneath it. Mirrors `LeafPage::is_live_lineage`,
-        // which every abort/undelete path already searches by.
-        match leaf_page
-            .as_records_mut()
-            .iter_mut()
-            .rfind(|r| r.key() == key && !r.version.insertion_stamp().is_invalid())
-        {
-            Some(record) =>
-                if tree.is_visible_stamp(self.worker_id, self.ts_start, record.version.insertion_stamp()) {
-                    let stamp
-                        = TxStamp::new(self.worker_id, self.ts_start);
-
-                    tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
-
-                    // Self-overwrite fast path: the live record is already
-                    // *this exact transaction's own* write (same worker,
-                    // same `ts_start` — one `TxStamp` per transaction, not
-                    // per write), e.g. `mv_bench::tpcc_txn::new_order`
-                    // pricing two order-lines for the same item and writing
-                    // the same Stock key twice. Nobody but this transaction
-                    // can ever see an uncommitted write (visibility requires
-                    // either being this same worker, or finding the stamp in
-                    // the commit log — neither applies to anyone else here),
-                    // so there is no live/possible reader relying on this
-                    // record's *current* payload the way there would be for
-                    // an already-committed predecessor — replacing it in
-                    // place is unconditionally sound. Skips minting a new
-                    // physical version entirely: a busy transaction that
-                    // writes one key N times now leaves exactly one extra
-                    // physical entry behind instead of N, which is what was
-                    // piling up enough same-key, still-open-transaction-
-                    // protected garbage (`mv_tree::smo::record_survives_gc`)
-                    // to occasionally force a same-key leaf split (see
-                    // `bench_tpcc_stress_tests.rs`'s doc on that limitation).
-                    // No new `written` entry needed — the one pushed by
-                    // whichever earlier write in this transaction created
-                    // this record already covers it, and `abort_write` only
-                    // ever needs to unwind one physical version per key here
-                    // now.
-                    if record.version.insertion_stamp() == stamp {
-                        record.set_payload(payload);
-                        return CRUDOperationResult::Updated(stamp.ts_start());
-                    }
-
-                    if !record.version.delete(stamp) {
-                        return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
-                    }
-
-                    let current_len
-                        = leaf_page.len();
-
-                    leaf_page.push_uncommitted(
-                        RecordPoint::new(key, VersionInfo::new(stamp), payload),
-                        current_len);
-
-                    leaf_page.commit_delta(0, 1);
-
-                    self.written.borrow_mut().push((table, key));
-                    CRUDOperationResult::Updated(stamp.ts_start())
-                }
-                else {
-                    CRUDOperationResult::Conflict
-                },
-            None => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
+        let (result, track) = update_on_tree(&tree, self.worker_id, self.ts_start, key, payload);
+        if track {
+            self.written.borrow_mut().push((table, key));
         }
+        result
     }
 
     pub fn delete(&self, table: TableId, key: Key) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let tree = self.tree(table);
-        let leaf_guard = tree.traversal_write_olc(key);
-        let leaf_deref_mut = leaf_guard.deref_mut();
-        let leaf_page = leaf_deref_mut.as_leaf_page();
-
-        // if !self.newest_visible_to_me(&tree, leaf_page, key) {
-        //     return CRUDOperationResult::Conflict;
-        // }
-
-        // See `update`'s identical comment just above: skip a physically-
-        // newest but `invalid` (since-aborted) entry, or its permanently-
-        // invisible stamp reports a spurious `Conflict` for every later
-        // writer of this key.
-        match leaf_page
-            .as_records_mut()
-            .iter_mut()
-            .rfind(|r| r.key == key && !r.version.insertion_stamp().is_invalid())
-        {
-            Some(record) => if tree.is_visible_stamp(
-                self.worker_id,
-                self.ts_start,
-                record.version.insertion_stamp())
-            {
-                let stamp = TxStamp::new(self.worker_id, self.ts_start);
-                tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));
-
-                if record.version.delete(stamp) {
-                    leaf_page.commit_delta(-1, 1);
-                    self.written.borrow_mut().push((table, key));
-
-                    CRUDOperationResult::Deleted(stamp.ts_start())
-                }
-                else {
-                    CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
-                }
-            }
-            else {
-                CRUDOperationResult::Conflict
-            },
-            None => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
+        let (result, track) = delete_on_tree(&tree, self.worker_id, self.ts_start, key);
+        if track {
+            self.written.borrow_mut().push((table, key));
         }
+        result
     }
 
     pub const fn is_committed(&self) -> bool {
