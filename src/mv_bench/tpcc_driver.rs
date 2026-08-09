@@ -380,14 +380,14 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
             cfg.output_dir.join("tpcc_restart_trace.csv").to_str().unwrap());
         crate::mv_test::dump_attempt_histogram(
             cfg.output_dir.join("tpcc_attempt_histogram.csv").to_str().unwrap());
-        use crate::mv_bench::tpcc_schema::{BigTreeOp, Table, TpccKey, TpccRow, TPCC_FAN_OUT};
+        use crate::mv_bench::tpcc_schema::{BigTreeOp, Table, TpccKey, TpccRow};
 
         struct AddrOp;
         impl BigTreeOp for AddrOp {
             type Output = usize;
-            fn run<const NUM_RECORDS: usize>(
+            fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
                 self,
-                tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+                tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
             ) -> usize {
                 tree as *const _ as usize
             }
@@ -526,12 +526,15 @@ pub fn main_tpcc(parms: Vec<String>) {
     // Table::Warehouse/Table::District's leaf capacity — see
     // tpcc_schema::BigTreeSize's doc for the measured trade-off each named
     // size sits at (root-contention reduction vs. OLAP scan throughput).
-    let big_tree_size = match parms.get(21).map(|s| s.as_str()).unwrap_or("medium") {
-        "tiny" => crate::mv_bench::tpcc_schema::BigTreeSize::Tiny,
-        "small" => crate::mv_bench::tpcc_schema::BigTreeSize::Small,
-        "large" => crate::mv_bench::tpcc_schema::BigTreeSize::Large,
-        "huge" => crate::mv_bench::tpcc_schema::BigTreeSize::Huge,
-        _ => crate::mv_bench::tpcc_schema::BigTreeSize::Medium,
+    let big_tree_size = match parms.get(21).map(|s| s.as_str()).unwrap_or("32kib") {
+        "1kib" => crate::mv_bench::tpcc_schema::BigTreeSize::KiB1,
+        "2kib" => crate::mv_bench::tpcc_schema::BigTreeSize::KiB2,
+        "4kib" => crate::mv_bench::tpcc_schema::BigTreeSize::KiB4,
+        "8kib" => crate::mv_bench::tpcc_schema::BigTreeSize::KiB8,
+        "16kib" => crate::mv_bench::tpcc_schema::BigTreeSize::KiB16,
+        "64kib" => crate::mv_bench::tpcc_schema::BigTreeSize::KiB64,
+        "512kib" => crate::mv_bench::tpcc_schema::BigTreeSize::KiB512,
+        _ => crate::mv_bench::tpcc_schema::BigTreeSize::KiB32,
     };
 
     let (olap_mode, num_olap_threads) = match olap_mode_str.as_str() {
