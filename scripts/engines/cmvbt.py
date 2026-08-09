@@ -36,10 +36,18 @@ def ensure_built() -> None:
     subprocess.run(["cargo", "build", "--release", "--features", "mdbx-backend"], cwd=REPO_ROOT, check=True)
 
 
-def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True) -> common.NormalizedResult:
+def run(
+    workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True,
+    big_tree_size: str = "medium",
+) -> common.NormalizedResult:
     """`reload` is accepted for interface parity with postgres_benchbase.run() but unused -
     every cMVBT invocation is a fresh in-process population, there's no persisted state to
     reuse across sweep points.
+
+    `big_tree_size` (tiny/small/medium/large/huge) selects Table::Warehouse/Table::District's
+    leaf capacity - see tpcc_schema::BigTreeSize's doc - only wired through for the "tpcc"
+    workload (positional arg 21 to `cMVBT tpcc`, see tpcc_driver.rs::main_tpcc); left at the
+    binary's own "medium" default everywhere else.
     """
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -62,6 +70,9 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
             "false", gc_bool, "false", "fg", "scan_sweep", "1", "10.0",
             "100000", "3000", "3000", "true", str(wal_path), "5",
+            # Positions 18-20 (ch_region/num_suppliers/htap_baseline_secs) filled with the
+            # driver's own defaults so position 21 (big_tree_size) is reachable.
+            "EUROPE", "10000", "0", big_tree_size,
         ]
         metric_name = "new_order_per_sec"
         ts_file, ts_column = "tpcc_oltp_timeseries.csv", "new_order_committed"
