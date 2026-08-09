@@ -240,6 +240,18 @@ impl<
         self.tables.load().iter().find(|entry| entry.name == name).map(|entry| entry.tree.clone())
     }
 
+    /// Every table's name paired with its tree's stable identity address
+    /// (`Arc::as_ptr`, not the `Arc` handle's own stack slot — the same
+    /// pointee address every `Arc` clone of that table's tree shares for the
+    /// life of the process, since a table is created once and never moved or
+    /// freed). Diagnostic use only, e.g. resolving `mv_test`'s
+    /// per-tree-address restart attribution back to a table name.
+    pub fn table_names_by_addr(&self) -> Vec<(usize, String)> {
+        self.tables.load().iter()
+            .map(|entry| (Arc::as_ptr(&entry.tree) as usize, entry.name.clone()))
+            .collect()
+    }
+
     /// Opens one shared writer and attaches it to every table that exists
     /// right now — any table created *after* this call is caught up
     /// automatically by `create_table` (see its doc). Also establishes this
@@ -264,6 +276,15 @@ impl<
 
         self.wal.store(Some(writer));
         Ok(())
+    }
+
+    /// The live shared writer, if WAL is currently attached — lets a
+    /// wrapper like `mv_bench::tpcc_schema::TpccDatabase` attach the *same*
+    /// writer to trees it manages outside this `Database`'s own table list
+    /// (see that module's `TreeClass` doc), instead of each opening its own
+    /// file. `None` if WAL was never enabled (or was `disable_wal`'d).
+    pub(crate) fn wal_writer(&self) -> Option<sync::Arc<WalWriter<Key, Payload>>> {
+        self.wal.load_full()
     }
 
     pub fn disable_wal(&self) {

@@ -80,7 +80,7 @@ fn cross_table_transaction_is_atomic_across_tables() {
 fn first_writer_wins_conflict_holds_per_table_under_shared_ctx() {
     let db = TpccDatabase::new(RootIndexType::default());
     let d_key = k_district(1, 1);
-    assert!(matches!(db.tree_for(Table::District).dispatch_crud(CRUDOperation::Insert(d_key, sample_district())),
+    assert!(matches!(crate::mv_bench::tpcc_schema::dispatch_crud_big(&db, Table::District, CRUDOperation::Insert(d_key, sample_district())),
         CRUDOperationResult::Inserted(_)));
 
     let tx1 = TpccTxn::begin(&db);

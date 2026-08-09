@@ -165,6 +165,7 @@ impl<const FAN_OUT: usize,
             _ => {
                 if mv_test::RESTART_TRACE {
                     mv_test::ROOT_RESTARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    mv_test::record_root_restart_for_table(self as *const Self as usize);
                 }
                 Err(())
             }

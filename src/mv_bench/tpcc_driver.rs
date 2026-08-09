@@ -46,6 +46,11 @@ pub struct DriverConfig {
     pub gc: bool,
     pub update_in_place: bool,
     pub root_star_index: RootIndexType,
+    /// `Table::Warehouse`/`Table::District`'s leaf capacity — see
+    /// `mv_bench::tpcc_schema::BigTreeSize`'s doc for the measured
+    /// root-contention-vs-OLAP-scan-throughput trade-off each variant sits
+    /// at.
+    pub big_tree_size: crate::mv_bench::tpcc_schema::BigTreeSize,
     pub olap_mode: OlapMode,
     pub num_olap_threads: usize,
     /// Attaches a live WAL at this path *before* population, so the whole
@@ -206,7 +211,7 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
         .unwrap_or_else(|e| panic!("tpcc: failed to create output_dir {}: {e}", cfg.output_dir.display()));
     let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
-    let db = Arc::new(TpccDatabase::new(cfg.root_star_index));
+    let db = Arc::new(TpccDatabase::new_with_big_tree_size(cfg.root_star_index, cfg.big_tree_size));
     if cfg.gc {
         db.enable_gc(cfg.update_in_place);
     }
@@ -375,6 +380,24 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
             cfg.output_dir.join("tpcc_restart_trace.csv").to_str().unwrap());
         crate::mv_test::dump_attempt_histogram(
             cfg.output_dir.join("tpcc_attempt_histogram.csv").to_str().unwrap());
+        use crate::mv_bench::tpcc_schema::{BigTreeOp, Table, TpccKey, TpccRow, TPCC_FAN_OUT};
+
+        struct AddrOp;
+        impl BigTreeOp for AddrOp {
+            type Output = usize;
+            fn run<const NUM_RECORDS: usize>(
+                self,
+                tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+            ) -> usize {
+                tree as *const _ as usize
+            }
+        }
+        let mut table_names = db.db.table_names_by_addr();
+        table_names.push((db.dispatch_big(Table::Warehouse, AddrOp), "warehouse".to_string()));
+        table_names.push((db.dispatch_big(Table::District, AddrOp), "district".to_string()));
+        crate::mv_test::dump_root_restarts_by_table(
+            cfg.output_dir.join("tpcc_root_restarts_by_table.csv").to_str().unwrap(),
+            &table_names);
     }
 
     write_results(&terminal_stats, &scan_results, duration, actual_wall, baseline_tpm_c, &cfg.output_dir)
@@ -500,6 +523,16 @@ pub fn main_tpcc(parms: Vec<String>) {
     let ch_region: String = parms.get(18).cloned().unwrap_or_else(|| "EUROPE".to_string());
     let num_suppliers: u32 = arg(&parms, 19, 10_000);
     let htap_baseline_secs: u64 = arg(&parms, 20, 0);
+    // Table::Warehouse/Table::District's leaf capacity — see
+    // tpcc_schema::BigTreeSize's doc for the measured trade-off each named
+    // size sits at (root-contention reduction vs. OLAP scan throughput).
+    let big_tree_size = match parms.get(21).map(|s| s.as_str()).unwrap_or("medium") {
+        "tiny" => crate::mv_bench::tpcc_schema::BigTreeSize::Tiny,
+        "small" => crate::mv_bench::tpcc_schema::BigTreeSize::Small,
+        "large" => crate::mv_bench::tpcc_schema::BigTreeSize::Large,
+        "huge" => crate::mv_bench::tpcc_schema::BigTreeSize::Huge,
+        _ => crate::mv_bench::tpcc_schema::BigTreeSize::Medium,
+    };
 
     let (olap_mode, num_olap_threads) = match olap_mode_str.as_str() {
         "none" => (OlapMode::RepeatedFreshFullScan, 0),
@@ -540,6 +573,7 @@ pub fn main_tpcc(parms: Vec<String>) {
         gc,
         update_in_place,
         root_star_index,
+        big_tree_size,
         olap_mode,
         num_olap_threads,
         wal: wal_enabled.then(|| (std::path::PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
@@ -570,6 +604,7 @@ fn standard_driver_config(
         gc: true,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,
+        big_tree_size: Default::default(),
         olap_mode,
         num_olap_threads,
         wal: None,
