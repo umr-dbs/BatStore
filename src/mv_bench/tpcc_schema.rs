@@ -120,52 +120,120 @@ pub type TpccTree = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS,
 /// that trade-off an explicit, chosen point instead of a hand-picked
 /// number.
 ///
-/// Each variant's `NUM_RECORDS` is chosen the same way the base tree's 123
-/// was (see that constant's doc): empirically, so `OptCell<Block<..>>`
-/// (`Block` plus its 8B `cell_version`) lands exactly on a page-size
-/// multiple with zero waste, rather than spilling into the next allocator
-/// size class the way a round number (256, 1024, ...) would (confirmed:
-/// `size_of::<OptCell<Block<TPCC_FAN_OUT, 256, ..>>>()` is 8384B, not
-/// 8192B — it *overshoots* the boundary it looks like it should hit).
+/// Each `KiB8`..`KiB512` variant's `NUM_RECORDS` is chosen the same way the
+/// base tree's 123 was (see that constant's doc): empirically, so
+/// `OptCell<Block<..>>` (`Block` plus its 8B `cell_version`) lands exactly
+/// on a page-size multiple with zero waste, rather than spilling into the
+/// next allocator size class the way a round number (256, 1024, ...) would
+/// (confirmed: `size_of::<OptCell<Block<TPCC_FAN_OUT, 256, ..>>>()` is
+/// 8384B, not 8192B — it *overshoots* the boundary it looks like it should
+/// hit).
+///
+/// `KiB1`..`KiB4` go the other direction — smaller than the untouched
+/// 123/123 base tree, down toward the contention/height trade-off's other
+/// extreme. They can't reuse `TPCC_FAN_OUT` the way `KiB8`..`KiB512` do:
+/// `Block`'s size is `header(64B) + max(internal_size, leaf_size)` (a real
+/// Rust `union` of `InternalPage`/`LeafPage`, see `mv_page_model::node`),
+/// and `internal_size` is driven by `FAN_OUT`, not `NUM_RECORDS` — at
+/// `FAN_OUT = TPCC_FAN_OUT = 123`, `internal_size` alone is already 3944B,
+/// which floors `Block` at 4032B no matter how small `NUM_RECORDS` gets.
+/// Shrinking the leaf below 4KiB therefore means shrinking the internal
+/// fan-out right along with it — each of these three variants uses a
+/// symmetric `FAN_OUT = NUM_RECORDS` (the same shape the 123/123 base tree
+/// already has), which is also the zero-waste choice: `InternalPage`'s and
+/// `LeafPage`'s per-entry cost are both exactly 32B (see `RecordPoint`'s and
+/// `Interval`/`Version`/`BlockRef`'s sizes), so `internal_size(N) ==
+/// leaf_size(N)` and neither arm of the union wastes space against the
+/// other.
+///
+/// **There is no variant below `KiB1` (`N=27`).** Every split-push
+/// into an internal node *appends* 2 fresh entries rather than overwriting
+/// (`mv_tree::smo`'s `on_overflow_node`) — the superseded entry just goes
+/// dead until GC compacts it away — so a freshly-split node (2 live
+/// children) needs `FAN_OUT >= 4` just to have room for a single further
+/// push, and each subsequent push costs 2 more raw slots against a total
+/// budget of only `FAN_OUT` (`overflow_units_count() == FAN_OUT - 1`, see
+/// `mv_block::block_handle`). At `FAN_OUT = 3` that margin is exactly zero:
+/// a fresh root already sits at the overflow threshold, permanently, before
+/// it can accept even one push — confirmed as a genuine, concurrency-
+/// independent deadlock, not mere slowness (traced through `smo.rs`'s
+/// `lacks_room_for_split_entries`/`on_overflow_node`/`unsafe_degree_root`).
+/// Larger-but-still-small `FAN_OUT` compiles and is not *provably*
+/// deadlocked the same way, but empirically it degrades from "fine" to
+/// "indistinguishable from hung" once concurrency rises: the *active*-vs-
+/// *total* split-strategy decision only grows the "real" entry count by 1
+/// per push while burning 2 raw slots, so a small root is an extremely hot,
+/// nearly-saturated bottleneck that every concurrent writer funnels
+/// through. Measured directly: `FAN_OUT` = 5, 7, 9, *and 11* all ran cleanly
+/// at 1 warehouse/2 terminals but never completed (150s+ wall time for a
+/// 20s run, <15s of actual CPU work across all threads — a genuine stall,
+/// not slow-but-live progress) at just 2 warehouses/4 terminals. `FAN_OUT =
+/// 27` (`KiB1`) was the smallest value that held up at that same load
+/// *and* at 4 warehouses/8 terminals — still treat it as more contention-
+/// sensitive than `KiB2`/`KiB4`, not as unconditionally safe at
+/// arbitrary concurrency; nothing here was tested past 8 terminals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BigTreeSize {
-    /// 251 records/leaf, exactly 8KiB. Cheapest, but only trims
-    /// district/warehouse root restarts ~1.2-1.3x over the untouched
+    /// 27 records/leaf and 27 keys/internal-node, exactly 1KiB — the
+    /// smallest variant confirmed to hold up under concurrent load; see
+    /// this enum's own doc for why nothing smaller is offered.
+    KiB1,
+    /// 59 records/leaf and 59 keys/internal-node, exactly 2KiB.
+    KiB2,
+    /// 123 records/leaf and 123 keys/internal-node, exactly 4KiB — the same
+    /// shape as the untouched base/standard-table tree (`TPCC_FAN_OUT`/
+    /// `TPCC_NUM_RECORDS`), just built as its own separate `TreeClass::Big`
+    /// instance. The "no augmentation at all" reference point below `KiB8`.
+    KiB4,
+    /// 251 records/leaf, exactly 8KiB (`FAN_OUT` stays `TPCC_FAN_OUT`, only
+    /// the leaf grows). Cheapest of the "grow the leaf" variants, but only
+    /// trims district/warehouse root restarts ~1.2-1.3x over the untouched
     /// 123-record leaf — barely more than "off," kept as a reference point.
-    Tiny,
+    KiB8,
     /// 507 records/leaf, exactly 16KiB. ~2x/~1.6x root-restart reduction.
-    Small,
+    KiB16,
     /// 1019 records/leaf, exactly 32KiB. The measured sweet spot: OLAP scan
     /// throughput fully recovered (~100% of the untouched-leaf baseline)
     /// while district/warehouse root restarts are still down ~4.4x/~2.6x.
     #[default]
-    Medium,
+    KiB32,
     /// 2043 records/leaf, exactly 64KiB. ~8x/~4.6x root-restart reduction,
     /// at a real but moderate OLAP scan cost (~82% of baseline).
-    Large,
+    KiB64,
     /// 16379 records/leaf, exactly 512KiB. Maximum measured contention
     /// reduction (~32x/~18x), at a steep OLAP scan cost (~21% of baseline
     /// — see this constant group's own doc for the mechanism).
-    Huge,
+    KiB512,
 }
 
-pub const TPCC_BIG_TINY_NUM_RECORDS: usize = 251;
-pub const TPCC_BIG_SMALL_NUM_RECORDS: usize = 507;
-pub const TPCC_BIG_MEDIUM_NUM_RECORDS: usize = 1019;
-pub const TPCC_BIG_LARGE_NUM_RECORDS: usize = 2043;
-pub const TPCC_BIG_HUGE_NUM_RECORDS: usize = 16379;
+/// `FAN_OUT`/`NUM_RECORDS` for the sub-4KiB variants — symmetric (see
+/// `BigTreeSize`'s doc for why), so one constant per variant serves both
+/// generic parameters.
+pub const TPCC_BIG_KIB1_N: usize = 27;
+pub const TPCC_BIG_KIB2_N: usize = 59;
+pub const TPCC_BIG_KIB4_N: usize = 123;
+
+pub const TPCC_BIG_KIB8_NUM_RECORDS: usize = 251;
+pub const TPCC_BIG_KIB16_NUM_RECORDS: usize = 507;
+pub const TPCC_BIG_KIB32_NUM_RECORDS: usize = 1019;
+pub const TPCC_BIG_KIB64_NUM_RECORDS: usize = 2043;
+pub const TPCC_BIG_KIB512_NUM_RECORDS: usize = 16379;
 
 /// One concrete tree type per `BigTreeSize` variant — see that enum's doc.
 /// Built via `MVBTSt::make_with_shared_ctx` sharing the very same
 /// `Arc<TxContext>` as `TpccDatabase::db` (see `TpccDatabase::make_big_trees`)
-/// — only the physical leaf capacity differs from `TpccTree`, not the
-/// transactional core, so a `TpccTxn` spanning both a standard and a big
+/// — only the physical leaf capacity differs from `TpccTree` (and, for
+/// `KiB1`..`KiB4`, the internal fan-out too — see `BigTreeSize`'s doc), not
+/// the transactional core, so a `TpccTxn` spanning both a standard and a big
 /// table still commits/aborts as one atomic, snapshot-isolated unit.
-pub type TpccBigTreeTiny = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_TINY_NUM_RECORDS, TpccKey, TpccRow>;
-pub type TpccBigTreeSmall = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_SMALL_NUM_RECORDS, TpccKey, TpccRow>;
-pub type TpccBigTreeMedium = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_MEDIUM_NUM_RECORDS, TpccKey, TpccRow>;
-pub type TpccBigTreeLarge = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_LARGE_NUM_RECORDS, TpccKey, TpccRow>;
-pub type TpccBigTreeHuge = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_HUGE_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB1 = crate::mv_tree::mvbt::MVBTSt<TPCC_BIG_KIB1_N, TPCC_BIG_KIB1_N, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB2 = crate::mv_tree::mvbt::MVBTSt<TPCC_BIG_KIB2_N, TPCC_BIG_KIB2_N, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB4 = crate::mv_tree::mvbt::MVBTSt<TPCC_BIG_KIB4_N, TPCC_BIG_KIB4_N, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB8 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB8_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB16 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB16_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB32 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB32_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB64 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB64_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB512 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB512_NUM_RECORDS, TpccKey, TpccRow>;
 
 /// The two `TreeClass::Big` trees actually built for one `TpccDatabase`,
 /// at whichever `BigTreeSize` it was constructed with. A closed enum over
@@ -174,14 +242,17 @@ pub type TpccBigTreeHuge = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_H
 /// must be fixed at compile time, so "choose a size at runtime" means
 /// "choose among a handful of pre-compiled candidates," not "pick an
 /// arbitrary integer." See `TpccDatabase::dispatch_big` for how an
-/// operation reaches the right variant's trees without a 5-way match at
+/// operation reaches the right variant's trees without an 8-way match at
 /// every call site.
 pub(crate) enum BigTrees {
-    Tiny { warehouse: Arc<TpccBigTreeTiny>, district: Arc<TpccBigTreeTiny> },
-    Small { warehouse: Arc<TpccBigTreeSmall>, district: Arc<TpccBigTreeSmall> },
-    Medium { warehouse: Arc<TpccBigTreeMedium>, district: Arc<TpccBigTreeMedium> },
-    Large { warehouse: Arc<TpccBigTreeLarge>, district: Arc<TpccBigTreeLarge> },
-    Huge { warehouse: Arc<TpccBigTreeHuge>, district: Arc<TpccBigTreeHuge> },
+    KiB1 { warehouse: Arc<TpccBigTreeKiB1>, district: Arc<TpccBigTreeKiB1> },
+    KiB2 { warehouse: Arc<TpccBigTreeKiB2>, district: Arc<TpccBigTreeKiB2> },
+    KiB4 { warehouse: Arc<TpccBigTreeKiB4>, district: Arc<TpccBigTreeKiB4> },
+    KiB8 { warehouse: Arc<TpccBigTreeKiB8>, district: Arc<TpccBigTreeKiB8> },
+    KiB16 { warehouse: Arc<TpccBigTreeKiB16>, district: Arc<TpccBigTreeKiB16> },
+    KiB32 { warehouse: Arc<TpccBigTreeKiB32>, district: Arc<TpccBigTreeKiB32> },
+    KiB64 { warehouse: Arc<TpccBigTreeKiB64>, district: Arc<TpccBigTreeKiB64> },
+    KiB512 { warehouse: Arc<TpccBigTreeKiB512>, district: Arc<TpccBigTreeKiB512> },
 }
 
 /// Picks `warehouse` or `district` out of one `BigTrees` arm — generic over
@@ -197,17 +268,23 @@ fn pick_big<'x, T>(table: Table, warehouse: &'x Arc<T>, district: &'x Arc<T>) ->
 }
 
 /// One `TreeClass::Big`-only operation, generic over whichever concrete
-/// `NUM_RECORDS` `TpccDatabase::dispatch_big` resolves it against — see
-/// that method's doc. Implementors are small, single-use structs holding
+/// `FAN_OUT`/`NUM_RECORDS` `TpccDatabase::dispatch_big` resolves it against —
+/// see that method's doc. Implementors are small, single-use structs holding
 /// an operation's parameters (e.g. `TpccTxn`'s `InsertOp { worker_id,
 /// ts_start, key, payload }`), each implementing `run` by calling straight
 /// into the same `mv_db::transaction::{insert_on_tree, ..}` free functions
 /// `DbTransaction` itself uses.
+///
+/// Generic over `FAN_OUT` too (not just `NUM_RECORDS`, as before the
+/// sub-4KiB `BigTreeSize` variants existed): those variants shrink the
+/// internal-node fan-out along with leaf capacity — see `BigTreeSize`'s
+/// doc — so they no longer share `TPCC_FAN_OUT` with the KiB8..KiB512
+/// variants above them.
 pub(crate) trait BigTreeOp {
     type Output;
-    fn run<const NUM_RECORDS: usize>(
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
         self,
-        tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+        tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) -> Self::Output;
 }
 
@@ -223,8 +300,8 @@ pub(crate) trait BigTreeOp {
 /// doc: "range is always eager"). Every other variant carries no such data,
 /// so re-wrapping it under different const generics changes nothing about
 /// its actual content.
-pub(crate) fn normalize<'a, const NUM_RECORDS_FROM: usize>(
-    r: CRUDOperationResult<'a, TPCC_FAN_OUT, NUM_RECORDS_FROM, TpccKey, TpccRow>,
+pub(crate) fn normalize<'a, const FAN_OUT_FROM: usize, const NUM_RECORDS_FROM: usize>(
+    r: CRUDOperationResult<'a, FAN_OUT_FROM, NUM_RECORDS_FROM, TpccKey, TpccRow>,
 ) -> CRUDOperationResult<'static, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow> {
     match r {
         CRUDOperationResult::MatchedRecords(v) => CRUDOperationResult::MatchedRecords(v),
@@ -259,9 +336,9 @@ pub fn dispatch_crud_big(
     struct DispatchCrudOp(crate::mv_crud_model::crud_operation::CRUDOperation<TpccKey, TpccRow>);
     impl BigTreeOp for DispatchCrudOp {
         type Output = CRUDOperationResult<'static, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
-        fn run<const NUM_RECORDS: usize>(
+        fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
             self,
-            tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+            tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
         ) -> Self::Output {
             normalize(tree.dispatch_crud(self.0))
         }
@@ -422,7 +499,7 @@ fn dec_key(k: TpccKey) -> TpccKey { k.checked_sub(1).unwrap_or(TpccKey::MIN) }
 
 impl TpccDatabase {
     /// Same as `new_with_big_tree_size`, at `BigTreeSize::default()`
-    /// (`Medium` — the measured sweet spot, see that enum's doc). Kept as
+    /// (`KiB32` — the measured sweet spot, see that enum's doc). Kept as
     /// the default constructor so every pre-existing caller (tests, the
     /// TPC-C driver's own default path) keeps working unchanged.
     pub fn new(root_index_type: RootIndexType) -> Self {
@@ -489,11 +566,14 @@ impl TpccDatabase {
             };
         }
         match size {
-            BigTreeSize::Tiny => { let (warehouse, district) = build!(TpccBigTreeTiny); BigTrees::Tiny { warehouse, district } }
-            BigTreeSize::Small => { let (warehouse, district) = build!(TpccBigTreeSmall); BigTrees::Small { warehouse, district } }
-            BigTreeSize::Medium => { let (warehouse, district) = build!(TpccBigTreeMedium); BigTrees::Medium { warehouse, district } }
-            BigTreeSize::Large => { let (warehouse, district) = build!(TpccBigTreeLarge); BigTrees::Large { warehouse, district } }
-            BigTreeSize::Huge => { let (warehouse, district) = build!(TpccBigTreeHuge); BigTrees::Huge { warehouse, district } }
+            BigTreeSize::KiB1 => { let (warehouse, district) = build!(TpccBigTreeKiB1); BigTrees::KiB1 { warehouse, district } }
+            BigTreeSize::KiB2 => { let (warehouse, district) = build!(TpccBigTreeKiB2); BigTrees::KiB2 { warehouse, district } }
+            BigTreeSize::KiB4 => { let (warehouse, district) = build!(TpccBigTreeKiB4); BigTrees::KiB4 { warehouse, district } }
+            BigTreeSize::KiB8 => { let (warehouse, district) = build!(TpccBigTreeKiB8); BigTrees::KiB8 { warehouse, district } }
+            BigTreeSize::KiB16 => { let (warehouse, district) = build!(TpccBigTreeKiB16); BigTrees::KiB16 { warehouse, district } }
+            BigTreeSize::KiB32 => { let (warehouse, district) = build!(TpccBigTreeKiB32); BigTrees::KiB32 { warehouse, district } }
+            BigTreeSize::KiB64 => { let (warehouse, district) = build!(TpccBigTreeKiB64); BigTrees::KiB64 { warehouse, district } }
+            BigTreeSize::KiB512 => { let (warehouse, district) = build!(TpccBigTreeKiB512); BigTrees::KiB512 { warehouse, district } }
         }
     }
 
@@ -507,11 +587,14 @@ impl TpccDatabase {
     /// `Table::Warehouse`/`Table::District`.
     pub(crate) fn dispatch_big<Op: BigTreeOp>(&self, table: Table, op: Op) -> Op::Output {
         match &self.big_trees {
-            BigTrees::Tiny { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::Small { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::Medium { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::Large { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::Huge { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB1 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB2 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB4 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB8 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB16 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB32 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB64 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB512 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
         }
     }
 
@@ -545,33 +628,42 @@ impl TpccDatabase {
     pub fn enable_gc(&self, update_in_place: bool) {
         self.db.enable_gc(update_in_place);
         match &self.big_trees {
-            BigTrees::Tiny { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::Small { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::Medium { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::Large { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::Huge { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::KiB1 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::KiB2 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::KiB4 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::KiB8 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::KiB16 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::KiB32 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::KiB64 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::KiB512 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
         }
     }
 
     pub fn disable_gc(&self) {
         self.db.disable_gc();
         match &self.big_trees {
-            BigTrees::Tiny { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::Small { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::Medium { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::Large { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::Huge { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::KiB1 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::KiB2 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::KiB4 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::KiB8 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::KiB16 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::KiB32 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::KiB64 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::KiB512 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
         }
     }
 
     pub fn truncate_commit_log(&self, enabled: bool) {
         self.db.allow_historic_query(enabled);
         match &self.big_trees {
-            BigTrees::Tiny { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::Small { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::Medium { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::Large { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::Huge { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::KiB1 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::KiB2 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::KiB4 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::KiB8 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::KiB16 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::KiB32 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::KiB64 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::KiB512 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
         }
     }
 
@@ -638,11 +730,14 @@ impl TpccDatabase {
             }};
         }
         match &big_trees {
-            BigTrees::Tiny { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::Small { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::Medium { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::Large { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::Huge { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::KiB1 { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::KiB2 { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::KiB4 { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::KiB8 { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::KiB16 { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::KiB32 { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::KiB64 { warehouse, district } => replay_and_attach!(warehouse, district),
+            BigTrees::KiB512 { warehouse, district } => replay_and_attach!(warehouse, district),
         }
 
         Ok(Self { db, table_ids, big_trees })
@@ -658,11 +753,14 @@ impl TpccDatabase {
         self.db.enable_wal(wal_path, flush_interval)?;
         if let Some(writer) = self.db.wal_writer() {
             match &self.big_trees {
-                BigTrees::Tiny { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::Small { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::Medium { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::Large { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::Huge { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::KiB1 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::KiB2 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::KiB4 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::KiB8 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::KiB16 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::KiB32 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::KiB64 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
+                BigTrees::KiB512 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
             }
         }
         Ok(())

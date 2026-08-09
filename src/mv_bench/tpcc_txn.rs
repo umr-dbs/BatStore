@@ -76,7 +76,7 @@ pub struct TpccTxn<'a> {
 struct PointOp { worker_id: WorkerId, ts_start: Version, key: TpccKey }
 impl BigTreeOp for PointOp {
     type Output = Res<'static>;
-    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Res<'static> {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Res<'static> {
         normalize(point_on_tree(tree, self.worker_id, self.ts_start, self.key))
     }
 }
@@ -84,7 +84,7 @@ impl BigTreeOp for PointOp {
 struct RangeOp { worker_id: WorkerId, ts_start: Version, range: Interval<TpccKey> }
 impl BigTreeOp for RangeOp {
     type Output = Res<'static>;
-    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Res<'static> {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Res<'static> {
         normalize(range_on_tree(tree, self.worker_id, self.ts_start, self.range))
     }
 }
@@ -92,7 +92,7 @@ impl BigTreeOp for RangeOp {
 struct RangeMinOp { worker_id: WorkerId, ts_start: Version, range: Interval<TpccKey> }
 impl BigTreeOp for RangeMinOp {
     type Output = Option<RecordPointResult<TpccKey, TpccRow>>;
-    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
         range_min_on_tree(tree, self.worker_id, self.ts_start, self.range)
     }
 }
@@ -100,7 +100,7 @@ impl BigTreeOp for RangeMinOp {
 struct InsertOp { worker_id: WorkerId, ts_start: Version, key: TpccKey, payload: TpccRow }
 impl BigTreeOp for InsertOp {
     type Output = (Res<'static>, bool);
-    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
         let (r, track) = insert_on_tree(tree, self.worker_id, self.ts_start, self.key, self.payload);
         (normalize(r), track)
     }
@@ -109,7 +109,7 @@ impl BigTreeOp for InsertOp {
 struct UpdateOp { worker_id: WorkerId, ts_start: Version, key: TpccKey, payload: TpccRow }
 impl BigTreeOp for UpdateOp {
     type Output = (Res<'static>, bool);
-    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
         let (r, track) = update_on_tree(tree, self.worker_id, self.ts_start, self.key, self.payload);
         (normalize(r), track)
     }
@@ -118,7 +118,7 @@ impl BigTreeOp for UpdateOp {
 struct DeleteOp { worker_id: WorkerId, ts_start: Version, key: TpccKey }
 impl BigTreeOp for DeleteOp {
     type Output = (Res<'static>, bool);
-    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
         let (r, track) = delete_on_tree(tree, self.worker_id, self.ts_start, self.key);
         (normalize(r), track)
     }
@@ -127,7 +127,7 @@ impl BigTreeOp for DeleteOp {
 struct WalCommitOp { stamp: TxStamp, ts_commit: Version }
 impl BigTreeOp for WalCommitOp {
     type Output = ();
-    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) {
         tree.wal_log_commit(self.stamp, self.ts_commit)
     }
 }
@@ -135,7 +135,7 @@ impl BigTreeOp for WalCommitOp {
 struct AbortWriteOp { key: TpccKey, stamp: TxStamp }
 impl BigTreeOp for AbortWriteOp {
     type Output = ();
-    fn run<const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) {
         tree.abort_write(self.key, self.stamp)
     }
 }
