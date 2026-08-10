@@ -217,3 +217,64 @@ TPC-C/YCSB driver, not a synthetic WAL-only microbenchmark) at a deliberately ti
 under 20s wall time combined, RSS growth asserted under a 20GB ceiling - so a regression
 like either bug above gets caught on every `cargo test`, not only in the full-scale,
 `#[ignore]`d comparison this section started from.
+
+## Second follow-up: re-profiling after the WAL fixes above surfaced two new hotspots
+
+With the WAL append path no longer the dominant cost (channel contention fixed, CRC32
+table-driven, lock-free option available), a short re-profiling pass - `perf record -F 999
+-g --call-graph fp` on the `profiling` build, 15s TPC-C (8 warehouses/16 threads) and
+YCSB-A (1M records/16 threads) runs, WAL on (batched/sharded backend) - found two new,
+purely allocator-side hotspots that used to be masked by the channel contention this doc's
+fix #3 removed.
+
+**Hotspot #1: a flush ticket built on every write, and discarded on every write.**
+`WalWriter::enqueue` constructed a fresh `crossbeam_channel::bounded(1)` on *every* call to
+return a "flush ticket" (`Receiver<()>`). Checked every production call site
+(`mv_sync::version_handle`): the ticket is always discarded - nothing in production ever
+calls `wait_flushed`. This showed up directly: `crossbeam_channel::channel::bounded` at
+1.7% self-time on the TPC-C profile, plus its own `RawVecInner::finish_grow`/allocator
+churn. **Fix:** split each logging method (`log_with_stamp`/`log_commit`/the `_for_table`
+variants/`start_commit_logged`/`start_commit_logged_for_table`) into a ticket-less default
+(no channel built at all - matches every real caller) plus an explicit `*_with_ticket`
+variant for the handful of tests that genuinely wait on one record.
+
+**Hotspot #2: framing buffers sized for the wrong payload.** Every framing call used a
+hardcoded `Vec::with_capacity(24..44)`, tuned for this module's own `u64`-payload tests.
+Real payloads are far bigger: `YcsbRow` (10 fields x 100 bytes = 1000 bytes) is roughly
+**25x** that capacity; `TpccRow` variants like `Customer`/`Stock` routinely run 300-400+
+bytes, 7-10x over. Every WAL write on a real workload was paying for several grow-and-copy
+reallocations during encoding - visible as `RawVecInner::finish_grow`/`do_rallocx` costing
+7.1% self-time on TPC-C, and a large chain of kernel page-fault handling
+(`alloc_pages_mpol`/`get_page_from_freelist`/a real `native_queued_spin_lock_slowpath` at
+7.4% self-time) on YCSB, where the undersizing is worst. **Fix:** added
+`WalPayload::wal_encode_size_hint()` (default `8`, exact for the base `u64` payload), with
+exact overrides for `YcsbRow` (`4 + self.len()`, trivial since the length is already known)
+and `TpccRow` (mirrors `wal_encode` field-for-field, so it always matches what's about to
+be written). `record::entry_size_hint()` combines this with the fixed header/frame
+overhead; every hardcoded constant in `writer.rs`/`lockfree_writer.rs` was swapped for it.
+
+**Results**, same short runs the analysis used, before vs. after both fixes:
+
+| Metric | Before | After | Change |
+|---|---|---|---|
+| TPC-C, WAL on (tpmC) | 2,675,157 | 3,013,193 | **+12.6%** |
+| YCSB-A, WAL on (ops/sec) | 1,374,921 | 1,723,455 | **+25.3%** |
+| Synthetic `WalWriter` @ 16 threads, `u64` payload (`wal_writer_throughput_bench.rs`) | 1,353,816 ops/s | 2,427,071 ops/s | **+79%** |
+
+The synthetic case gained the most: against an 8-byte payload, the discarded ticket's
+channel allocation *was* essentially the entire per-write cost once the payload itself was
+already correctly sized (`u64`'s hint was exact from the start), so removing it alone
+nearly doubled throughput. `crossbeam_channel::channel::bounded` no longer appears in the
+TPC-C profile at all; `RawVecInner::finish_grow`'s self-time dropped from 7.1% to 3.0%.
+
+**Not fully closed:** YCSB's page-fault/allocator chain is smaller but still present -
+right-sizing the buffer removed the grow-and-copy, but a fresh ~1000-byte `Vec` allocated
+per write is still a fresh allocation per write. A true buffer pool (reuse across calls,
+recycled once the flush thread frees it) would close this further, but needs solving
+cross-thread buffer ownership - the bytes have to travel through the channel to the flush
+thread, so a simple thread-local scratch buffer doesn't compose with that directly. Flagged
+as a candidate for a future pass, not attempted here.
+
+Verified: full 126-test suite passes; `wal_writer_tests.rs`/`wal_recovery_tests.rs` updated
+to call the new `_with_ticket` methods where they actually wait on a specific record's
+flush.
