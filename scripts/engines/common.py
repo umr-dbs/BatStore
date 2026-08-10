@@ -67,6 +67,27 @@ NUMA_NODE = 0
 # distro by default.
 SCRATCH_ROOT = Path(os.environ.get("SCRATCH_ROOT", "/dev/shm/cmvbt_bench_scratch"))
 
+# Global allocator cMVBT's own binary is built with - see Cargo.toml's `mimalloc`
+# feature and src/main.rs's global-allocator cfg (jemalloc is the crate's own default;
+# mimalloc measured a few % *worse* on TPC-C despite winning a few % on YCSB's WAL path,
+# so it stays opt-in rather than becoming the default there too). Read fresh from the
+# environment on every call (not cached at import time) so compare_engines.py's
+# --cmvbt-allocator flag can set it right before either cmvbt.py's or libmdbx.py's
+# ensure_built() runs - both build the exact same binary (see their own module docs),
+# so this one helper is the single place that decides the cargo invocation for either.
+def cmvbt_cargo_build_args(*extra_features: str) -> list[str]:
+    allocator = os.environ.get("CMVBT_ALLOCATOR", "jemalloc")
+    args = ["cargo", "build", "--release"]
+    if allocator == "mimalloc":
+        args.append("--features")
+        args.append(",".join(("mimalloc",) + extra_features))
+    elif allocator == "jemalloc":
+        if extra_features:
+            args += ["--features", ",".join(extra_features)]
+    else:
+        raise ValueError(f"unknown CMVBT_ALLOCATOR={allocator!r} (expected 'jemalloc' or 'mimalloc')")
+    return args
+
 
 def numactl_prefix() -> list:
     return ["numactl", f"--cpubind={NUMA_NODE}", f"--membind={NUMA_NODE}"]

@@ -278,3 +278,70 @@ as a candidate for a future pass, not attempted here.
 Verified: full 126-test suite passes; `wal_writer_tests.rs`/`wal_recovery_tests.rs` updated
 to call the new `_with_ticket` methods where they actually wait on a specific record's
 flush.
+
+## Third follow-up: chasing the still-open per-write allocation
+
+Picking back up the "not fully closed" item above - the fresh `Vec` still allocated per
+write in `WalWriter::log_with_stamp_impl`, whose bytes then travel through the channel to
+be freed on a *different* thread (the flush thread).
+
+**Dead end: a thread-local scratch buffer on `LockFreeWalWriter`.** Reasoned that the
+*lock-free* writer's `log_with_stamp`/`log_commit` (and `_for_table` variants) don't have
+`WalWriter`'s cross-thread problem at all - they `pwrite` synchronously on the calling
+thread, so a plain `thread_local! { RefCell<Vec<u8>> }`, cleared and reused per call, should
+be a strict win with none of the cross-thread-ownership complexity. Implemented and
+verified correct (55/55 WAL tests pass), but tracing the actual call graph found it
+**dead weight**: every real caller of `LockFreeWalWriter` goes through `LockFreeWalBackend`
+(`mv_wal/backend.rs`), whose `log_with_stamp`/`log_commit` always call
+`LocalBatch::push_write`/`push_commit` first - appending into `LocalBatch`'s own
+persistent `bytes: Vec<u8>` (cleared, not dropped, on every `flush_batch`) - before ever
+reaching the raw method that was patched. That's true even at `batch_size: 1`. So the only
+callers that ever hit the unbatched method directly were this module's own unit tests and
+`wal_writer_throughput_bench.rs`'s deliberately-unbatched comparison arm - not production,
+not any driver benchmark. **Reverted** rather than keep a change with no real effect.
+
+**Allocator swap experiment: mimalloc, opt-in, kept off by default.** The genuine
+cross-thread pattern lives in `WalWriter`: one thread mallocs the framed buffer, the flush
+thread frees it once its bytes are copied into that cycle's combined batch (`flush_loop`,
+`writer.rs`). jemalloc's per-thread arenas route a cross-thread free back to the *owning*
+arena, which needs locking that arena's bin; mimalloc instead gives every page a lock-free
+"thread-free list" a foreign thread's `free()` can push onto without any lock - a design
+its own benchmarks call out for exactly this producer-consumer shape. Added an opt-in
+`mimalloc` Cargo feature (`Cargo.toml`, `src/main.rs`) that swaps `MiMalloc` in as
+`#[global_allocator]`; `mv_bench::mem_stats::read_jemalloc_stats` now returns `None` under
+that feature instead of reporting stats from an idle jemalloc arena (the allocator-
+independent `VmRSS` column, and `scripts/plot_suite.py`'s RSS-over-time plots, are
+unaffected either way).
+
+Measured end to end (real driver, not the synthetic writer microbenchmark, which was too
+noisy on this machine - run-to-run variance up to ~40% with *no* code change at all,
+swamping any allocator effect):
+
+| Backend | Workload | jemalloc | mimalloc | Change |
+|---|---|---|---|---|
+| `batched` (`WalWriter`, has the cross-thread free) | YCSB-A, 8 threads | 1,744,821 ops/s | 1,797,272 ops/s | **+3.0%** |
+| `batched` | YCSB-A, 16 threads | 2,011,806 ops/s | 2,057,250 ops/s | **+2.3%** |
+| `lockfree-batch16`/`64` (`LocalBatch`, no cross-thread free) | YCSB-A, 8/16 threads | - | - | -1.3% .. +0.3% (noise) |
+| `batched` | TPC-C, 2 terminals | 1,772,013 tpmC | 1,712,769 tpmC | **-3.3%** |
+| `batched` | TPC-C, 4 terminals | 2,762,752 tpmC | 2,626,646 tpmC | **-4.9%** |
+| `lockfree-batch16`/`64` | TPC-C, 2/4 terminals | - | - | **-0.1% .. -4.1%** (also down) |
+
+The YCSB result is mechanistically clean: a real gain specifically on the one backend with
+the cross-thread free, a wash on the two backends that never had it. TPC-C tells the
+opposite story - mimalloc is worse across *every* backend, including the `LocalBatch` ones
+that have nothing to do with this allocation pattern, all 6 (backend x terminal-count)
+combinations moving the same direction (a ~1.6% chance of that being pure noise). Net:
+mimalloc trades a small, mechanism-specific YCSB win for a broader, workload-level TPC-C
+loss - **not** adopted as the default allocator (jemalloc stays `#[global_allocator]`),
+kept as an opt-in feature. `scripts/engines/common.py::cmvbt_cargo_build_args()` (read from
+`CMVBT_ALLOCATOR`) plus `compare_engines.py --cmvbt-allocator {jemalloc,mimalloc}` let a
+future comparison run pick either without editing `Cargo.toml`.
+
+**Still not fully closed.** Neither of the two things tried here actually eliminates the
+per-write allocation in `WalWriter` - the thread-local buffer doesn't compose with a value
+that has to cross threads, and the allocator swap only makes the free cheaper (and only
+helps one of the two workloads tested). The buffer-pool design flagged in the previous
+follow-up - a bounded pool of reusable buffers per shard, with buffers returned to the pool
+right after `flush_loop` copies their bytes into the batch buffer (well before the
+`pwrite`/`fsync`, so the pool doesn't need to wait on durability) - remains the candidate
+that would close this for real, and is still unimplemented.

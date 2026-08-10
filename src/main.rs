@@ -32,15 +32,23 @@ mod mv_db;
 mod mv_viz;
 
 use crate::mv_sync::smart_cell::OptCell;
-#[cfg(not(miri))]
+#[cfg(all(not(miri), not(feature = "mimalloc")))]
 use jemallocator::Jemalloc;
+#[cfg(feature = "mimalloc")]
+use mimalloc::MiMalloc;
 use crate::mv_bench::tpcc_schema::{TpccKey, TpccRow};
 
-// Miri interprets pure Rust/LLVM IR only — it can't run jemalloc's FFI'd C,
-// so this swaps in the default (System) allocator under `cargo miri`.
-#[cfg(not(miri))]
+// Miri interprets pure Rust/LLVM IR only — it can't run either allocator's
+// FFI'd C, so this swaps in the default (System) allocator under `cargo
+// miri`. The `mimalloc` feature (see `Cargo.toml`) swaps jemalloc for
+// mimalloc as an A/B experiment - see that feature's doc for why.
+#[cfg(all(not(miri), not(feature = "mimalloc")))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
+
+#[cfg(all(not(miri), feature = "mimalloc"))]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() {
     startup();

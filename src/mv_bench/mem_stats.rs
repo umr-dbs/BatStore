@@ -52,10 +52,15 @@ struct JemallocStats {
 fn read_jemalloc_stats() -> Option<JemallocStats> {
     // Miri interprets pure Rust/LLVM IR only — it can't call into jemalloc's
     // FFI'd C, and `main.rs` already swaps the global allocator out for
-    // Miri builds, so there's no real jemalloc to query anyway.
-    #[cfg(miri)]
+    // Miri builds, so there's no real jemalloc to query anyway. Same idea
+    // for the `mimalloc` feature (see `main.rs`/`Cargo.toml`): jemalloc's
+    // own arena sits idle when it isn't the `#[global_allocator]`, so its
+    // stats would read as stale/near-zero noise rather than real numbers -
+    // report `None` (the allocator-independent `VmRSS` column still works)
+    // instead of a misleading jemalloc reading.
+    #[cfg(any(miri, feature = "mimalloc"))]
     return None;
-    #[cfg(not(miri))]
+    #[cfg(not(any(miri, feature = "mimalloc")))]
     {
     jemalloc_ctl::epoch::advance().ok()?;
     Some(JemallocStats {

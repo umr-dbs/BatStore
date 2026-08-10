@@ -44,6 +44,15 @@ mdbx-backend = ["dep:libmdbx"]
 # anything the benchmark/paper path needs, so its `serde`/`serde_json` deps
 # stay out of the default build.
 tree-viz = ["dep:serde", "dep:serde_json"]
+# Swaps the global allocator from jemalloc to mimalloc (see `main.rs`) - an
+# A/B experiment for the WAL writer's cross-thread alloc/free pattern (buffer
+# allocated on a worker thread, freed on the flush thread): mimalloc's
+# per-page lock-free "thread free list" targets exactly that producer-
+# consumer pattern, unlike jemalloc's cross-arena free. When this is on,
+# `mv_bench::mem_stats`'s jemalloc-specific stats columns read as zero (no
+# real jemalloc arena is active) - use the allocator-independent VmRSS
+# column instead.
+mimalloc = ["dep:mimalloc"]
 
 #[lib]
 #name = "cmvbt"
@@ -72,6 +81,7 @@ libc = "0.2.189"
 num_cpus = "1.17"
 jemallocator = "0.5.4"
 jemalloc-ctl = "0.5.4"
+mimalloc = { version = "0.1", optional = true }
 triomphe = "0.1.16"
 
 [dev-dependencies]
