@@ -281,17 +281,41 @@ pub fn encode_entry_for_table_framed<Key: Ord + Copy + Hash + Display, Payload: 
     out.extend_from_slice(&crc.to_le_bytes());
 }
 
-/// Standard (IEEE) CRC-32, implemented by hand to avoid pulling in a
-/// dependency and to stay stable across toolchains/versions (unlike e.g.
-/// `DefaultHasher`, whose algorithm is explicitly not guaranteed stable).
+/// Every possible byte's contribution to the running CRC, precomputed once
+/// at compile time (same reflected IEEE-802.3 polynomial, `0xEDB8_8320`, the
+/// bit-loop below used to apply 8 shift-xor steps at a time per byte) — see
+/// `crc32`'s doc for why this table exists instead of just that loop.
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut byte = 0usize;
+    while byte < 256 {
+        let mut crc = byte as u32;
+        let mut _bit = 0;
+        while _bit < 8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            _bit += 1;
+        }
+        table[byte] = crc;
+        byte += 1;
+    }
+    table
+};
+
+/// Standard (IEEE) CRC-32, implemented by hand (table-driven — see
+/// `CRC32_TABLE`) to avoid pulling in a dependency and to stay stable across
+/// toolchains/versions (unlike e.g. `DefaultHasher`, whose algorithm is
+/// explicitly not guaranteed stable). Same output as the straightforward
+/// byte-at-a-time bit-loop this replaced: profiling a write-heavy workload
+/// found that loop (8 branchy shift-xor steps per byte, inlined into every
+/// call site via `encode_entry_framed`) costing over 20% of total CPU time,
+/// since it runs on every single WAL record's body. One table lookup per
+/// byte instead of 8 shift-xor steps is the standard fix.
 pub fn crc32(bytes: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in bytes {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
+        let idx = ((crc ^ byte as u32) & 0xFF) as usize;
+        crc = (crc >> 8) ^ CRC32_TABLE[idx];
     }
     !crc
 }
@@ -408,5 +432,25 @@ pub fn resync_next<T>(bytes: &[u8], decode: impl Fn(&[u8]) -> Option<T>) -> Opti
         skip += 1;
     }
     None
+}
+
+#[cfg(test)]
+mod crc32_tests {
+    use super::crc32;
+
+    /// The standard CRC-32/ISO-HDLC check value for the ASCII string
+    /// "123456789" — the reference test vector every implementation of this
+    /// polynomial is checked against. Pins the table-driven implementation
+    /// to the exact same algorithm the byte-at-a-time bit-loop it replaced
+    /// computed.
+    #[test]
+    fn matches_standard_check_value() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn empty_input() {
+        assert_eq!(crc32(b""), 0x0000_0000);
+    }
 }
 

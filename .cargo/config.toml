@@ -1,0 +1,11 @@
+# `rustflags` only has an effect here, in `.cargo/config.toml` — it was
+# previously (and silently, uselessly) set under a `[build]` table in
+# Cargo.toml itself, which cargo does not read `rustflags` from (it warns
+# "unused manifest key: build" and ignores it). The whole crate has been
+# building for the generic x86-64 baseline (no AVX2/BMI2/POPCNT/etc.) despite
+# this setting's presence for who knows how long. Every build in this repo is
+# meant to run on the same machine it's compiled on (see manual.txt) - never
+# shipped as a portable binary - so tying codegen to the exact host CPU is
+# safe here.
+[build]
+rustflags = ["-C", "target-cpu=native"]
