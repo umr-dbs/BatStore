@@ -37,6 +37,20 @@ const TAG_COMMIT: u8 = 3;
 pub trait WalPayload: Sized {
     fn wal_encode(&self, out: &mut Vec<u8>);
     fn wal_decode(bytes: &[u8]) -> Option<Self>;
+
+    /// Upper-bound-ish estimate of how many bytes `wal_encode` is about to
+    /// write, used only to pre-size the framing `Vec` (see
+    /// `entry_size_hint`/`WalWriter::log_with_stamp`) so encoding a real
+    /// payload doesn't pay for repeated grow-and-copy reallocations along
+    /// the way (`Vec::extend_from_slice` on an undersized buffer). Getting
+    /// this wrong costs at worst one extra reallocation, never correctness
+    /// — `wal_encode` remains the sole source of truth for what's actually
+    /// written. Default of `8` matches the base `u64` payload exactly;
+    /// override for anything bigger (see `TpccRow`/`YcsbRow`'s impls).
+    #[inline]
+    fn wal_encode_size_hint(&self) -> usize {
+        8
+    }
 }
 
 impl WalPayload for u64 {
@@ -177,6 +191,29 @@ pub fn decode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
 pub enum WalEntry<Key: Ord + Copy + Hash + Display, Payload: Clone> {
     Write(WalRecord<Key, Payload>),
     Commit { stamp: TxStamp, ts_commit: Version },
+}
+
+/// Estimated total framed size of `entry` — `tag(1) + ts_start(8) +
+/// worker_id(2) + Key(size_of::<Key>()) + frame overhead(4 len + 4 crc)`,
+/// plus the payload's own `wal_encode_size_hint` for a `Write` entry backed
+/// by `Insert`/`Update` (an entry with no payload — `Delete`/`Commit` —
+/// adds none). Callers that pre-size their encoding buffer with
+/// `Vec::with_capacity(entry_size_hint(entry))` avoid the repeated
+/// grow-and-copy `encode_entry_framed`/`encode_entry_for_table_framed`
+/// would otherwise pay for a payload much bigger than a fixed small guess
+/// (real payloads like `TpccRow`/`YcsbRow` routinely run into the hundreds
+/// of bytes, not the ~20-30 bytes a `u64`-payload record needs).
+pub fn entry_size_hint<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
+    entry: &WalEntry<Key, Payload>,
+) -> usize {
+    const HEADER_AND_FRAME: usize = 1 + 8 + 2 + 4 + 4;
+    let payload_hint = match entry {
+        WalEntry::Write(WalRecord { op: CRUDOperation::Insert(_, p) | CRUDOperation::Update(_, p), .. }) => {
+            p.wal_encode_size_hint()
+        }
+        _ => 0,
+    };
+    HEADER_AND_FRAME + size_of::<Key>() + payload_hint
 }
 
 /// Encodes one [`WalEntry`]'s body (no length prefix, no checksum). A

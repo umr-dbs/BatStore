@@ -353,4 +353,58 @@ impl WalPayload for TpccRow {
             _ => return None,
         })
     }
+
+    /// Exact, not just an estimate: mirrors `wal_encode` above field for
+    /// field (a `str` field costs `4 + s.len()`, matching `Writer::str`'s
+    /// own length-prefix-then-bytes shape), so this always matches what
+    /// `wal_encode` is about to write. Worth the small amount of duplication
+    /// since the default hint (`8`, tuned for a bare `u64` payload) would
+    /// otherwise be off by hundreds of bytes for every variant here except
+    /// the tiny marker ones (`Empty`/`CustomerNameIdx`/`NewOrder`/
+    /// `CustLastOrder`) — enough to force several grow-and-copy
+    /// reallocations per WAL write for the common row types
+    /// (`Customer`/`Stock` routinely exceed 300-400 bytes).
+    fn wal_encode_size_hint(&self) -> usize {
+        fn str_len(s: &str) -> usize { 4 + s.len() }
+        fn opt_len(present: bool, some_size: usize) -> usize { 1 + if present { some_size } else { 0 } }
+
+        const TAG: usize = 1;
+        match self {
+            TpccRow::Empty | TpccRow::CustomerNameIdx => TAG,
+            TpccRow::Warehouse(x) => {
+                TAG + str_len(&x.w_name) + str_len(&x.w_street_1) + str_len(&x.w_street_2)
+                    + str_len(&x.w_city) + str_len(&x.w_state) + str_len(&x.w_zip) + 8 + 8
+            }
+            TpccRow::District(x) => {
+                TAG + str_len(&x.d_name) + str_len(&x.d_street_1) + str_len(&x.d_street_2)
+                    + str_len(&x.d_city) + str_len(&x.d_state) + str_len(&x.d_zip) + 8 + 8 + 4
+            }
+            TpccRow::Customer(x) => {
+                TAG + str_len(&x.c_first) + str_len(&x.c_middle) + str_len(&x.c_last)
+                    + str_len(&x.c_street_1) + str_len(&x.c_street_2) + str_len(&x.c_city)
+                    + str_len(&x.c_state) + str_len(&x.c_zip) + str_len(&x.c_phone)
+                    + 8 + 1 + 8 + 8 + 8 + 8 + 4 + 4 + str_len(&x.c_data)
+            }
+            TpccRow::History(x) => TAG + 4 + 1 + 4 + 1 + 4 + 8 + 8 + str_len(&x.h_data),
+            TpccRow::NewOrder(_) => TAG + 4,
+            TpccRow::Order(x) => {
+                TAG + 4 + 8 + opt_len(x.o_carrier_id.is_some(), 4) + 1 + 1
+            }
+            TpccRow::OrderLine(x) => {
+                TAG + 4 + 4 + opt_len(x.ol_delivery_d.is_some(), 8) + 1 + 8 + str_len(&x.ol_dist_info)
+            }
+            TpccRow::Item(x) => TAG + 4 + str_len(&x.i_name) + 8 + str_len(&x.i_data),
+            TpccRow::Stock(x) => {
+                TAG + 4 + x.s_dist.iter().map(|d| str_len(d)).sum::<usize>()
+                    + 8 + 4 + 4 + str_len(&x.s_data) + 4
+            }
+            TpccRow::CustLastOrder(_) => TAG + 4,
+            TpccRow::Supplier(x) => {
+                TAG + str_len(&x.s_name) + str_len(&x.s_address) + 1 + str_len(&x.s_phone)
+                    + 8 + str_len(&x.s_comment)
+            }
+            TpccRow::Nation(x) => TAG + str_len(&x.n_name) + 1 + str_len(&x.n_comment),
+            TpccRow::Region(x) => TAG + str_len(&x.r_name) + str_len(&x.r_comment),
+        }
+    }
 }

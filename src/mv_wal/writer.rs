@@ -55,8 +55,12 @@ struct LogMessage {
     /// would let `wait_wal_hardened` return before the commit marker —
     /// the actual, replay-relevant durability point — is on disk.
     is_commit: bool,
-    /// Fired once `bytes` has been durably fsynced.
-    ack: Sender<()>,
+    /// Fired once `bytes` has been durably fsynced. `None` for the (checked:
+    /// every production call site) common case where the caller never asked
+    /// for a ticket in the first place — see `WalWriter::enqueue`'s
+    /// `want_ticket` doc for why that case skips constructing this channel
+    /// at all, rather than building one and just never sending on it.
+    ack: Option<Sender<()>>,
 }
 
 /// One (channel, background flush thread) pair — see `NUM_SHARDS`. All
@@ -214,7 +218,9 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> WalWriter<Key, Payload> {
             }
 
             for msg in batch {
-                let _ = msg.ack.send(());
+                if let Some(ack) = &msg.ack {
+                    let _ = ack.send(());
+                }
             }
         }
     }
@@ -287,20 +293,36 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> WalWriter<Key, Payload> {
 impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalWriter<Key, Payload> {
     /// Mints the next `ts_start` from `clock` — a plain lock-free
     /// `fetch_add`, uncoordinated with any other WAL-logging thread — pairs
-    /// it with `worker_id` into a `TxStamp`, and logs it via
-    /// [`log_with_stamp`](Self::log_with_stamp). Returns the stamp and a
-    /// flush ticket: `wait_flushed`/dropping it without waiting both work,
-    /// but only waiting on it actually blocks for durability. Used by the
-    /// single-op, auto-committing dispatch path, where each `CRUDOperation`
-    /// mints its own fresh stamp.
+    /// it with `worker_id` into a `TxStamp`, and logs it fire-and-forget via
+    /// [`log_with_stamp`](Self::log_with_stamp). Used by the single-op,
+    /// auto-committing dispatch path — the actual production hot path,
+    /// which (checked: every call site in `mv_sync::version_handle`)
+    /// never waits on this specific record's own flush. See
+    /// [`start_commit_logged_with_ticket`](Self::start_commit_logged_with_ticket)
+    /// for the variant that returns a flush ticket, at the cost of a real
+    /// per-call channel allocation.
     pub fn start_commit_logged(
+        &self,
+        clock: &GlobalClock,
+        worker_id: WorkerId,
+        build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
+    ) -> TxStamp {
+        let stamp = TxStamp::new(worker_id, clock.next_timestamp());
+        self.log_with_stamp(stamp, build);
+        stamp
+    }
+
+    /// Ticketed counterpart to [`start_commit_logged`](Self::start_commit_logged)
+    /// — for callers that genuinely need to `wait_flushed` on this one
+    /// record (this module's own tests; no production call site uses this).
+    pub fn start_commit_logged_with_ticket(
         &self,
         clock: &GlobalClock,
         worker_id: WorkerId,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) -> (TxStamp, Receiver<()>) {
         let stamp = TxStamp::new(worker_id, clock.next_timestamp());
-        let ticket = self.log_with_stamp(stamp, build);
+        let ticket = self.log_with_stamp_impl(stamp, build, true).expect("ticket requested");
         (stamp, ticket)
     }
 
@@ -309,40 +331,60 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
     /// write in the same transaction shares its one `ts_start`, so it must
     /// reuse that stamp instead of drawing a new tick per operation (which
     /// would break snapshot isolation and defeat instant commit's "no
-    /// write-set revisit"). Returns a flush ticket, same as
-    /// `start_commit_logged`.
-    pub fn log_with_stamp(
+    /// write-set revisit"). Fire-and-forget — see `start_commit_logged`'s
+    /// doc; [`log_with_stamp_with_ticket`](Self::log_with_stamp_with_ticket)
+    /// is the ticketed counterpart, if some future test needs one.
+    pub fn log_with_stamp(&self, stamp: TxStamp, build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>) {
+        self.log_with_stamp_impl(stamp, build, false);
+    }
+
+    /// Ticketed counterpart to [`log_with_stamp`](Self::log_with_stamp).
+    pub fn log_with_stamp_with_ticket(
         &self,
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) -> Receiver<()> {
-        let op = build(stamp.ts_start());
+        self.log_with_stamp_impl(stamp, build, true).expect("ticket requested")
+    }
+
+    fn log_with_stamp_impl(
+        &self,
+        stamp: TxStamp,
+        build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
+        want_ticket: bool,
+    ) -> Option<Receiver<()>> {
+        let entry = WalEntry::Write(WalRecord { stamp, op: build(stamp.ts_start()) });
 
         // Encodes straight into one buffer (length prefix + body + crc)
         // instead of encoding the body into its own buffer and then
         // copying it into a second, framed one — see
-        // `record::encode_entry_framed`.
-        let mut framed = Vec::with_capacity(40);
-        record::encode_entry_framed(&WalEntry::Write(WalRecord { stamp, op }), &mut framed);
+        // `record::encode_entry_framed`. Pre-sized via `entry_size_hint`
+        // (an exact-or-close estimate of the real encoded size — see that
+        // function's doc) rather than a small fixed guess, so this doesn't
+        // pay for repeated grow-and-copy reallocations on anything bigger
+        // than a `u64` payload (real payloads like `TpccRow`/`YcsbRow`
+        // routinely run into the hundreds of bytes).
+        let mut framed = Vec::with_capacity(record::entry_size_hint(&entry));
+        record::encode_entry_framed(&entry, &mut framed);
 
-        self.enqueue(stamp.worker_id(), stamp.ts_start(), false, framed)
+        self.enqueue(stamp.worker_id(), stamp.ts_start(), false, framed, want_ticket)
     }
 
     /// Logs a **Commit marker** confirming that `stamp`'s transaction
     /// actually committed at `ts_commit` — see `WalEntry::Commit`'s doc for
     /// why this is a separate entry from the write(s) it confirms, and
-    /// `mv_wal::recovery::replay`'s doc for how it gates replay. Same
-    /// fire-and-forget model as `log_with_stamp`: the caller never waits on
-    /// this, and it flows through the exact same channel/flush-loop/
-    /// `hardened` machinery, just carrying a different entry kind.
-    pub fn log_commit(&self, stamp: TxStamp, ts_commit: Version) -> Receiver<()> {
-        let mut framed = Vec::with_capacity(24);
-        record::encode_entry_framed::<Key, Payload>(
-            &WalEntry::Commit { stamp, ts_commit },
-            &mut framed,
-        );
+    /// `mv_wal::recovery::replay`'s doc for how it gates replay.
+    /// Fire-and-forget — see `start_commit_logged`'s doc.
+    pub fn log_commit(&self, stamp: TxStamp, ts_commit: Version) {
+        self.log_commit_impl(stamp, ts_commit, false);
+    }
 
-        self.enqueue(stamp.worker_id(), stamp.ts_start(), true, framed)
+    fn log_commit_impl(&self, stamp: TxStamp, ts_commit: Version, want_ticket: bool) -> Option<Receiver<()>> {
+        let entry = WalEntry::Commit { stamp, ts_commit };
+        let mut framed = Vec::with_capacity(record::entry_size_hint::<Key, Payload>(&entry));
+        record::encode_entry_framed::<Key, Payload>(&entry, &mut framed);
+
+        self.enqueue(stamp.worker_id(), stamp.ts_start(), true, framed, want_ticket)
     }
 
     /// Table-tagged counterpart to `start_commit_logged`, for a `Database`'s
@@ -350,8 +392,23 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
     /// encodes/logs the record under `table_id` (see
     /// `record::encode_entry_for_table_framed`) so `mv_wal::recovery::
     /// replay_database` can later demux this file's entries back to the
-    /// right table.
+    /// right table. Fire-and-forget — see `start_commit_logged`'s doc.
     pub fn start_commit_logged_for_table(
+        &self,
+        table_id: record::TableId,
+        clock: &GlobalClock,
+        worker_id: WorkerId,
+        build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
+    ) -> TxStamp {
+        let stamp = TxStamp::new(worker_id, clock.next_timestamp());
+        self.log_with_stamp_for_table(table_id, stamp, build);
+        stamp
+    }
+
+    /// Ticketed counterpart to
+    /// [`start_commit_logged_for_table`](Self::start_commit_logged_for_table)
+    /// — see `start_commit_logged_with_ticket`'s doc.
+    pub fn start_commit_logged_for_table_with_ticket(
         &self,
         table_id: record::TableId,
         clock: &GlobalClock,
@@ -359,25 +416,37 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) -> (TxStamp, Receiver<()>) {
         let stamp = TxStamp::new(worker_id, clock.next_timestamp());
-        let ticket = self.log_with_stamp_for_table(table_id, stamp, build);
+        let ticket = self.log_with_stamp_for_table_impl(table_id, stamp, build, true).expect("ticket requested");
         (stamp, ticket)
     }
 
     /// Table-tagged counterpart to `log_with_stamp` — same "log under an
     /// already-determined stamp" contract, just tagging the record with
     /// `table_id` for later demultiplexing by `replay_database`.
+    /// Fire-and-forget — see `start_commit_logged`'s doc.
     pub fn log_with_stamp_for_table(
         &self,
         table_id: record::TableId,
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
-    ) -> Receiver<()> {
-        let op = build(stamp.ts_start());
+    ) {
+        self.log_with_stamp_for_table_impl(table_id, stamp, build, false);
+    }
 
-        let mut framed = Vec::with_capacity(44);
-        record::encode_entry_for_table_framed(table_id, &WalEntry::Write(WalRecord { stamp, op }), &mut framed);
+    fn log_with_stamp_for_table_impl(
+        &self,
+        table_id: record::TableId,
+        stamp: TxStamp,
+        build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
+        want_ticket: bool,
+    ) -> Option<Receiver<()>> {
+        let entry = WalEntry::Write(WalRecord { stamp, op: build(stamp.ts_start()) });
+        // +4: the table id this framing adds on top of `encode_entry_framed`'s
+        // plain shape — see `record::encode_entry_for_table_framed`'s doc.
+        let mut framed = Vec::with_capacity(record::entry_size_hint(&entry) + 4);
+        record::encode_entry_for_table_framed(table_id, &entry, &mut framed);
 
-        self.enqueue(stamp.worker_id(), stamp.ts_start(), false, framed)
+        self.enqueue(stamp.worker_id(), stamp.ts_start(), false, framed, want_ticket)
     }
 
     /// Table-tagged counterpart to `log_commit`. A Commit marker is
@@ -385,19 +454,27 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
     /// and `record::TABLE_ID_COMMIT_SENTINEL`'s), so this always tags the
     /// entry with that reserved sentinel rather than taking a `table_id`
     /// parameter — `replay_database` ignores it for `Commit` entries
-    /// regardless.
-    pub fn log_commit_for_table(&self, stamp: TxStamp, ts_commit: Version) -> Receiver<()> {
-        let mut framed = Vec::with_capacity(28);
-        record::encode_entry_for_table_framed::<Key, Payload>(
-            record::TABLE_ID_COMMIT_SENTINEL,
-            &WalEntry::Commit { stamp, ts_commit },
-            &mut framed,
-        );
-
-        self.enqueue(stamp.worker_id(), stamp.ts_start(), true, framed)
+    /// regardless. Fire-and-forget — see `start_commit_logged`'s doc.
+    pub fn log_commit_for_table(&self, stamp: TxStamp, ts_commit: Version) {
+        self.log_commit_for_table_impl(stamp, ts_commit, false);
     }
 
-    /// Shared enqueue path for `log_with_stamp`/`log_commit`: downgrades
+    /// Ticketed counterpart to
+    /// [`log_commit_for_table`](Self::log_commit_for_table) — see
+    /// `start_commit_logged_with_ticket`'s doc.
+    pub fn log_commit_for_table_with_ticket(&self, stamp: TxStamp, ts_commit: Version) -> Receiver<()> {
+        self.log_commit_for_table_impl(stamp, ts_commit, true).expect("ticket requested")
+    }
+
+    fn log_commit_for_table_impl(&self, stamp: TxStamp, ts_commit: Version, want_ticket: bool) -> Option<Receiver<()>> {
+        let entry = WalEntry::Commit { stamp, ts_commit };
+        let mut framed = Vec::with_capacity(record::entry_size_hint::<Key, Payload>(&entry) + 4);
+        record::encode_entry_for_table_framed::<Key, Payload>(record::TABLE_ID_COMMIT_SENTINEL, &entry, &mut framed);
+
+        self.enqueue(stamp.worker_id(), stamp.ts_start(), true, framed, want_ticket)
+    }
+
+    /// Shared enqueue path for `log_with_stamp`/`log_commit`/etc: downgrades
     /// `worker_id`'s shard's own `confirmed` off its "never used" sentinel
     /// if needed, bumps that shard's `submitted` if this is a Commit (see
     /// `WalWriter::hardened_version`'s doc for why only Commits count
@@ -405,8 +482,26 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
     /// that shard's background flush thread (`worker_id % NUM_SHARDS` —
     /// see `WalWriter`'s doc). `is_commit` — see `LogMessage::is_commit`'s
     /// doc — must be `true` only for an actual `WalEntry::Commit` marker.
-    fn enqueue(&self, worker_id: WorkerId, ts_start: Version, is_commit: bool, framed: Vec<u8>) -> Receiver<()> {
-        let (ack_tx, ack_rx) = bounded(1);
+    ///
+    /// `want_ticket`: `false` (every production call site, via the
+    /// ticket-less methods above) skips constructing the per-call
+    /// `bounded(1)` ack channel entirely, rather than building one and
+    /// simply discarding it — checked every dispatch call site
+    /// (`mv_sync::version_handle`) already discarded the ticket
+    /// `log_with_stamp`/`log_commit`/etc used to unconditionally return, so
+    /// building that channel was pure waste on the hot path (visible in
+    /// profiling as `crossbeam_channel::channel::bounded` plus its own
+    /// allocator churn — see `docs/oltp_wal_optimization.md`'s follow-up
+    /// section). `true` (the `_with_ticket` methods, used only by this
+    /// module's own tests) builds it, same as this type always used to.
+    fn enqueue(
+        &self,
+        worker_id: WorkerId,
+        ts_start: Version,
+        is_commit: bool,
+        framed: Vec<u8>,
+        want_ticket: bool,
+    ) -> Option<Receiver<()>> {
         let shard = &self.shards[worker_id as usize % self.shards.len()];
 
         // The moment this write is enqueued, this shard has real
@@ -429,12 +524,19 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> WalW
             shard.submitted.fetch_max(ts_start, Relaxed);
         }
 
+        let (ack, ack_rx) = if want_ticket {
+            let (tx, rx) = bounded(1);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         // Safe to unwrap: a shard's sender is only ever taken (and its
         // channel closed) from `Drop`, which can't run concurrently with
         // this call — `self` is reached through an `Arc`, so `Drop` only
         // runs once no other reference (and thus no other call to this
         // method) exists.
-        let _ = shard.sender.as_ref().unwrap().send(LogMessage { bytes: framed, ts_start, is_commit, ack: ack_tx });
+        let _ = shard.sender.as_ref().unwrap().send(LogMessage { bytes: framed, ts_start, is_commit, ack });
         ack_rx
     }
 }

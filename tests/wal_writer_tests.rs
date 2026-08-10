@@ -16,10 +16,10 @@ fn group_commit_flushes_and_wait_unblocks() {
     let clock = GlobalClock::new();
 
     let (s1, t1)
-        = writer.start_commit_logged(&clock, 0, |_v| CRUDOperation::Insert(1, 100));
+        = writer.start_commit_logged_with_ticket(&clock, 0, |_v| CRUDOperation::Insert(1, 100));
 
     let (s2, t2)
-        = writer.start_commit_logged(&clock, 0, |_v| CRUDOperation::Delete(2));
+        = writer.start_commit_logged_with_ticket(&clock, 0, |_v| CRUDOperation::Delete(2));
     assert!(s2.ts_start() > s1.ts_start());
 
     writer.wait_flushed(t1);
@@ -58,8 +58,8 @@ fn group_commit_table_tagged_flushes_and_round_trips() {
         WalWriter::open(&path, Duration::from_millis(5)).unwrap();
     let clock = GlobalClock::new();
 
-    let (s1, t1) = writer.start_commit_logged_for_table(11, &clock, 0, |_v| CRUDOperation::Insert(1, 100));
-    let (s2, t2) = writer.start_commit_logged_for_table(22, &clock, 0, |_v| CRUDOperation::Delete(2));
+    let (s1, t1) = writer.start_commit_logged_for_table_with_ticket(11, &clock, 0, |_v| CRUDOperation::Insert(1, 100));
+    let (s2, t2) = writer.start_commit_logged_for_table_with_ticket(22, &clock, 0, |_v| CRUDOperation::Delete(2));
     assert!(s2.ts_start() > s1.ts_start());
 
     writer.wait_flushed(t1);
