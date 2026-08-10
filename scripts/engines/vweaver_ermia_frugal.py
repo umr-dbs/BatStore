@@ -27,9 +27,10 @@ working. Root-caused here to two independent things:
    doesn't define), so it's applied unconditionally onto the one shared checkout
    regardless of which variant(s) get built from it.
 
-Same YCSB A-F / TPC-C support (or lack of CH-benCHmark/HTAP support) as
-vweaver_ermia.py - see that module's docstring; this one only duplicates what differs
-(build dir, binary, CMAKE_BUILD_PARAM, engine name).
+Same YCSB A-F / TPC-C / htap_q1-htap_q6 support as vweaver_ermia.py - see that module's
+docstring (including patches/vweaver_ermia_chbenchmark.patch, which - like
+vweaver_ermia_frugal.patch - applies identically to both variants); this one only
+duplicates what differs (build dir, binary, CMAKE_BUILD_PARAM, engine name).
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ import subprocess
 from pathlib import Path
 
 from . import common
-from .vweaver_ermia import _clang_env, _parse_throughput
+from .vweaver_ermia import _clang_env, _parse_throughput, _write_htap_scan_csv
 
 REPO = common.VWEAVER_REPO
 BUILD_DIR = REPO / "build_frugal"
@@ -74,9 +75,12 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     enable_gc = "true" if gc == "on" else "false"
     node_memory_gb = max(2, int(scale.dram_gib * 2))
 
-    if workload == "tpcc":
+    if workload in (["tpcc"] + common.HTAP_WORKLOADS):
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
+        benchmark_options = "--workload-mix=45,43,0,4,4,4,0,0 --warehouse-spread=0"
+        if workload in common.HTAP_WORKLOADS:
+            benchmark_options += " --enable-chbenchmark"
         args = [
             str(BINARY), "-verbose", "-benchmark", "tpcc",
             "-threads", str(threads), "-scale_factor", str(scale.tpcc_warehouses),
@@ -84,7 +88,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
             f"-node_memory_gb={node_memory_gb}",
             "-log_data_dir", str(log_dir), "-log_buffer_mb=128", "-log_segment_mb=131072",
             "-parallel_loading",
-            "-benchmark_options", "--workload-mix=45,43,0,4,4,4,0,0 --warehouse-spread=0",
+            "-benchmark_options", benchmark_options,
         ]
         metric_name = "new_order_per_sec"
     else:
@@ -117,7 +121,20 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
 
     value = _parse_throughput(stdout_path, workload)
     notes = "" if value else "throughput line not found in stdout.log"
+
+    latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
+    if workload in common.HTAP_WORKLOADS:
+        mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
+        scan_csv = _write_htap_scan_csv(stdout_path, output_dir)
+        latency = common.percentiles_from_samples(
+            scan_csv, "latency_ns", filter_column="mode", filter_value=mode,
+        )
+        for k in ("p50", "p95", "p99", "avg"):
+            latency[k] /= 1000.0  # ns -> us
+
     return common.NormalizedResult(
         "vweaver_ermia_frugal", workload, scale.label, duration, metric_name, value, peak_rss_mb,
-        threads=threads, gc_enabled=gc, notes=notes,
+        threads=threads, gc_enabled=gc,
+        scan_p50_us=latency["p50"], scan_p95_us=latency["p95"], scan_p99_us=latency["p99"],
+        scan_avg_us=latency["avg"], scan_count=latency["count"], notes=notes,
     )

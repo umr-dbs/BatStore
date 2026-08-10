@@ -337,9 +337,19 @@ this rather than papering over it:
   aren't part of this cross-engine comparison - only Q1/Q6 rows get read out of cMVBT's
   own output). LeanStore/WiredTiger's analyticalQuery() was a literal "TODO: implement CH
   analytical queries" stub before this harness added real Q1/Q6 bodies to it (see
-  frontend/tpc-c/TPCCWorkload.hpp in the LeanStore checkout). libmdbx and both
-  vWeaver_ermia variants (vweaver_ermia, vweaver_ermia_frugal) have NO CH-benCHmark/HTAP
-  support at all - htap_q1/htap_q6 simply skip all three.
+  frontend/tpc-c/TPCCWorkload.hpp in the LeanStore checkout). libmdbx got the same
+  treatment in src/mv_bench/mdbx_tpcc.rs (`mdbx_q1`/`mdbx_q6`, a libmdbx port of
+  `mv_bench::tpch_queries::q1`/`q6` against its own `Transaction<RO>`/cursor API, plus one
+  OLAP thread rotating them - see that module's docs). Both vWeaver_ermia variants got it
+  too, via patches/vweaver_ermia_chbenchmark.patch (`RunChQ1`/`RunChQ6` in ERMIA's own
+  benchmarks/tpcc.cc, a real `ORDER_LINE` table scan against ERMIA's own transaction/Scan
+  API, plus a dedicated `tpcc_bench_runner::StartHtapThread` OLAP thread - same "N OLTP + 1
+  OLAP thread" convention as every other engine here) - see engines/vweaver_ermia.py's
+  module docstring for the full writeup, including a real heap-corruption bug (an
+  unbounded table scan overflowing str_arena's fixed 128MB reservation, silent in a
+  Release build) hit and fixed during development. Applies identically to both
+  CMAKE_BUILD_PARAM variants - no `#ifdef HYU_VWEAVER`/`HYU_SKIPLIST` branching in that
+  patch at all.
 
 - libmdbx's single-writer model: unlike every other engine here, libmdbx (like LMDB)
   allows only ONE read-write transaction active process-wide at a time - there is no
@@ -390,9 +400,22 @@ this rather than papering over it:
   `deallocate_skiplist()` following the same recycle-into-`tls_free_object_pool` pattern
   `deallocate()` already uses. Entirely guarded by `#ifdef HYU_SKIPLIST` - a no-op for the
   plain Vweaver build - so it's applied unconditionally onto the one shared checkout.
-  Verified: builds cleanly via setup_environment.py's step_vweaver_ermia_frugal(), and
-  engines/vweaver_ermia_frugal.py's ensure_built()/run() work end to end (same known
-  hugepages-on-this-workstation limitation as vweaver_ermia above, not a new issue).
+  Builds cleanly via setup_environment.py's step_vweaver_ermia_frugal().
+  KNOWN ISSUE (found once this machine had enough hugepages to actually sustain a real
+  multi-second run, not just start one - see vweaver_ermia's own hugepages note above):
+  this build reliably SIGSEGVs a few seconds into ANY real concurrent TPC-C workload
+  (reproduces on plain "tpcc", not specific to htap_q1/htap_q6), consistently inside
+  `MM::gc_version_chain` -> `sm_oid_mgr::oid_get_version_skiplist_from_ver` during a normal
+  New-Order/Payment update (a near-null pointer read off `Object::GetSentinel()`, i.e. some
+  object reachable from an active version chain ends up without the sentinel array every
+  other object on that chain has). This is a genuine concurrency bug in the restored
+  HYU_SKIPLIST GC code above (patches/vweaver_ermia_frugal.patch) or in the vendor's
+  broader skip-list machinery it depends on (SubmitSkipListChain/SentinelOverwrite in
+  dbcore/sm-oid.cpp, not yet root-caused) - not something patches/
+  vweaver_ermia_chbenchmark.patch's Q1/Q6 additions touch or introduced (confirmed: crashes
+  identically with --enable-chbenchmark on or off). Until this is root-caused, this engine
+  variant should be treated as NOT reliably usable for anything beyond a very short smoke
+  test - real comparison runs will very likely end in "FAILED exit=-11, see stdout.log".
 
 - Peak memory (peak_rss_mb): tracks PostgreSQL's actual SERVER process tree now
   (postmaster + checkpointer + bgwriter + walwriter + every per-connection backend -
@@ -561,6 +584,6 @@ manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
                               ycsb_e (scan ops), tpcc (cMVBT's own HTAP scan-sweep only),
                               and htap_q1/htap_q6 (CH-benCHmark query latency); 0/blank
                               elsewhere
-    notes                     "FAILED ..." / "EXCEPTION: ..." on error, or an
-                              engine-specific caveat (e.g. "not supported: ..." for
-                              libmdbx on htap_q1/htap_q6)
+    notes                     "FAILED ..." / "EXCEPTION: ..." on error (e.g.
+                              vweaver_ermia_frugal on ANY sustained workload - see the
+                              KNOWN ISSUE note in section 5), or blank

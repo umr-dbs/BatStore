@@ -5,8 +5,32 @@ directly, mirroring the flag shape of its own benchmarks/run.sh reference script
 ERMIA ships real, standard YCSB A-F workload definitions (`--workload=<letter>` in
 benchmarks/ycsb.cc, matching the textbook read/update/insert/scan/rmw ratios exactly - no
 approximation needed, unlike LeanStore's separate-ratio-flags mapping) and a real
-multi-table TPC-C (benchmarks/tpcc.cc). No CH-benCHmark/HTAP support in either - htap_q1/
-htap_q6 simply skip this engine.
+multi-table TPC-C (benchmarks/tpcc.cc).
+
+htap_q1/htap_q6: upstream had no CH-benCHmark/HTAP support at all - added in
+patches/vweaver_ermia_chbenchmark.patch (`RunChQ1`/`RunChQ6` in benchmarks/tpcc.cc, ported
+from `mv_bench::tpch_queries::q1`/`q6` in the sibling cMVBT-OSIC harness - a full
+`ORDER_LINE` table scan, pure aggregation, no joins, see that patch's inline comments for
+why only these 2 of CH-benCHmark's 22 queries). Passing `--enable-chbenchmark` in
+`-benchmark_options` spawns one dedicated thread (`tpcc_bench_runner::StartHtapThread`)
+rotating both queries concurrently with the normal OLTP `tpcc_worker` threads - the same
+"N OLTP threads + 1 always-on OLAP thread" convention every other engine here already uses
+for htap_q1/htap_q6 - and prints one `HTAP_SCAN,<mode>,<elapsed_secs>,<scanned_tuples>,
+<latency_ns>,<summary>` line per completed query to stdout (parsed by `_parse_htap_scan`
+below into the same tpcc_scan.csv shape cmvbt.py/libmdbx.py already produce - ERMIA has no
+separate result-file mechanism the way those two do, everything comes out over stdout, see
+`_parse_throughput`'s own doc).
+
+Applies identically to both CMAKE_BUILD_PARAM variants (vweaver_ermia_frugal.py builds the
+exact same patched checkout, just with a different -DCMAKE_BUILD_PARAM). Developing it
+surfaced a real, separate bug worth knowing about if you ever touch RunChQ1/RunChQ6 again:
+buffering an unbounded (multi-million-row, ever-growing) table scan's rows into
+`tpcc_table_scanner`-style per-row arena allocations silently overflows str_arena's fixed
+128MB reservation in a Release build (str_arena::next's own overrun ASSERT compiles to
+nothing under NDEBUG) - this manifested as a SIGSEGV/heap-corruption crash in a totally
+unrelated subsystem (sm_tx_log) several seconds into a real load, not as an obvious
+out-of-memory error at the actual overflow site. Fixed by aggregating directly inside the
+scan callback (streaming, O(1) memory) instead of buffering first - see the patch.
 
 Builds cleanly against https://github.com/SNU-DBXLab-papers/vWeaver_ermia's own default
 ("vweaver") branch with two fixes: a dead `#include <sys/vtimes.h>` (removed from modern
@@ -44,6 +68,11 @@ SUPPORTS_GC_TOGGLE = True
 
 _COMMITS_RE = re.compile(r"^([\d.]+)\s+commits/s,")
 _TXN_ROW_RE = re.compile(r"^([A-Za-z_]+)\t([\d.]+)\s+commits/s")
+# tpcc_bench_runner::HtapThreadMain's printf format (patches/vweaver_ermia_chbenchmark.patch):
+# "HTAP_SCAN,<mode>,<elapsed_secs>,<scanned_tuples>,<latency_ns>,<summary>"
+_HTAP_SCAN_RE = re.compile(
+    r"^HTAP_SCAN,([a-z0-9_]+),([\d.]+),(\d+),(\d+),(-?[\d.]+)$"
+)
 
 
 def ensure_built() -> None:
@@ -101,9 +130,16 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     # hard crash, not degraded throughput, so it gets extra headroom the other two don't.
     node_memory_gb = max(2, int(scale.dram_gib * 2))
 
-    if workload == "tpcc":
+    if workload in (["tpcc"] + common.HTAP_WORKLOADS):
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
+        # Standard TPC-C mix (NewOrder/Payment/OrderStatus/Delivery/StockLevel), no
+        # warehouse-spread skew - matches benchmarks/run.sh's own plain "tpcc" default.
+        # --enable-chbenchmark (htap_q1/htap_q6 only) spawns the dedicated Q1/Q6 OLAP
+        # thread - see this module's own doc and patches/vweaver_ermia_chbenchmark.patch.
+        benchmark_options = "--workload-mix=45,43,0,4,4,4,0,0 --warehouse-spread=0"
+        if workload in common.HTAP_WORKLOADS:
+            benchmark_options += " --enable-chbenchmark"
         args = [
             str(BINARY), "-verbose", "-benchmark", "tpcc",
             "-threads", str(threads), "-scale_factor", str(scale.tpcc_warehouses),
@@ -111,9 +147,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
             f"-node_memory_gb={node_memory_gb}",
             "-log_data_dir", str(log_dir), "-log_buffer_mb=128", "-log_segment_mb=131072",
             "-parallel_loading",
-            # Standard TPC-C mix (NewOrder/Payment/OrderStatus/Delivery/StockLevel), no
-            # warehouse-spread skew - matches benchmarks/run.sh's own plain "tpcc" default.
-            "-benchmark_options", "--workload-mix=45,43,0,4,4,4,0,0 --warehouse-spread=0",
+            "-benchmark_options", benchmark_options,
         ]
         metric_name = "new_order_per_sec"
     else:
@@ -156,10 +190,53 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
 
     value = _parse_throughput(stdout_path, workload)
     notes = "" if value else "throughput line not found in stdout.log"
+
+    latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
+    if workload in common.HTAP_WORKLOADS:
+        mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
+        scan_csv = _write_htap_scan_csv(stdout_path, output_dir)
+        latency = common.percentiles_from_samples(
+            scan_csv, "latency_ns", filter_column="mode", filter_value=mode,
+        )
+        for k in ("p50", "p95", "p99", "avg"):
+            latency[k] /= 1000.0  # ns -> us
+
     return common.NormalizedResult(
         "vweaver_ermia", workload, scale.label, duration, metric_name, value, peak_rss_mb,
-        threads=threads, gc_enabled=gc, notes=notes,
+        threads=threads, gc_enabled=gc,
+        scan_p50_us=latency["p50"], scan_p95_us=latency["p95"], scan_p99_us=latency["p99"],
+        scan_avg_us=latency["avg"], scan_count=latency["count"], notes=notes,
     )
+
+
+def _write_htap_scan_csv(stdout_path: Path, output_dir: Path) -> Path:
+    """Extracts every `HTAP_SCAN,...` line `_HTAP_SCAN_RE` matches in `stdout_path` (see
+    tpcc_bench_runner::HtapThreadMain, patches/vweaver_ermia_chbenchmark.patch) and writes
+    them into the same tpcc_scan.csv column shape cmvbt.py/libmdbx.py's own tpcc_scan.csv
+    already use, so common.percentiles_from_samples reads all three identically.
+    `snapshot`/`staleness_versions`/`delay_secs` are always blank/0 here - ERMIA's
+    transaction id isn't threaded through the stdout line (unlike libmdbx's
+    MdbxScanResult), and neither field is actually consumed downstream.
+    """
+    scan_csv = output_dir / "tpcc_scan.csv"
+    rows = []
+    if stdout_path.exists():
+        for line in stdout_path.read_text(errors="replace").splitlines():
+            m = _HTAP_SCAN_RE.match(line)
+            if not m:
+                continue
+            mode, elapsed_secs, scanned_tuples, latency_ns, summary = m.groups()
+            scanned_tuples, latency_ns = int(scanned_tuples), int(latency_ns)
+            tuples_per_sec = scanned_tuples / (latency_ns / 1e9) if latency_ns else 0.0
+            rows.append(
+                f"{mode},{elapsed_secs},0,,{scanned_tuples},{latency_ns},"
+                f"{tuples_per_sec:.2f},{summary},"
+            )
+    with open(scan_csv, "w") as f:
+        f.write("mode,elapsed_secs,delay_secs,snapshot,scanned_tuples,latency_ns,"
+                "tuples_per_sec,summary,staleness_versions\n")
+        f.write("\n".join(rows) + ("\n" if rows else ""))
+    return scan_csv
 
 
 def _parse_throughput(stdout_path: Path, workload: str) -> float:
