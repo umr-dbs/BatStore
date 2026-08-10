@@ -910,6 +910,71 @@ watermark scheme with the paper's actual design: \path{GlobalClock}, per-worker
         commit stream.
 \end{itemize}
 
+\paragraph{A lock-free WAL backend, and two concurrency bugs it took to land it (Aug 10,
+2026).} Two independent lines of work attacked the same WAL append-path contention at
+once, and had to be reconciled on merge.
+
+\begin{itemize}
+  \item \commit{4a1a50a} --- \emph{``Fix dead target-cpu=native, table-driven CRC32, shard
+        WAL writer channel.''} Profiling (see \path{docs/oltp\_wal\_optimization.md}) found
+        the single shared \path{crossbeam-channel} every worker's \path{WalWriter::enqueue}
+        sent through was a genuine contention point (86\% of \path{Sender::send} samples
+        sitting in its internal spin-wait). Fix: split into \path{NUM\_SHARDS = 4}
+        independent (channel, flush-thread) pairs keyed by \path{worker\_id \% 4}, all
+        still writing through one shared \path{Arc<Mutex<File>>} so the on-disk format and
+        recovery are unaffected. Landed directly on \path{main} (not through this repo's
+        usual review-by-conversation path), alongside a table-driven \path{crc32} (was
+        22.6\% of self time on a write-heavy workload; a byte-at-a-time bit-loop) and a fix
+        for \path{target-cpu=native} silently not applying (Cargo only reads
+        \path{rustflags} from \path{.cargo/config.toml}, never the manifest's
+        \path{[build]} section).
+  \item \commit{ebdd789} --- \emph{``Add lock-free WAL backend, fix RESTART\_TRACE OOM
+        leak, add fast WAL perf tests.''} A second, concurrent design for the same
+        contention: \path{LockFreeWalWriter}/\path{LockFreeWalBackend}
+        (\path{mv\_wal::lockfree\_writer}/\path{backend}) removes the channel and dedicated
+        writer thread entirely --- every worker reserves its own byte range via
+        \path{tail.fetch\_add} and calls \path{pwrite} directly, optionally batching its
+        own records locally (\path{LocalBatch}) before flushing. \path{WalBackend} wraps
+        both designs behind one enum so callers pick either at attach time. Benchmarking
+        this (\path{tests/tpcc\_wal\_backend\_bench.rs}) surfaced a real bug, unrelated to
+        either WAL design: \path{mv\_test::RESTART\_TRACE} (a write-restart diagnostic,
+        documented ``off by default'') had been left \path{true} in checked-in code. Every
+        OCC restart recorded a \path{String} key into a process-lifetime global map that's
+        never cleared; the comparison loop calls \path{run\_tpcc()} 6 times in one process,
+        so this accumulated across every iteration until the fastest config
+        (\path{lockfree-batch64}, 16 terminals --- generating restarts fastest of all of
+        them) grew past 12GB RSS and got OOM-killed, taking the whole terminal session down
+        with it. Fixed by restoring the documented default and adding
+        \path{reset\_restart\_trace()}, called at the start of every \path{run\_tpcc()}.
+        Also added two always-on (not \path{\#[ignore]}d), deliberately tiny WAL perf smoke
+        tests (\path{tpcc\_wal\_perf\_tests.rs}/\path{ycsb\_wal\_perf\_tests.rs}, under 20s
+        combined, RSS growth asserted under a 20GB ceiling) so a regression like this one
+        is caught on every \path{cargo test}, not only in the full-scale run that found it.
+  \item \commit{9ced1a3} --- \emph{``Merge origin/main (WAL channel sharding + table-driven
+        CRC32), fix cross-shard hardened\_version race.''} Merging \commit{4a1a50a} and
+        \commit{ebdd789} exposed a second, more serious bug in the sharded
+        \path{WalWriter} itself: \path{hardened\_version} published every shard's own
+        confirmed watermark into \emph{one} value via \path{fetch\_max}, correct only if
+        every shard's watermark were directly comparable --- it isn't, since
+        \path{ts\_start} is one global sequence spread across shards unpredictably by
+        \path{worker\_id \% 4}, not partitioned per shard. One busy shard's flush could
+        advance the shared watermark past a \path{ts\_start} a slower shard hadn't flushed
+        yet. \path{tree\_wal\_consistency\_tests.rs}'s
+        \path{concurrent\_db\_transactions\_across\_tables\_match\_shared\_wal\_exactly}
+        caught it directly: a quarter of the written records missing from the
+        reconstructed WAL (\path{1200} vs. the expected \path{1800}) because
+        \path{wait\_wal\_hardened} returned early. A first fix attempt (minimum of every
+        shard's raw confirmed value) traded the false-positive for a hang: a shard whose
+        own submissions never reach some \emph{other} shard's higher watermark would never
+        satisfy a plain \path{min}, even once fully caught up on everything it actually
+        had. The actual fix gives each shard a \path{submitted} watermark alongside
+        \path{confirmed} (updated in \path{enqueue}, strictly before the message is sent,
+        so it can only ever be a stale overestimate of in-flight work), and the aggregate
+        now treats a shard as imposing no constraint once \path{confirmed >= submitted}
+        (fully drained) rather than comparing raw values across shards. Verified: the
+        failing test run 5$\times$ with no flakiness, the full suite 3$\times$ clean.
+\end{itemize}
+
 \subsection{Known, documented limitations}
 
 \begin{itemize}
@@ -971,6 +1036,9 @@ for cross-reference against \texttt{git log}.
 \commit{dc30111}, \commit{4c01360}, \commit{dcb5abe}, \commit{0659d34} & 2026-08-02 & Merge/boundary-search fixes (\S\ref{sec:smo}) \\
 \commit{eac6e40} & 2026-08-02 & Cache-padded per-worker atomics (\S\ref{sec:sharding}) \\
 \commit{b29d347} & 2026-08-02 & FAN\_OUT tuned for page alignment (\S\ref{sec:smo}) \\
+\commit{4a1a50a} & 2026-08-09 & WAL channel sharding, table-driven CRC32 (\S\ref{sec:osic}) \\
+\commit{ebdd789} & 2026-08-10 & Lock-free WAL backend; RESTART\_TRACE OOM fixed (\S\ref{sec:osic}) \\
+\commit{9ced1a3} & 2026-08-10 & Cross-shard hardened\_version race fixed (\S\ref{sec:osic}) \\
 \bottomrule
 \caption{Chronological index of commits discussed in this document.}
 \label{tab:timeline}
