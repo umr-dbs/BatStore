@@ -32,7 +32,9 @@ SUPPORTS_GC_TOGGLE = False
 
 def ensure_built() -> None:
     import subprocess
-    subprocess.run(["cargo", "build", "--release", "--features", "mdbx-backend"], cwd=REPO_ROOT, check=True)
+    # Same shared binary/allocator knob as cmvbt.py's own ensure_built() - see
+    # common.cmvbt_cargo_build_args's doc for why this can't just be duplicated ad hoc.
+    subprocess.run(common.cmvbt_cargo_build_args("mdbx-backend"), cwd=REPO_ROOT, check=True)
 
 
 def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", reload: bool = True) -> common.NormalizedResult:

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -73,6 +74,11 @@ def parse_args() -> argparse.Namespace:
                    help=f"comma-separated subset of {common.ALL_WORKLOADS}")
     p.add_argument("--tiny", action="store_true", help="use TINY_SCALE (smoke test) instead of the server scale")
     p.add_argument("--skip-build", action="store_true", help="skip each engine's ensure_built() step")
+    p.add_argument("--cmvbt-allocator", choices=["jemalloc", "mimalloc"], default="jemalloc",
+                   help="global allocator cMVBT's binary is built with (see Cargo.toml's `mimalloc` "
+                        "feature) - 'jemalloc' is the crate's own default; 'mimalloc' measured a few %% "
+                        "faster on YCSB's WAL path but a few %% slower on TPC-C, so it's opt-in here too. "
+                        "Only affects the cmvbt/libmdbx engines, which share one binary.")
 
     p.add_argument("--threads", default=None,
                    help=f"comma-separated thread/terminal counts to sweep (default {DEFAULT_THREADS}, "
@@ -116,6 +122,11 @@ def _workload_duration(workload: str, scale: common.Scale) -> float:
 
 def main() -> None:
     args = parse_args()
+    # Read fresh by common.cmvbt_cargo_build_args() inside cmvbt.py/libmdbx.py's own
+    # ensure_built() - see that function's doc for why this is an env var, not a direct
+    # module attribute, and why it's set unconditionally here even if "cmvbt"/"libmdbx"
+    # aren't in --engines (harmless: the var is simply never read in that case).
+    os.environ["CMVBT_ALLOCATOR"] = args.cmvbt_allocator
     scale = build_scale(args)
     engines = [e.strip() for e in args.engines.split(",") if e.strip()]
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
@@ -158,6 +169,7 @@ def main() -> None:
     print(f"scale         : {scale.label} (warehouses={scale.tpcc_warehouses}, "
           f"ycsb_records={scale.ycsb_records})")
     print(f"engines       : {engines}")
+    print(f"cmvbt alloc   : {args.cmvbt_allocator} (ignored unless 'cmvbt'/'libmdbx' is in --engines)")
     print(f"workloads     : {workloads}")
     print(f"threads sweep : {thread_list}")
     print(f"gc sweep      : {gc_list} (engines with no working GC toggle always run once, gc=n/a)")

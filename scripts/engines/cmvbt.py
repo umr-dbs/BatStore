@@ -32,8 +32,9 @@ def ensure_built() -> None:
     # engine's ensure_built() runs last would otherwise silently determine whether the
     # mdbx_ycsb/mdbx_tpcc subcommands exist - building with the feature unconditionally
     # here removes that ordering dependency entirely. The extra subcommands are inert for
-    # cMVBT's own tpcc/ycsb/htap_* workloads.
-    subprocess.run(["cargo", "build", "--release", "--features", "mdbx-backend"], cwd=REPO_ROOT, check=True)
+    # cMVBT's own tpcc/ycsb/htap_* workloads. Allocator (jemalloc/mimalloc) - see
+    # common.cmvbt_cargo_build_args's doc - comes from CMVBT_ALLOCATOR/--cmvbt-allocator.
+    subprocess.run(common.cmvbt_cargo_build_args("mdbx-backend"), cwd=REPO_ROOT, check=True)
 
 
 def run(
