@@ -33,9 +33,6 @@ inherits = "release"
 debug = true
 strip = false
 
-[build]
-rustflags = ["-C", "target-cpu=native"]
-
 [features]
 hardware-lock-elision = []
 # Gates the libmdbx-backed comparison engine (src/mv_bench/mdbx_ycsb.rs/mdbx_tpcc.rs) -
