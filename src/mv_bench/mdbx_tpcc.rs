@@ -16,8 +16,16 @@
 //! generic backend swapped into `tpcc_driver.rs`).
 //!
 //! Only the 11 core TPC-C tables are used (not CH-benCHmark's SUPPLIER/
-//! NATION/REGION addition) - libmdbx isn't part of the htap_q1/htap_q6
-//! comparison (see scripts/engines/libmdbx.py).
+//! NATION/REGION addition) - so unlike `tpcc_driver.rs`'s full 4-query
+//! `OlapMode::ChBenchmark` rotation (`mv_bench::tpch_queries`/`olap_scan.rs`),
+//! only [`mdbx_q1`]/[`mdbx_q6`] are implemented here: CH-benCHmark's Q1
+//! ("Pricing Summary Report") and Q6 ("Forecasting Revenue Change") are the
+//! only 2 of its 22 queries that are pure aggregations over `ORDER_LINE`
+//! alone, no joins against the missing dimension tables needed (see
+//! `tpch_queries` module docs for why these two specifically were chosen as
+//! the portable pair) - Q4/Q5 (which do need SUPPLIER/NATION/REGION) are not
+//! ported here, matching every other engine's own htap_q1/htap_q6-only scope
+//! (see scripts/engines/libmdbx.py and `common.HTAP_WORKLOADS`'s doc).
 //!
 //! Conflict handling differs fundamentally from cMVBT's OSIC: libmdbx (like
 //! LMDB) allows only one read-write transaction active process-wide at a
@@ -51,6 +59,13 @@ pub struct MdbxTpccConfig {
     pub duration: Duration,
     pub db_path: PathBuf,
     pub output_dir: PathBuf,
+    /// Runs one extra read-only OLAP thread rotating [`mdbx_q1`]/[`mdbx_q6`]
+    /// concurrently with the OLTP terminals - htap_q1/htap_q6's "run
+    /// CH-benCHmark queries alongside OLTP" mechanism (mirrors
+    /// `tpcc_driver.rs`'s `OlapMode::ChBenchmark`, minus Q4/Q5 - see module
+    /// docs). `false` for plain `tpcc`/`ycsb_*` runs, which skip the extra
+    /// thread and the `tpcc_scan.csv` output entirely.
+    pub htap_ch_benchmark: bool,
 }
 
 pub struct MdbxTpccRunSummary {
@@ -164,6 +179,72 @@ fn range_rows<K: TransactionKind>(txn: &Transaction<K, WriteMap>, table: Table, 
 fn pick_middle_by_name(matches: &[(TpccKey, TpccRow)]) -> u32 {
     let mid = (matches.len() + 1) / 2 - 1;
     decode_customer_name_idx_c_id(matches[mid].0)
+}
+
+// ---------------------------------------------------------------------
+// CH-benCHmark Q1/Q6 (mirrors `mv_bench::tpch_queries::q1`/`q6` function-for-
+// function, against libmdbx's `Transaction<RO>` instead of `TpccTxn` - see
+// module docs on why only these 2 queries are ported here).
+// ---------------------------------------------------------------------
+
+/// Per-`ol_number` group produced by [`mdbx_q1`] - mirrors
+/// `tpch_queries::OrderLineSummary`.
+#[derive(Clone, Copy, Debug, Default)]
+struct OrderLineSummary {
+    ol_number: u8,
+    count: u64,
+    sum_qty: u64,
+    sum_amount: f64,
+}
+
+/// CH-benCHmark Q1 ("Pricing Summary Report") - see
+/// `tpch_queries::q1`'s doc for the full rationale (groups every delivered
+/// order-line by `ol_number`, this schema's stand-in for `l_returnflag`/
+/// `l_linestatus`). One full `ORDER_LINE` table scan under a read-only
+/// snapshot; returns that snapshot's libmdbx transaction id alongside the
+/// result (this engine's analogue of `tpch_queries::q1`'s `Version`, used the
+/// same way - see `olap_thread`'s staleness computation).
+fn mdbx_q1(db: &Database<WriteMap>, delivered_before: i64) -> (Vec<OrderLineSummary>, u64) {
+    let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (q1)");
+    let ts_start = txn.id();
+    let lines = range_rows(&txn, Table::OrderLine, TpccKey::MIN, TpccKey::MAX);
+
+    let mut groups: [OrderLineSummary; 16] =
+        std::array::from_fn(|i| OrderLineSummary { ol_number: i as u8, ..Default::default() });
+
+    for (key, row) in &lines {
+        let ol = row.as_order_line();
+        let Some(delivered) = ol.ol_delivery_d else { continue };
+        if delivered > delivered_before {
+            continue;
+        }
+        let g = &mut groups[decode_order_line_number(*key) as usize];
+        g.count += 1;
+        g.sum_qty += ol.ol_quantity as u64;
+        g.sum_amount += ol.ol_amount;
+    }
+
+    let mut out: Vec<_> = groups.into_iter().filter(|g| g.count > 0).collect();
+    out.sort_by_key(|g| g.ol_number);
+    (out, ts_start)
+}
+
+/// CH-benCHmark Q6 ("Forecasting Revenue Change") - see `tpch_queries::q6`'s
+/// doc (total revenue from order-lines delivered within `[date_lo, date_hi)`
+/// with quantity below `max_qty`). One full `ORDER_LINE` table scan.
+fn mdbx_q6(db: &Database<WriteMap>, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, u64) {
+    let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (q6)");
+    let ts_start = txn.id();
+    let lines = range_rows(&txn, Table::OrderLine, TpccKey::MIN, TpccKey::MAX);
+
+    let revenue = lines.iter()
+        .filter_map(|(_, row)| {
+            let ol = row.as_order_line();
+            let delivered = ol.ol_delivery_d?;
+            (delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty).then_some(ol.ol_amount)
+        })
+        .sum();
+    (revenue, ts_start)
 }
 
 // ---------------------------------------------------------------------
@@ -613,9 +694,96 @@ fn stock_level(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32, thresh
 }
 
 // ---------------------------------------------------------------------
-// Driver (mirrors tpcc_driver.rs, minus OLAP/HTAP/WAL/affinity - see
-// module docs on scope).
+// Driver (mirrors tpcc_driver.rs, minus WAL/affinity/the full multi-query
+// OlapMode sweep - see module docs on scope; htap_ch_benchmark is the one
+// piece of tpcc_driver.rs's OLAP/HTAP machinery this file does port).
 // ---------------------------------------------------------------------
+
+/// One row of `tpcc_scan.csv` - same column shape as `olap_scan::ScanResult`
+/// (see `tpcc_driver.rs::write_results`) so `scripts/engines/libmdbx.py`
+/// reads it exactly the way `scripts/engines/cmvbt.py` already reads
+/// cMVBT's own. `snapshot`/`staleness_versions` use libmdbx's own
+/// transaction id (`Transaction::id()`, a real MDBX-internal monotonic
+/// counter) in place of cMVBT's logical `Version` - same idea (a
+/// snapshot's position on the timeline of committed writes), different
+/// engine's native counter.
+struct MdbxScanResult {
+    mode: &'static str,
+    elapsed_secs: f64,
+    snapshot: u64,
+    scanned_tuples: usize,
+    latency_ns: u128,
+    summary: Option<f64>,
+    staleness_versions: u64,
+}
+
+/// Runs [`mdbx_q1`] then [`mdbx_q6`] once each, reporting one
+/// [`MdbxScanResult`] per query - the 2-query analogue of `tpcc_driver.rs`'s
+/// `ch_benchmark_queries_once` (Q1/Q6 only, see module docs). `staleness`
+/// is computed the same way `olap_scan.rs` computes it for cMVBT: a fresh
+/// read-only transaction opened immediately after the query finishes, diffed
+/// against the query's own transaction id - "how many committed writer
+/// transactions happened while this analytical answer was being computed."
+fn ch_benchmark_queries_once(db: &Database<WriteMap>, date_lo: i64, date_hi: i64, run_start: Instant) -> [MdbxScanResult; 2] {
+    let staleness = |ts_start: u64| {
+        let fresh = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (staleness probe)");
+        fresh.id().saturating_sub(ts_start)
+    };
+
+    let start = Instant::now();
+    let (q1, ts_start) = mdbx_q1(db, date_hi);
+    let r1 = MdbxScanResult {
+        mode: "ch_q1_pricing_summary",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        snapshot: ts_start,
+        scanned_tuples: q1.len(),
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q1.iter().map(|g| g.sum_amount).sum()),
+        staleness_versions: staleness(ts_start),
+    };
+
+    let start = Instant::now();
+    let (q6, ts_start) = mdbx_q6(db, date_lo, date_hi, 24);
+    let r6 = MdbxScanResult {
+        mode: "ch_q6_forecast_revenue",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        snapshot: ts_start,
+        scanned_tuples: 1,
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q6),
+        staleness_versions: staleness(ts_start),
+    };
+
+    [r1, r6]
+}
+
+/// The one HTAP OLAP thread's whole run - rotates Q1/Q6 until `stop`,
+/// streaming every completed query's result into the returned `Vec`
+/// (joined back in `run_mdbx_tpcc`, mirrors `terminal_thread`'s
+/// join-and-collect shape rather than `tpcc_driver.rs`'s channel-based
+/// multi-thread fan-in, since there's always exactly one of these).
+fn olap_thread(
+    db: Arc<Database<WriteMap>>,
+    date_lo: i64,
+    date_hi: i64,
+    stop: Arc<AtomicBool>,
+    barrier: Arc<Barrier>,
+) -> Vec<MdbxScanResult> {
+    barrier.wait();
+    let run_start = Instant::now();
+    let mut out = Vec::new();
+
+    while !stop.load(Relaxed) {
+        for r in ch_benchmark_queries_once(&db, date_lo, date_hi, run_start) {
+            out.push(r);
+            if stop.load(Relaxed) {
+                break;
+            }
+        }
+    }
+
+    out
+}
 
 struct TerminalStats {
     new_order_committed_per_sec: Vec<u64>,
@@ -692,8 +860,12 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     }
     println!("Loaded {} warehouse(s) in {:?}.", cfg.tpcc.num_warehouses, load_start.elapsed());
 
+    // +1 OLAP thread when htap_ch_benchmark is set - same "every distinct thread
+    // permanently owns a barrier slot" shape as tpcc_driver.rs's num_terminals +
+    // num_olap_threads (see that module's threading-constraint doc), just fixed at
+    // exactly 0 or 1 OLAP threads here (see module docs on scope).
+    let barrier = Arc::new(Barrier::new(num_terminals + 1 + cfg.htap_ch_benchmark as usize));
     let stop = Arc::new(AtomicBool::new(false));
-    let barrier = Arc::new(Barrier::new(num_terminals + 1));
     let duration = cfg.duration;
 
     let handles: Vec<_> = (0..num_terminals).map(|_| {
@@ -705,6 +877,18 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
         thread::spawn(move || terminal_thread(db, cfg, duration, stop, barrier, history_seq))
     }).collect();
 
+    // Wide-open by default, same as tpcc_driver.rs's "ch" olap_mode: every row
+    // loaded gets stamped with the load's own real wall-clock time (see
+    // tpcc_random::now_millis), not a simulated TPC-H date range, so an
+    // unrestricted [MIN, MAX) filter is what makes Q1/Q6 see the whole loaded
+    // data set.
+    let olap_handle = cfg.htap_ch_benchmark.then(|| {
+        let db = db.clone();
+        let stop = stop.clone();
+        let barrier = barrier.clone();
+        thread::spawn(move || olap_thread(db, i64::MIN, i64::MAX, stop, barrier))
+    });
+
     barrier.wait();
     let run_start = Instant::now();
     println!("Loading done. Running timed phase for {duration:?}...");
@@ -712,14 +896,15 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     stop.store(true, Relaxed);
 
     let stats: Vec<TerminalStats> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let scan_results = olap_handle.map(|h| h.join().unwrap()).unwrap_or_default();
     let actual_wall = run_start.elapsed();
 
     mem_sampler.stop();
 
-    write_results(&stats, duration, actual_wall, &cfg.output_dir)
+    write_results(&stats, &scan_results, duration, actual_wall, &cfg.output_dir)
 }
 
-fn write_results(stats: &[TerminalStats], requested_duration: Duration, actual_wall: Duration, out_dir: &std::path::Path) -> MdbxTpccRunSummary {
+fn write_results(stats: &[TerminalStats], scan_results: &[MdbxScanResult], requested_duration: Duration, actual_wall: Duration, out_dir: &std::path::Path) -> MdbxTpccRunSummary {
     let series_len = requested_duration.as_secs() as usize + 2;
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_COUNTERS];
@@ -738,6 +923,27 @@ fn write_results(stats: &[TerminalStats], requested_duration: Duration, actual_w
     ts_file.write_all(b"elapsed_sec,new_order_committed\n").unwrap();
     for (sec, count) in per_sec.iter().enumerate() {
         ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
+    }
+
+    // Same column shape as tpcc_driver.rs::write_results's tpcc_scan.csv (see
+    // MdbxScanResult's doc) - only written when the OLAP thread actually ran, so plain
+    // tpcc/ycsb_* runs don't leave a stale/empty file behind from a previous htap run
+    // reusing the same output_dir.
+    if !scan_results.is_empty() {
+        let scan_path = out_dir.join("tpcc_scan.csv");
+        let _ = fs::remove_file(&scan_path);
+        let mut scan_file = OpenOptions::new().create(true).append(true).open(&scan_path).unwrap();
+        scan_file.write_all(b"mode,elapsed_secs,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary,staleness_versions\n").unwrap();
+        for r in scan_results {
+            let tuples_per_sec = if r.latency_ns == 0 { 0.0 } else { r.scanned_tuples as f64 / (r.latency_ns as f64 / 1e9) };
+            scan_file.write_all(format!(
+                "{},{:.3},{},{},{},{},{:.2},{},{}\n",
+                r.mode, r.elapsed_secs, 0.0, r.snapshot, r.scanned_tuples, r.latency_ns, tuples_per_sec,
+                r.summary.map(|s| format!("{s:.2}")).unwrap_or_default(),
+                r.staleness_versions,
+            ).as_bytes()).unwrap();
+        }
+        println!("Wrote {}", scan_path.display());
     }
 
     let new_order_total = totals[NO];
@@ -760,8 +966,12 @@ pub fn main_mdbx_tpcc(parms: Vec<String>) {
 
     // Positional order mirrors the existing `tpcc` subcommand (main_tpcc) wherever the
     // concept overlaps, dropping every knob that has no libmdbx equivalent (affinity, gc,
-    // update_in_place, root_star_index, OLAP/HTAP, WAL) - see mdbx_ycsb.rs/
-    // scripts/engines/libmdbx.py for the same convention.
+    // update_in_place, root_star_index, WAL) - see mdbx_ycsb.rs/
+    // scripts/engines/libmdbx.py for the same convention. `htap_mode` (position 9) is the
+    // one piece of tpcc_driver.rs's OLAP/HTAP surface this file does port - "none"
+    // (default) or "ch" (rotates mdbx_q1/mdbx_q6, see module docs) - dropping
+    // tpcc_driver.rs's other olap_mode_str variants (sleep/fresh/scan-delay-sweep) and
+    // ch's own region_name/num_suppliers knobs, neither of which apply to Q1/Q6.
     let num_warehouses: u32 = arg(&parms, 2, 4);
     let num_terminals: usize = arg(&parms, 3, num_cpus::get());
     let duration_secs: u64 = arg(&parms, 4, 30);
@@ -769,6 +979,7 @@ pub fn main_mdbx_tpcc(parms: Vec<String>) {
     let customers_per_district: u32 = arg(&parms, 6, 3_000);
     let initial_orders_per_district: u32 = arg(&parms, 7, 3_000);
     let db_path: String = parms.get(8).cloned().unwrap_or_else(|| "mdbx_tpcc_db".to_string());
+    let htap_ch_benchmark = parms.get(9).map(|s| s.as_str()) == Some("ch");
 
     run_mdbx_tpcc(MdbxTpccConfig {
         tpcc: TpccConfig {
@@ -780,6 +991,7 @@ pub fn main_mdbx_tpcc(parms: Vec<String>) {
             initial_new_orders: (initial_orders_per_district * 3 / 10).max(1),
             num_suppliers: 0,
         },
+        htap_ch_benchmark,
         num_terminals,
         duration: Duration::from_secs(duration_secs),
         db_path: PathBuf::from(db_path),

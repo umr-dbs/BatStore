@@ -1,0 +1,329 @@
+--- a/benchmarks/bench.cc
++++ b/benchmarks/bench.cc
+@@ -509,6 +509,7 @@
+ 
+   util::timer t, t_nosync;
+   barrier_b.count_down();  // bombs away!
++  StartHtapThread();
+ 
+   double total_util = 0;
+   double sec_util = 0;
+@@ -557,6 +558,7 @@
+     }
+   }
+   running = false;
++  JoinHtapThread();
+ 
+   ermia::volatile_write(ermia::config::state, ermia::config::kStateShutdown);
+   for (size_t i = 0; i < ermia::config::worker_threads; i++) {
+--- a/benchmarks/bench.h
++++ b/benchmarks/bench.h
+@@ -226,6 +226,16 @@
+   void create_files_task(char *);
+   void start_measurement();
+ 
++  // Hook for a benchmark-specific dedicated HTAP/analytical thread, run
++  // concurrently with the normal OLTP workers between start_measurement()'s
++  // barrier_b.count_down() ("bombs away") and `running` going false - see
++  // start_measurement()'s own call sites. No-op by default (only
++  // tpcc_bench_runner overrides this, for CH-benCHmark Q1/Q6 - see
++  // scripts/engines/vweaver_ermia.py); every other benchmark (ycsb, tpce)
++  // just inherits these no-ops.
++  virtual void StartHtapThread() {}
++  virtual void JoinHtapThread() {}
++
+   static std::vector<bench_worker *> workers;
+ 
+   // For command log shipping only
+--- a/benchmarks/tpcc.cc
++++ b/benchmarks/tpcc.cc
+@@ -16,11 +16,15 @@
+ #include <set>
+ #include <vector>
+ 
++#include <chrono>
++#include <thread>
++
+ #include <stdio.h>
+ #ifdef HYU_EVAL /* HYU_EVAL */
+ #include <time.h>
+ #endif /* HYU_EVAL */
+ #include "../dbcore/sm-cmd-log.h"
++#include "../dbcore/rcu.h"
+ 
+ #include "bench.h"
+ #include "tpcc.h"
+@@ -47,6 +51,10 @@
+ static int g_uniform_item_dist = 0;
+ static int g_order_status_scan_hack = 0;
+ static int g_wh_temperature = 0;
++// Runs one dedicated thread rotating CH-benCHmark Q1/Q6 (see RunChQ1/RunChQ6
++// and tpcc_bench_runner::StartHtapThread below) concurrently with the normal
++// OLTP tpcc_worker threads - see scripts/engines/vweaver_ermia.py.
++static int g_enable_chbenchmark = 0;
+ static uint g_microbench_rows = 10;  // this many rows
+ // can't have both ratio and rows at the same time
+ static int g_microbench_wr_rows = 0;  // this number of rows to write
+@@ -2916,6 +2924,155 @@
+   std::unordered_map<uint, bool> s_i_ids;
+ };
+ 
++// ---------------------------------------------------------------------
++// CH-benCHmark Q1/Q6 (see mv_bench::tpch_queries::q1/q6 in the sibling
++// cMVBT-OSIC harness for the reference implementation every engine there
++// ports) - run from a dedicated thread (tpcc_bench_runner::StartHtapThread,
++// below) rather than mixed into the normal per-transaction weighted workload
++// the way Query2/txn_query2 above is: this matches the "N OLTP threads + 1
++// always-on dedicated OLAP thread" convention every other engine in that
++// harness already uses for htap_q1/htap_q6, so OLTP thread counts stay
++// directly comparable to a plain "tpcc" run at the same worker_threads.
++//
++// ORDER_LINE is one table PER WAREHOUSE here (see TPCC_TABLE_LIST/
++// tbl_order_line), unlike the sibling harness's single-tree-per-table
++// engines - "one full ORDER_LINE table scan" is therefore a loop over every
++// warehouse's own table, all under one transaction snapshot (the same
++// multi-warehouse-loop-under-one-txn shape txn_query2() above already uses).
++// `scoped_str_arena` constructed fresh per warehouse resets the arena on
++// each iteration (see its destructor) so a whole-database scan can't
++// overrun str_arena's fixed 128MB reservation the way accumulating every
++// warehouse into one still-open scope would.
++//
++// ol_delivery_d == 0 means "not delivered yet" (see NewOrder/Delivery/the
++// loader, all of which use exactly this sentinel). GetCurrentTimeMillis()
++// (used to stamp it) is a per-thread monotonic counter here, not a real
++// wall-clock (see its own comment above) - so unlike the sibling harness's
++// engines, there is no meaningful absolute date range to filter on;
++// delivered_before/date_lo/date_hi are always wide open (see
++// tpcc_bench_runner::HtapThreadMain).
++struct ch_q1_group {
++  uint64_t count = 0;
++  uint64_t sum_qty = 0;
++  double sum_amount = 0.0;
++};
++
++// Streaming aggregation, NOT tpcc_table_scanner's own "buffer every (key,
++// value) pair into the arena, aggregate after" style (the style
++// txn_stock_level/txn_query2 above use) - those only ever scan a few
++// hundred/thousand rows at most (one district's last-20-orders, or a <100-row
++// dimension table). ORDER_LINE across a whole warehouse can be millions of
++// rows once the benchmark's been running a while, and str_arena is a FIXED
++// 128MB reservation whose own overrun guard (str_arena::next's ASSERT)
++// compiles to nothing in a Release build (NDEBUG) - buffering a
++// multi-million-row scan into it silently corrupts unrelated heap memory
++// instead of failing loudly (this was the actual root cause of a hard-to-
++// place SIGSEGV/heap-corruption crash observed during development, well past
++// where any of it looked related to this file). Aggregating directly inside
++// Invoke() instead needs only O(1) memory regardless of table size.
++class ch_q1_scan_callback : public ermia::OrderedIndex::ScanCallback {
++ public:
++  ch_q1_scan_callback(uint32_t delivered_before, ch_q1_group (&groups)[16],
++                      size_t &scanned_tuples)
++      : delivered_before_(delivered_before),
++        groups_(groups),
++        scanned_tuples_(scanned_tuples) {}
++  virtual bool Invoke(const char *keyp, size_t keylen,
++                      const ermia::varstr &value) override {
++    MARK_REFERENCED(keylen);
++    ASSERT(keylen == sizeof(order_line::key));
++    order_line::key k_temp;
++    const order_line::key *k = Decode(keyp, k_temp);
++    order_line::value v_temp;
++    const order_line::value *v = Decode(value, v_temp);
++    if (v->ol_delivery_d == 0 || v->ol_delivery_d > delivered_before_)
++      return true;
++    ch_q1_group &g = groups_[k->ol_number];
++    g.count++;
++    g.sum_qty += v->ol_quantity;
++    g.sum_amount += v->ol_amount;
++    scanned_tuples_++;
++    return true;
++  }
++  uint32_t delivered_before_;
++  ch_q1_group (&groups_)[16];
++  size_t &scanned_tuples_;
++};
++
++static rc_t RunChQ1(ermia::Engine *db, ermia::str_arena &arena,
++                    ermia::transaction *txn_buf,
++                    const std::vector<ermia::OrderedIndex *> &order_line_tables,
++                    uint32_t delivered_before, ch_q1_group (&groups)[16],
++                    size_t &scanned_tuples) {
++  const uint64_t read_only_mask = ermia::config::enable_safesnap
++                                      ? ermia::transaction::TXN_FLAG_READ_ONLY
++                                      : 0;
++  ermia::transaction *txn = db->NewTransaction(read_only_mask, arena, txn_buf);
++
++  ch_q1_scan_callback cb(delivered_before, groups, scanned_tuples);
++  for (uint w = 1; w <= NumWarehouses(); w++) {
++    ermia::scoped_str_arena s_arena(arena);
++    const order_line::key k_lo(w, 0, 0, 0);
++    TryCatch(order_line_tables[w - 1]->Scan(
++        txn, Encode(*arena.next(Size(k_lo)), k_lo), nullptr, cb,
++        s_arena.get()));
++  }
++
++  TryCatch(db->Commit(txn));
++  return {RC_TRUE};
++}
++
++// Streaming aggregation - see ch_q1_scan_callback's doc above for why
++// (unbounded ORDER_LINE scan, fixed-size str_arena, ASSERT compiled out).
++class ch_q6_scan_callback : public ermia::OrderedIndex::ScanCallback {
++ public:
++  ch_q6_scan_callback(uint32_t date_lo, uint32_t date_hi, int32_t max_qty,
++                      double &revenue)
++      : date_lo_(date_lo),
++        date_hi_(date_hi),
++        max_qty_(max_qty),
++        revenue_(revenue) {}
++  virtual bool Invoke(const char *keyp, size_t keylen,
++                      const ermia::varstr &value) override {
++    MARK_REFERENCED(keyp);
++    MARK_REFERENCED(keylen);
++    ASSERT(keylen == sizeof(order_line::key));
++    order_line::value v_temp;
++    const order_line::value *v = Decode(value, v_temp);
++    if (v->ol_delivery_d == 0) return true;
++    if (v->ol_delivery_d < date_lo_ || v->ol_delivery_d >= date_hi_) return true;
++    if (v->ol_quantity >= max_qty_) return true;
++    revenue_ += v->ol_amount;
++    return true;
++  }
++  uint32_t date_lo_, date_hi_;
++  int32_t max_qty_;
++  double &revenue_;
++};
++
++static rc_t RunChQ6(ermia::Engine *db, ermia::str_arena &arena,
++                    ermia::transaction *txn_buf,
++                    const std::vector<ermia::OrderedIndex *> &order_line_tables,
++                    uint32_t date_lo, uint32_t date_hi, int32_t max_qty,
++                    double &revenue) {
++  const uint64_t read_only_mask = ermia::config::enable_safesnap
++                                      ? ermia::transaction::TXN_FLAG_READ_ONLY
++                                      : 0;
++  ermia::transaction *txn = db->NewTransaction(read_only_mask, arena, txn_buf);
++
++  ch_q6_scan_callback cb(date_lo, date_hi, max_qty, revenue);
++  for (uint w = 1; w <= NumWarehouses(); w++) {
++    ermia::scoped_str_arena s_arena(arena);
++    const order_line::key k_lo(w, 0, 0, 0);
++    TryCatch(order_line_tables[w - 1]->Scan(
++        txn, Encode(*arena.next(Size(k_lo)), k_lo), nullptr, cb,
++        s_arena.get()));
++  }
++
++  TryCatch(db->Commit(txn));
++  return {RC_TRUE};
++}
++
+ rc_t tpcc_worker::txn_stock_level() {
+   const uint warehouse_id = pick_wh(r);
+   const uint threshold = RandomNumber(r, 10, 20);
+@@ -3534,10 +3691,98 @@
+     return ret;
+   }
+ 
++  // See bench_runner::StartHtapThread/JoinHtapThread's doc (bench.h) - only
++  // this benchmark overrides these, for CH-benCHmark Q1/Q6.
++  virtual void StartHtapThread() {
++    if (!g_enable_chbenchmark) return;
++    htap_thread_ = std::thread(&tpcc_bench_runner::HtapThreadMain, this);
++  }
++
++  virtual void JoinHtapThread() {
++    if (htap_thread_.joinable()) htap_thread_.join();
++  }
++
+  private:
++  void HtapThreadMain();
++  std::thread htap_thread_;
+   std::map<std::string, std::vector<ermia::OrderedIndex *>> partitions;
+ };
+ 
++// Not part of ermia::thread::Runner/the pooled-pthread machinery every
++// tpcc_worker/bench_loader runs on (see dbcore/sm-thread.cpp's IdleTask,
++// which registers RCU/MM once per pooled OS thread at startup) - this is a
++// plain std::thread, so it must register/deregister with RCU and MM itself,
++// mirroring bench_runner::measure_read_view_lsn (the only other raw
++// std::thread in this file that touches the database) exactly.
++void tpcc_bench_runner::HtapThreadMain() {
++  ermia::RCU::rcu_register();
++  ermia::MM::register_thread();
++  ermia::RCU::rcu_start_tls_cache(32, 100000);
++
++  ermia::str_arena arena;
++  ermia::transaction *txn_buf =
++      (ermia::transaction *)malloc(sizeof(ermia::transaction));
++  const std::vector<ermia::OrderedIndex *> &order_line_tables =
++      partitions.at("order_line");
++
++  const auto run_start = std::chrono::steady_clock::now();
++  auto elapsed_secs = [&]() {
++    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
++                                         run_start)
++        .count();
++  };
++
++  while (running) {
++    // RunChQ1/RunChQ6's own per-warehouse scoped_str_arena only bounds the SCAN
++    // portion of each call - db->NewTransaction()/db->Commit() also allocate
++    // read-set/commit bookkeeping from this same `arena` outside those inner
++    // scopes, which never gets freed between calls otherwise. str_arena's own
++    // overrun guard (str_arena::next's ASSERT) compiles to nothing in a Release
++    // build (NDEBUG), so left unreset here that bookkeeping would eventually
++    // walk `arena` past its fixed 128MB reservation and silently corrupt
++    // unrelated heap memory instead of failing loudly - reset explicitly every
++    // iteration so nothing outlives one query call.
++    arena.reset();
++
++    ch_q1_group groups[16] = {};
++    size_t scanned_tuples = 0;
++    auto q1_start = std::chrono::steady_clock::now();
++    // Wide open by design - see the CH-benCHmark Q1/Q6 module doc above
++    // RunChQ1/RunChQ6 (ol_delivery_d isn't a real wall-clock timestamp here).
++    rc_t rc = RunChQ1(db, arena, txn_buf, order_line_tables,
++                      std::numeric_limits<uint32_t>::max(), groups,
++                      scanned_tuples);
++    if (!rc.IsAbort()) {
++      auto latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                            std::chrono::steady_clock::now() - q1_start)
++                            .count();
++      double total_revenue = 0.0;
++      for (auto &g : groups) total_revenue += g.sum_amount;
++      printf("HTAP_SCAN,ch_q1_pricing_summary,%.3f,%zu,%lld,%.2f\n",
++             elapsed_secs(), scanned_tuples, (long long)latency_ns,
++             total_revenue);
++    }
++    if (!running) break;
++    arena.reset();
++
++    double revenue = 0.0;
++    auto q6_start = std::chrono::steady_clock::now();
++    rc = RunChQ6(db, arena, txn_buf, order_line_tables, 0,
++                std::numeric_limits<uint32_t>::max(), 24, revenue);
++    if (!rc.IsAbort()) {
++      auto latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                            std::chrono::steady_clock::now() - q6_start)
++                            .count();
++      printf("HTAP_SCAN,ch_q6_forecast_revenue,%.3f,%d,%lld,%.2f\n",
++             elapsed_secs(), 1, (long long)latency_ns, revenue);
++    }
++  }
++
++  free(txn_buf);
++  ermia::MM::deregister_thread();
++  ermia::RCU::rcu_deregister();
++}
++
+ void tpcc_do_test(ermia::Engine *db, int argc, char **argv) {
+   // parse options
+   optind = 1;
+@@ -3552,6 +3797,7 @@
+         {"new-order-fast-id-gen", no_argument, &g_new_order_fast_id_gen, 1},
+         {"uniform-item-dist", no_argument, &g_uniform_item_dist, 1},
+         {"order-status-scan-hack", no_argument, &g_order_status_scan_hack, 1},
++        {"enable-chbenchmark", no_argument, &g_enable_chbenchmark, 1},
+         {"workload-mix", required_argument, 0, 'w'},
+         {"warehouse-spread", required_argument, 0, 's'},
+         {"80-20-dist", no_argument, &g_wh_temperature, 't'},

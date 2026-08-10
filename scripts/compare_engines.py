@@ -18,7 +18,11 @@ gc_enabled="n/a" regardless of --gc. cMVBT (real --gc flag) and PostgreSQL
 htap_q1/htap_q6 (see common.py's HTAP_WORKLOADS) run TPC-C OLTP concurrently
 with one dedicated thread repeatedly executing CH-benCHmark Q1 ("Pricing
 Summary Report") or Q6 ("Forecasting Revenue Change") - the only 2 of
-CH-benCHmark's 22 queries genuinely implemented across all 4 engines. Compare
+CH-benCHmark's 22 queries genuinely implemented across every engine here
+(cmvbt, leanstore, wiredtiger, postgres, libmdbx, and both vweaver_ermia
+variants - see manual.txt section 5; vweaver_ermia_frugal has a separate,
+pre-existing KNOWN ISSUE there that crashes it on any sustained workload).
+Compare
 htap_q1/htap_q6's OLTP throughput against plain "tpcc" at the same
 threads/gc (see plot_compare.py::plot_htap_interference) for the interference
 analytics puts on OLTP - that derived comparison *is* this harness's "HTAP"

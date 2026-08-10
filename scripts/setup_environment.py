@@ -77,6 +77,16 @@ VWEAVER_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "vweav
 # checkout right alongside vweaver_ermia.patch, regardless of which variant(s) actually
 # get built from it.
 VWEAVER_FRUGAL_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "vweaver_ermia_frugal.patch"
+# Adds CH-benCHmark Q1 ("Pricing Summary Report")/Q6 ("Forecasting Revenue Change") support
+# (RunChQ1/RunChQ6 in benchmarks/tpcc.cc, a dedicated OLAP thread rotating them concurrently
+# with the normal OLTP tpcc_worker threads, gated behind a new -enable-chbenchmark
+# benchmark_option flag) - upstream had neither; see engines/vweaver_ermia.py's module
+# docstring for the full writeup, including a real heap-corruption bug (str_arena overrun,
+# silent in a Release build) hit and fixed during development. Applies identically to both
+# CMAKE_BUILD_PARAM variants (no #ifdef HYU_VWEAVER/HYU_SKIPLIST branching in this patch at
+# all), so - like vweaver_ermia_frugal.patch - it's applied unconditionally onto the one
+# shared checkout regardless of which variant(s) actually get built from it.
+VWEAVER_CHBENCHMARK_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "vweaver_ermia_chbenchmark.patch"
 # dbcore/burt-hash.cpp is gitignored upstream (dbcore/.gitignore) and meant to be generated
 # fresh at build time by `python2 dbcore/burt-hash.py` (see dbcore/CMakeLists.txt) - no
 # python2 on this system, so this repo ships a Python 3 port instead (see that file's header).
@@ -257,6 +267,9 @@ def step_vweaver_ermia() -> None:
             f"definition + disabled HYU_SKIPLIST GC branch - no-op for this Vweaver build, "
             f"needed by the separate vweaver_ermia_frugal build below)")
         run(["git", "apply", str(VWEAVER_FRUGAL_PATCH_PATH)], cwd=VWEAVER_REPO)
+        log(f"Applying {VWEAVER_CHBENCHMARK_PATCH_PATH.name} (adds CH-benCHmark Q1/Q6 - "
+            f"htap_q1/htap_q6 - support to both build variants)")
+        run(["git", "apply", str(VWEAVER_CHBENCHMARK_PATCH_PATH)], cwd=VWEAVER_REPO)
 
     burt_hash_cpp = VWEAVER_REPO / "dbcore" / "burt-hash.cpp"
     if not burt_hash_cpp.exists() or burt_hash_cpp.stat().st_size == 0:

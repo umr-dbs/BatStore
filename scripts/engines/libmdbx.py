@@ -5,8 +5,15 @@ B+Tree) instead of cMVBT's own version-chain MVBTree - only compiled in behind t
 `mdbx-backend` Cargo feature, since it's an optional comparison point, not part of every
 build.
 
-TPC-C + YCSB A-F only (`common.ALL_WORKLOADS` minus `common.HTAP_WORKLOADS`) - no
-CH-benCHmark/HTAP support, see this engine's absence from htap_q1/htap_q6 handling below.
+TPC-C + YCSB A-F + htap_q1/htap_q6 - the latter two run mdbx_tpcc.rs's own Q1 ("Pricing
+Summary Report")/Q6 ("Forecasting Revenue Change") queries (mdbx_q1/mdbx_q6, a libmdbx
+port of `mv_bench::tpch_queries::q1`/`q6`) concurrently with the OLTP terminals, same
+mechanism as cmvbt.py's "ch" olap_mode. Unlike cMVBT/LeanStore/WiredTiger, only Q1/Q6 are
+implemented (not the full 4-query CH-benCHmark rotation) - libmdbx's own TPC-C schema
+(mdbx_tpcc.rs) only has the 11 core tables, not CH-benCHmark's SUPPLIER/NATION/REGION
+addition Q4/Q5 need, and Q1/Q6 are the only 2 of CH-benCHmark's 22 queries that are pure
+`ORDER_LINE` aggregations needing no joins against those missing tables (see
+mdbx_tpcc.rs's module docs).
 
 libmdbx (like LMDB) allows only one read-write transaction active process-wide at a time -
 there is no possible write-write race the way cMVBT's OSIC or a real MVCC engine has, so
@@ -43,23 +50,21 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if workload in common.HTAP_WORKLOADS:
-        return common.NormalizedResult(
-            "libmdbx", workload, scale.label, 0.0, "new_order_per_sec", 0.0, 0.0,
-            threads=0, gc_enabled="n/a",
-            notes="not supported: libmdbx has no CH-benCHmark/HTAP analytical-query path",
-        )
-
     # Fixed, wiped-before-every-run path - matches leanstore.py/wiredtiger.py's ssd_path
     # treatment, and your explicit ask for libmdbx specifically.
     db_path = common.fresh_scratch_dir("libmdbx_data") / "db"
 
-    if workload == "tpcc":
+    if workload in (["tpcc"] + common.HTAP_WORKLOADS):
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
+        # htap_mode (position 9): "ch" spawns mdbx_tpcc.rs's one OLAP thread rotating
+        # mdbx_q1/mdbx_q6 - see that module's docs and this file's own module doc. Both
+        # htap_q1 and htap_q6 request the same "ch" rotation (mirrors cmvbt.py's identical
+        # choice); only the mode filter used below when reading tpcc_scan.csv differs.
+        htap_mode = "ch" if workload in common.HTAP_WORKLOADS else "none"
         args = [
             str(BINARY), "mdbx_tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
-            "100000", "3000", "3000", str(db_path),
+            "100000", "3000", "3000", str(db_path), htap_mode,
         ]
         metric_name = "new_order_per_sec"
         ts_file, ts_column = "tpcc_oltp_timeseries.csv", "new_order_committed"
@@ -94,6 +99,16 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if workload == "ycsb_e":
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
+    elif workload in common.HTAP_WORKLOADS:
+        # mdbx_tpcc.rs's OLAP thread writes both queries' rows into one tpcc_scan.csv (see
+        # MdbxScanResult's doc there) - same "filter by mode column" convention cmvbt.py
+        # uses for its own tpcc_scan.csv.
+        mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
+        latency = common.percentiles_from_samples(
+            output_dir / "tpcc_scan.csv", "latency_ns", filter_column="mode", filter_value=mode,
+        )
+        for k in ("p50", "p95", "p99", "avg"):
+            latency[k] /= 1000.0  # ns -> us
 
     return common.NormalizedResult(
         "libmdbx", workload, scale.label, duration, metric_name, value, peak_rss_mb,
