@@ -140,3 +140,80 @@ Raw manifests: `comparison_results/run_20260809_184829` (before),
   contended writes) is also unchanged - neither was in scope for this pass.
 - Only cMVBT was benchmarked (`--engines cmvbt`), not the other six engines this harness
   can drive - this doc is about cMVBT's own headroom, not a cross-engine comparison.
+
+## Follow-up: a lock-free WAL backend, an OOM in its own benchmark, and a cross-shard durability race found merging the two
+
+A separate, concurrent line of work pursued the same "WAL append path" contention this
+doc's fix #3 targets, but via a different mechanism: instead of splitting the *shared*
+channel into shards, `LockFreeWalWriter`/`LockFreeWalBackend`
+(`src/mv_wal/lockfree_writer.rs`/`backend.rs`) removes the channel and the dedicated
+writer thread entirely - every worker reserves its own byte range in the file via
+`tail.fetch_add` and calls `pwrite` itself, directly, optionally batching its own records
+locally (`LocalBatch`) before flushing. `WalBackend` wraps both `WalWriter` (this doc's
+sharded channel) and `LockFreeWalWriter` behind one enum so callers pick either at attach
+time (`enable_wal`/`enable_wal_lockfree`).
+
+**Synthetic microbenchmark** (`tests/wal_writer_throughput_bench.rs`, debug build, this
+repo's current state - not the `perf`-profiled numbers above):
+
+| Backend | @8 threads | @16 threads |
+|---|---|---|
+| `WalWriter` (4-way sharded, this doc's fix #3) | 1,006,755 ops/s | 1,353,816 ops/s |
+| `LockFreeWalWriter`, unbatched | 752,179 ops/s | 748,676 ops/s (p99.9 latency: 1.68ms) |
+| `LockFreeWalWriter` + `LocalBatch(64)` | 2,549,030 ops/s | **5,089,502 ops/s** |
+
+Unbatched lock-free writes lose to the sharded channel past a few threads - each write pays
+a full `pwrite` syscall, and (per that module's own doc) some filesystem-level
+inode-extension serialization on a shared growing file. Per-thread batching (`LocalBatch`)
+is what actually wins: same lock-free append, but each thread groups its own records into
+one `pwrite` per `batch_size`, amortizing the same syscall cost the sharded channel amortizes
+a different way (batching *within* a group-commit window instead of *across* threads).
+
+**Bug #1 (memory, not WAL): `RESTART_TRACE` OOM'd the real-workload comparison.**
+Running `tests/tpcc_wal_backend_bench.rs`'s full-scale `compare_wal_backends_tpcc` (16
+warehouses, 16 terminals, `lockfree-batch64`) got OOM-killed at **12GB+ RSS**, taking the
+whole terminal session with it. Cause: `mv_test::RESTART_TRACE` (a write-restart diagnostic,
+documented "off by default") had been left `true` in checked-in code. Every OCC restart
+records a `String` key into a process-lifetime global map that nothing ever clears; the
+comparison loop calls `run_tpcc()` 6 times in one process, so this accumulates across every
+iteration, and the *fastest* config (last in the loop, `lockfree-batch64`/16 terminals -
+exactly the backend this section is benchmarking) generates restarts fast enough to blow
+through available memory before the run even finishes. Reproduced at a *tiny* scale (1
+warehouse, 200ms runs) in well under a second: footprint grew from 214 to 877 entries across
+4 in-process `run_tpcc()` calls with tracing left on. **Fix:** restored the documented
+default (`false`); added `mv_test::reset_restart_trace()`, called at the start of every
+`run_tpcc()`, so repeated in-process runs never cross-contaminate even if tracing is
+deliberately turned back on for an investigation.
+
+**Bug #2 (WAL, found merging with fix #3 above): cross-shard `hardened_version` race.**
+`WalWriter`'s sharded channel (this doc's fix #3) and the lock-free backend above were
+developed concurrently and landed via a merge. The sharded channel's `hardened_version`
+published every shard's own confirmed watermark into *one* shared atomic via `fetch_max` -
+correct only if every shard's watermark is comparable, which it isn't: `ts_start` is one
+global sequence spread across shards unpredictably by `worker_id % NUM_SHARDS`, not
+partitioned per shard. One busy shard's flush could advance the shared watermark past a
+`ts_start` a *different*, slower shard hadn't flushed yet.
+`tests/tree_wal_consistency_tests.rs::concurrent_db_transactions_across_tables_match_shared_wal_exactly`
+caught it directly: `wal_state.len()` came back `1200` instead of the expected `1800` - a
+quarter of the written records missing from the reconstructed WAL because
+`wait_wal_hardened` had returned before every shard actually flushed.
+
+A first fix attempt (aggregate = minimum of every shard's own raw `confirmed` value) traded
+the false-positive for a hang: a shard whose own submissions simply never reach some
+*other* shard's higher watermark would never satisfy a plain `min` comparison, even once
+it had flushed everything it was ever going to receive - `wait_wal_hardened` polled forever.
+**Actual fix:** give each shard a `submitted` watermark alongside `confirmed` (`submitted`
+updated in `enqueue`, strictly before the message is sent, so it can only ever be a stale
+*overestimate* of in-flight work, never an underestimate). The aggregate now treats a shard
+as imposing **no constraint** once `confirmed >= submitted` ("fully drained, nothing
+outstanding regardless of the numeric gap to any other shard"), the same way an always-idle
+shard already imposed none - only a shard that's genuinely behind (`confirmed < submitted`)
+contributes its own `confirmed` value to the aggregate's minimum. Verified with the exact
+failing test run 5x with no flakiness, plus the full 126-test suite run 3x clean.
+
+**New: fast, always-on WAL backend perf smoke tests.** `tests/tpcc_wal_perf_tests.rs`/
+`tests/ycsb_wal_perf_tests.rs` sweep the batched vs. lock-free backends end to end (real
+TPC-C/YCSB driver, not a synthetic WAL-only microbenchmark) at a deliberately tiny scale -
+under 20s wall time combined, RSS growth asserted under a 20GB ceiling - so a regression
+like either bug above gets caught on every `cargo test`, not only in the full-scale,
+`#[ignore]`d comparison this section started from.
