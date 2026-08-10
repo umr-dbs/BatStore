@@ -973,6 +973,31 @@ once, and had to be reconciled on merge.
         now treats a shard as imposing no constraint once \path{confirmed >= submitted}
         (fully drained) rather than comparing raw values across shards. Verified: the
         failing test run 5$\times$ with no flakiness, the full suite 3$\times$ clean.
+  \item \commit{efc3773} --- \emph{``Skip the discarded flush ticket on the WAL hot path,
+        right-size framing buffers.''} A short \path{perf record} pass (15s TPC-C/YCSB-A,
+        WAL on) run once the append path itself was no longer the bottleneck surfaced two
+        purely allocator-side hotspots the earlier channel contention had been masking.
+        (1)~\path{WalWriter::enqueue} built a fresh \path{bounded(1)} ack channel on
+        \emph{every} call to return a flush ticket that every production call site
+        (\path{mv\_sync::version\_handle}) always discarded --- split each logging method
+        into a ticket-less default (no channel built at all) plus an explicit
+        \path{*\_with\_ticket} variant for the handful of tests that genuinely wait on one
+        record. (2)~every framing buffer's \path{Vec::with\_capacity} hint (24--44 bytes)
+        was tuned for this module's own \path{u64}-payload tests, not real payloads ---
+        \path{YcsbRow} (1000 bytes at this benchmark's field sizes) is roughly 25$\times$
+        that, \path{TpccRow}'s \path{Customer}/\path{Stock} variants routinely 7--10$\times$
+        over, forcing several grow-and-copy reallocations per WAL write. Added
+        \path{WalPayload::wal\_encode\_size\_hint()} (exact for \path{u64}, and for
+        \path{YcsbRow}/\path{TpccRow} via overrides mirroring their own \path{wal\_encode}
+        field-for-field) and \path{record::entry\_size\_hint()}, and swapped every
+        hardcoded constant in \path{writer.rs}/\path{lockfree\_writer.rs} for it. Re-measured
+        on the same short runs: TPC-C tpmC +12.6\%, YCSB-A ops/sec +25.3\%, and the
+        synthetic \path{u64}-payload \path{WalWriter} microbenchmark at 16 threads +79\%
+        (largest gain here since, against an 8-byte payload, the discarded ticket's channel
+        allocation was close to the entire per-write cost). Not fully closed: YCSB's
+        page-fault/allocator chain shrank but didn't disappear --- a fresh $\sim$1000-byte
+        \path{Vec} per write is still a fresh allocation per write; a true cross-thread
+        buffer pool was flagged as a follow-up, not attempted.
 \end{itemize}
 
 \subsection{Known, documented limitations}
@@ -1039,6 +1064,7 @@ for cross-reference against \texttt{git log}.
 \commit{4a1a50a} & 2026-08-09 & WAL channel sharding, table-driven CRC32 (\S\ref{sec:osic}) \\
 \commit{ebdd789} & 2026-08-10 & Lock-free WAL backend; RESTART\_TRACE OOM fixed (\S\ref{sec:osic}) \\
 \commit{9ced1a3} & 2026-08-10 & Cross-shard hardened\_version race fixed (\S\ref{sec:osic}) \\
+\commit{efc3773} & 2026-08-10 & Discarded flush ticket + undersized WAL buffers fixed (\S\ref{sec:osic}) \\
 \bottomrule
 \caption{Chronological index of commits discussed in this document.}
 \label{tab:timeline}
