@@ -318,21 +318,25 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> Lock
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) {
-        let op = build(stamp.ts_start());
+        let entry = WalEntry::Write(WalRecord { stamp, op: build(stamp.ts_start()) });
 
-        let mut framed = Vec::with_capacity(40);
-        record::encode_entry_framed(&WalEntry::Write(WalRecord { stamp, op }), &mut framed);
+        // Pre-sized via `entry_size_hint` (an exact-or-close estimate of the
+        // real encoded size — see that function's doc) rather than a small
+        // fixed guess, so this doesn't pay for repeated grow-and-copy
+        // reallocations on anything bigger than a `u64` payload (real
+        // payloads like `TpccRow`/`YcsbRow` routinely run into the hundreds
+        // of bytes).
+        let mut framed = Vec::with_capacity(record::entry_size_hint(&entry));
+        record::encode_entry_framed(&entry, &mut framed);
 
         self.enqueue(stamp.ts_start(), false, &framed);
     }
 
     /// Lock-free counterpart to `WalWriter::log_commit`.
     pub fn log_commit(&self, stamp: TxStamp, ts_commit: Version) {
-        let mut framed = Vec::with_capacity(24);
-        record::encode_entry_framed::<Key, Payload>(
-            &WalEntry::Commit { stamp, ts_commit },
-            &mut framed,
-        );
+        let entry = WalEntry::Commit { stamp, ts_commit };
+        let mut framed = Vec::with_capacity(record::entry_size_hint::<Key, Payload>(&entry));
+        record::encode_entry_framed::<Key, Payload>(&entry, &mut framed);
 
         self.enqueue(stamp.ts_start(), true, &framed);
     }
@@ -357,20 +361,22 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> Lock
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) {
-        let op = build(stamp.ts_start());
-
-        let mut framed = Vec::with_capacity(44);
-        record::encode_entry_for_table_framed(table_id, &WalEntry::Write(WalRecord { stamp, op }), &mut framed);
+        let entry = WalEntry::Write(WalRecord { stamp, op: build(stamp.ts_start()) });
+        // +4: the table id this framing adds on top of `encode_entry_framed`'s
+        // plain shape — see `record::encode_entry_for_table_framed`'s doc.
+        let mut framed = Vec::with_capacity(record::entry_size_hint(&entry) + 4);
+        record::encode_entry_for_table_framed(table_id, &entry, &mut framed);
 
         self.enqueue(stamp.ts_start(), false, &framed);
     }
 
     /// Lock-free counterpart to `WalWriter::log_commit_for_table`.
     pub fn log_commit_for_table(&self, stamp: TxStamp, ts_commit: Version) {
-        let mut framed = Vec::with_capacity(28);
+        let entry = WalEntry::Commit { stamp, ts_commit };
+        let mut framed = Vec::with_capacity(record::entry_size_hint::<Key, Payload>(&entry) + 4);
         record::encode_entry_for_table_framed::<Key, Payload>(
             record::TABLE_ID_COMMIT_SENTINEL,
-            &WalEntry::Commit { stamp, ts_commit },
+            &entry,
             &mut framed,
         );
 

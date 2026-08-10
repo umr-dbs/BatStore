@@ -37,13 +37,13 @@ fn replay_database_routes_writes_to_correct_table() {
         writer.log_with_stamp_for_table(TABLE_A, stamp1, |_| CRUDOperation::Insert(10u64, 100u64));
         writer.log_with_stamp_for_table(TABLE_B, stamp1, |_| CRUDOperation::Insert(20u64, 200u64));
         let ts_commit1 = clock.next_timestamp();
-        let t1 = writer.log_commit_for_table(stamp1, ts_commit1);
+        let t1 = writer.log_commit_for_table_with_ticket(stamp1, ts_commit1);
 
         // tx2 (worker 0, later stamp): writes only TABLE_A.
         let stamp2 = TxStamp::new(0, clock.next_timestamp());
         writer.log_with_stamp_for_table(TABLE_A, stamp2, |_| CRUDOperation::Insert(11u64, 111u64));
         let ts_commit2 = clock.next_timestamp();
-        let t2 = writer.log_commit_for_table(stamp2, ts_commit2);
+        let t2 = writer.log_commit_for_table_with_ticket(stamp2, ts_commit2);
 
         writer.wait_flushed(t1);
         writer.wait_flushed(t2);

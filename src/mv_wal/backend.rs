@@ -227,7 +227,7 @@ impl<
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) -> TxStamp {
         match self {
-            Self::Batched(w) => w.start_commit_logged(clock, worker_id, build).0,
+            Self::Batched(w) => w.start_commit_logged(clock, worker_id, build),
             Self::LockFree(w) => w.start_commit_logged(clock, worker_id, build),
         }
     }
@@ -254,7 +254,7 @@ impl<
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) -> TxStamp {
         match self {
-            Self::Batched(w) => w.start_commit_logged_for_table(table_id, clock, worker_id, build).0,
+            Self::Batched(w) => w.start_commit_logged_for_table(table_id, clock, worker_id, build),
             Self::LockFree(w) => w.start_commit_logged_for_table(table_id, clock, worker_id, build),
         }
     }

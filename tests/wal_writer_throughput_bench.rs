@@ -83,7 +83,7 @@ fn bench_wal_writer(threads: usize, path: &std::path::Path) -> RunStats {
                 for i in 0..OPS_PER_THREAD {
                     let key = (t * OPS_PER_THREAD + i) as u64;
                     let start = Instant::now();
-                    let _ticket = writer.start_commit_logged(&clock, t as u16, move |_v| {
+                    let _stamp = writer.start_commit_logged(&clock, t as u16, move |_v| {
                         CRUDOperation::Insert(key, key)
                     });
                     latencies.push(start.elapsed().as_nanos() as u64);

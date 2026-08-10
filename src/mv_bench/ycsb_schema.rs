@@ -227,6 +227,18 @@ impl WalPayload for YcsbRow {
         let data = bytes.get(4..4 + len)?;
         Some(Self::from_bytes(data))
     }
+
+    /// Exact, not just an estimate: `wal_encode` above writes precisely
+    /// `4 + self.len()` bytes, and `self.len()` is already known up front
+    /// (no encoding work needed to compute it) — the trait default (`8`,
+    /// tuned for a bare `u64` payload) would otherwise be off by roughly
+    /// `field_count * field_length` bytes (e.g. 996 bytes short at this
+    /// benchmark's usual 10x100 fields), forcing several grow-and-copy
+    /// reallocations per WAL write.
+    #[inline]
+    fn wal_encode_size_hint(&self) -> usize {
+        4 + self.len()
+    }
 }
 
 #[cfg(test)]
