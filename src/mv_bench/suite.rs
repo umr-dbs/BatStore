@@ -132,6 +132,7 @@ fn run_one(experiment: &str, scale: Scale, gc: bool, out_dir: PathBuf) -> (&'sta
                 olap_mode: OlapMode::RepeatedFreshFullScan,
                 num_olap_threads: 0,
                 wal: None,
+                wal_lockfree_batch_size: None,
                 htap_baseline: None,
                 output_dir: out_dir,
             });
@@ -152,6 +153,7 @@ fn run_one(experiment: &str, scale: Scale, gc: bool, out_dir: PathBuf) -> (&'sta
                 olap_mode: OlapMode::ChBenchmark { region_name: "EUROPE".to_string(), date_lo: i64::MIN, date_hi: i64::MAX },
                 num_olap_threads: scale.ch_htap_olap_threads(),
                 wal: None,
+                wal_lockfree_batch_size: None,
                 htap_baseline,
                 output_dir: out_dir,
             });
@@ -173,6 +175,7 @@ fn run_one(experiment: &str, scale: Scale, gc: bool, out_dir: PathBuf) -> (&'sta
                 update_in_place: false,
                 root_star_index: RootIndexType::FrugalList,
                 wal: None,
+                wal_lockfree_batch_size: None,
                 output_dir: out_dir,
             });
             ("ops_per_sec", summary.throughput_ops_sec, None)

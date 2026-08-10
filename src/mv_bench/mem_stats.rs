@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 /// different cadence can add one directly via `MemSampler::start`.
 pub const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
-fn read_vm_rss_kb() -> Option<u64> {
+pub fn read_vm_rss_kb() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {

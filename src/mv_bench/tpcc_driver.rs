@@ -60,6 +60,15 @@ pub struct DriverConfig {
     /// measured phase. `None` disables WAL entirely (population and OLTP
     /// writes take the plain, unlogged path).
     pub wal: Option<(std::path::PathBuf, Duration)>,
+    /// `None` (default): `cfg.wal`, if set, attaches via `enable_wal`
+    /// (`WalBackend::Batched` — channel + one background writer thread).
+    /// `Some(batch_size)`: attaches via `enable_wal_lockfree` instead
+    /// (`WalBackend::LockFree` — every worker thread reserves its own byte
+    /// range and writes it directly, batching its own records up to
+    /// `batch_size` before each `pwrite`; see `mv_wal::lockfree_writer`'s
+    /// and `mv_wal::backend`'s docs). Ignored entirely when `cfg.wal` is
+    /// `None`.
+    pub wal_lockfree_batch_size: Option<usize>,
     /// HTAP interference measurement: if set, runs a short OLTP-only
     /// sub-phase of this duration (same terminals, zero OLAP threads) right
     /// after loading and *before* the real timed phase, so the real phase's
@@ -180,6 +189,13 @@ fn terminal_thread(
 pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     assert!(cfg.tpcc.num_warehouses >= 1, "tpcc: num_warehouses must be >= 1");
 
+    // See `mv_test::reset_restart_trace`'s doc: without this, a caller that
+    // invokes `run_tpcc` more than once in the same process (e.g.
+    // `tests/tpcc_wal_backend_bench.rs`'s backend-comparison loop) would
+    // accumulate every prior run's restart-trace data into this run's dump,
+    // unbounded, whenever `RESTART_TRACE` is on.
+    crate::mv_test::reset_restart_trace();
+
     let max_threads = crate::mv_tree::mvbt::default_max_workers().max(1);
 
     let mut num_terminals = cfg.num_terminals.max(1);
@@ -218,7 +234,10 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
 
     if let Some((wal_path, flush_interval)) = &cfg.wal {
         let _ = fs::remove_file(wal_path);
-        db.enable_wal(wal_path, *flush_interval).expect("failed to attach WAL");
+        match cfg.wal_lockfree_batch_size {
+            Some(batch_size) => db.enable_wal_lockfree(wal_path, *flush_interval, batch_size).expect("failed to attach lock-free WAL"),
+            None => db.enable_wal(wal_path, *flush_interval).expect("failed to attach WAL"),
+        }
     }
 
     println!(
@@ -239,9 +258,10 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
         if cfg.affinity { "warehouse affinity (0% remote)" } else { "cross warehouse" },
         cfg.duration,
         cfg.gc, cfg.update_in_place,
-        match &cfg.wal {
-            Some((path, interval)) => format!("On ({} @ {interval:?} flush)", path.display()),
-            None => "Off".to_string(),
+        match (&cfg.wal, cfg.wal_lockfree_batch_size) {
+            (Some((path, interval)), None) => format!("On, batched ({} @ {interval:?} flush)", path.display()),
+            (Some((path, interval)), Some(batch_size)) => format!("On, lock-free batch={batch_size} ({} @ {interval:?} flush)", path.display()),
+            (None, _) => "Off".to_string(),
         },
         cfg.root_star_index,
         cfg.tpcc.num_items, cfg.tpcc.customers_per_district, cfg.tpcc.initial_orders_per_district,
@@ -580,6 +600,7 @@ pub fn main_tpcc(parms: Vec<String>) {
         olap_mode,
         num_olap_threads,
         wal: wal_enabled.then(|| (std::path::PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
+        wal_lockfree_batch_size: None,
         htap_baseline: (htap_baseline_secs > 0).then(|| Duration::from_secs(htap_baseline_secs)),
         output_dir: PathBuf::from("."),
     });
@@ -611,6 +632,7 @@ fn standard_driver_config(
         olap_mode,
         num_olap_threads,
         wal: None,
+        wal_lockfree_batch_size: None,
         htap_baseline,
         output_dir: PathBuf::from("."),
     }

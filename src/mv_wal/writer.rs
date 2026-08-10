@@ -81,7 +81,18 @@ pub struct WalWriter<Key, Payload> {
     /// type's doc) submitting strictly in `ts_start` order, so batches are
     /// drained and flushed in that same non-decreasing order.
     hardened: Arc<AtomicVersion>,
-    _marker: PhantomData<(Key, Payload)>,
+    /// `fn(Key, Payload)`, not `(Key, Payload)`: this type never actually
+    /// stores a `Key`/`Payload` value (its background thread's captured
+    /// state is plain bytes/atomics/handles, no `Key`/`Payload` type ever
+    /// crosses the channel — see `LogMessage`), so only the `fn`-pointer
+    /// marker form is unconditionally `Send + Sync` regardless of
+    /// `Key`/`Payload`. Matters now that `mv_wal::backend::WalBackend`
+    /// wraps this alongside `LockFreeWalWriter` in one enum shared across
+    /// threads via `Arc` — the tuple form would make the whole enum's
+    /// `Send`/`Sync` conditional on `Key: Send`/`Payload: Send`, rippling
+    /// that requirement through every generic caller (`MVBTSt`, `Database`,
+    /// `DbTransaction`, ...) for no real reason.
+    _marker: PhantomData<fn(Key, Payload)>,
 }
 
 impl<Key: Ord + Copy + Hash + Display, Payload: Clone> WalWriter<Key, Payload> {

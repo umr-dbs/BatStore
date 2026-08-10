@@ -3,7 +3,7 @@ use crate::mv_record_model::tx_stamp::TxStamp;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_wal::record::{
     decode, decode_entry, decode_entry_for_table, encode, encode_entry, encode_entry_for_table_framed,
-    encode_entry_framed, frame, read_frame, WalEntry, WalRecord, TABLE_ID_COMMIT_SENTINEL,
+    encode_entry_framed, frame, read_frame, resync_next, WalEntry, WalRecord, TABLE_ID_COMMIT_SENTINEL,
 };
 
 fn assert_ops_eq(a: &CRUDOperation<u64, u64>, b: &CRUDOperation<u64, u64>) {
@@ -236,4 +236,72 @@ fn detects_corrupted_body() {
     framed[corrupt_idx] ^= 0xFF;
 
     assert!(read_frame(&framed).is_none());
+}
+
+/// `resync_next` must skip clean over an **interior** hole (the scenario
+/// `read_frame`'s plain "stop at the first bad frame" can't handle — see
+/// that function's doc for why `LockFreeWalWriter` can produce one) and
+/// still find the record on the far side, at a hole length that is
+/// deliberately *not* a multiple of the frame header size, so a naive
+/// "skip by 8 bytes and retry" fix (which would misalign past the hole's
+/// true end) would fail this.
+#[test]
+fn resync_next_skips_an_interior_hole_of_unaligned_length() {
+    let first = WalRecord { stamp: TxStamp::new(1, 1), op: CRUDOperation::Insert(1u64, 100u64) };
+    let second = WalRecord { stamp: TxStamp::new(1, 2), op: CRUDOperation::Insert(2u64, 200u64) };
+
+    let mut bytes = Vec::new();
+    encode_entry_framed(&WalEntry::Write(first), &mut bytes);
+    let first_len = bytes.len();
+    let hole_len = 13; // not a multiple of 4, 8, or this frame's own header size
+    bytes.extend(std::iter::repeat(0u8).take(hole_len));
+    let second_offset = bytes.len();
+    encode_entry_framed(&WalEntry::Write(second), &mut bytes);
+    let second_len = bytes.len() - second_offset;
+
+    // `offset` tracks where each `resync_next` call *starts* scanning from,
+    // not where it actually found its entry (that's `offset` plus however
+    // much of `consumed` was spent skipping) — recovery only ever needs
+    // "advance by `consumed`", never the found position itself, so that's
+    // all this loop tracks too.
+    let mut offset = 0;
+    let mut found = Vec::new();
+    while let Some((entry, consumed)) = resync_next(&bytes[offset..], decode_entry::<u64, u64>) {
+        found.push(entry);
+        offset += consumed;
+    }
+
+    assert_eq!(offset, bytes.len(), "must consume every byte, including the hole, once fully resynced");
+    assert_eq!(found.len(), 2, "both records must survive, despite the hole between them");
+    match &found[0] {
+        WalEntry::Write(r) => assert_eq!(r.stamp.ts_start(), 1),
+        _ => panic!("expected first Write"),
+    }
+    match &found[1] {
+        WalEntry::Write(r) => assert_eq!(r.stamp.ts_start(), 2),
+        _ => panic!("expected second Write"),
+    }
+    // The hole's exact position/length round-trips correctly too, not just
+    // the two records either side of it.
+    assert_eq!(first_len + hole_len, second_offset);
+    assert_eq!(second_offset + second_len, bytes.len());
+}
+
+/// A hole reaching all the way to true EOF (nothing follows it) must be
+/// treated as a torn tail, same as `read_frame` already does — `resync_next`
+/// generalizes "stop at the first bad frame" to "stop once nothing further
+/// is found", not "keep looking forever".
+#[test]
+fn resync_next_returns_none_when_the_hole_reaches_eof() {
+    let first = WalRecord { stamp: TxStamp::new(1, 1), op: CRUDOperation::Insert(1u64, 100u64) };
+    let mut bytes = Vec::new();
+    encode_entry_framed(&WalEntry::Write(first), &mut bytes);
+    bytes.extend(std::iter::repeat(0u8).take(20));
+
+    let (entry, consumed) = resync_next(&bytes, decode_entry::<u64, u64>).expect("first record still found");
+    match entry {
+        WalEntry::Write(r) => assert_eq!(r.stamp.ts_start(), 1),
+        _ => panic!("expected a Write"),
+    }
+    assert!(resync_next(&bytes[consumed..], decode_entry::<u64, u64>).is_none(), "trailing hole-to-EOF must not fabricate a record");
 }

@@ -751,6 +751,25 @@ impl TpccDatabase {
     /// right alongside every standard table's.
     pub fn enable_wal(&self, wal_path: &std::path::Path, flush_interval: std::time::Duration) -> std::io::Result<()> {
         self.db.enable_wal(wal_path, flush_interval)?;
+        self.attach_wal_to_big_trees();
+        Ok(())
+    }
+
+    /// Same as `enable_wal`, but backed by `LockFreeWalWriter` (via
+    /// `mv_wal::backend::WalBackend::LockFree`) instead — see
+    /// `MVBTSt::enable_wal_lockfree`'s doc for what that trades off.
+    pub fn enable_wal_lockfree(&self, wal_path: &std::path::Path, flush_interval: std::time::Duration, batch_size: usize) -> std::io::Result<()> {
+        self.db.enable_wal_lockfree(wal_path, flush_interval, batch_size)?;
+        self.attach_wal_to_big_trees();
+        Ok(())
+    }
+
+    /// Shared tail of `enable_wal`/`enable_wal_lockfree`: attach whatever
+    /// writer `self.db.enable_wal*` just installed to the two
+    /// `TreeClass::Big` trees too, tagged with their own reserved
+    /// `TableId`s, so their writes land in the one shared file right
+    /// alongside every standard table's.
+    fn attach_wal_to_big_trees(&self) {
         if let Some(writer) = self.db.wal_writer() {
             match &self.big_trees {
                 BigTrees::KiB1 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
@@ -763,7 +782,6 @@ impl TpccDatabase {
                 BigTrees::KiB512 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
             }
         }
-        Ok(())
     }
 }
 
