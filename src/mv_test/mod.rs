@@ -308,6 +308,35 @@ pub fn record_restart(page_addr: usize, key: &impl Display, site: &'static str) 
     });
 }
 
+/// Total number of distinct `(page_addr, site, key)` entries currently held
+/// across every page in `RESTART_GLOBAL` — a direct measure of this
+/// diagnostic's own memory footprint, for tests that want to check it
+/// without dumping a CSV. Only ever non-zero when `RESTART_TRACE` is `true`.
+pub fn restart_trace_footprint() -> usize {
+    RESTART_GLOBAL.lock().values().map(|s| s.by_site_key.len()).sum()
+}
+
+/// Clears every accumulator `record_restart`/`record_root_restart_for_table`/
+/// `record_write_attempts` feed. These are process-lifetime `static`s that
+/// only ever grow (see `RestartLocal`/`RootRestartsLocal`'s doc for why
+/// they're merged into a global on thread-exit rather than reset there) —
+/// harmless for a single benchmark run that exits the process afterward, but
+/// a driver that calls `run_tpcc`/`run_ycsb` more than once in the same
+/// process (e.g. `tests/tpcc_wal_backend_bench.rs`'s backend-comparison
+/// loop) would otherwise keep accumulating every prior run's restart data
+/// on top of the current run's, unbounded, for as long as `RESTART_TRACE` is
+/// on. Call at the start of a fresh run, before any worker thread can record
+/// anything, so each run's `dump_restart_trace`/`dump_attempt_histogram`/
+/// `dump_root_restarts_by_table` output reflects only that run.
+pub fn reset_restart_trace() {
+    RESTART_GLOBAL.lock().clear();
+    ROOT_RESTARTS_BY_TABLE.lock().clear();
+    ROOT_RESTARTS.store(0, Relaxed);
+    for a in &WRITE_ATTEMPTS_HISTOGRAM {
+        a.store(0, Relaxed);
+    }
+}
+
 /// Writes the merged restart attribution to `path` as CSV
 /// (`page_addr,page_total_restarts,page_distinct_site_keys,site,key,count`),
 /// one row per (page, site, key) triple, sorted by page total descending.
@@ -1633,6 +1662,18 @@ mod wal_record_tests;
 #[path = "../../tests/wal_writer_tests.rs"]
 mod wal_writer_tests;
 #[cfg(test)]
+#[path = "../../tests/wal_lockfree_writer_tests.rs"]
+mod wal_lockfree_writer_tests;
+#[cfg(test)]
+#[path = "../../tests/wal_writer_throughput_bench.rs"]
+mod wal_writer_throughput_bench;
+#[cfg(test)]
+#[path = "../../tests/tpcc_wal_backend_bench.rs"]
+mod tpcc_wal_backend_bench;
+#[cfg(test)]
+#[path = "../../tests/ycsb_wal_backend_bench.rs"]
+mod ycsb_wal_backend_bench;
+#[cfg(test)]
 #[path = "../../tests/wal_recovery_tests.rs"]
 mod wal_recovery_tests;
 #[cfg(test)]
@@ -1701,3 +1742,12 @@ mod verify_range_scan;
 #[cfg(test)]
 #[path = "../../tests/verify_concurrent_shared_keys.rs"]
 mod verify_concurrent_shared_keys;
+#[cfg(test)]
+#[path = "../../tests/restart_trace_leak_repro.rs"]
+mod restart_trace_leak_repro;
+#[cfg(test)]
+#[path = "../../tests/tpcc_wal_perf_tests.rs"]
+mod tpcc_wal_perf_tests;
+#[cfg(test)]
+#[path = "../../tests/ycsb_wal_perf_tests.rs"]
+mod ycsb_wal_perf_tests;

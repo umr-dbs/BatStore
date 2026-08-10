@@ -13,9 +13,9 @@ use crate::mv_record_model::version_info::Version;
 use crate::mv_root::index_root::RootIndexType;
 use crate::mv_sync::tx_context::TxContext;
 use crate::mv_tree::mvbt::{default_max_workers, MVBTSt};
+use crate::mv_wal::backend::WalBackend;
 use crate::mv_wal::record::{TableId, WalPayload};
 use crate::mv_wal::recovery;
-use crate::mv_wal::writer::WalWriter;
 
 /// How many tables' worth of `TableEntry` are stored inline inside
 /// `Database::tables`' own `Arc` allocation, rather than in a second,
@@ -104,7 +104,7 @@ pub struct Database<
     /// The one writer shared by every table on this database — the *same*
     /// `Arc` cloned into each table's own `MVBTSt::wal` field (see
     /// `MVBTSt::attach_wal`) — or empty if WAL is off.
-    wal: ArcSwapOption<WalWriter<Key, Payload>>,
+    wal: ArcSwapOption<WalBackend<Key, Payload>>,
     /// This database's table-catalog path (see `catalog_path`) once WAL has
     /// been enabled at least once — there is nothing to persist a catalog
     /// *for* before then. `None` for a purely in-memory database.
@@ -261,8 +261,21 @@ impl<
     /// before the first `enable_wal` call) still ends up with a catalog
     /// that accounts for all of them, not just ones created afterwards.
     pub fn enable_wal(&self, path: &Path, flush_interval: Duration) -> io::Result<()> {
-        let writer = sync::Arc::new(WalWriter::open(path, flush_interval)?);
+        self.enable_wal_with(sync::Arc::new(WalBackend::open_batched(path, flush_interval)?), path)
+    }
 
+    /// Same as `enable_wal`, but backed by `LockFreeWalWriter` (via
+    /// `WalBackend::LockFree`) instead — see `MVBTSt::enable_wal_lockfree`'s
+    /// doc for what that trades off.
+    pub fn enable_wal_lockfree(&self, path: &Path, flush_interval: Duration, batch_size: usize) -> io::Result<()> {
+        let writer = WalBackend::open_lockfree(path, flush_interval, batch_size, default_max_workers())?;
+        self.enable_wal_with(sync::Arc::new(writer), path)
+    }
+
+    /// Shared plumbing behind `enable_wal`/`enable_wal_lockfree`: attach
+    /// `writer` to every existing table and establish the catalog file,
+    /// exactly the same regardless of which backend `writer` actually is.
+    fn enable_wal_with(&self, writer: sync::Arc<WalBackend<Key, Payload>>, path: &Path) -> io::Result<()> {
         let snapshot = self.tables.load();
         for entry in snapshot.iter() {
             entry.tree.attach_wal(writer.clone());
@@ -283,7 +296,7 @@ impl<
     /// writer to trees it manages outside this `Database`'s own table list
     /// (see that module's `TreeClass` doc), instead of each opening its own
     /// file. `None` if WAL was never enabled (or was `disable_wal`'d).
-    pub(crate) fn wal_writer(&self) -> Option<sync::Arc<WalWriter<Key, Payload>>> {
+    pub(crate) fn wal_writer(&self) -> Option<sync::Arc<WalBackend<Key, Payload>>> {
         self.wal.load_full()
     }
 

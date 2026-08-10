@@ -350,3 +350,63 @@ pub fn read_frame(bytes: &[u8]) -> Option<(&[u8], usize)> {
     Some((body, total))
 }
 
+/// `read_frame` + `decode`, tolerant of an **interior** hole rather than
+/// only a torn *tail*: scans forward from `bytes[0]` a byte at a time until
+/// it finds a position where a frame parses *and* `decode` accepts its
+/// body, returning the decoded value and the total bytes consumed from
+/// `bytes[0]` (including whatever was skipped to get there). `None` once
+/// the scan runs off the end of `bytes` with nothing found — a genuine
+/// torn tail, same as `read_frame` returning `None` right away used to
+/// mean for the strictly-sequential writer this module was originally
+/// written for.
+///
+/// # Why this exists
+/// `mv_wal::writer::WalWriter` appends strictly in the order its one
+/// background thread drains its channel, so there `read_frame` returning
+/// `None` can *only* mean "this is where a crash cut off the tail" —
+/// stopping the scan right there (what every `recovery::replay*` used to
+/// do) is exactly correct. `mv_wal::lockfree_writer::LockFreeWalWriter`
+/// breaks that assumption: concurrent writers reserve disjoint byte ranges
+/// via `fetch_add` but can *complete* out of order, so a thread that
+/// reserved a low offset and then died (the whole process crashing, not
+/// just that thread stalling) before its `pwrite` landed leaves a hole of
+/// unwritten (zero) bytes with valid, durable records on *both* sides of
+/// it — see that type's doc for the full argument. A plain "stop at the
+/// first bad frame" scan would silently discard every record after such a
+/// hole, even though they really did reach disk.
+///
+/// # Why a byte-at-a-time scan is safe here
+/// A real record's body is never empty (every real `encode`/`encode_entry`
+/// output is at least 19 bytes — `1` tag `+ 8` ts_start `+ 2` worker_id
+/// `+` at least a `Key`/`ts_commit`'s worth more), so `len == 0` can only
+/// come from a hole's zero bytes, never genuine data. Since a hole is
+/// always *some enqueue call's entire reserved range* (`tail.fetch_add`
+/// hands out one call's whole framed length atomically — never a partial
+/// record from two different calls), the byte immediately after a hole is
+/// always the true, aligned start of the next real frame. So advancing one
+/// byte at a time through anything that doesn't parse-and-decode is
+/// guaranteed to land exactly there, however long the hole is and whatever
+/// it's misaligned against (no assumption that a hole's length is a
+/// multiple of anything). The one residual risk — some misaligned window
+/// *inside* a hole coincidentally produces a length that fits the
+/// remaining bytes *and* whose CRC32 happens to match *and* whose decoded
+/// body looks superficially valid — is the same class of (astronomically
+/// unlikely, ~1-in-4-billion-per-candidate-position) risk `read_frame`'s
+/// CRC32 already accepts as "good enough to catch a torn write, not a
+/// cryptographic guarantee"; this doesn't introduce a new kind of risk,
+/// just more chances (one per skipped byte) to hit the existing one.
+pub fn resync_next<T>(bytes: &[u8], decode: impl Fn(&[u8]) -> Option<T>) -> Option<(T, usize)> {
+    let mut skip = 0usize;
+    while skip < bytes.len() {
+        if let Some((body, consumed)) = read_frame(&bytes[skip..]) {
+            if !body.is_empty() {
+                if let Some(parsed) = decode(body) {
+                    return Some((parsed, skip + consumed));
+                }
+            }
+        }
+        skip += 1;
+    }
+    None
+}
+

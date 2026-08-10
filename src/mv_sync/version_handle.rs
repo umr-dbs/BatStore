@@ -196,8 +196,8 @@ impl<'a,
             // including `TpccDatabase`'s own per-table files) keeps today's
             // plain, untagged encoding, byte-for-byte unchanged.
             Some(writer) => match self.table_id {
-                Some(table_id) => writer.start_commit_logged_for_table(table_id, self.ctx.global_clock(), worker_id, build).0,
-                None => writer.start_commit_logged(self.ctx.global_clock(), worker_id, build).0,
+                Some(table_id) => writer.start_commit_logged_for_table(table_id, self.ctx.global_clock(), worker_id, build),
+                None => writer.start_commit_logged(self.ctx.global_clock(), worker_id, build),
             },
             None => TxStamp::new(worker_id, self.ctx.start_tx_commit()),
         }

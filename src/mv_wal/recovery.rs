@@ -83,11 +83,7 @@ pub fn replay<
     let mut commits: HashMap<(WorkerId, Version), Version> = HashMap::new();
 
     let mut offset = 0usize;
-    while let Some((body, consumed)) = record::read_frame(&bytes[offset..]) {
-        let Some(entry) = record::decode_entry::<Key, Payload>(body) else {
-            break;
-        };
-
+    while let Some((entry, consumed)) = record::resync_next(&bytes[offset..], record::decode_entry::<Key, Payload>) {
         match entry {
             WalEntry::Write(record) => {
                 let seq = writes.len();
@@ -160,11 +156,7 @@ pub fn replay_database<
     let mut commits: HashMap<(WorkerId, Version), Version> = HashMap::new();
 
     let mut offset = 0usize;
-    while let Some((body, consumed)) = record::read_frame(&bytes[offset..]) {
-        let Some((table_id, entry)) = record::decode_entry_for_table::<Key, Payload>(body) else {
-            break;
-        };
-
+    while let Some(((table_id, entry), consumed)) = record::resync_next(&bytes[offset..], record::decode_entry_for_table::<Key, Payload>) {
         match entry {
             WalEntry::Write(record) => {
                 let seq = writes.len();
@@ -239,11 +231,7 @@ pub fn replay_two_tables<
     let mut commits: HashMap<(WorkerId, Version), Version> = HashMap::new();
 
     let mut offset = 0usize;
-    while let Some((body, consumed)) = record::read_frame(&bytes[offset..]) {
-        let Some((table_id, entry)) = record::decode_entry_for_table::<Key, Payload>(body) else {
-            break;
-        };
-
+    while let Some(((table_id, entry), consumed)) = record::resync_next(&bytes[offset..], record::decode_entry_for_table::<Key, Payload>) {
         match entry {
             WalEntry::Write(record) => {
                 let seq = writes.len();

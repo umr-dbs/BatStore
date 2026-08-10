@@ -9,7 +9,7 @@ use crate::mv_gc::tracker_handle::{TrackerHandle, TrackerHandleSt};
 use crate::mv_page_model::Height;
 use crate::mv_root::index_root::{RootIndex, RootIndexType};
 use crate::mv_sync::tx_context::TxContext;
-use crate::mv_wal::writer::WalWriter;
+use crate::mv_wal::backend::WalBackend;
 
 /// `RecordPoint<Key, Payload>` is 32B for `Key = Payload = u64` (`VersionInfo`
 /// packs down to 16B — see `mv_record_model::tx_stamp::TxStamp`'s doc), so
@@ -66,14 +66,17 @@ pub struct MVBTSt<
     pub(crate) dec_key: fn(Key) -> Key,
     pub(crate) min_key: Key,
     pub(crate) max_key: Key,
-    /// One unified `WalWriter` for this tree — every worker enqueues into
-    /// its single channel (a lock-free MPSC queue, so concurrent workers
-    /// still enqueue without blocking each other) and its one background
-    /// thread group-commits everyone's pending records together into one
-    /// file. `enable_wal`/`disable_wal` swap this atomically.
-    pub(crate) wal: ArcSwapOption<WalWriter<Key, Payload>>,
+    /// One unified `WalBackend` for this tree — either kind (see that
+    /// type's doc): a `WalWriter`, where every worker enqueues into its
+    /// single channel (a lock-free MPSC queue, so concurrent workers still
+    /// enqueue without blocking each other) and its one background thread
+    /// group-commits everyone's pending records together into one file; or
+    /// a `LockFreeWalWriter`, where every worker instead reserves its own
+    /// byte range and writes it directly. `enable_wal`/`enable_wal_lockfree`/
+    /// `disable_wal` swap this atomically.
+    pub(crate) wal: ArcSwapOption<WalBackend<Key, Payload>>,
     /// `Some(id)` when this tree is one table of a `mv_db::Database`, whose
-    /// tables all share one `WalWriter` (the *same* `Arc` cloned into every
+    /// tables all share one `WalBackend` (the *same* `Arc` cloned into every
     /// table's `wal` field via `attach_wal`) and must tag their WAL entries
     /// so `mv_wal::recovery::replay_database` can demultiplex the single
     /// interleaved file back to the right table. `None` for every
@@ -180,6 +183,30 @@ impl<const FAN_OUT: usize,
         }
 
         tree.enable_wal(wal_path, flush_interval)?;
+
+        Ok(tree)
+    }
+
+    /// Same as `open_recovered`, but reattaches via `enable_wal_lockfree`
+    /// instead of `enable_wal` — recovery itself (`mv_wal::recovery::replay`,
+    /// via `record::resync_next`) doesn't care which writer produced the
+    /// file, since both share the same on-disk wire format; only which
+    /// writer picks up *afterwards* differs.
+    pub fn open_recovered_lockfree(
+        root_index_type: RootIndexType,
+        wal_path: &std::path::Path,
+        flush_interval: std::time::Duration,
+        batch_size: usize,
+    ) -> std::io::Result<Self> {
+        let tree = Self::make_standard(root_index_type);
+
+        let valid_len = crate::mv_wal::recovery::replay(&tree, wal_path)?;
+
+        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(wal_path) {
+            file.set_len(valid_len)?;
+        }
+
+        tree.enable_wal_lockfree(wal_path, flush_interval, batch_size)?;
 
         Ok(tree)
     }
@@ -294,36 +321,58 @@ impl<const FAN_OUT: usize,
     }
 }
 
-/// Split from the block above: `enable_wal`/`disable_wal` are the only
-/// methods that ever construct/attach a `WalWriter<Key, Payload>`, which
-/// (via `start_commit_logged`/`log_with_stamp`) requires `Payload:
-/// WalPayload` — everything else on `MVBTSt` (`enable_gc`, `make`, ...)
-/// stays usable for any `Payload`, WAL-capable or not.
+/// Split from the block above: `enable_wal`/`enable_wal_lockfree`/
+/// `disable_wal` are the only methods that ever construct/attach a
+/// `WalBackend<Key, Payload>`, which (via `start_commit_logged`/
+/// `log_with_stamp`) requires `Payload: WalPayload` — everything else on
+/// `MVBTSt` (`enable_gc`, `make`, ...) stays usable for any `Payload`,
+/// WAL-capable or not.
 impl<const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
     Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     /// Attaches an already-open writer — the shared primitive behind
-    /// `enable_wal` below, and also used directly by `mv_db::Database` to
-    /// hand every one of its tables a *clone of the same* `Arc<WalWriter>`
-    /// (rather than each table opening its own), which is what makes a
-    /// Database's WAL genuinely one shared file/thread instead of one per
-    /// table. Every worker enqueues into this single writer; its
-    /// group-commit batches are fsynced every `flush_interval`.
-    pub(crate) fn attach_wal(&self, writer: sync::Arc<WalWriter<Key, Payload>>) {
+    /// `enable_wal`/`enable_wal_lockfree` below, and also used directly by
+    /// `mv_db::Database` to hand every one of its tables a *clone of the
+    /// same* `Arc<WalBackend>` (rather than each table opening its own),
+    /// which is what makes a Database's WAL genuinely one shared file
+    /// instead of one per table.
+    pub(crate) fn attach_wal(&self, writer: sync::Arc<WalBackend<Key, Payload>>) {
         self.wal.store(Some(writer));
         self.wal_ever_enabled.store(true, sync::atomic::Ordering::Relaxed);
     }
 
-    /// Opens and attaches one live WAL writer at `path` — after any bytes
-    /// already there (a fresh file, or the valid prefix a prior
-    /// `mv_wal::recovery::replay` left behind). Cheap/no-op when never
-    /// called: the dispatch write path only touches the WAL when this
-    /// returns `Some`.
+    /// Opens and attaches one live, batched (`WalWriter`) WAL writer at
+    /// `path` — after any bytes already there (a fresh file, or the valid
+    /// prefix a prior `mv_wal::recovery::replay` left behind). Cheap/no-op
+    /// when never called: the dispatch write path only touches the WAL
+    /// when this returns `Some`. Every worker enqueues into this single
+    /// writer's channel; its group-commit batches are fsynced every
+    /// `flush_interval`. See `enable_wal_lockfree` for the alternative,
+    /// lock-free backend.
     pub fn enable_wal(&self, path: &std::path::Path, flush_interval: std::time::Duration) -> std::io::Result<()> {
-        self.attach_wal(sync::Arc::new(WalWriter::open(path, flush_interval)?));
+        self.attach_wal(sync::Arc::new(WalBackend::open_batched(path, flush_interval)?));
+        Ok(())
+    }
+
+    /// Same as `enable_wal`, but backed by `LockFreeWalWriter` (via
+    /// `WalBackend::LockFree`) instead: every worker locally batches its
+    /// own writes (see `mv_wal::lockfree_writer::LocalBatch`) up to
+    /// `batch_size` records, flushed early if that fills up or otherwise on
+    /// the next periodic sweep (bounded by `flush_interval`), with its own
+    /// `pwrite` rather than funneling through one shared background thread.
+    /// See `tests/wal_writer_throughput_bench.rs` for when this actually
+    /// wins over `enable_wal` (short answer: past a couple of concurrent
+    /// worker threads, provided `batch_size` isn't left at `1`).
+    pub fn enable_wal_lockfree(
+        &self,
+        path: &std::path::Path,
+        flush_interval: std::time::Duration,
+        batch_size: usize,
+    ) -> std::io::Result<()> {
+        self.attach_wal(sync::Arc::new(WalBackend::open_lockfree(path, flush_interval, batch_size, default_max_workers())?));
         Ok(())
     }
 

@@ -33,6 +33,9 @@ pub struct DriverConfig {
     pub root_star_index: RootIndexType,
     /// See `DriverConfig::wal` in `tpcc_driver` — same semantics here.
     pub wal: Option<(std::path::PathBuf, Duration)>,
+    /// See `DriverConfig::wal_lockfree_batch_size` in `tpcc_driver` — same
+    /// semantics here.
+    pub wal_lockfree_batch_size: Option<usize>,
     /// See `DriverConfig::output_dir` in `tpcc_driver` — same semantics here;
     /// defaults to `.` for the standalone `ycsb` subcommand.
     pub output_dir: PathBuf,
@@ -149,7 +152,10 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     }
     if let Some((wal_path, flush_interval)) = &cfg.wal {
         let _ = fs::remove_file(wal_path);
-        tree.enable_wal(wal_path, *flush_interval).expect("failed to attach WAL");
+        match cfg.wal_lockfree_batch_size {
+            Some(batch_size) => tree.enable_wal_lockfree(wal_path, *flush_interval, batch_size).expect("failed to attach lock-free WAL"),
+            None => tree.enable_wal(wal_path, *flush_interval).expect("failed to attach WAL"),
+        }
     }
 
     println!(
@@ -167,9 +173,10 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         cfg.ycsb.record_count, cfg.ycsb.field_count, cfg.ycsb.field_length,
         cfg.duration, cfg.mix, cfg.distribution, cfg.max_scan_length,
         cfg.gc, cfg.update_in_place,
-        match &cfg.wal {
-            Some((path, interval)) => format!("On ({} @ {interval:?} flush)", path.display()),
-            None => "Off".to_string(),
+        match (&cfg.wal, cfg.wal_lockfree_batch_size) {
+            (Some((path, interval)), None) => format!("On, batched ({} @ {interval:?} flush)", path.display()),
+            (Some((path, interval)), Some(batch_size)) => format!("On, lock-free batch={batch_size} ({} @ {interval:?} flush)", path.display()),
+            (None, _) => "Off".to_string(),
         },
         cfg.root_star_index,
     );
@@ -336,6 +343,7 @@ pub fn main_ycsb(parms: Vec<String>) {
         update_in_place,
         root_star_index,
         wal: wal_enabled.then(|| (std::path::PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
+        wal_lockfree_batch_size: None,
         output_dir: PathBuf::from("."),
     });
 }

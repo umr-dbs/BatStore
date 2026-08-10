@@ -4,9 +4,11 @@ use std::time::Duration;
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::mv_record_model::tx_stamp::TxStamp;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_root::index_root::RootIndexType;
 use crate::mv_tree::mvbt::MVBTSt;
+use crate::mv_wal::record::{self, WalEntry, WalRecord};
 
 const FAN: usize = 8;
 type TestTree = MVBTSt<FAN, FAN, u64, u64>;
@@ -312,6 +314,116 @@ fn logged_but_never_committed_write_does_not_resurface_after_recovery() {
 
     assert_eq!(point(&recovered, 1, version), Some(100), "the real, committed insert must survive");
     assert_eq!(point(&recovered, 2, version), None, "the never-committed Update/Delete attempts must not resurface key 2");
+
+    drop(recovered);
+    let _ = fs::remove_file(&path);
+}
+
+/// `mv_wal::lockfree_writer::LockFreeWalWriter` can, in principle, leave an
+/// *interior* hole (a byte range some thread reserved via `fetch_add` but
+/// never got to `pwrite` before the whole process died, while a
+/// later-offset write already landed and reached disk) — see that type's
+/// doc and `record::resync_next`'s for the full argument. `WalWriter`'s own
+/// strictly-sequential design can never produce this shape, so this test
+/// builds the file by hand instead of driving a live writer, and checks
+/// that `replay` — which now calls `resync_next` under the hood — recovers
+/// records on *both* sides of the hole, not just the ones before it (which
+/// is all the old "stop at the first bad frame" scan would have found).
+#[test]
+fn replay_recovers_records_after_an_interior_hole() {
+    let path = temp_log_path("interior_hole");
+    let _ = fs::remove_file(&path);
+
+    let mut bytes = Vec::new();
+
+    let stamp1 = TxStamp::new(0, 1);
+    record::encode_entry_framed::<u64, u64>(
+        &WalEntry::Write(WalRecord { stamp: stamp1, op: CRUDOperation::Insert(1u64, 111u64) }),
+        &mut bytes,
+    );
+    record::encode_entry_framed::<u64, u64>(&WalEntry::Commit { stamp: stamp1, ts_commit: 2 }, &mut bytes);
+
+    // Deliberately not a multiple of 4/8/this frame's own header size - see
+    // `resync_next_skips_an_interior_hole_of_unaligned_length` for why that
+    // matters (a naive fixed-stride skip would misalign past it).
+    bytes.extend(std::iter::repeat(0u8).take(17));
+
+    let stamp2 = TxStamp::new(0, 3);
+    record::encode_entry_framed::<u64, u64>(
+        &WalEntry::Write(WalRecord { stamp: stamp2, op: CRUDOperation::Insert(2u64, 222u64) }),
+        &mut bytes,
+    );
+    record::encode_entry_framed::<u64, u64>(&WalEntry::Commit { stamp: stamp2, ts_commit: 4 }, &mut bytes);
+
+    fs::write(&path, &bytes).unwrap();
+
+    let tree = TestTree::make_standard(RootIndexType::default());
+    let valid_len = crate::mv_wal::recovery::replay(&tree, &path).unwrap();
+    assert_eq!(valid_len, bytes.len() as u64, "the whole file, hole included, is the valid prefix here - nothing trailing to truncate");
+
+    let version = tree.current_version();
+    assert_eq!(point(&tree, 1, version), Some(111), "the record before the hole must survive");
+    assert_eq!(point(&tree, 2, version), Some(222), "the record after the hole must ALSO survive");
+
+    let _ = fs::remove_file(&path);
+}
+
+/// `concurrent_writers_crash_recovery_round_trip`'s counterpart for the
+/// lock-free + per-thread-batched backend (`enable_wal_lockfree`/
+/// `open_recovered_lockfree`, via `mv_wal::backend::WalBackend::LockFree`) —
+/// proves the two pieces added on top of `LockFreeWalWriter` actually work
+/// together through the real production dispatch path, not just in
+/// isolation:
+/// - `LocalBatch`'s per-worker batching (`batch_size` small enough here
+///   that every worker actually crosses it at least once during the loop
+///   below, exercising the "flush early because full" path, not just the
+///   periodic sweep).
+/// - The periodic sweep thread's timeout-based flush (`flush_interval` set
+///   larger than this test's total write time, so *every* record reaching
+///   disk depends on the sweep firing at least once during `Drop` — see
+///   `LockFreeWalBackend::drop`'s doc — not on batches filling up on their
+///   own).
+#[test]
+fn concurrent_writers_lockfree_batched_crash_recovery_round_trip() {
+    let path = temp_log_path("lockfree_batched_round_trip");
+    let _ = fs::remove_file(&path);
+
+    let tree = TestTree::make_standard(RootIndexType::default());
+    // A generous flush_interval (deliberately longer than this test should
+    // take to issue all its writes) plus a small batch_size: most of what
+    // reaches disk here is forced out either by a batch filling up
+    // (batch_size=3) or by the one final sweep `Drop` triggers, not by a
+    // sweep firing mid-run.
+    tree.enable_wal_lockfree(&path, Duration::from_millis(500), 3).unwrap();
+
+    const THREADS: u64 = 8;
+    const KEYS_PER_THREAD: u64 = 200;
+
+    std::thread::scope(|scope| {
+        for t in 0..THREADS {
+            let tree = &tree;
+            scope.spawn(move || {
+                for i in 0..KEYS_PER_THREAD {
+                    let key = t * KEYS_PER_THREAD + i;
+                    let result = tree.dispatch_crud(CRUDOperation::Insert(key, key * 10 + 1));
+                    assert!(matches!(result, CRUDOperationResult::Inserted(_)));
+                }
+            });
+        }
+    });
+
+    drop(tree);
+
+    let recovered = TestTree::open_recovered_lockfree(RootIndexType::default(), &path, Duration::from_millis(2), 3).unwrap();
+    let recovered_version = recovered.current_version();
+
+    for key in 0..THREADS * KEYS_PER_THREAD {
+        assert_eq!(
+            point(&recovered, key, recovered_version),
+            Some(key * 10 + 1),
+            "key {key} missing or wrong after concurrent lock-free-batched-write recovery"
+        );
+    }
 
     drop(recovered);
     let _ = fs::remove_file(&path);
