@@ -732,6 +732,32 @@ impl<const FAN_OUT: usize,
     /// the time a record is invalid its owning transaction has already
     /// fully resolved — there's no future "undo" that still needs it kept
     /// around.
+    ///
+    /// **Known gap, not yet fixed** (see `docs/range_scan_visibility_check.md`'s
+    /// addendum): a *second*, independent hazard beyond abort-reversal —
+    /// some other, already-registered reader's snapshot may still need to
+    /// resolve to this exact (superseded, but not-yet-obsolete-*for-them*)
+    /// version, even after the transaction that superseded it has long
+    /// since committed and unregistered (`is_snapshot_live(del.ts_start())`
+    /// false by then) — OSIC visibility is LCB-based, not a raw `ts_start`
+    /// comparison, so a reader's own `ts_start` being numerically *later*
+    /// than a foreign write's `ts_start` does not guarantee that write (or
+    /// whatever superseded it) is visible to them yet. Confirmed as the
+    /// root cause of `verify_concurrent_shared_keys`'s intermittent
+    /// point-read miss on a key that's never deleted. A first fix attempt
+    /// (OR in `self.ctx.live_min_snapshot().is_some_and(|w| del.ts_start()
+    /// >= w)`, the same watermark block-level GC already consults) is
+    /// logically correct but couples *every* leaf's compaction to the
+    /// single slowest transaction anywhere in the whole shared `TxContext`
+    /// — under this project's own heavy concurrent stress tests, that
+    /// watermark barely advances, so `record_survives_gc` returns `true`
+    /// for nearly everything, and `split()`'s `ByVersion` case keeps
+    /// producing a still-fully-protected survivor set that doesn't shrink —
+    /// exactly the "repeats the same no-op VERSION_SPLIT forever" failure
+    /// mode this file's own `split()` doc already warns about. Confirmed
+    /// empirically: 7+ minutes and ~14GB RSS on what should be a 4s test
+    /// run. Reverted rather than shipped with that regression; needs a
+    /// more localized bound than the global watermark before landing.
     #[inline]
     pub(crate) fn record_survives_gc(&self, version: &crate::mv_record_model::version_info::VersionInfo) -> bool {
         if version.is_live() {
