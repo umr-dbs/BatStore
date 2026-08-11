@@ -80,7 +80,8 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         threads = scale.tpcc_terminals
         benchmark_options = "--workload-mix=45,43,0,4,4,4,0,0 --warehouse-spread=0"
         if workload in common.HTAP_WORKLOADS:
-            benchmark_options += " --enable-chbenchmark"
+            query_flag = "--chbenchmark-q1" if workload == "htap_q1" else "--chbenchmark-q6"
+            benchmark_options += f" --enable-chbenchmark {query_flag}"
         args = [
             str(BINARY), "-verbose", "-benchmark", "tpcc",
             "-threads", str(threads), "-scale_factor", str(scale.tpcc_warehouses),

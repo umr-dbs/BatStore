@@ -57,11 +57,8 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     if workload in (["tpcc"] + common.HTAP_WORKLOADS):
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
-        # htap_mode (position 9): "ch" spawns mdbx_tpcc.rs's one OLAP thread rotating
-        # mdbx_q1/mdbx_q6 - see that module's docs and this file's own module doc. Both
-        # htap_q1 and htap_q6 request the same "ch" rotation (mirrors cmvbt.py's identical
-        # choice); only the mode filter used below when reading tpcc_scan.csv differs.
-        htap_mode = "ch" if workload in common.HTAP_WORKLOADS else "none"
+        # Run only the query named by this workload, matching every other wrapper.
+        htap_mode = workload.replace("htap_", "ch_") if workload in common.HTAP_WORKLOADS else "none"
         args = [
             str(BINARY), "mdbx_tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
             "100000", "3000", "3000", str(db_path), htap_mode,
@@ -100,9 +97,8 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     if workload == "ycsb_e":
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
     elif workload in common.HTAP_WORKLOADS:
-        # mdbx_tpcc.rs's OLAP thread writes both queries' rows into one tpcc_scan.csv (see
-        # MdbxScanResult's doc there) - same "filter by mode column" convention cmvbt.py
-        # uses for its own tpcc_scan.csv.
+        # mdbx_tpcc.rs writes the requested query's rows into tpcc_scan.csv (see
+        # MdbxScanResult's doc there), using the same mode-column convention as cMVBT.
         mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
         latency = common.percentiles_from_samples(
             output_dir / "tpcc_scan.csv", "latency_ns", filter_column="mode", filter_value=mode,

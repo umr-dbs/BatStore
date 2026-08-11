@@ -26,6 +26,7 @@ import csv
 import os
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -215,6 +216,19 @@ def _template_connection_values() -> dict[str, str]:
     }
 
 
+def _assert_unlimited_config(config_path: Path) -> None:
+    """Refuse to execute a stale/generated BenchBase config with a numeric rate cap."""
+    rates = [((node.text or "").strip(), node.attrib.get("bench", "default"))
+             for node in ET.parse(config_path).getroot().findall(".//rate")]
+    capped = [(rate, bench) for rate, bench in rates if rate != "unlimited"]
+    if not rates or capped:
+        raise RuntimeError(
+            f"generated BenchBase config is not unlimited-rate: {capped or rates}; "
+            f"config={config_path}. Ensure the server is running this updated "
+            f"{Path(__file__).resolve()} rather than an older checkout."
+        )
+
+
 def _set_autovacuum(enabled: bool) -> None:
     """ALTER SYSTEM + reload takes effect immediately, no server restart needed. Runs
     directly (not through common.run_and_track_rss) - this is a tiny admin statement, not
@@ -367,6 +381,8 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         bench_type = "ycsb"
         metric_name = "ops_per_sec"
 
+    _assert_unlimited_config(config_path)
+    print(f"PostgreSQL BenchBase config: {config_path} (rate=unlimited, terminals={threads})")
     _set_autovacuum(gc != "off")
 
     postmaster_pid = _find_postmaster_pid()
