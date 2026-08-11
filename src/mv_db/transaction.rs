@@ -44,10 +44,10 @@
 //! transaction's lifetime:
 //! - `range` is always eager (`CRUDOperationResult::MatchedRecords`, never
 //!   the lazy `MatchedRecordIter`): a `RangeQueryIter<'a>` borrowing from a
-//!   function-local `Arc` clone can't outlive this method call. A caller
-//!   wanting a zero-copy streaming scan on one table should fetch
-//!   `Database::table(id)` into a local binding themselves and call
-//!   `dispatch_crud(RangeIterSi(..))` on it directly.
+//!   function-local `Arc` clone can't outlive this method call. The
+//!   `range_for_each`/`range_fold`/`range_count` methods keep that `Arc`
+//!   local and consume the iterator before returning, providing zero-copy
+//!   scans without exposing the borrowed iterator.
 //! - `commit()` logs exactly one Commit marker (through any one touched
 //!   table's tree — they all share the same underlying `Arc<WalWriter>`),
 //!   not a loop over every touched table.
@@ -372,6 +372,50 @@ impl<
     /// new-order") no longer have to collect the entire range to get it.
     pub fn range_min(&self, table: TableId, range: Interval<Key>) -> Option<RecordPointResult<Key, Payload>> {
         range_min_on_tree(&self.tree(table), self.worker_id, self.ts_start, range)
+    }
+
+    /// Fallible zero-copy range visitor against this transaction's fixed
+    /// snapshot. An error stops the scan immediately.
+    pub fn try_range_for_each<E>(
+        &self,
+        table: TableId,
+        range: Interval<Key>,
+        visit: impl FnMut(Key, &Payload) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let tree = self.tree(table);
+        RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id)
+            .try_for_each_ref(visit)
+    }
+
+    /// Infallible zero-copy range visitor.
+    pub fn range_for_each(
+        &self,
+        table: TableId,
+        range: Interval<Key>,
+        visit: impl FnMut(Key, &Payload),
+    ) {
+        let tree = self.tree(table);
+        RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id)
+            .for_each_ref(visit)
+    }
+
+    /// Zero-copy left fold over a range.
+    pub fn range_fold<Acc>(
+        &self,
+        table: TableId,
+        range: Interval<Key>,
+        initial: Acc,
+        fold: impl FnMut(Acc, Key, &Payload) -> Acc,
+    ) -> Acc {
+        let tree = self.tree(table);
+        RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id)
+            .fold_ref(initial, fold)
+    }
+
+    /// Counts visible range records without constructing result objects.
+    pub fn range_count(&self, table: TableId, range: Interval<Key>) -> usize {
+        let tree = self.tree(table);
+        RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id).count_ref()
     }
 
     // /// First-writer-wins check, on `table`: the physically newest version at

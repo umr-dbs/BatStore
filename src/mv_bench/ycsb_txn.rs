@@ -62,24 +62,13 @@ pub fn insert(tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey) {
 /// records"), against the freshest committed version. Returns the number of
 /// rows actually found (can be `< len` near the end of the loaded key range).
 ///
-/// Goes via `RangeIterSi` directly (what `RangeSi` itself dispatches to,
-/// then plain `.collect()`s — see `mv_query::dispatch`) rather than
-/// `RangeSi`, so the result `Vec` can be pre-sized to `len`: keys here are
-/// dense unique `u64`s, so `len` is already a tight upper bound on how many
-/// rows an `[start_key, start_key+len)` range can ever match. A generic
-/// `.collect()` has no such bound available (`RangeQueryIter` doesn't know
-/// its `Key` type supports subtraction) and grows the `Vec` from empty via
-/// ordinary amortized-doubling `push`es instead — for `maxscanlength=100`
-/// that's ~6 reallocations-and-memmoves per scan, measurable in a `perf`
-/// profile once scans run in the hundreds of thousands per second.
+/// Goes via `RangeIterSi` and its zero-copy `count_ref` terminal operation:
+/// no result vector, `RecordPointResult`, or payload-handle clone is needed
+/// for YCSB's count-only scan result.
 pub fn scan(tree: &YcsbTree, start_key: YcsbKey, len: u64) -> usize {
     let hi = start_key.saturating_add(len.saturating_sub(1));
     match tree.dispatch_crud(CRUDOperation::RangeIterSi(Interval::new(start_key, hi))) {
-        CRUDOperationResult::MatchedRecordIter(iter) => {
-            let mut v = Vec::with_capacity(len as usize);
-            v.extend(iter);
-            v.len()
-        }
+        CRUDOperationResult::MatchedRecordIter(iter) => iter.count_ref(),
         other => panic!("ycsb scan: unexpected result: {other}"),
     }
 }

@@ -139,10 +139,9 @@ fn fresh_full_scan_once(db: &TpccDatabase, run_start: Instant) -> ScanResult {
 
     let start = Instant::now();
     let full_range = crate::mv_query::interval::Interval::new(TpccKey::MIN, TpccKey::MAX);
-    let scanned: usize = Table::ALL.iter().map(|&table| match tx.range(table, full_range, true) {
-        CRUDOperationResult::MatchedRecords(v) => v.len(),
-        other => panic!("tpcc olap scan: unexpected range result: {other}"),
-    }).sum();
+    let scanned = Table::ALL.iter()
+        .map(|&table| tx.range_count(table, full_range))
+        .sum();
     let latency = start.elapsed();
     tx.commit();
 
