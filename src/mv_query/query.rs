@@ -256,9 +256,12 @@ impl<const FAN_OUT: usize,
                        .iter()
                        .rev()
                        .skip(start_pos_si)
+                       // Cheap range check before the indirect (`&mut dyn
+                       // FnMut`, not inlinable) `matches` call — see
+                       // `iter_query.rs::refill`'s identical reorder for why.
                        .filter(|r|
-                           r.version().matches(is_visible) &&
-                               lookup_range.contains(r.key()))
+                           lookup_range.contains(r.key()) &&
+                               r.version().matches(is_visible))
                        // .sorted_by_key(|r| r.key())
                        .map(RecordPointResult::from)
                        .collect::<Vec<_>>()

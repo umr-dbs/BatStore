@@ -137,79 +137,113 @@ impl<'a,
         let inc
             = tree.inc_key;
 
-        loop {
-            if self.path.is_empty() || self.range.lower > self.range.upper {
-                // Only release if *this iterator* is the one that registered
-                // the snapshot (`register_reader_si`) — mirrors `Drop`'s own
-                // guard just below. Without it, a `Transaction`-owned range
-                // scan (`Transaction::range`, `register_reader_si: false`,
-                // since the `Transaction` itself registered `ts_start` at
-                // `begin()` and releases it at `commit()`/drop) would have
-                // its *first* fully-drained range scan release the
-                // transaction's snapshot registration early — leaving every
-                // later read in the same transaction (any further
-                // `tx.point`/`tx.range` call) running with no GC protection
-                // at all, since the registration is already gone.
-                if self.register_reader_si {
-                    tree.on_release_reader_snapshot(si);
+        let worker_id
+            = self.worker_id;
+
+        // `with_snapshot_cache_and_logs`, not `with_visibility_checker`:
+        // builds `is_visible` as a concrete, `Sized` closure right here
+        // (see that method's doc) so `VersionInfo::matches`'s calls into it
+        // below are ordinary, inlinable calls instead of an indirect `dyn
+        // FnMut` dispatch — worth it specifically here since this loop can
+        // call it up to twice per *physical* record in a leaf (live and
+        // dead alike, see `refill`'s own module-level doc), not just once
+        // per matched result. Called once per `refill()` invocation
+        // (wrapping every leaf this call visits), not once per leaf: `si`/
+        // `worker_id` never change within one call, so there's nothing to
+        // gain from rebuilding `is_visible` per leaf, and one fewer TLS
+        // cache lookup on the (common, see `SCAN_TRACE`'s findings)
+        // multi-leaf-per-call path.
+        tree.with_snapshot_cache_and_logs(|cache, commit_logs| {
+            let mut is_visible = |stamp| crate::mv_sync::visibility::is_visible(
+                commit_logs, cache, worker_id, si, stamp);
+
+            loop {
+                if self.path.is_empty() || self.range.lower > self.range.upper {
+                    // Only release if *this iterator* is the one that
+                    // registered the snapshot (`register_reader_si`) —
+                    // mirrors `Drop`'s own guard just below. Without it, a
+                    // `Transaction`-owned range scan (`Transaction::range`,
+                    // `register_reader_si: false`, since the `Transaction`
+                    // itself registered `ts_start` at `begin()` and
+                    // releases it at `commit()`/drop) would have its
+                    // *first* fully-drained range scan release the
+                    // transaction's snapshot registration early — leaving
+                    // every later read in the same transaction (any further
+                    // `tx.point`/`tx.range` call) running with no GC
+                    // protection at all, since the registration is already
+                    // gone.
+                    if self.register_reader_si {
+                        tree.on_release_reader_snapshot(si);
+                    }
+
+                    self.is_completed = true;
+                    return
                 }
 
-                self.is_completed = true;
-                return
-            }
+                let (curr_fence, curr_block)
+                    = self.path.last().unwrap().clone();
 
-            let (curr_fence, curr_block)
-                = self.path.last().unwrap().clone();
+                match curr_block.as_page_ref() {
+                    PageType::IndexRef(internal_page) => {
+                        let (keys_page, versions_page) = internal_page
+                            .keys_versions();
 
-            match curr_block.as_page_ref() {
-                PageType::IndexRef(internal_page) => {
-                    let (keys_page, versions_page) = internal_page
-                        .keys_versions();
-
-                    match versions_page
-                        .iter()
-                        .zip(keys_page.iter())
-                        .enumerate()
-                        .rev()
-                        .find_map(|(pos, (v, range))|
-                            if range.contains(self.range.lower) && v.matched(si){
-                                Some((*range, internal_page.get_pointer(pos)))
-                            } else {
-                                None
-                            })
-                    {
-                        Some((next_keys, next_block)) =>
-                            self.path.push((next_keys, next_block)),
-                        _ => {
-                            self.path.pop();
-                            self.range.lower = inc(curr_fence.upper);
+                        match versions_page
+                            .iter()
+                            .zip(keys_page.iter())
+                            .enumerate()
+                            .rev()
+                            .find_map(|(pos, (v, range))|
+                                if range.contains(self.range.lower) && v.matched(si){
+                                    Some((*range, internal_page.get_pointer(pos)))
+                                } else {
+                                    None
+                                })
+                        {
+                            Some((next_keys, next_block)) =>
+                                self.path.push((next_keys, next_block)),
+                            _ => {
+                                self.path.pop();
+                                self.range.lower = inc(curr_fence.upper);
+                            }
                         }
                     }
-                }
-                PageType::LeafRef(leaf_page) => {
-                    let records = leaf_page
-                        .as_records();
+                    PageType::LeafRef(leaf_page) => {
+                        let records = leaf_page
+                            .as_records();
 
-                    let before = self.buff.len();
-                    tree.with_visibility_checker(self.worker_id, si, |is_visible| {
+                        let before = self.buff.len();
                         self.buff.extend(records
                             .iter()
+                            // Cheap key-range comparison first, so it can
+                            // short-circuit `&&` before the costlier
+                            // `matches` call below — see `is_visible`'s doc
+                            // above for why this call is inlinable now, but
+                            // it's still real per-record work (LCB cache
+                            // lookup) that a narrower range scan (e.g. one
+                            // order's order-lines, sharing a leaf with
+                            // neighboring orders/keys outside that range)
+                            // can skip outright for every out-of-range
+                            // record instead of paying for it first. A
+                            // full-table OLAP scan's range always contains
+                            // every key in a leaf visited at all, so this is
+                            // a no-op there either way.
                             .filter(|r|
-                                r.version().matches(is_visible) && self.range.contains(r.key()))
+                                self.range.contains(r.key()) && r.version().matches(&mut is_visible))
                             .map(RecordPointResult::from));
-                    });
-                    crate::mv_test::record_leaf_scan(records.len(), self.buff.len() - before);
+                        crate::mv_test::record_leaf_scan(records.len(), self.buff.len() - before);
 
-                    self.path.pop();
+                        self.path.pop();
 
-                    self.range.lower = inc(curr_fence.upper);
-                    if !self.buff.is_empty() || self.range.lower == tree.max_key {
-                        return
+                        self.range.lower = inc(curr_fence.upper);
+                        if !self.buff.is_empty() || self.range.lower == tree.max_key {
+                            return
+                        }
                     }
+                    _ => unreachable!()
                 }
-                _ => unreachable!()
             }
-        }
+        })
     }
 
     /// The record with the smallest key remaining in this scan, or `None`

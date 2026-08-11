@@ -92,8 +92,17 @@ impl VersionInfo {
     /// already committed (see `mv_sync::visibility::is_visible` for the
     /// actual OSIC LCB-based check) — visible iff the insertion is visible
     /// and, if deleted, the deletion is not (yet) visible to this reader.
+    ///
+    /// Generic + `?Sized` rather than a plain `&mut dyn FnMut(TxStamp) ->
+    /// bool`, so a caller with a concrete (`Sized`) closure gets a
+    /// statically-dispatched, inlinable call — `dyn FnMut(..)` itself still
+    /// satisfies `FnMut(..) + ?Sized`, so every existing call site passing
+    /// an actual `&mut dyn FnMut(..)` (unchanged dynamic dispatch) keeps
+    /// compiling and behaving identically with no changes needed there; see
+    /// `mv_query::iter_query::RangeQueryIter::refill`'s call site for the
+    /// concrete-closure path this exists for.
     #[inline(always)]
-    pub fn matches(&self, is_visible: &mut dyn FnMut(TxStamp) -> bool) -> bool {
+    pub fn matches<F: FnMut(TxStamp) -> bool + ?Sized>(&self, is_visible: &mut F) -> bool {
         is_visible(self.insertion_stamp())
             && !self.deletion_stamp().map(|del| is_visible(del)).unwrap_or(false)
     }
