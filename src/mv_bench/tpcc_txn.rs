@@ -22,6 +22,7 @@ use crate::mv_db::transaction::{
     delete_on_tree, insert_on_tree, point_on_tree, range_min_on_tree, range_on_tree, update_on_tree,
 };
 use crate::mv_query::interval::Interval;
+use crate::mv_query::iter_query::RangeQueryIter;
 use crate::mv_record_model::record_point::RecordPointResult;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::Version;
@@ -94,6 +95,23 @@ impl BigTreeOp for RangeMinOp {
     type Output = Option<RecordPointResult<TpccKey, TpccRow>>;
     fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
         range_min_on_tree(tree, self.worker_id, self.ts_start, self.range)
+    }
+}
+
+struct RangeVisitOp<'a> {
+    worker_id: WorkerId,
+    ts_start: Version,
+    range: Interval<TpccKey>,
+    visit: &'a mut dyn FnMut(TpccKey, &TpccRow),
+}
+impl BigTreeOp for RangeVisitOp<'_> {
+    type Output = ();
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) {
+        RangeQueryIter::new(tree, self.ts_start, self.range, false, self.worker_id)
+            .for_each_ref(self.visit);
     }
 }
 
@@ -189,6 +207,47 @@ impl<'a> TpccTxn<'a> {
             TreeClass::Standard => range_min_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, range),
             TreeClass::Big => self.db.dispatch_big(table, RangeMinOp { worker_id: self.worker_id, ts_start: self.ts_start, range }),
         }
+    }
+
+    /// Streams a snapshot-consistent range directly into `visit`, avoiding
+    /// one `RecordPointResult` and one retained payload handle per row.
+    pub fn range_for_each(
+        &self,
+        table: Table,
+        range: Interval<TpccKey>,
+        mut visit: impl FnMut(TpccKey, &TpccRow),
+    ) {
+        match table.class() {
+            TreeClass::Standard => RangeQueryIter::new(
+                &self.db.tree_for(table), self.ts_start, range, false, self.worker_id)
+                .for_each_ref(&mut visit),
+            TreeClass::Big => self.db.dispatch_big(table, RangeVisitOp {
+                worker_id: self.worker_id,
+                ts_start: self.ts_start,
+                range,
+                visit: &mut visit,
+            }),
+        }
+    }
+
+    /// Zero-copy left fold over a snapshot-consistent table range.
+    pub fn range_fold<Acc>(
+        &self,
+        table: Table,
+        range: Interval<TpccKey>,
+        initial: Acc,
+        mut fold: impl FnMut(Acc, TpccKey, &TpccRow) -> Acc,
+    ) -> Acc {
+        let mut acc = Some(initial);
+        self.range_for_each(table, range, |key, row| {
+            acc = Some(fold(acc.take().unwrap(), key, row));
+        });
+        acc.unwrap()
+    }
+
+    /// Counts visible rows without constructing result objects.
+    pub fn range_count(&self, table: Table, range: Interval<TpccKey>) -> usize {
+        self.range_fold(table, range, 0usize, |count, _, _| count + 1)
     }
 
     pub fn insert(&self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'_> {

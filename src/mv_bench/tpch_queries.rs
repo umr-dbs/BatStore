@@ -71,23 +71,21 @@ impl OrderLineSummary {
 pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, Version) {
     let tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
-    let lines = many(tx.range(Table::OrderLine, order_line_table_range(), true));
-    tx.commit();
-
     let mut groups: [OrderLineSummary; 16] =
         std::array::from_fn(|i| OrderLineSummary { ol_number: i as u8, ..Default::default() });
 
-    for line in &lines {
-        let ol = line.payload.as_order_line();
-        let Some(delivered) = ol.ol_delivery_d else { continue };
+    tx.range_for_each(Table::OrderLine, order_line_table_range(), |key, row| {
+        let ol = row.as_order_line();
+        let Some(delivered) = ol.ol_delivery_d else { return };
         if delivered > delivered_before {
-            continue;
+            return;
         }
-        let g = &mut groups[decode_order_line_number(line.key) as usize];
+        let g = &mut groups[decode_order_line_number(key) as usize];
         g.count += 1;
         g.sum_qty += ol.ol_quantity as u64;
         g.sum_amount += ol.ol_amount;
-    }
+    });
+    tx.commit();
 
     let mut out: Vec<_> = groups.into_iter().filter(|g| g.count > 0).collect();
     out.sort_by_key(|g| g.ol_number);
@@ -101,16 +99,16 @@ pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, V
 pub fn q6(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, Version) {
     let tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
-    let lines = many(tx.range(Table::OrderLine, order_line_table_range(), true));
+    let mut revenue = 0.0;
+    tx.range_for_each(Table::OrderLine, order_line_table_range(), |_, row| {
+        let ol = row.as_order_line();
+        if ol.ol_delivery_d.is_some_and(|delivered|
+            delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty)
+        {
+            revenue += ol.ol_amount;
+        }
+    });
     tx.commit();
-
-    let revenue = lines.iter()
-        .filter_map(|r| {
-            let ol = r.payload.as_order_line();
-            let delivered = ol.ol_delivery_d?;
-            (delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty).then_some(ol.ol_amount)
-        })
-        .sum();
     (revenue, ts_start)
 }
 

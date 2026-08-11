@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::fmt::Display;
 use std::hash::Hash;
 
@@ -180,32 +181,19 @@ impl<'a,
                     return
                 }
 
-                let (curr_fence, curr_block)
-                    = self.path.last().unwrap().clone();
+                let (curr_fence, curr_block) = self.path.last().unwrap().clone();
 
                 match curr_block.as_page_ref() {
                     PageType::IndexRef(internal_page) => {
-                        let (keys_page, versions_page) = internal_page
-                            .keys_versions();
-
-                        match versions_page
-                            .iter()
-                            .zip(keys_page.iter())
-                            .enumerate()
-                            .rev()
-                            .find_map(|(pos, (v, range))|
-                                if range.contains(self.range.lower) && v.matched(si){
-                                    Some((*range, internal_page.get_pointer(pos)))
-                                } else {
-                                    None
-                                })
+                        let (keys, versions) = internal_page.keys_versions();
+                        if let Some((pos, (_, fence))) = versions.iter().zip(keys).enumerate().rev()
+                            .find(|(_, (version, fence))|
+                                version.matched(si) && fence.contains(self.range.lower))
                         {
-                            Some((next_keys, next_block)) =>
-                                self.path.push((next_keys, next_block)),
-                            _ => {
-                                self.path.pop();
-                                self.range.lower = inc(curr_fence.upper);
-                            }
+                            self.path.push((*fence, internal_page.get_pointer(pos)));
+                        } else {
+                            self.path.pop();
+                            self.range.lower = inc(curr_fence.upper);
                         }
                     }
                     PageType::LeafRef(leaf_page) => {
@@ -234,9 +222,14 @@ impl<'a,
                         crate::mv_test::record_leaf_scan(records.len(), self.buff.len() - before);
 
                         self.path.pop();
-
-                        self.range.lower = inc(curr_fence.upper);
-                        if !self.buff.is_empty() || self.range.lower == tree.max_key {
+                        let reached_end = curr_fence.upper >= self.range.upper
+                            || curr_fence.upper == tree.max_key;
+                        if reached_end {
+                            self.path.clear();
+                        } else {
+                            self.range.lower = inc(curr_fence.upper);
+                        }
+                        if !self.buff.is_empty() || reached_end {
                             return
                         }
                     }
@@ -244,6 +237,103 @@ impl<'a,
                 }
             }
         })
+    }
+
+    /// Fallible zero-copy streaming scan. Returning `Err` stops immediately;
+    /// `Drop` still releases snapshots owned by this iterator.
+    pub fn try_for_each_ref<E>(mut self, mut visit: impl FnMut(Key, &Payload) -> Result<(), E>)
+        -> Result<(), E>
+    {
+        let si = self.snapshot();
+        let tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload> = self.isolated_snapshot.1;
+        let inc = tree.inc_key;
+        let worker_id = self.worker_id;
+        let mut visit_error = None;
+
+        tree.with_snapshot_cache_and_logs(|cache, commit_logs| {
+            let mut is_visible = |stamp| crate::mv_sync::visibility::is_visible(
+                commit_logs, cache, worker_id, si, stamp);
+
+            while !self.path.is_empty() && self.range.lower <= self.range.upper {
+                let (curr_fence, curr_block) = self.path.last().unwrap().clone();
+                match curr_block.as_page_ref() {
+                    PageType::IndexRef(internal_page) => {
+                        let (keys, versions) = internal_page.keys_versions();
+                        if let Some((pos, (_, fence))) = versions.iter().zip(keys).enumerate().rev()
+                            .find(|(_, (version, fence))|
+                                version.matched(si) && fence.contains(self.range.lower))
+                        {
+                            self.path.push((*fence, internal_page.get_pointer(pos)));
+                        } else {
+                            self.path.pop();
+                            self.range.lower = inc(curr_fence.upper);
+                        }
+                    }
+                    PageType::LeafRef(leaf_page) => {
+                        let records = leaf_page.as_records();
+                        let mut matched = 0;
+                        for record in records {
+                            if self.range.contains(record.key()) && record.version().matches(&mut is_visible) {
+                                matched += 1;
+                                if let Err(error) = visit(record.key(), record.payload()) {
+                                    visit_error = Some(error);
+                                    return;
+                                }
+                            }
+                        }
+                        crate::mv_test::record_leaf_scan(records.len(), matched);
+                        self.path.pop();
+                        if curr_fence.upper >= self.range.upper
+                            || curr_fence.upper == tree.max_key
+                        {
+                            self.path.clear();
+                        } else {
+                            self.range.lower = inc(curr_fence.upper);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+
+        if let Some(error) = visit_error {
+            return Err(error);
+        }
+
+        if self.register_reader_si {
+            tree.on_release_reader_snapshot(si);
+        }
+        self.is_completed = true;
+        Ok(())
+    }
+
+    /// Streams visible records without cloning payload handles or
+    /// materializing a result vector. Intended for analytical folds/counts.
+    pub fn for_each_ref(self, mut visit: impl FnMut(Key, &Payload)) {
+        let result: Result<(), Infallible> = self.try_for_each_ref(|key, payload| {
+            visit(key, payload);
+            Ok(())
+        });
+        match result {
+            Ok(()) => {}
+            Err(never) => match never {},
+        }
+    }
+
+    /// Zero-copy left fold over the visible records.
+    pub fn fold_ref<Acc>(self, initial: Acc, mut fold: impl FnMut(Acc, Key, &Payload) -> Acc) -> Acc {
+        let mut acc = Some(initial);
+        self.for_each_ref(|key, payload| {
+            acc = Some(fold(acc.take().unwrap(), key, payload));
+        });
+        acc.unwrap()
+    }
+
+    /// Counts visible records without constructing result objects.
+    pub fn count_ref(self) -> usize {
+        let mut count = 0usize;
+        self.for_each_ref(|_, _| count += 1);
+        count
     }
 
     /// The record with the smallest key remaining in this scan, or `None`

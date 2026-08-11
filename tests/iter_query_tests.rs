@@ -41,6 +41,38 @@ fn payload_for(key: u64) -> u64 {
     key * 31 + 7
 }
 
+#[test]
+fn streaming_terminals_count_fold_and_stop_on_error() {
+    let tree = make_tree();
+    for key in shuffled(0..64) {
+        assert!(matches!(
+            tree.dispatch_crud(CRUDOperation::Insert(key, payload_for(key))),
+            CRUDOperationResult::Inserted(_)
+        ));
+    }
+    let version = tree.current_version();
+    let narrow = Interval::new(19, 23);
+
+    assert_eq!(RangeQueryIter::new(&tree, version, narrow, false, tree.worker_id()).count_ref(), 5);
+    // `inc_key(u64::MAX)` saturates. A full-range streaming scan must mark
+    // the final leaf complete instead of routing MAX back into it forever.
+    assert_eq!(RangeQueryIter::new(
+        &tree, version, Interval::new(u64::MIN, u64::MAX), false, tree.worker_id()
+    ).count_ref(), 64);
+    let sum = RangeQueryIter::new(&tree, version, narrow, false, tree.worker_id())
+        .fold_ref(0u64, |sum, _, payload| sum + *payload);
+    assert_eq!(sum, (19..=23).map(payload_for).sum());
+
+    let mut visited = 0;
+    let result = RangeQueryIter::new(&tree, version, narrow, false, tree.worker_id())
+        .try_for_each_ref(|_, _| {
+            visited += 1;
+            if visited == 3 { Err("stop") } else { Ok(()) }
+        });
+    assert_eq!(result, Err("stop"));
+    assert_eq!(visited, 3);
+}
+
 fn collect_range(tree: &TestTree, range: Interval<u64>, version: Version) -> HashMap<u64, u64> {
     match tree.dispatch_crud(CRUDOperation::Range(range, version)) {
         CRUDOperationResult::MatchedRecords(records) =>

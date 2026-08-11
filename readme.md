@@ -38,6 +38,13 @@ CROSS-ENGINE BENCHMARK HARNESS - MANUAL
 ========================================
     Read manual.txt
 
+## Engineering notes
+
+- [Range-scan iteration: ordered routing and zero-copy streaming](docs/range_scan_iteration.md)
+- [Range-scan visibility-check optimization](docs/range_scan_visibility_check.md)
+- [Big-tree leaf-size benchmark](docs/bigtree_size_benchmark.md)
+- [OLTP/WAL optimization](docs/oltp_wal_optimization.md)
+
 # Contact
     Name:               Amir Tonta
     E-Mail:             amir.tonta@mathematik.uni-marburg.de

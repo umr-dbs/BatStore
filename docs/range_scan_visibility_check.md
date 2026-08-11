@@ -6,6 +6,11 @@ whole record array, live and dead alike, has to be scanned — see that doc). Th
 at what's left to optimize purely in the *scan-iteration* code itself, without touching
 leaf/compaction layout.
 
+For the complementary internal-page routing change and the zero-copy
+`RangeQueryIter::for_each_ref` analytical path, see
+[`range_scan_iteration.md`](range_scan_iteration.md). This document covers
+only the per-record visibility hot loop once routing has reached a leaf.
+
 ## What was found
 
 `RangeQueryIter::refill` (`src/mv_query/iter_query.rs`) and

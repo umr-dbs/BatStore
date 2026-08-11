@@ -18,6 +18,36 @@ fn new_db() -> TestDb {
     Database::new(RootIndexType::default(), inc, dec, u64::MIN, u64::MAX)
 }
 
+#[test]
+fn db_transaction_zero_copy_range_terminals_share_its_snapshot() {
+    let db = new_db();
+    let table = db.create_table("scan").table_id().unwrap();
+    let load = DbTransaction::begin(&db);
+    for key in 0..20 {
+        assert!(matches!(load.insert(table, key, key * 10), CRUDOperationResult::Inserted(_)));
+    }
+    load.commit();
+
+    let tx = DbTransaction::begin(&db);
+    let range = crate::mv_query::interval::Interval::new(5, 14);
+    assert_eq!(tx.range_count(table, range), 10);
+    assert_eq!(tx.range_fold(table, range, 0u64, |sum, _, payload| sum + *payload), 950);
+
+    let mut keys = Vec::new();
+    tx.range_for_each(table, range, |key, _| keys.push(key));
+    keys.sort_unstable();
+    assert_eq!(keys, (5..=14).collect::<Vec<_>>());
+
+    let mut visited = 0;
+    let stopped = tx.try_range_for_each(table, range, |_, _| {
+        visited += 1;
+        if visited == 4 { Err("stop") } else { Ok(()) }
+    });
+    assert_eq!(stopped, Err("stop"));
+    assert_eq!(visited, 4);
+    tx.commit();
+}
+
 /// The cross-table analogue of `mv_bench::tpcc_txn::tests::
 /// cross_table_transaction_is_atomic_across_tables`: one `DbTransaction`
 /// writes to two different tables, and both writes must become visible to
