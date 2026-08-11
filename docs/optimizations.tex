@@ -56,6 +56,11 @@ atomics and memory fences; later designs instead restructured the data so the ra
 became structurally impossible.
 \end{abstract}
 
+For a concise table-first inventory of every optimization, its evidence-backed gain,
+reason, risk, and current or reverted status, see the standalone
+\path{docs/optimization_catalog.tex}. This document remains the detailed narrative;
+the catalog is the quick-reference index.
+
 \tableofcontents
 
 \section{Introduction and roadmap}
@@ -122,8 +127,9 @@ the next structural-maintenance operation (\S\ref{sec:smo}) rebuilds the page fr
 scratch.
 
 This means a single key can accumulate a \emph{physical chain} of several
-\path{RecordPoint} tuples in one page --- one per insert/update/delete against that key
---- found by scanning backward (\path{rfind}) for the most recent live entry
+\path{RecordPoint} tuples in one page --- inserts append a tuple, updates normally mark
+the predecessor deleted and append its replacement, while a delete only marks the
+existing tuple. Lookups scan backward (\path{rfind}) for the most recent live entry
 (\path{leaf_page.rs:335-337}). Each tuple carries a \path{VersionInfo}
 (\path{version_info.rs:37-40}): an \path{insertion_stamp: TxStamp} (a packed
 \path{(worker\_id, ts\_start)}, constant for an entire transaction --- not per write, see
@@ -133,14 +139,14 @@ a single equality check rather than a heuristic.
 
 Structural maintenance (\S\ref{sec:smo}) decides what to keep during a rebuild via
 \path{record_survives_gc} (\path{src/mv_tree/smo.rs:736-744}): a record survives if it is
-live, \emph{or} if it was deleted by a transaction whose snapshot some other, still-live
-transaction may still need (\path{ctx.is_snapshot_live}). An \emph{uncommitted} record's
-fate is undetermined until commit or abort: it can be neither discarded (might still be
-committed) nor coalesced with anything (nothing superseded it yet). This single fact ---
-that live, dead-but-still-needed, and uncommitted entries all occupy physical slots
-indefinitely --- is the root cause behind the two big problems solved in
-\S\ref{sec:smo}--\S\ref{sec:selfoverwrite}: pages that cannot be split cleanly, and
-pages that fill up with garbage from a single busy transaction.
+live, \emph{or} if its deleting transaction is still unresolved and may therefore abort,
+which requires the predecessor to remain available for undelete
+(\path{ctx.is_snapshot_live}). Older readers are not the reason for copying that record:
+they route through the retired source block, and \path{live_min_snapshot} prevents that
+block from being reused until those readers finish. An \emph{uncommitted} replacement's
+fate is nevertheless undetermined until commit or abort, so it cannot be discarded.
+The self-overwrite and reinsert-reuse paths in \S\ref{sec:selfoverwrite} bound how many
+such unresolved tuples one transaction can create for one key.
 
 The internal (index) page format underwent a parallel simplification, discussed together
 with garbage collection in \S\ref{sec:gc}: an early design tracked obsolete child
@@ -485,6 +491,24 @@ already-committed predecessor to protect, because nothing has committed yet. If 
 found record instead belongs to another transaction, or is an older, already-committed
 version, the code falls through to the ordinary delete-then-push path unchanged.
 
+\subsection{Delete/reinsert cycles use the same bound}
+
+Update self-overwrite alone did not cover a less common spelling of the same logical
+operation. The first \path{delete(key)} followed by \path{insert(key, value)} in one
+transaction must append a replacement tuple: the committed predecessor must remain
+physically present so abort can undelete it. Before the follow-up fix, however, repeating
+that pair in the same transaction appended another replacement on every cycle.
+
+\path{insert_on_tree} now finds the newest non-invalid record before deciding to append.
+If that record was both inserted and deleted by the current transaction --- its insertion
+and deletion stamps equal the transaction's \path{TxStamp} --- insertion WAL-logs the new
+logical value, clears the deletion mark, replaces the payload in place, and adjusts the
+leaf's live/dead counters. It deliberately does not add another write-set entry: the
+entry created for the first replacement already makes abort invalidate that tuple and
+undelete the original predecessor. Thus $N$ delete/reinsert cycles create one replacement
+tuple, commit exposes only the final payload, abort restores the pre-transaction value,
+and WAL recovery replays the final logical state.
+
 \subsection{The chronological story}
 
 Two separate mechanisms are easy to conflate here; only the second is the trick this
@@ -533,16 +557,22 @@ heuristic for single-op writes, unrelated to the transactional self-overwrite tr
         \path{leaf_split_off_by_one_regression_tests.rs} to reflect the real cause.
 \end{enumerate}
 
-\subsection{What remains open}
+\subsection{Resulting bound and the separate TPC-C discrepancy}
 
-The self-overwrite fix removes exactly one well-understood source of pile-up: $N$ writes
-to one key by one transaction now cost one physical tuple, not $N$. It does not, by
-itself, solve hot-key leaf-split tearing in general: a page whose survivors are
-genuinely \emph{all} versions of one key (e.g.\ many concurrent, non-self, committed
-updates to one hot key, protected by a long-open reader snapshot) still has no valid
-key boundary for a \path{KeySplit}. This is documented as an accepted, low-probability
-residual limitation in \path{tests/bench_tpcc_stress_tests.rs:34-51}, with a small
-numeric tolerance in that test's invariants rather than exact equality.
+$N$ updates, or $N$ delete/reinsert cycles, to one key by one transaction now cost at
+most one unresolved replacement tuple. First-writer-wins prevents other transactions
+from concurrently appending unresolved replacements for that same live key. After those
+transactions resolve, ordinary GC compaction can discard obsolete committed versions;
+pages containing multiple keys remain splittable at a key boundary. Consequently the
+earlier proposed ``unsplittable hot-key chain protected by an old reader'' explanation
+does not describe the current failure mode: the old reader stays on the historical
+retired block rather than forcing all of its records into each replacement page.
+
+The TPC-C stress invariant still permits a narrow 0.5\% difference between aggregate
+\path{Stock} counters and inserted \path{OrderLine} rows. Temporarily making that
+assertion exact reproduced a small accounting/update discrepancy in both GC modes. It
+is tracked as a separate issue; neither the evidence nor the data structure semantics
+support attributing it to same-key splitting or reader snapshot retention.
 
 \section{Garbage collection: reclaiming dead blocks without contention}
 \label{sec:gc}
@@ -1015,8 +1045,10 @@ once, and had to be reconciled on merge.
         generically solved problem.
   \item \textbf{Self-overwrite leaves one physical entry, not zero}: writing the same key
         $N$ times in one transaction still leaves one extra physical entry versus never
-        writing it at all --- enough, under stress, to occasionally contribute to a
-        same-key leaf split (\S\ref{sec:selfoverwrite}).
+        writing it at all. First-writer-wins prevents another transaction from building
+        a concurrent unresolved chain for that key. Repeated delete/reinsert cycles now
+        also reuse the transaction-owned replacement tuple after the first reinsert,
+        keeping the unresolved per-key survivor set bounded.
   \item The scope of \commit{ecc9900}'s torn-read fix is explicit in its own
         documentation: it closes one specific torn-read hazard, not every possible
         concurrent-mutation hazard on the lock-free OLC read path in general.

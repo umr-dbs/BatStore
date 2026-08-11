@@ -26,11 +26,11 @@
 //! capacity. Fixed in `split()` by comparing `survivor_count >= capacity`
 //! instead, reserving the one slot the pending write actually needs.
 //!
-//! This does *not* cover the separate, still-open structural limitation
-//! where a page's survivors are *all* physical versions of the *same* key
-//! (a real `KEY_SPLIT` then has no valid boundary to split by - see
-//! `mv_tree::smo::nearest_key_boundary`'s doc) - that's what `bench_tpcc_
-//! stress_tests.rs`'s own tolerance-based invariants still guard against.
+//! Same-transaction updates overwrite their pending tuple, and
+//! first-writer-wins prevents concurrent transactions from accumulating an
+//! unresolved chain for one key. Repeated delete/reinsert is covered by the
+//! matching transaction regression tests and likewise reuses the pending
+//! tuple after its first replacement.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;

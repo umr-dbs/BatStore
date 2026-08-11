@@ -35,10 +35,8 @@ use crate::mv_bench::tpcc_txn::{self, TxnOutcome};
 use crate::mv_bench::tpch_queries;
 use crate::mv_root::index_root::RootIndexType;
 
-// `num_items` deliberately isn't tiny - see `bench_tpcc_stress_tests::
-// stress_cfg`'s doc for why a too-small item catalog can trip a real,
-// pre-existing, out-of-scope structural limit (a same-key leaf split can't
-// safely tear one key's version chain across two sibling leaves).
+// Keep enough items for representative Stock-key contention without making
+// test population expensive.
 fn stress_cfg() -> TpccConfig {
     TpccConfig {
         num_warehouses: 4,

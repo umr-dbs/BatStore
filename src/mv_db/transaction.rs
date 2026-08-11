@@ -101,23 +101,39 @@ pub(crate) fn insert_on_tree<
     let leaf_guard = tree.traversal_write_olc(key);
     let leaf_deref_mut = leaf_guard.deref_mut();
     let leaf_page = leaf_deref_mut.as_leaf_page();
+    let stamp = TxStamp::new(worker_id, ts_start);
 
-    if let Some(crud_error) = leaf_page
-        .as_records()
-        .iter()
-        .rfind(|r| r.key == key)
-        .filter(|r| r.version.is_live())
-        .map(|r|
-            if r.version.insertion_stamp().worker_id() != worker_id {
+    if let Some(record) = leaf_page
+        .as_records_mut()
+        .iter_mut()
+        .rfind(|r| r.key == key && !r.version.insertion_stamp().is_invalid())
+    {
+        if record.version.is_live() {
+            let crud_error = if record.version.insertion_stamp().worker_id() != worker_id {
                 CRUDOperationResult::Conflict
             } else {
                 CRUDOperationResult::ZeroAffected(KeyAlreadyExists)
-            })
-    {
-        return (crud_error, false)
+            };
+            return (crud_error, false)
+        }
+
+        // A delete followed by an insert in this same transaction creates
+        // one replacement tuple the first time. Subsequent delete/insert
+        // cycles must reuse that transaction-owned tuple rather than append
+        // an unbounded same-key chain. Its original write-set entry already
+        // covers rollback; keeping the older predecessor untouched lets
+        // abort restore the pre-transaction value.
+        if record.version.insertion_stamp() == stamp
+            && record.version.deletion_stamp() == Some(stamp)
+        {
+            tree.wal_log_write(stamp, |_| CRUDOperation::Insert(key, payload.clone()));
+            record.version.undelete();
+            record.set_payload(payload);
+            leaf_page.commit_delta(1, -1);
+            return (CRUDOperationResult::Inserted(stamp.ts_start()), false)
+        }
     }
 
-    let stamp = TxStamp::new(worker_id, ts_start);
     tree.wal_log_write(stamp, |_| CRUDOperation::Insert(key, payload.clone()));
 
     let current_len = leaf_page.len();
