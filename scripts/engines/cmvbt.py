@@ -80,15 +80,12 @@ def run(
     elif workload in ("htap_q1", "htap_q6"):
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
-        # olap_mode_str="ch" activates the real CH-benCHmark OLAP thread (rotates through
-        # every query cMVBT implements - Q1/Q6/Q4/Q5 - see tpcc_driver.rs::main_tpcc); only
-        # this workload's own query's rows are read back out of tpcc_scan.csv below (see
-        # HTAP_WORKLOADS's module doc in common.py for why Q4/Q5 aren't part of this
-        # cross-engine comparison). Positions 7-19 filled with the driver's own defaults so
-        # position 9 (olap_mode_str="ch") and 10 (num_olap_threads=1) are reachable.
+        # Run exactly the query named by the workload. The old shared "ch" mode rotates
+        # Q1/Q6/Q4/Q5 and therefore made both points pay for unrelated Q4/Q5 joins.
+        olap_mode = "ch_q1" if workload == "htap_q1" else "ch_q6"
         args = [
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
-            "false", gc_bool, "false", "fg", "ch", "1", "10.0",
+            "false", gc_bool, "false", "fg", olap_mode, "1", "10.0",
             "100000", "3000", "3000", "true", str(wal_path), "5", "EUROPE", "10000",
         ]
         metric_name = "new_order_per_sec"
@@ -99,11 +96,12 @@ def run(
         threads = scale.ycsb_threads
         # Positions 8-11 (field_count/field_length/max_scan_length/root_star_index) and 13
         # (update_in_place) filled with the driver's own defaults so positions 14-16
-        # (wal_enabled/wal_path/wal_flush_ms) are reachable.
+        # (wal_enabled/wal_path/wal_flush_ms) and position 17
+        # (write_all_fields=false, standard YCSB default) are reachable.
         args = [
             str(BINARY), "ycsb", letter, str(scale.ycsb_records), str(threads),
             str(duration), "default", str(scale.ycsb_theta),
-            "10", "100", "100", "fg", gc_bool, "false", "true", str(wal_path), "5",
+            "10", "100", "100", "fg", gc_bool, "false", "true", str(wal_path), "5", "false",
         ]
         metric_name = "ops_per_sec"
         ts_file, ts_column = "ycsb_timeseries.csv", "ops_completed"

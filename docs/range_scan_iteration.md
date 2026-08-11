@@ -71,6 +71,12 @@ the leaf fence and reroutes at the retained parent. Leaf
 records themselves are still filtered by both the requested range and MVCC
 visibility; see the companion visibility document for that hot loop.
 
+An exact full-domain scan (`Key::MIN..=Key::MAX`) is detected once before the
+leaf loop. Q1, Q6, and the full-scan benchmark then use a visibility-only
+record loop, avoiding two key-bound comparisons per physical record. Every
+bounded interval continues to use range-first filtering, which remains faster
+when edge leaves contain many records outside the requested range.
+
 The final leaf is a special case. Key increment functions saturate at the
 maximum key, so incrementing `Key::MAX` does not move the cursor. Both the
 materialized and streaming paths explicitly complete when the consumed fence

@@ -271,6 +271,26 @@ impl<const FAN_OUT: usize,
         })
     }
 
+    /// Fresh-snapshot point existence check without allocating a result
+    /// vector or cloning the payload. This is the point-read counterpart to
+    /// range `count_ref`: callers that only need hit/miss should not pay to
+    /// materialize a one-row result.
+    #[inline]
+    pub fn point_exists_si(&self, key: Key) -> bool {
+        let reader_worker = self.worker_id();
+        let reader_ts_start = self.begin_snapshot();
+        let root = self.retrieve_root_for(reader_ts_start);
+        let records = Self::traverse_read_key(&root, key, reader_ts_start);
+        let found = self.with_snapshot_cache_and_logs(|cache, commit_logs| {
+            let mut is_visible = |stamp| crate::mv_sync::visibility::is_visible(
+                commit_logs, cache, reader_worker, reader_ts_start, stamp);
+            records.as_records().iter().rev().any(|record|
+                record.key() == key && record.version().matches(&mut is_visible))
+        });
+        self.end_snapshot(reader_ts_start);
+        found
+    }
+
     pub(crate) fn key_range_read_from_root<'a>(
         &self,
         root: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,

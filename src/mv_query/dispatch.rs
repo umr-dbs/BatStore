@@ -65,6 +65,50 @@ impl<
     }
 }
 
+impl<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload,
+> MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload> {
+    /// Atomically derives a replacement payload from the latest live value
+    /// while holding the leaf write latch. Used by YCSB's single-field
+    /// update so it cannot lose another updater's intervening field change.
+    pub(crate) fn update_with(
+        &self,
+        key: Key,
+        make_payload: impl FnOnce(&Payload) -> Payload,
+    ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let leaf_guard = self.traversal_write_olc(key);
+        let leaf_page = leaf_guard.deref_mut().as_leaf_page();
+        let Some(position) = leaf_page.as_records().iter().rposition(|record| record.key() == key) else {
+            return CRUDOperationResult::ZeroAffected(KeyDoesNotExist);
+        };
+        if !leaf_page.as_records()[position].version.is_live() {
+            return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted);
+        }
+
+        let payload = make_payload(leaf_page.as_records()[position].payload());
+        if !self.wal_ever_enabled.load(Relaxed) && self.decide_update_in_place(leaf_page, key) {
+            leaf_page.as_records_mut()[position].set_payload(payload);
+            return CRUDOperationResult::Updated(self.current_version());
+        }
+
+        let stamp = self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
+        if !leaf_page.as_records_mut()[position].version.delete(stamp) {
+            return CRUDOperationResult::Error;
+        }
+        let current_len = leaf_page.len();
+        leaf_page.push_uncommitted(
+            RecordPoint::new(key, VersionInfo::new(stamp), payload), current_len);
+        leaf_page.commit_delta(0, 1);
+        drop(leaf_guard);
+        let ts_commit = self.commit_tx(stamp.worker_id());
+        self.wal_log_commit(stamp, ts_commit);
+        CRUDOperationResult::Updated(stamp.ts_start())
+    }
+}
+
 impl<'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
@@ -531,4 +575,3 @@ impl<'a,
         self.dispatch_crud(atomic_tx)
     }
 }
-

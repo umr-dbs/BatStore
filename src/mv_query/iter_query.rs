@@ -249,6 +249,7 @@ impl<'a,
         let inc = tree.inc_key;
         let worker_id = self.worker_id;
         let mut visit_error = None;
+        let full_key_range = self.range.lower == tree.min_key && self.range.upper == tree.max_key;
 
         tree.with_snapshot_cache_and_logs(|cache, commit_logs| {
             let mut is_visible = |stamp| crate::mv_sync::visibility::is_visible(
@@ -272,12 +273,24 @@ impl<'a,
                     PageType::LeafRef(leaf_page) => {
                         let records = leaf_page.as_records();
                         let mut matched = 0;
-                        for record in records {
-                            if self.range.contains(record.key()) && record.version().matches(&mut is_visible) {
-                                matched += 1;
-                                if let Err(error) = visit(record.key(), record.payload()) {
-                                    visit_error = Some(error);
-                                    return;
+                        if full_key_range {
+                            for record in records {
+                                if record.version().matches(&mut is_visible) {
+                                    matched += 1;
+                                    if let Err(error) = visit(record.key(), record.payload()) {
+                                        visit_error = Some(error);
+                                        return;
+                                    }
+                                }
+                            }
+                        } else {
+                            for record in records {
+                                if self.range.contains(record.key()) && record.version().matches(&mut is_visible) {
+                                    matched += 1;
+                                    if let Err(error) = visit(record.key(), record.payload()) {
+                                        visit_error = Some(error);
+                                        return;
+                                    }
                                 }
                             }
                         }

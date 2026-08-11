@@ -386,6 +386,12 @@ indirect call becomes inlinable; incremental gain was below run-to-run noise aft
 reordering. & Exposing raw snapshot cache/log slices broadens a sensitive internal API;
 visibility logic must remain identical. & \stateactive \\
 
+Working tree, \code{iter\_query.rs} & Exact full-domain leaf-loop specialization & Q1/Q6
+do not need to compare every physical key with minimum and maximum bounds. & \gainbounded:
+removes two bound comparisons per physical record; included in the combined YCSB-E result
+below, without isolated attribution. & Only the exact \code{Key::MIN..=Key::MAX} interval
+may take this path; bounded ranges need their range predicate. & \stateactive \\
+
 \commit{c0fe172} & Search physical leaf order rather than assuming transaction-start
 ordering & Append order is not globally sorted by \code{ts\_start}; binary/search-like
 selection could miss the newest matching row. & \gainenabling: fixes point and range misses;
@@ -483,9 +489,45 @@ key-locality pattern unlike reference YCSB/LeanStore. & \gainenabling: more repr
 contention and comparison, not claimed as an engine speedup. & Changes benchmark results;
 before/after engine numbers are incomparable unless generator version is fixed. & \stateactive \\
 
+Working tree, \code{ycsb\_random.rs} & Walker alias Zipf sampler & Remove floating-point
+power from every timed request. & \gainmeasured: part of the combined YCSB-C improvement
+from 7.16M to 14.82M ops/s (+106.8\%). & O(n) setup and 8 bytes/key (about 160 MB at 20M
+keys); \code{f32} probabilities slightly quantize the distribution. & \stateactive \\
+
+Working tree, \code{ycsb\_schema.rs}/\code{ycsb\_txn.rs} & In-place bulk value generation
+and \code{writeallfields} policy & Avoid temporary value containers and implement standard
+YCSB single-field updates. & \gainmeasured: full-row YCSB-A 2.52M to 3.11M (+23.5\%);
+standard single-field mode reached 4.81M ops/s (+90.8\% versus the old full-row baseline).
+& The larger number changes semantics; historical comparison requires
+\code{write\_all\_fields=true}. Atomic patch closure runs under a leaf write latch. &
+\stateactive \\
+
+Working tree, \code{query.rs} & \code{point\_exists\_si} & Hit/miss-only YCSB reads do not
+need result vectors or payload-handle clones. & \gainmeasured: included with alias sampling
+in YCSB-C's 7.16M to 14.82M ops/s combined result. & Cannot serve callers that need payload
+contents; reader registration and SI visibility must remain gap-free. & \stateactive \\
+
+Working tree, transaction commit paths & Elide empty read-only commits & Avoid advancing
+the global clock and appending a commit-log entry when no table was written. &
+\gainbounded: one timestamp increment and commit-log operation removed per empty read-only
+transaction. & Successful read-only commits return no commit timestamp; callers must honor
+the existing \code{Option<Version>} contract. & \stateactive \\
+
+Working tree, \code{ycsb\_driver.rs} & Sample scan latency and amortize timeseries clocks &
+Measure one of every 1,024 scans and refresh the elapsed-time bucket every 256 operations.
+& \gainmeasured: combined YCSB-E throughput 4.59M to 6.22M ops/s (+35.4\%). & CSV latency
+count is sample count; percentiles have sampling error and bucket placement can lag by 255
+operations per worker. & \stateactive \\
+
+Working tree, \code{olap\_scan.rs}/engine wrapper & Isolated CH Q1 and Q6 modes & Prevent
+Q1/Q6 benchmark points from paying for the unrelated Q4/Q5 joins in the old rotating mode.
+& \gainenabling: results now attribute work to the named query; no isolated speedup claimed.
+& New isolated results measure a different workload and are not comparable to historical
+four-query \code{ch} runs. & \stateactive \\
+
 Working-tree benchmark scaling & Run TPC-C/YCSB/WAL comparisons as ordinary smoke tests;
 restore full scale with \code{CMVBT\_FULL\_BENCH=1} & Previously ignored/full benchmarks
-did not run on normal developer machines. & \gainenabling: complete suite now runs 135 tests,
+did not run on normal developer machines. & \gainenabling: complete suite now runs 138 tests,
 zero ignored, in 8.23 seconds on the development machine. & Smoke scale catches hangs and
 gross regressions, not production throughput or long-duration memory growth. & \stateactive \\
 
@@ -579,6 +621,13 @@ write-heavy Zipfian workload. \\
 Same three WAL/build changes & YCSB-E, 16/64 & +16.2\% / +49.8\% & Scan-heavy but with a
 write component. \\
 Same three WAL/build changes & YCSB-F, 16/64 & +20.7\% / +70.1\% & Read-modify-write. \\
+Current YCSB/scan batch & YCSB-A full-row / standard single-field & 2.52M to 3.11M
+(+23.5\%) / 4.81M (+90.8\% vs old baseline) & 200k rows, 4 threads, 3 seconds; second
+number uses standard, different update semantics. \\
+Alias Zipf + hit-only point path & YCSB-C & 7.16M to 14.82M ops/s (+106.8\%) & Combined
+batch result on the same short 200k-row setup. \\
+Scan-loop and measurement batch & YCSB-E & 4.59M to 6.22M ops/s (+35.4\%) & Combined
+batch result; latency samples one scan in 1,024. \\
 Ticket-less WAL + exact buffer hints & TPC-C / YCSB-A & +12.6\% / +25.3\% & Same short
 profiling setup before and after both fixes together. \\
 Ticket-less WAL + exact buffer hints & Synthetic WalWriter, 16 threads & +79\% & 8-byte
@@ -595,8 +644,8 @@ BigTreeSize 32 KiB default & District root restarts & 18.9M to 4.3M & Commit-rep
 not reproduced in the later size sweep. \\
 Mimalloc feature & YCSB-A / TPC-C & +2.3--3.0\% / $-3.3$ to $-4.9$\% & Kept optional;
 not a universal optimization. \\
-Scaled complete test/benchmark smoke suite & Development test run & 135 passed, 0 ignored,
-8.23 s & Correctness/operability result, not production performance. \\
+Scaled complete test/benchmark smoke suite & Development test run & 138 passed, 0 ignored,
+8.30 s & Correctness/operability result, not production performance. \\
 \bottomrule
 \end{longtable}
 

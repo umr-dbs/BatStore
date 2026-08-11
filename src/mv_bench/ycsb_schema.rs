@@ -124,6 +124,35 @@ impl YcsbRow {
         }
     }
 
+    /// Allocates the final header+payload object once and initializes its
+    /// bytes in place. Generators use this instead of filling a temporary
+    /// `Vec` and copying it into a second allocation.
+    pub fn from_len_with(data_len: usize, fill: impl FnOnce(&mut [u8])) -> Self {
+        let layout = Self::layout_for(data_len);
+        unsafe {
+            let raw = alloc(layout);
+            if raw.is_null() {
+                handle_alloc_error(layout);
+            }
+            raw.cast::<AtomicU32>().write(AtomicU32::new(1));
+            raw.add(REFCOUNT_LEN).cast::<u32>().write(data_len as u32);
+            let bytes = std::slice::from_raw_parts_mut(raw.add(HEADER_LEN), data_len);
+            fill(bytes);
+            Self { ptr: NonNull::new_unchecked(raw) }
+        }
+    }
+
+    pub fn copy_with_field(&self, field: usize, field_length: usize, replacement: &[u8]) -> Self {
+        assert_eq!(replacement.len(), field_length);
+        let data_len = self.len();
+        let start = field.checked_mul(field_length).expect("YCSB field offset overflow");
+        assert!(start + field_length <= data_len, "YCSB field outside row");
+        Self::from_len_with(data_len, |bytes| {
+            bytes.copy_from_slice(self.as_bytes());
+            bytes[start..start + field_length].copy_from_slice(replacement);
+        })
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().add(HEADER_LEN), self.len()) }
     }

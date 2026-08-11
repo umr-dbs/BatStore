@@ -19,7 +19,7 @@
 //! where a concurrent GC decision can't yet see this read and could reclaim
 //! a page it needs.
 
-use crate::mv_bench::ycsb_random::random_row;
+use crate::mv_bench::ycsb_random::{random_field_patch, random_row};
 use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbKey, YcsbTree};
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
@@ -31,18 +31,32 @@ use crate::mv_query::interval::Interval;
 /// range, e.g. a `Latest`-distribution read racing just ahead of a fresh
 /// `Insert`'s counter bump).
 pub fn read(tree: &YcsbTree, key: YcsbKey) -> bool {
-    match tree.dispatch_crud(CRUDOperation::PointSi(key)) {
-        CRUDOperationResult::MatchedRecords(v) => !v.is_empty(),
-        other => panic!("ycsb read: unexpected result: {other}"),
-    }
+    tree.point_exists_si(key)
 }
 
-/// Replaces the whole row at `key` with fresh random field values (YCSB's
-/// "update a record" — see module docs for why the storage layer replaces
-/// the whole row rather than merging individual fields). Returns `false` if
-/// the key doesn't currently exist (already deleted, or not loaded yet).
-pub fn update(tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey) -> bool {
-    match tree.dispatch_crud(CRUDOperation::Update(key, random_row(cfg))) {
+/// Updates a row using YCSB's `writeallfields` policy. When it is `true`, a
+/// fresh complete row is generated. The standard/default `false` changes one
+/// randomly selected field while preserving all other fields. The latter is
+/// applied atomically under the leaf write latch, so concurrent updates of
+/// different fields cannot overwrite each other's already-committed bytes.
+/// Returns `false` if the key does not currently exist.
+pub fn update(tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey, write_all_fields: bool) -> bool {
+    let replacement = if write_all_fields {
+        Some(random_row(cfg))
+    } else {
+        None
+    };
+    let result = if let Some(replacement) = replacement {
+        tree.dispatch_crud(CRUDOperation::Update(key, replacement))
+    } else if cfg.field_count == 0 || cfg.field_length == 0 {
+        return tree.point_exists_si(key);
+    } else {
+        let (field, bytes) = random_field_patch(cfg);
+        tree.update_with(key, |old| {
+            old.copy_with_field(field, cfg.field_length, &bytes)
+        })
+    };
+    match result {
         CRUDOperationResult::Updated(_) => true,
         CRUDOperationResult::ZeroAffected(_) => false,
         other => panic!("ycsb update: unexpected result: {other}"),
@@ -78,7 +92,12 @@ pub fn scan(tree: &YcsbTree, start_key: YcsbKey, len: u64) -> usize {
 /// isn't wrapped in a multi-op `Transaction`. Returns whether the write half
 /// found the row (the read half's outcome isn't separately observable here,
 /// same as real YCSB clients which don't act on the read's content either).
-pub fn read_modify_write(tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey) -> bool {
+pub fn read_modify_write(
+    tree: &YcsbTree,
+    cfg: &YcsbConfig,
+    key: YcsbKey,
+    write_all_fields: bool,
+) -> bool {
     let _ = read(tree, key);
-    update(tree, cfg, key)
+    update(tree, cfg, key, write_all_fields)
 }
