@@ -109,14 +109,17 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
 
     run_env = os.environ.copy()
     run_env["LD_LIBRARY_PATH"] = str(BUILD_DIR) + os.pathsep + run_env.get("LD_LIBRARY_PATH", "")
+    timeout = common.default_subprocess_timeout(duration)
     returncode, peak_rss_mb = common.run_and_track_rss(
-        args, cwd=REPO, env=run_env, stdout_path=stdout_path,
+        args, cwd=REPO, env=run_env, stdout_path=stdout_path, timeout=timeout,
     )
     if returncode != 0:
+        notes = f"TIMEOUT after {timeout:.0f}s, see stdout.log" if returncode is None else \
+            f"FAILED exit={returncode}, see stdout.log"
         return common.NormalizedResult(
             "vweaver_ermia_frugal", workload, scale.label, duration, metric_name, 0.0, peak_rss_mb,
             threads=threads, gc_enabled=gc,
-            notes=f"FAILED exit={returncode}, see stdout.log",
+            notes=notes,
         )
 
     value = _parse_throughput(stdout_path, workload)

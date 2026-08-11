@@ -16,8 +16,10 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Updated the split/merge logic accounting for weakened fresh node rule">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Fix postgres script to resolve symlinks">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/engines/postgres_benchbase.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/postgres_benchbase.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/setup_environment.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/setup_environment.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -28,7 +30,7 @@
     <option name="formatViaClangd" value="false" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="14733" />
+    <option name="cachedIndexableFilesCount" value="14814" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:dev" />
@@ -72,61 +74,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.011156292881393" />
-      <entry key="MS500" value="1.8029089116194978" />
-      <entry key="S2" value="5.560911131641905" />
-      <entry key="S5" value="11.160318437700077" />
-      <entry key="S10" value="16.277815555104326" />
-      <entry key="S30" value="25.290049843002194" />
-      <entry key="S60" value="31.63874624479661" />
-      <entry key="M2" value="39.40691252900297" />
-      <entry key="M5" value="62.08447567554979" />
-      <entry key="M10" value="87.79324234562209" />
-      <entry key="M15" value="110.27630069038362" />
-      <entry key="M30" value="205.78084319683342" />
-      <entry key="H1" value="386.91226959941787" />
-      <entry key="H2" value="588.0009285689441" />
-      <entry key="H4" value="795.4268477852805" />
-      <entry key="D1" value="2692.7428556460145" />
-      <entry key="W1" value="9802.88952502776" />
+      <entry key="MS100" value="1.0122111507738414" />
+      <entry key="MS500" value="1.7992468968819297" />
+      <entry key="S2" value="6.213005313797431" />
+      <entry key="S5" value="12.543104443964785" />
+      <entry key="S10" value="17.939012829995004" />
+      <entry key="S30" value="26.38763317292886" />
+      <entry key="S60" value="37.95913108078598" />
+      <entry key="M2" value="55.93762316897966" />
+      <entry key="M5" value="89.70632375471406" />
+      <entry key="M10" value="122.09688304996538" />
+      <entry key="M15" value="147.35421130151838" />
+      <entry key="M30" value="244.36844712698505" />
+      <entry key="H1" value="426.53403316646916" />
+      <entry key="H2" value="630.2090770675877" />
+      <entry key="H4" value="840.1889045980047" />
+      <entry key="D1" value="2739.835209895229" />
+      <entry key="W1" value="9851.385445146512" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
       <entry key="MS500" value="0.0" />
       <entry key="S2" value="0.0" />
       <entry key="S5" value="0.0" />
-      <entry key="S10" value="3.6410251695982276E-167" />
-      <entry key="S30" value="5.241186385288584E-56" />
-      <entry key="S60" value="3.236086905028654E-28" />
-      <entry key="M2" value="2.543739509910162E-14" />
-      <entry key="M5" value="5.530882929200749E-6" />
-      <entry key="M10" value="0.0033263256485977803" />
-      <entry key="M15" value="0.028151988636174973" />
-      <entry key="M30" value="0.25224060758725375" />
-      <entry key="H1" value="0.902607181147888" />
-      <entry key="H2" value="2.1700764507776196" />
-      <entry key="H4" value="8.282772673308628" />
-      <entry key="D1" value="210.39183867929032" />
-      <entry key="W1" value="959.9010556009811" />
+      <entry key="S10" value="3.4654845664129066E-171" />
+      <entry key="S30" value="2.3930018453550054E-57" />
+      <entry key="S60" value="6.914756491809767E-29" />
+      <entry key="M2" value="1.1758474804535941E-14" />
+      <entry key="M5" value="4.0620550885192525E-6" />
+      <entry key="M10" value="0.002850627274011914" />
+      <entry key="M15" value="0.025399559969995177" />
+      <entry key="M30" value="0.2395926885997976" />
+      <entry key="H1" value="0.8796867751702351" />
+      <entry key="H2" value="2.142346298069489" />
+      <entry key="H4" value="8.229682142334692" />
+      <entry key="D1" value="210.16647607386156" />
+      <entry key="W1" value="959.7541017904389" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.021899112630689922" />
-      <entry key="MS500" value="1.205291702823447" />
-      <entry key="S2" value="5.354531188189319" />
-      <entry key="S5" value="11.070150406528386" />
-      <entry key="S10" value="16.230707372634967" />
-      <entry key="S30" value="25.26507658389186" />
-      <entry key="S60" value="31.609458914196445" />
-      <entry key="M2" value="39.37561837432206" />
-      <entry key="M5" value="62.059182997891035" />
-      <entry key="M10" value="87.77915975842885" />
-      <entry key="M15" value="110.29130128274602" />
-      <entry key="M30" value="206.02527637937771" />
-      <entry key="H1" value="387.8102871096507" />
-      <entry key="H2" value="590.1682711778077" />
-      <entry key="H4" value="803.7072005106" />
-      <entry key="D1" value="2903.128493262476" />
-      <entry key="W1" value="10762.78672378315" />
+      <entry key="MS100" value="0.9846107006518598" />
+      <entry key="MS500" value="1.7813712609586614" />
+      <entry key="S2" value="6.171200494835928" />
+      <entry key="S5" value="12.508846001839318" />
+      <entry key="S10" value="17.915957737002437" />
+      <entry key="S30" value="26.374639987939187" />
+      <entry key="S60" value="37.94358944611139" />
+      <entry key="M2" value="55.91648591547146" />
+      <entry key="M5" value="89.68427409882989" />
+      <entry key="M10" value="122.08290441291192" />
+      <entry key="M15" value="147.36643002518215" />
+      <entry key="M30" value="244.5999443515249" />
+      <entry key="H1" value="427.40890140352707" />
+      <entry key="H2" value="632.3485503133455" />
+      <entry key="H4" value="848.4160948691422" />
+      <entry key="D1" value="2949.995476925604" />
+      <entry key="W1" value="10811.135688591567" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -216,6 +218,9 @@
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
+  <component name="PyDebuggerOptionsProvider">
+    <option name="myDebuggerBackend" value="DEBUGPY" />
+  </component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/comparison_results" />
@@ -225,11 +230,11 @@
       <recent name="$PROJECT_DIR$/src/mv_sync" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/tools" />
       <recent name="$PROJECT_DIR$/src/mv_test" />
       <recent name="$PROJECT_DIR$/tests" />
       <recent name="$PROJECT_DIR$/src/mv_query" />
       <recent name="$PROJECT_DIR$/src/mv_tree" />
-      <recent name="$PROJECT_DIR$/src/mv_tx_query" />
     </key>
   </component>
   <component name="RunAnythingCache">
@@ -1397,70 +1402,31 @@
       <workItem from="1785573692292" duration="313000" />
       <workItem from="1785620604929" duration="2032000" />
       <workItem from="1785673822073" duration="5205000" />
-    </task>
-    <task id="LOCAL-00159" summary="Commit for exps">
-      <option name="closed" value="true" />
-      <created>1777284215848</created>
-      <option name="number" value="00159" />
-      <option name="presentableId" value="LOCAL-00159" />
-      <option name="project" value="LOCAL" />
-      <updated>1777284215848</updated>
-    </task>
-    <task id="LOCAL-00160" summary="Commit for exps">
-      <option name="closed" value="true" />
-      <created>1777319556436</created>
-      <option name="number" value="00160" />
-      <option name="presentableId" value="LOCAL-00160" />
-      <option name="project" value="LOCAL" />
-      <updated>1777319556437</updated>
-    </task>
-    <task id="LOCAL-00161" summary="Fix GC lag in blocks; Remove extra latch for SMO">
-      <option name="closed" value="true" />
-      <created>1778487403674</created>
-      <option name="number" value="00161" />
-      <option name="presentableId" value="LOCAL-00161" />
-      <option name="project" value="LOCAL" />
-      <updated>1778487403675</updated>
-    </task>
-    <task id="LOCAL-00162" summary="Fix GC lag in blocks; Remove extra latch for SMO">
-      <option name="closed" value="true" />
-      <created>1778515444863</created>
-      <option name="number" value="00162" />
-      <option name="presentableId" value="LOCAL-00162" />
-      <option name="project" value="LOCAL" />
-      <updated>1778515444863</updated>
-    </task>
-    <task id="LOCAL-00163" summary="Fix GC lag in blocks; Remove extra latch for SMO">
-      <option name="closed" value="true" />
-      <created>1778579580147</created>
-      <option name="number" value="00163" />
-      <option name="presentableId" value="LOCAL-00163" />
-      <option name="project" value="LOCAL" />
-      <updated>1778579580147</updated>
-    </task>
-    <task id="LOCAL-00164" summary="Fix GC on empty Reader threads">
-      <option name="closed" value="true" />
-      <created>1778603853935</created>
-      <option name="number" value="00164" />
-      <option name="presentableId" value="LOCAL-00164" />
-      <option name="project" value="LOCAL" />
-      <updated>1778603853935</updated>
-    </task>
-    <task id="LOCAL-00165" summary="Fix UIP logic">
-      <option name="closed" value="true" />
-      <created>1779115175081</created>
-      <option name="number" value="00165" />
-      <option name="presentableId" value="LOCAL-00165" />
-      <option name="project" value="LOCAL" />
-      <updated>1779115175081</updated>
-    </task>
-    <task id="LOCAL-00166" summary="Add insert check">
-      <option name="closed" value="true" />
-      <created>1779291538019</created>
-      <option name="number" value="00166" />
-      <option name="presentableId" value="LOCAL-00166" />
-      <option name="project" value="LOCAL" />
-      <updated>1779291538019</updated>
+      <workItem from="1785746380730" duration="992000" />
+      <workItem from="1785788700141" duration="3190000" />
+      <workItem from="1785846683754" duration="4682000" />
+      <workItem from="1785938254342" duration="3753000" />
+      <workItem from="1786003052052" duration="3202000" />
+      <workItem from="1786033923375" duration="623000" />
+      <workItem from="1786105323582" duration="659000" />
+      <workItem from="1786112101743" duration="2081000" />
+      <workItem from="1786171310778" duration="2528000" />
+      <workItem from="1786180362173" duration="5517000" />
+      <workItem from="1786195913519" duration="1162000" />
+      <workItem from="1786217687103" duration="1452000" />
+      <workItem from="1786274740121" duration="3721000" />
+      <workItem from="1786305424106" duration="4401000" />
+      <workItem from="1786353789839" duration="3116000" />
+      <workItem from="1786363339929" duration="2733000" />
+      <workItem from="1786371188501" duration="2861000" />
+      <workItem from="1786376246651" duration="738000" />
+      <workItem from="1786433680344" duration="1973000" />
+      <workItem from="1786437227278" duration="469000" />
+      <workItem from="1786437703263" duration="4432000" />
+      <workItem from="1786447348793" duration="9969000" />
+      <workItem from="1786471720048" duration="2496000" />
+      <workItem from="1786475215693" duration="2172000" />
+      <workItem from="1786477993361" duration="591000" />
     </task>
     <task id="LOCAL-00167" summary="Pin Root* for root_live reorg, without actual latching of root_live. Move node tag to single cacheline">
       <option name="closed" value="true" />
@@ -1790,7 +1756,71 @@
       <option name="project" value="LOCAL" />
       <updated>1785492360295</updated>
     </task>
-    <option name="localTasksCounter" value="208" />
+    <task id="LOCAL-00208" summary="Updated Visualizer and added demo JSON for direct use">
+      <option name="closed" value="true" />
+      <created>1785746528236</created>
+      <option name="number" value="00208" />
+      <option name="presentableId" value="LOCAL-00208" />
+      <option name="project" value="LOCAL" />
+      <updated>1785746528237</updated>
+    </task>
+    <task id="LOCAL-00209" summary="Updated crate versions">
+      <option name="closed" value="true" />
+      <created>1785942118032</created>
+      <option name="number" value="00209" />
+      <option name="presentableId" value="LOCAL-00209" />
+      <option name="project" value="LOCAL" />
+      <updated>1785942118033</updated>
+    </task>
+    <task id="LOCAL-00210" summary="Updated tree visualizer">
+      <option name="closed" value="true" />
+      <created>1786284855293</created>
+      <option name="number" value="00210" />
+      <option name="presentableId" value="LOCAL-00210" />
+      <option name="project" value="LOCAL" />
+      <updated>1786284855293</updated>
+    </task>
+    <task id="LOCAL-00211" summary="Updated tree explorer">
+      <option name="closed" value="true" />
+      <created>1786311724784</created>
+      <option name="number" value="00211" />
+      <option name="presentableId" value="LOCAL-00211" />
+      <option name="project" value="LOCAL" />
+      <updated>1786311724785</updated>
+    </task>
+    <task id="LOCAL-00212" summary="Updated tree explorer">
+      <option name="closed" value="true" />
+      <created>1786373951289</created>
+      <option name="number" value="00212" />
+      <option name="presentableId" value="LOCAL-00212" />
+      <option name="project" value="LOCAL" />
+      <updated>1786373951289</updated>
+    </task>
+    <task id="LOCAL-00213" summary="Added optimizations">
+      <option name="closed" value="true" />
+      <created>1786451862906</created>
+      <option name="number" value="00213" />
+      <option name="presentableId" value="LOCAL-00213" />
+      <option name="project" value="LOCAL" />
+      <updated>1786451862907</updated>
+    </task>
+    <task id="LOCAL-00214" summary="Added optimizations">
+      <option name="closed" value="true" />
+      <created>1786454054810</created>
+      <option name="number" value="00214" />
+      <option name="presentableId" value="LOCAL-00214" />
+      <option name="project" value="LOCAL" />
+      <updated>1786454054810</updated>
+    </task>
+    <task id="LOCAL-00215" summary="Fix postgres script to resolve symlinks">
+      <option name="closed" value="true" />
+      <created>1786477677509</created>
+      <option name="number" value="00215" />
+      <option name="presentableId" value="LOCAL-00215" />
+      <option name="project" value="LOCAL" />
+      <updated>1786477677509</updated>
+    </task>
+    <option name="localTasksCounter" value="216" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1811,12 +1841,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Add HTAP" />
-    <MESSAGE value="Refine experiments and add plot scripts" />
-    <MESSAGE value="Refine all" />
-    <MESSAGE value="Introduce Tables per indexes, not encoded into a single tree" />
-    <MESSAGE value="Add commit log truncate setting turned on now by default (gc = off + truncate_commit_log = on)" />
-    <MESSAGE value="Cleaned and added tests" />
     <MESSAGE value="Added benchmark suite for auto-testing and scripts for plot" />
     <MESSAGE value="Bulk improve system" />
     <MESSAGE value="Improve Tx conflict findings" />
@@ -1836,7 +1860,13 @@
     <MESSAGE value="Added Tree Visualizer, including block tracer and live viewer" />
     <MESSAGE value="Updated tree visualizer and plot code" />
     <MESSAGE value="Updated the split/merge logic accounting for weakened fresh node rule" />
-    <option name="LAST_COMMIT_MESSAGE" value="Updated the split/merge logic accounting for weakened fresh node rule" />
+    <MESSAGE value="Updated Visualizer and added demo JSON for direct use" />
+    <MESSAGE value="Updated crate versions" />
+    <MESSAGE value="Updated tree visualizer" />
+    <MESSAGE value="Updated tree explorer" />
+    <MESSAGE value="Added optimizations" />
+    <MESSAGE value="Fix postgres script to resolve symlinks" />
+    <option name="LAST_COMMIT_MESSAGE" value="Fix postgres script to resolve symlinks" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

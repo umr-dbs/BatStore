@@ -62,14 +62,14 @@ def run(
     if workload == "tpcc":
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
-        # Positions 7-14 filled with the driver's own defaults (update_in_place=false,
-        # root_star_index="fg", olap_mode_str="scan_sweep", num_olap_threads=1,
+        # Positions 7-14 filled explicitly (update_in_place=false,
+        # root_star_index="fg", OLAP disabled for this plain TPC-C baseline,
         # olap_param=10.0, num_items/customers_per_district/initial_orders_per_district)
         # so that positions 15-17 (wal_enabled/wal_path/wal_flush_ms) are reachable -
         # Rust's arg() is strictly positional (parms.get(idx)).
         args = [
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
-            "false", gc_bool, "false", "fg", "scan_sweep", "1", "10.0",
+            "false", gc_bool, "false", "fg", "none", "0", "10.0",
             "100000", "3000", "3000", "true", str(wal_path), "5",
             # Positions 18-20 (ch_region/num_suppliers/htap_baseline_secs) filled with the
             # driver's own defaults so position 21 (big_tree_size) is reachable.
@@ -124,15 +124,10 @@ def run(
     peak_rss_mb = common.max_csv_column(output_dir / "mem_stats.csv", "rss_kb") / 1024.0
 
     # Scan/OLAP latency: workload "ycsb_e" has its own pre-computed summary (see
-    # ycsb_driver.rs::write_results); TPC-C's HTAP scan-sweep OLAP thread (always active by
-    # default, see tpcc_driver.rs::main_tpcc's olap_mode_str default) writes raw per-scan
-    # samples to tpcc_scan.csv instead - percentiles computed here from those.
+    # ycsb_driver.rs::write_results); explicit HTAP workloads write raw per-query samples
+    # to tpcc_scan.csv. Plain TPC-C deliberately has no analytical thread.
     if workload == "ycsb_e":
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
-    elif workload == "tpcc":
-        latency = common.percentiles_from_samples(output_dir / "tpcc_scan.csv", "latency_ns")
-        for k in ("p50", "p95", "p99", "avg"):
-            latency[k] /= 1000.0  # ns -> us
     elif workload in ("htap_q1", "htap_q6"):
         mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
         latency = common.percentiles_from_samples(
