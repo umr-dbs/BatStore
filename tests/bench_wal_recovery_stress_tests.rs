@@ -29,10 +29,8 @@ use crate::mv_query::interval::Interval;
 use crate::mv_record_model::record_point::RecordPointResult;
 use crate::mv_root::index_root::RootIndexType;
 
-// `num_items` deliberately isn't tiny - see `bench_tpcc_stress_tests::
-// stress_cfg`'s doc for why a too-small item catalog can trip a real,
-// pre-existing, out-of-scope structural limit (a same-key leaf split can't
-// safely tear one key's version chain across two sibling leaves).
+// Keep enough items for representative Stock-key contention without making
+// test population expensive.
 fn stress_cfg() -> TpccConfig {
     TpccConfig {
         num_warehouses: 3,

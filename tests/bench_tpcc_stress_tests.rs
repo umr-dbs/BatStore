@@ -35,20 +35,11 @@ use crate::mv_root::index_root::RootIndexType;
 /// same-district counter contention both actually happen), still small
 /// enough that population is instant and every table scan below stays cheap.
 ///
-/// `num_items` deliberately isn't tiny: a too-small item catalog makes some
-/// Stock rows disproportionately popular, so enough *different*, separately
-/// committed New-Order transactions land on the exact same Stock key that
-/// its own version chain alone can dominate - or entirely fill - a leaf
-/// page. Two narrower contributors to this same class of pressure are
-/// already fixed (`DbTransaction::update`'s same-transaction self-overwrite
-/// fast path, and a `mv_tree::smo::split` off-by-one that used to demand a
-/// free slot to remain a hot key at all - see `leaf_split_off_by_one_
-/// regression_tests.rs`), but a page whose survivors are genuinely *all*
-/// versions of one key still has no valid boundary for `KEY_SPLIT` to
-/// divide by (`mv_tree::smo::nearest_key_boundary`'s doc: "a pre-existing
-/// structural limit this doesn't attempt to fix"), and no realistic TPC-C
-/// item catalog (the spec's own 100,000) ever comes close to concentrating
-/// enough traffic on one key to hit it.
+/// `num_items` is large enough to retain a representative Stock-key
+/// distribution while keeping population fast. First-writer-wins and the
+/// same-transaction overwrite/reinsert fast paths bound unresolved physical
+/// versions per key; contention produces conflicts rather than an
+/// unbounded same-key chain.
 fn stress_cfg() -> TpccConfig {
     TpccConfig {
         num_warehouses: 4,
@@ -234,40 +225,20 @@ fn run_stress_and_check_invariants(gc_update_in_place: bool, num_threads: usize,
         committed_no as i64 - delivered as i64,
         "NewOrder row count must grow by committed New-Orders minus delivered districts"
     );
-    // These two would ideally be an exact `assert_eq!`/zero-tolerance check
-    // (every committed New-Order's Stock update and its order-line insert
-    // are written together, atomically, in the same transaction - see
-    // `tpcc_txn::new_order`). A small tolerance is used instead because of a
-    // confirmed, pre-existing structural limitation this stress test
-    // reliably (if rarely - a fraction of a percent of committed New-Orders)
-    // triggers under real concurrent load: a Stock key hot enough that its
-    // accumulated MVCC versions (including ones still protected because the
-    // writing transaction, or some other one, hasn't committed/released its
-    // snapshot yet - see `mv_tree::smo::record_survives_gc`) overflow one
-    // leaf page forces a same-key split, which - since every entry in that
-    // split page shares the one hot key - has no valid key boundary to
-    // divide by (`mv_tree::smo::nearest_key_boundary`'s own doc: "tearing is
-    // then unavoidable without duplicate-key sibling support, a pre-existing
-    // structural limit this doesn't attempt to fix"). A handful of that
-    // key's physical versions can end up stranded in the sibling whose fence
-    // no longer routes to it, silently dropping that one Stock update's
-    // effect on `s_order_cnt`/`s_ytd` even though its own order-line commits
-    // normally. Fixing the underlying split/merge algorithm to support one
-    // key's version chain spanning sibling leaves is a real, substantial,
-    // separate undertaking - out of scope for this test; the tolerance here
-    // exists to still catch a *gross* violation (a real regression would
-    // blow well past a fraction of a percent) without this test flaking on
-    // the already-known, already-documented limitation.
+    // These should agree exactly because the Stock updates and OrderLine
+    // inserts share one atomic transaction. Repeated strict runs currently
+    // expose a small pre-existing discrepancy (for example 120,914 Stock
+    // increments versus 120,934 OrderLines). It is not explained by the
+    // disproven same-key split theory; retain the narrow stress tolerance
+    // until that separate accounting/update issue is isolated.
     let ol_growth = (after.ol_count - before.ol_count) as u64;
     let s_order_cnt_growth = after.s_order_cnt_sum - before.s_order_cnt_sum;
     let order_cnt_tolerance = (ol_growth / 200).max(5); // 0.5%, floor of 5
-    assert!(
-        s_order_cnt_growth.abs_diff(ol_growth) <= order_cnt_tolerance,
-        "total stock s_order_cnt growth ({s_order_cnt_growth}) must be within {order_cnt_tolerance} of total new order-line count ({ol_growth})"
-    );
+    assert!(s_order_cnt_growth.abs_diff(ol_growth) <= order_cnt_tolerance,
+        "total stock s_order_cnt growth ({s_order_cnt_growth}) must be within {order_cnt_tolerance} of total new order-line count ({ol_growth})");
     let ol_qty_growth = (after.ol_qty_sum - before.ol_qty_sum) as f64;
     let s_ytd_growth = after.s_ytd_sum - before.s_ytd_sum;
-    let ytd_tolerance = (ol_qty_growth * 0.005).max(50.0); // 0.5%, floor of 50
+    let ytd_tolerance = (ol_qty_growth * 0.005).max(50.0); // same 0.5% bound
     assert!(
         (s_ytd_growth - ol_qty_growth).abs() < ytd_tolerance,
         "total stock s_ytd growth ({s_ytd_growth}) must be within {ytd_tolerance} of total order-line quantity inserted ({ol_qty_growth})"

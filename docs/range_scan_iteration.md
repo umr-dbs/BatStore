@@ -263,6 +263,14 @@ The routing and streaming changes are covered by focused tests for:
 - generic `DbTransaction` zero-copy terminals; and
 - Q1/Q6 and YCSB scan correctness.
 
+Structural and transactional regressions added with the follow-up fix also verify that:
+
+- a reader opened before an update and subsequent splits continues through the retained
+  historical blocks while GC reuse is enabled;
+- repeated delete/reinsert cycles in one transaction commit only their final value;
+- aborting those cycles restores the pre-transaction value; and
+- WAL recovery reconstructs the final committed value after the tuple-reuse path.
+
 The focused iterator, generic-database, YCSB, TPC-H, and range-version suites
 pass. The GC regression was diagnosed by comparing total and unique keys:
 each surplus `NewOrder` row was a duplicate produced by overlapping historical
@@ -270,8 +278,12 @@ routes. After restoring cursor-based routing, three consecutive runs of each
 TPC-C stress mode (copy-on-write and update-in-place GC) passed without
 duplicate-key reports.
 
-The normal suite subsequently completed with 128 passed and three ignored in
-33.84 seconds. Each ignored benchmark was also run separately in release
-mode: TPC-C completed in 124.58 seconds, YCSB in 63.25 seconds, and the WAL
-throughput microbenchmark in 2.13 seconds. The longer two intentionally run
-six eight-second timed phases and reload their datasets between phases.
+The suite now includes smoke-scaled TPC-C, YCSB, and WAL backend comparisons and
+completes with 135 passed and zero ignored tests (8.23 seconds on the development
+machine used for the final run). The default TPC-C comparison uses two warehouses and
+two terminals for one second per WAL backend; YCSB uses 20,000 records, two threads,
+and one second per backend. The WAL writer microbenchmark retains its original workload
+because it already completes in roughly two seconds. Set `CMVBT_FULL_BENCH=1` to
+restore the original large TPC-C/YCSB configurations for dedicated release-mode
+measurements; those full configurations are performance runs, not required correctness
+tests for an ordinary development machine.

@@ -2,8 +2,9 @@
 //! why this drives the real benchmark end to end rather than a synthetic
 //! WAL-only microbenchmark.
 //!
-//! `#[ignore]`d — see `tpcc_wal_backend_bench.rs`. Run with:
-//! `cargo test --bin cMVBT compare_wal_backends_ycsb --release -- --ignored --nocapture --test-threads=1`
+//! The normal test uses a 20,000-record, one-second smoke configuration.
+//! Set `CMVBT_FULL_BENCH=1` to restore the original 200,000-record,
+//! eight-second, 8/16-thread comparison.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,9 +14,9 @@ use crate::mv_bench::ycsb_driver::{run_ycsb, DriverConfig};
 use crate::mv_bench::ycsb_schema::YcsbConfig;
 use crate::mv_root::index_root::RootIndexType;
 
-const RECORD_COUNT: u64 = 200_000;
-const DURATION_SECS: u64 = 8;
-const THREAD_COUNTS: &[usize] = &[8, 16];
+const FULL_RECORD_COUNT: u64 = 200_000;
+const FULL_DURATION_SECS: u64 = 8;
+const FULL_THREAD_COUNTS: &[usize] = &[8, 16];
 /// See `tpcc_wal_backend_bench.rs`'s `BACKENDS` doc.
 const BACKENDS: &[(&str, Option<usize>)] = &[
     ("batched", None),
@@ -23,11 +24,19 @@ const BACKENDS: &[(&str, Option<usize>)] = &[
     ("lockfree-batch64", Some(64)),
 ];
 
-fn config(num_threads: usize, wal_path: PathBuf, batch_size: Option<usize>) -> DriverConfig {
+fn full_scale() -> bool {
+    std::env::var_os("CMVBT_FULL_BENCH").is_some()
+}
+
+fn config(num_threads: usize, wal_path: PathBuf, batch_size: Option<usize>, full: bool) -> DriverConfig {
     DriverConfig {
-        ycsb: YcsbConfig { record_count: RECORD_COUNT, field_count: 10, field_length: 100 },
+        ycsb: YcsbConfig {
+            record_count: if full { FULL_RECORD_COUNT } else { 20_000 },
+            field_count: 10,
+            field_length: 100,
+        },
         num_threads,
-        duration: Duration::from_secs(DURATION_SECS),
+        duration: Duration::from_secs(if full { FULL_DURATION_SECS } else { 1 }),
         // Workload A (50% read / 50% update): the update half is what
         // actually exercises the WAL write path - a read-only mix
         // (workload C) would never touch it at all.
@@ -44,17 +53,20 @@ fn config(num_threads: usize, wal_path: PathBuf, batch_size: Option<usize>) -> D
 }
 
 #[test]
-#[ignore]
 fn compare_wal_backends_ycsb() {
+    let full = full_scale();
+    let record_count = if full { FULL_RECORD_COUNT } else { 20_000 };
+    let duration = if full { FULL_DURATION_SECS } else { 1 };
+    let thread_counts: &[usize] = if full { FULL_THREAD_COUNTS } else { &[2] };
     let dir = std::env::temp_dir();
     println!();
-    println!("=== YCSB workload A: WAL backend comparison ({RECORD_COUNT} records, {DURATION_SECS}s/run) ===");
-    for &threads in THREAD_COUNTS {
+    println!("=== YCSB workload A: WAL backend comparison ({record_count} records, {duration}s/run) ===");
+    for &threads in thread_counts {
         for &(label, batch_size) in BACKENDS {
             let wal_path = dir.join(format!("cmvbt_ycsb_wal_bench_{label}_{threads}_{}.log", std::process::id()));
             let _ = std::fs::remove_file(&wal_path);
 
-            let summary = run_ycsb(config(threads, wal_path.clone(), batch_size));
+            let summary = run_ycsb(config(threads, wal_path.clone(), batch_size, full));
 
             println!("YCSB  backend={label:<18} threads={threads:<3} ops/sec={:>10.1}", summary.throughput_ops_sec);
 

@@ -74,6 +74,50 @@ fn explicit_abort_on_a_transaction_with_no_writes_is_a_safe_noop() {
     assert!(tx.abort());
 }
 
+#[test]
+fn repeated_delete_reinsert_reuses_one_transaction_owned_tuple_and_commits_final_value() {
+    let db = new_db();
+    let t = db.create_table("t").table_id().unwrap();
+    let setup = DbTransaction::begin(&db);
+    assert!(matches!(setup.insert(t, 1, 10), CRUDOperationResult::Inserted(_)));
+    setup.commit();
+
+    let tx = DbTransaction::begin(&db);
+    for value in 11..=1_000 {
+        assert!(matches!(tx.delete(t, 1), CRUDOperationResult::Deleted(_)));
+        assert!(matches!(tx.insert(t, 1, value), CRUDOperationResult::Inserted(_)));
+    }
+    assert!(matches!(tx.point(t, 1), CRUDOperationResult::MatchedRecords(r)
+        if r.len() == 1 && r[0].payload == 1_000));
+    tx.commit();
+
+    let check = DbTransaction::begin(&db);
+    assert!(matches!(check.point(t, 1), CRUDOperationResult::MatchedRecords(r)
+        if r.len() == 1 && r[0].payload == 1_000));
+    check.commit();
+}
+
+#[test]
+fn repeated_delete_reinsert_abort_restores_pre_transaction_value() {
+    let db = new_db();
+    let t = db.create_table("t").table_id().unwrap();
+    let setup = DbTransaction::begin(&db);
+    assert!(matches!(setup.insert(t, 1, 10), CRUDOperationResult::Inserted(_)));
+    setup.commit();
+
+    let tx = DbTransaction::begin(&db);
+    for value in 11..=1_000 {
+        assert!(matches!(tx.delete(t, 1), CRUDOperationResult::Deleted(_)));
+        assert!(matches!(tx.insert(t, 1, value), CRUDOperationResult::Inserted(_)));
+    }
+    assert!(tx.abort());
+
+    let check = DbTransaction::begin(&db);
+    assert!(matches!(check.point(t, 1), CRUDOperationResult::MatchedRecords(r)
+        if r.len() == 1 && r[0].payload == 10));
+    check.commit();
+}
+
 /// Cross-table analogue of `explicit_abort_reverts_every_kind_of_write_
 /// with_no_conflict`: one transaction writes two different tables, then
 /// explicitly aborts — both tables' writes must be reverted atomically, as

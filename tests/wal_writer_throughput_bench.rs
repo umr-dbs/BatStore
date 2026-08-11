@@ -6,10 +6,8 @@
 //! no channel, no dedicated writer thread — see `mv_wal::lockfree_writer`'s
 //! doc for the full design and its correctness trade-off).
 //!
-//! `#[ignore]`d: this measures wall-clock throughput against a real file on
-//! disk, so it's a manually-run comparison, not a correctness check that
-//! should run on every `cargo test`. Run with:
-//! `cargo test --bin cMVBT wal_writer_throughput -- --ignored --nocapture --test-threads=1`
+//! This remains small enough to run in the normal suite (roughly two
+//! seconds on the development machine) while still exercising real files.
 
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -200,7 +198,6 @@ fn bench_lockfree_batched_writer(threads: usize, batch_size: usize, path: &std::
 }
 
 #[test]
-#[ignore]
 fn compare_wal_writer_vs_lockfree_throughput() {
     let dir = std::env::temp_dir();
     let old_path = dir.join(format!("cmvbt_bench_wal_old_{}.log", std::process::id()));

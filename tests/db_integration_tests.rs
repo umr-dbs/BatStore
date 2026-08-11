@@ -1,4 +1,5 @@
 use std::time::Duration;
+use std::sync::Arc;
 
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
@@ -46,6 +47,92 @@ fn db_transaction_zero_copy_range_terminals_share_its_snapshot() {
     assert_eq!(stopped, Err("stop"));
     assert_eq!(visited, 4);
     tx.commit();
+}
+
+#[test]
+fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
+    let db = Arc::new(new_db());
+    let table = db.create_table("history").table_id().unwrap();
+    db.enable_gc(false);
+
+    let setup = DbTransaction::begin(&db);
+    assert!(matches!(setup.insert(table, 1, 10), CRUDOperationResult::Inserted(_)));
+    setup.commit();
+
+    // This snapshot predates every split and replacement below. It is not
+    // pinned to a physical root object; each read must route by ts_start to
+    // the retained historical root/child entries.
+    let old = DbTransaction::begin(&db);
+    let writer_db = db.clone();
+    std::thread::spawn(move || {
+        let update = DbTransaction::begin(&writer_db);
+        assert!(matches!(update.update(table, 1, 20), CRUDOperationResult::Updated(_)));
+        for key in 2..=256 {
+            assert!(matches!(update.insert(table, key, key * 10), CRUDOperationResult::Inserted(_)));
+        }
+        update.commit();
+
+        // More allocation after retirement gives GC ample opportunity to
+        // reuse eligible blocks; blocks needed by `old` must remain exempt.
+        for key in 257..=512 {
+            let tx = DbTransaction::begin(&writer_db);
+            assert!(matches!(tx.insert(table, key, key * 10), CRUDOperationResult::Inserted(_)));
+            tx.commit();
+        }
+    }).join().unwrap();
+
+    assert!(matches!(old.point(table, 1), CRUDOperationResult::MatchedRecords(r)
+        if r.len() == 1 && r[0].payload == 10));
+    assert_eq!(old.range_count(
+        table, crate::mv_query::interval::Interval::new(u64::MIN, u64::MAX)
+    ), 1);
+    old.commit();
+
+    let current = DbTransaction::begin(&db);
+    assert!(matches!(current.point(table, 1), CRUDOperationResult::MatchedRecords(r)
+        if r.len() == 1 && r[0].payload == 20));
+    assert_eq!(current.range_count(
+        table, crate::mv_query::interval::Interval::new(u64::MIN, u64::MAX)
+    ), 512);
+    current.commit();
+}
+
+#[test]
+fn repeated_delete_reinsert_round_trips_through_wal_recovery() {
+    let path = std::env::temp_dir().join(format!(
+        "cmvbt_db_reinsert_recovery_test_{}.log", std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{}.meta", path.display()));
+
+    let db = new_db();
+    let table = db.create_table("t").table_id().unwrap();
+    db.enable_wal(&path, Duration::from_millis(2)).unwrap();
+    let setup = DbTransaction::begin(&db);
+    assert!(matches!(setup.insert(table, 1, 10), CRUDOperationResult::Inserted(_)));
+    setup.commit();
+
+    let tx = DbTransaction::begin(&db);
+    let ts_start = tx.ts_start();
+    for value in 11..=100 {
+        assert!(matches!(tx.delete(table, 1), CRUDOperationResult::Deleted(_)));
+        assert!(matches!(tx.insert(table, 1, value), CRUDOperationResult::Inserted(_)));
+    }
+    tx.commit();
+    db.table(table).unwrap().wait_wal_hardened(ts_start);
+    drop(db);
+
+    let recovered = TestDb::open_recovered(
+        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
+        &path, Duration::from_millis(2),
+    ).unwrap();
+    let check = DbTransaction::begin(&recovered);
+    assert!(matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r)
+        if r.len() == 1 && r[0].payload == 100));
+    check.commit();
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{}.meta", path.display()));
 }
 
 /// The cross-table analogue of `mv_bench::tpcc_txn::tests::

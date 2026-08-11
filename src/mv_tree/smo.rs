@@ -733,31 +733,14 @@ impl<const FAN_OUT: usize,
     /// fully resolved — there's no future "undo" that still needs it kept
     /// around.
     ///
-    /// **Known gap, not yet fixed** (see `docs/range_scan_visibility_check.md`'s
-    /// addendum): a *second*, independent hazard beyond abort-reversal —
-    /// some other, already-registered reader's snapshot may still need to
-    /// resolve to this exact (superseded, but not-yet-obsolete-*for-them*)
-    /// version, even after the transaction that superseded it has long
-    /// since committed and unregistered (`is_snapshot_live(del.ts_start())`
-    /// false by then) — OSIC visibility is LCB-based, not a raw `ts_start`
-    /// comparison, so a reader's own `ts_start` being numerically *later*
-    /// than a foreign write's `ts_start` does not guarantee that write (or
-    /// whatever superseded it) is visible to them yet. Confirmed as the
-    /// root cause of `verify_concurrent_shared_keys`'s intermittent
-    /// point-read miss on a key that's never deleted. A first fix attempt
-    /// (OR in `self.ctx.live_min_snapshot().is_some_and(|w| del.ts_start()
-    /// >= w)`, the same watermark block-level GC already consults) is
-    /// logically correct but couples *every* leaf's compaction to the
-    /// single slowest transaction anywhere in the whole shared `TxContext`
-    /// — under this project's own heavy concurrent stress tests, that
-    /// watermark barely advances, so `record_survives_gc` returns `true`
-    /// for nearly everything, and `split()`'s `ByVersion` case keeps
-    /// producing a still-fully-protected survivor set that doesn't shrink —
-    /// exactly the "repeats the same no-op VERSION_SPLIT forever" failure
-    /// mode this file's own `split()` doc already warns about. Confirmed
-    /// empirically: 7+ minutes and ~14GB RSS on what should be a 4s test
-    /// run. Reverted rather than shipped with that regression; needs a
-    /// more localized bound than the global watermark before landing.
+    /// Other readers do not require their visible predecessor to be copied
+    /// into a replacement page. A reader older than the split/merge routes
+    /// through the retained source block, whose replacement birth version
+    /// is also its death version; `live_min_snapshot` prevents that block's
+    /// reuse until the reader finishes. If the deleting transaction is
+    /// still unresolved when the SMO runs, the check below copies the
+    /// predecessor for abort safety and for readers born against that new
+    /// structural version. Once deletion commits, future readers see it.
     #[inline]
     pub(crate) fn record_survives_gc(&self, version: &crate::mv_record_model::version_info::VersionInfo) -> bool {
         if version.is_live() {
@@ -1267,9 +1250,9 @@ impl<const FAN_OUT: usize,
         // others sharing its page (see `tests/db_transaction_abort_tests.rs`
         // and the git history around this change for the traced repro).
         // `>=` instead reserves that one slot: at the boundary, `KEY_SPLIT`
-        // now runs instead, which always produces two pages with real free
-        // space (short of the separate, still-open same-key-tearing
-        // limitation this doesn't touch - see `nearest_key_boundary`'s doc).
+        // now runs instead, which produces two pages with real free space.
+        // Transaction-level self-overwrite/reinsert reuse and first-writer-
+        // wins keep an unresolved single-key chain below page capacity.
         if active_block as usize >= block.filling_80_percent() || survivor_count >= capacity {
             // KEY_SPLIT
             match is_leaf {

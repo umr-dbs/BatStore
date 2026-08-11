@@ -1,0 +1,612 @@
+\documentclass[10pt,a4paper,landscape]{article}
+
+\usepackage[margin=1.25cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage[table]{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.45em}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.18}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\commit}[1]{\code{#1}}
+\newcommand{\gainmeasured}{\textbf{Measured}}
+\newcommand{\gainbounded}{\textbf{Bounded}}
+\newcommand{\gainenabling}{\textbf{Enabling}}
+\newcommand{\gainnoise}{\textbf{No clear gain}}
+\newcommand{\stateactive}{\textbf{Active}}
+\newcommand{\stateoptional}{\textbf{Optional}}
+\newcommand{\statereverted}{\textbf{Reverted}}
+
+\newcolumntype{I}{>{\raggedright\arraybackslash}p{2.3cm}}
+\newcolumntype{O}{>{\raggedright\arraybackslash}p{4.1cm}}
+\newcolumntype{R}{>{\raggedright\arraybackslash}p{4.4cm}}
+\newcolumntype{G}{>{\raggedright\arraybackslash}p{4.6cm}}
+\newcolumntype{K}{>{\raggedright\arraybackslash}p{5.2cm}}
+\newcolumntype{S}{>{\raggedright\arraybackslash}p{2.0cm}}
+
+\title{cMVBT Optimization Catalog\\\large Complete repository inventory, gains, reasons, and risks}
+\author{Repository documentation}
+\date{11 August 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Purpose and evidence rules}
+
+This document is the compact index of optimizations found in the cMVBT repository and
+its Git history. It covers the current tree, earlier optimizations that shaped it, and
+important attempted optimizations that were rejected or reverted. Correctness fixes are
+included when they remove retry, livelock, overflow, leak, or unbounded-growth behaviour;
+those are operational optimizations even when no throughput number was recorded.
+
+The gain column deliberately distinguishes three evidence levels:
+
+\begin{itemize}
+  \item \gainmeasured{}: a before/after benchmark or profiler measurement exists in the
+        repository documentation. Numbers retain the original workload and caveats.
+  \item \gainbounded{}: the implementation removes or bounds a countable cost (allocations,
+        tuples, locks, retries, scans, or memory growth), but no trustworthy end-to-end
+        percentage was recorded.
+  \item \gainenabling{}: primarily a correctness or scalability fix. It enables completion,
+        safe reclamation, or correct concurrency rather than claiming a numeric speedup.
+\end{itemize}
+
+Combined benchmark results must not be attributed to each component independently. For
+example, the first WAL result table measures CRC, build, and channel-sharding changes as
+one set. ``Unknown'' never means zero; it means the repository contains no controlled
+measurement from which a number can responsibly be inferred.
+
+Primary detailed sources are \code{docs/optimizations.tex},
+\code{docs/oltp\_wal\_optimization.md}, \code{docs/range\_scan\_iteration.md},
+\code{docs/range\_scan\_visibility\_check.md}, and
+\code{docs/bigtree\_size\_benchmark.md}.
+
+\section{Concurrency, synchronization, and memory ordering}
+
+\begin{longtable}{IORGKS}
+\toprule
+\textbf{Commit / location} & \textbf{Optimization} & \textbf{Reason} &
+\textbf{Gain / evidence} & \textbf{Potential risk or trade-off} & \textbf{State} \\
+\midrule
+\endhead
+\commit{9abfb51}, current OLC paths & Optimistic lock coupling: lock-free readers and
+version-validated traversal & Avoid reader latches and hand-over-hand lock traffic;
+writers use a seqlock-like node word. & \gainenabling: unlimited concurrent readers; current
+read path takes an Acquire version sample rather than a latch. Numeric historical gain
+was not preserved. & Every field observed without a latch must be atomic or immutable;
+missed revalidation becomes a use-after-reuse or torn-read bug. & \stateactive \\
+
+\commit{95cc76d} & Remove the master/root guard from write traversal; use atomic state
+checks & The global master guard serialized otherwise independent writes. & \gainbounded:
+one global guard removed from each write traversal. & Root replacement must still return
+a pinned, validated root; stale unsafe-state observations can split the wrong root. &
+\stateactive \\
+
+\commit{f85d6d1}, \commit{e5b07a0}, \commit{867f28e} & OLC borrow and traversal
+micro-optimizations & Reduce wrapper work and repeated validation on point traversals. &
+\gainbounded: fewer borrow/guard operations; no retained controlled percentage. & Extremely
+hot and correctness-sensitive path; a removed validation may admit a retired block. &
+\stateactive \\
+
+\commit{48c4ded}, \commit{3c6da7b}, \commit{a518eed} & Remove standalone fences already
+subsumed by atomic load/CAS ordering & Earlier defensive fences duplicated ordering in
+the adjacent atomic operation. & \gainbounded: removes fence instructions from traversal and
+page-length paths. & Weakening ordering without a complete happens-before argument can
+make initialized page data invisible to readers. & \stateactive \\
+
+\commit{a7bb29c} & Use Acquire/Release semantics that match OLC publication & Avoid
+unnecessary CAS failures while establishing the exact reader/writer edge. & \gainbounded:
+fewer spurious retries; no isolated benchmark retained. & Incorrect success/failure
+ordering silently breaks the seqlock contract on weakly ordered CPUs. & \stateactive \\
+
+\commit{2a2be93} & Page soft-commit counters use Relaxed stores & The later latch unlock
+already performs the Release publication. & \gainbounded: one weaker atomic operation per
+page commit. & Safe only while every path performs the releasing latch unlock after the
+counter update. & \stateactive \\
+
+\commit{40b00fd} & Make the node type tag non-atomic and remove the Drop fence & The tag
+changes only under the exclusive node latch. & \gainbounded: removes atomic/fence work and
+shrinks metadata. & Any future out-of-latch mutation would introduce a data race. &
+\stateactive \\
+
+\commit{45c7c21}/\commit{fd92f38} & Direct \code{try\_retire} instead of a conservative
+child write-latch upgrade & A guard that is unconditionally consumed does not need a
+reversible exclusive upgrade. & \gainbounded: one CAS/write-lock acquisition removed per
+eligible split or merge child. & Unsound for any path that can back out after retirement;
+such paths must explicitly unretire or retain the full upgrade. & \stateactive \\
+
+\commit{7f2bd09} & Cache-line-align the hot node tag and use SmartCell for root liveness &
+Avoid false sharing and a separate root mutex. & \gainbounded: isolates the frequently polled
+tag; no controlled throughput number. & Padding increases object size; alignment only
+helps if allocator placement preserves it. & \stateactive \\
+
+\commit{eac6e40}, \code{tx\_context.rs} & Cache-pad per-worker transaction atomics &
+Workers update their own liveness/commit slots frequently. & \gainbounded: prevents multiple
+workers' hot atomics sharing one cache line. & More memory per worker and a fixed worker
+capacity. & \stateactive \\
+
+\code{SnapshotCache} and thread-local worker identity & Cache snapshot/commit-log lookup
+state per worker & Avoid repeated worker discovery and repeated full commit-log searches
+during visibility checks. & \gainbounded: O(1) inline worker slots and cached lookup position;
+no isolated benchmark. & \code{MAX\_WORKERS\_CAP=256}; stale cache state would return an
+incorrect visibility answer. & \stateactive \\
+\bottomrule
+\end{longtable}
+
+\section{Page layout and structural maintenance}
+
+\begin{longtable}{IORGKS}
+\toprule
+\textbf{Commit / location} & \textbf{Optimization} & \textbf{Reason} &
+\textbf{Gain / evidence} & \textbf{Potential risk or trade-off} & \textbf{State} \\
+\midrule
+\endhead
+\commit{34555e2} & Delay internal-page overflow until one slot remains & The former
+three-slot reserve triggered SMOs too eagerly. & \gainbounded: uses two additional key slots
+before splitting, reducing premature structural work. & Too little headroom can leave no
+space for the pending parent entry; boundary arithmetic must remain exact. & \stateactive \\
+
+\commit{b29d347} & Tune \code{FAN\_OUT/NUM\_RECORDS} from 125 to 123 for a real 4 KiB
+allocation & The wrapper around a block made the nominal size cross a page boundary. &
+\gainmeasured: page-aligned allocations rose from 25\% to 100\%; dTLB load misses fell
+9--12\%. & Two fewer records per base leaf can increase split frequency; result depends
+on the exact key/payload layout. & \stateactive \\
+
+\commit{1f6d666}, \code{BigTreeSize} & Give hot Warehouse/District tables independent
+page-size classes & Tiny hot tables otherwise compact/version-split frequently; table
+specific sizing avoids inflating every tree. & \gainmeasured: District root restarts reportedly
+18.9M to 4.3M at the selected 32 KiB default. Short tpmC tests were broadly flat. & Large
+leaves retain more dead versions and make aged scans slower; 512 KiB was measured about
+4--6x slower than 32 KiB for delayed scans. & \stateactive \\
+
+\commit{2a2607e} & Treat survivor count equal to capacity as requiring a key split & A
+compacted page at exactly 100\% capacity cannot accept the pending write. & \gainenabling:
+removes a root-leaf overflow panic and non-root infinite retry/livelock. & A key split may
+copy more data than version compaction; off-by-one regressions are catastrophic. &
+\stateactive \\
+
+\commit{dc30111} & Tiered nearest-key-boundary search & A greedy nearest cut could miss a
+farther boundary whose two halves both fit. & \gainenabling: guarantees a capacity-fitting
+cut when one exists and avoids futile split retries. & Last-resort tiers may tear a
+same-key historical chain or produce an imbalanced split when no ideal boundary exists. &
+\stateactive \\
+
+\commit{dcb5abe} & Merge with the emptier adjacent sibling & Always choosing the right
+sibling ignored available space on the left. & \gainbounded: increases merge success and
+reduces immediate re-splits. & Inspecting both candidates adds validation races; chosen
+candidate may retire before upgrade. & \stateactive \\
+
+\commit{4c01360} & Preserve append order when combining leaf records & Sorting by
+transaction start time was unnecessary and could violate newest-physical-record lookup. &
+\gainbounded: removes a sort and prevents wrong \code{rfind} results. & Correctness relies on
+both inputs already preserving their append/version order. & \stateactive \\
+
+\commit{4bc78de} & Count true GC survivors before merging & Active count omitted dead
+predecessors still required for abort. & \gainenabling: avoids overflowing the fixed leaf;
+falls back to key split when survivors do not fit. & Survivor evaluation must match the
+later copy exactly or the pre-check is stale. & \stateactive \\
+
+\commit{5c54658} & GC-gated survivor protection plus correct \code{bulk\_push} accounting &
+Unresolved deletes need predecessors for abort; bulk copy incorrectly assumed all rows
+were active. & \gainenabling: fixed two reproduced TPC-C crashes and prevents lost keys and
+wrong capacity decisions. & Over-protection retains garbage; under-protection makes abort
+silently lose data. & \stateactive \\
+
+\commit{fe03d90} & Derive internal-entry liveness from disjoint live intervals & Remove a
+separately mutated obsolete/version-region atomic from published child entries. &
+\gainbounded: one atomic metadata field and mutation protocol removed. & Depends on live
+sibling intervals remaining pairwise disjoint; overlapping publication breaks selection. &
+\stateactive \\
+\bottomrule
+\end{longtable}
+
+\section{Transactional version-chain optimizations}
+
+\begin{longtable}{IORGKS}
+\toprule
+\textbf{Commit / location} & \textbf{Optimization} & \textbf{Reason} &
+\textbf{Gain / evidence} & \textbf{Potential risk or trade-off} & \textbf{State} \\
+\midrule
+\endhead
+\commit{bea1117}, update-in-place feature & Overwrite a committed payload when no live
+snapshot can observe its predecessor & Avoid creating another MVCC version once GC proves
+the old value unreachable. & \gainbounded: one tuple append and later compaction avoided per
+eligible update. & Disabled with WAL because the physical shortcut is not represented by
+one ordinary update record; an incorrect oldest-snapshot test violates SI. & \stateactive \\
+
+\commit{85ac1b0}, \code{DbTransaction::update} & Self-overwrite a tuple already inserted
+by this transaction & Repeated updates by one open transaction formerly appended one
+unreclaimable tuple each. & \gainbounded: $N$ same-key updates create one replacement tuple,
+so physical growth changes from O($N$) to O(1). & Must match the full \code{TxStamp}, not
+only worker ID; WAL must still record every logical update needed for recovery. & \stateactive \\
+
+Working-tree follow-up, \code{insert\_on\_tree} & Reuse the transaction-owned tuple across
+repeated delete/reinsert cycles & After the first replacement, every later cycle was
+another spelling of self-overwrite but still appended a tuple. & \gainbounded: $N$ cycles
+create one replacement tuple; commit exposes the final payload, abort restores the
+original, and WAL recovery reconstructs the final value. & Live/dead counters must be
+reversed exactly; no extra write-set entry may be added; reuse is legal only when both
+insertion and deletion stamps equal the current transaction. & \stateactive \\
+
+\commit{160186e} & Abort repeated-key writes in strict LIFO order & Reverting only the
+newest tuple left older self-written state visible. & \gainenabling: complete rollback across
+all same-key and cross-table writes; also makes tuple-reuse write-set semantics safe. &
+Readers may observe per-key rollback progress during abort; changing order can expose an
+intermediate version. & \stateactive \\
+
+First-writer-wins conflict detection & Stop another transaction extending an unresolved
+same-key chain & Bound concurrent pending versions and retain OSIC's conflict rule. &
+\gainbounded: at most the owning transaction can mutate the unresolved live key. & Aborts
+under contention waste traversals/work; TPC-C conflict rates remain a major performance
+opportunity. & \stateactive \\
+\bottomrule
+\end{longtable}
+
+\section{Garbage collection and reclamation}
+
+\begin{longtable}{IORGKS}
+\toprule
+\textbf{Commit / location} & \textbf{Optimization} & \textbf{Reason} &
+\textbf{Gain / evidence} & \textbf{Potential risk or trade-off} & \textbf{State} \\
+\midrule
+\endhead
+\commit{2e3ad21} & Non-blocking dead-page reuse checks & Blocking allocation locks could
+join the page-latch dependency graph and deadlock. & \gainenabling: allocator can bail out and
+allocate fresh memory rather than block a structural operation. & Falling back increases
+memory use when reuse metadata is contended. & \stateactive, evolved \\
+
+\commit{95e149f} then current \code{TxContext} & Replace global active-transaction mutex;
+ultimately use per-worker liveness slots & Global minimum-snapshot bookkeeping serialized
+transaction entry/exit. & \gainbounded: liveness publication is per-worker atomic; minimum is
+computed without one global transaction lock. & Scanning fixed slots costs O(workers);
+registration ordering must prevent a just-starting reader being missed. & \stateactive \\
+
+\code{block\_tracer.rs}, worker-sharded \code{SkipMap} & Shard retired-block queues & A
+single dead-page list/index was a reclamation hotspot. & \gainbounded: independent inserts;
+allocators check their own shard first and steal round-robin only on demand. & Uneven
+shards can retain reusable memory; stealing adds cross-shard traversal. & \stateactive \\
+
+\commit{f9fc960} & Own-shard-first reuse with round-robin stealing & Improve cache
+locality and avoid eagerly touching every reclamation shard. & \gainbounded: common reuse
+touches one shard; cross-shard work occurs only on a miss. & Local starvation or imbalance
+can delay reuse until stealing runs. & \stateactive \\
+
+\commit{d0e0977} & Fold retirement into SmartCell's version word & Separate retired state
+raced guard Drop and block reuse. & \gainenabling: eliminated a reproduced GC hang/livelock
+and one atomic field/state transition. & Bit packing makes latch arithmetic delicate;
+unlock must preserve retirement bits. & \stateactive \\
+
+\commit{ecc9900} & Key retired pages by (death version, address) & Two siblings retired by
+one merge share a death version and collided in the old index. & \gainenabling: prevents one
+of the two blocks leaking on every such collision. & Address participates only in
+identity; reuse must not compare it as a temporal value. & \stateactive \\
+
+\commit{ecc9900} & Atomic insertion/deletion stamps & Lock-free readers could tear a
+plain stamp while a writer deleted or invalidated it. & \gainenabling: ThreadSanitizer race
+removed without adding reader locks. & Relaxed ordering solves atomicity, not publication;
+payload publication still relies on the node latch. & \stateactive \\
+
+Historical-block routing plus \code{live\_min\_snapshot} reuse gate & Keep old readers on
+retired source blocks instead of copying all old-reader-visible records forward & Copying
+for the oldest reader globally couples all keys and can self-reinforce into compaction
+livelock. & \gainbounded: replacement pages retain only structurally necessary survivors;
+old blocks become reusable immediately after their last reader. & Reusing a block before
+the oldest routed reader exits is a use-after-reuse; root/version routing must select the
+correct historical block. & \stateactive \\
+\bottomrule
+\end{longtable}
+
+\section{Root indexing and database sharding}
+
+\begin{longtable}{IORGKS}
+\toprule
+\textbf{Commit / location} & \textbf{Optimization} & \textbf{Reason} &
+\textbf{Gain / evidence} & \textbf{Potential risk or trade-off} & \textbf{State} \\
+\midrule
+\endhead
+\commit{816356a}, \code{FrugalList} & Compact append-oriented root-version index & Root
+lookups need predecessor-by-version while new structural roots append over time. &
+\gainbounded: compact linear representation with cheap append, suited to few roots. & Lookup
+becomes linear as history grows; not ideal for long GC-off runs. & \stateactive option \\
+
+\commit{24fed9b} and later wrappers & Runtime-selectable Frugal, linked-list, skip-list,
+and B-tree root indexes & Permit experiments across append cost, memory, and predecessor
+lookup complexity. & \gainenabling: chooses an index appropriate to root-history size; no
+single controlled winner retained. & Multiple implementations increase validation and
+maintenance surface; semantics must match at version boundaries. & \stateactive options \\
+
+\commit{5f92e9f} & One tree/index per database table & Encoding table IDs into one shared
+tree creates unrelated contention and oversized structural domains. & \gainbounded: table
+writes and SMOs proceed independently; table-specific capacities become possible. &
+Cross-table atomicity moves to transaction/WAL coordination; more roots and allocators. &
+\stateactive \\
+
+\commit{0ba6ca5}/\commit{73cc4a5} & Track live transactions without GC and optionally
+truncate commit logs & Visibility needs liveness even when block GC is disabled; unbounded
+commit history consumes memory. & \gainbounded: truncation bounds retained commit-log history
+when configuration permits. & Pruning before every relevant reader has advanced causes
+false invisibility; long historical readers delay reclamation. & \stateactive \\
+\bottomrule
+\end{longtable}
+
+\section{Range scans and analytical terminals}
+
+\begin{longtable}{IORGKS}
+\toprule
+\textbf{Commit / location} & \textbf{Optimization} & \textbf{Reason} &
+\textbf{Gain / evidence} & \textbf{Potential risk or trade-off} & \textbf{State} \\
+\midrule
+\endhead
+\commit{816356a}/\commit{f4e786b} and current iterator & Lazy range iteration & Avoid
+materializing the entire range result before consumption. & \gainbounded: memory is one path
+and at most one leaf buffer instead of O(result size). & Iterator must revalidate across
+SMOs and must release its registered snapshot on every exit path. & \stateactive \\
+
+Current cursor-based internal routing & Select the newest visible child containing the
+scan cursor, without \code{unique\_by} or child lists & Physical internal slots contain
+overlapping historical routes; equality deduplication was both costly and incorrect. &
+\gainbounded: no child vector, hash set, sort, or two \code{unique\_by} adaptors; GC stress no
+longer returns duplicate keys. & Cursor increment saturates at maximum key and needs an
+explicit completion test; wrong newest-route ordering causes duplicates or omissions. &
+\stateactive \\
+
+\code{for\_each\_ref}/\code{fold\_ref} streaming terminals & Pass callback-scoped payload
+references instead of owned result rows & Analytical consumers immediately aggregate and
+do not need cloned handles or result objects. & \gainmeasured: full scan 1.165--1.173x faster,
+about 16.8\%; 28.8--29.3M versus 24.7--25.1M rows/s. & Callback cannot retain the payload
+or safely re-enter the same tree; long callbacks prolong leaf access. & \stateactive \\
+
+\code{try\_for\_each\_ref} & Fallible early-exit visitor & Stop scans when a consumer has
+enough data or encounters an error. & \gainbounded: avoids visiting all remaining records;
+gain depends on stop position. & Drop must release iterator-owned snapshots but not a
+transaction-owned snapshot. & \stateactive \\
+
+\code{count\_ref}/\code{range\_count} & Specialized visible-row count & Counting does not
+need \code{RecordPointResult} construction or payload-handle cloning. & \gainmeasured:
+approximately 49--53M rows/s in the recorded full-scan count benchmark; retained after
+unsafe routing experiments were reverted. & Must use identical routing and visibility
+semantics to the normal iterator. & \stateactive \\
+
+\commit{8e48ae5} & Test key range before MVCC visibility & Narrow scans can cheaply reject
+out-of-range physical rows before up to two visibility lookups. & \gainmeasured: CH Q4 about
+18\% faster; Q5 about 11--13\% faster in short indicative runs; no expected full-scan
+gain. & Benefit depends on selectivity; changing predicate order is safe only because both
+checks are side-effect-free for accepted rows. & \stateactive \\
+
+\commit{8e48ae5} & Monomorphize the range iterator visibility closure & Remove a
+\code{dyn FnMut} indirect call for every tested insertion/deletion stamp. & \gainbounded:
+indirect call becomes inlinable; incremental gain was below run-to-run noise after filter
+reordering. & Exposing raw snapshot cache/log slices broadens a sensitive internal API;
+visibility logic must remain identical. & \stateactive \\
+
+\commit{c0fe172} & Search physical leaf order rather than assuming transaction-start
+ordering & Append order is not globally sorted by \code{ts\_start}; binary/search-like
+selection could miss the newest matching row. & \gainenabling: fixes point and range misses;
+also avoids an invalid ordering assumption. & Linear reverse search costs O(page size),
+making compaction/page sizing important for scan performance. & \stateactive \\
+\bottomrule
+\end{longtable}
+
+\section{WAL, durability, and encoding}
+
+\begin{longtable}{IORGKS}
+\toprule
+\textbf{Commit / location} & \textbf{Optimization} & \textbf{Reason} &
+\textbf{Gain / evidence} & \textbf{Potential risk or trade-off} & \textbf{State} \\
+\midrule
+\endhead
+\commit{3e8b837}/\commit{8a39d51} & Group-commit linger & Allow the background writer to
+collect more records per hardening operation. & \gainbounded: amortizes write/fsync across a
+larger batch; numeric isolated gain not retained. & Adds commit latency and requires
+correct wait/wakeup handling. & \stateactive \\
+
+\commit{ab10660} & Non-blocking WAL enqueue with background batch hardening & Committers
+should not serialize on file I/O. & \gainbounded: caller pays enqueue rather than pwrite/fsync;
+durability advances asynchronously. & Backpressure and hardened-watermark correctness;
+unbounded queues may grow if storage falls behind. & \stateactive \\
+
+\commit{4a1a50a} & Table-driven CRC32 & Bit-at-a-time framing checksum consumed 22.6\% of
+YCSB-A CPU cycles. & Combined three-fix campaign: CRC self-time fell 22.6\% to 11.3\%; it
+shares the end-to-end numbers below with build and sharding changes. & Must preserve the
+same polynomial and on-disk format; table lookup can affect cache footprint. & \stateactive \\
+
+\commit{4a1a50a} & Four sharded WAL producer channels and flush threads & One crossbeam
+channel spent about 8\% of total TPC-C CPU in producer spin-wait. & Combined campaign:
+TPC-C +7.4\%/+17.6\% at 16/64 threads; YCSB-A +25.4\%/+68.7\%; YCSB-E +16.2\%/+49.8\%;
+YCSB-F +20.7\%/+70.1\%. & Multiple flushers complete out of order; a single max watermark
+was unsound and required per-shard submitted/confirmed tracking. & \stateactive \\
+
+\commit{4a1a50a} & Make \code{target-cpu=native} effective in benchmark builds & The old
+configuration silently failed to apply intended CPU-specific optimization. & Part of the
+same combined campaign; no independent percentage. & Native binaries are not portable to
+older/different CPUs and benchmark comparisons must use identical build flags. & \stateactive \\
+
+\commit{ebdd789}, \code{LockFreeWalWriter} & Reserve file offsets atomically and let each
+worker \code{pwrite} its own local batch & Remove the shared producer channel/background
+writer as an alternative backend. & \gainmeasured synthetic at 16 threads: batch-64
+5.09M ops/s versus sharded writer 1.35M; unbatched only 0.75M and loses. & Shared-file
+extension and syscalls dominate without batching; recovery and watermarks must handle
+out-of-order writes. & \stateactive option \\
+
+\commit{9ced1a3} & Per-shard submitted/confirmed durability aggregation & Raw max let a
+fast shard falsely cover an unflushed slow shard; raw min could wait forever on an idle
+shard. & \gainenabling: fixed recovery returning 1200 rather than 1800 records and eliminated
+the alternative hang; failing test passed 5 times and full suite 3 times. & Submission
+must publish before enqueue; stale underestimates allow premature durability. & \stateactive \\
+
+\commit{efc3773} & Ticket-less production WAL logging & Every write allocated a bounded
+ack channel whose receiver production callers discarded. & Combined with size hints:
+TPC-C +12.6\%, YCSB-A +25.3\%, synthetic 16-thread writer +79\%. & Tests/callers that
+really wait for one record must use explicit \code{*\_with\_ticket} methods. & \stateactive \\
+
+\commit{efc3773} & Payload-aware exact framing capacity hints & Buffers sized for 8-byte
+tests repeatedly grew for 300--1000-byte real rows. & Same combined result; allocator
+self-time \code{RawVecInner::finish\_grow} fell from 7.1\% to 3.0\% in TPC-C. & Every
+payload encoder must keep its hint consistent; underestimates lose performance, while
+overestimates waste memory. & \stateactive \\
+
+\commit{73cc4a5}/\commit{a5e6b7a} & Commit-log truncation configuration & Long runs with
+GC disabled otherwise retain every commit forever. & \gainbounded: bounds memory once all
+relevant snapshots pass a segment. & Premature truncation makes committed versions look
+uncommitted; long readers pin history. & \stateactive \\
+\bottomrule
+\end{longtable}
+
+\section{Workload and benchmark-path optimizations}
+
+\begin{longtable}{IORGKS}
+\toprule
+\textbf{Commit / location} & \textbf{Optimization} & \textbf{Reason} &
+\textbf{Gain / evidence} & \textbf{Potential risk or trade-off} & \textbf{State} \\
+\midrule
+\endhead
+\commit{423a1f5} & Fast YCSB RNG, reference-counted rows, and pre-sized scan buffers &
+Benchmark-driver allocation/RNG overhead obscured engine throughput. & \gainbounded: fewer
+row clones, reallocations, and expensive random-number operations; no isolated percentage
+retained. & Driver optimizations can change the generated distribution or accidentally
+benchmark shared payload handles rather than realistic copies. & \stateactive \\
+
+\commit{eac6e40} & Use \code{fastrand} for TPC-C data and transaction parameters & Random
+generation was on the transaction hot path. & \gainbounded: cheaper parameter generation; no
+isolated percentage. & Must retain TPC-C distributions and invalid-item rollback rate. &
+\stateactive \\
+
+\commit{47ec877} & Scramble Zipfian rank with FNV & Sequential rank mapping created a
+key-locality pattern unlike reference YCSB/LeanStore. & \gainenabling: more representative
+contention and comparison, not claimed as an engine speedup. & Changes benchmark results;
+before/after engine numbers are incomparable unless generator version is fixed. & \stateactive \\
+
+Working-tree benchmark scaling & Run TPC-C/YCSB/WAL comparisons as ordinary smoke tests;
+restore full scale with \code{CMVBT\_FULL\_BENCH=1} & Previously ignored/full benchmarks
+did not run on normal developer machines. & \gainenabling: complete suite now runs 135 tests,
+zero ignored, in 8.23 seconds on the development machine. & Smoke scale catches hangs and
+gross regressions, not production throughput or long-duration memory growth. & \stateactive \\
+
+\code{RESTART\_TRACE=false} plus reset per run & Prevent diagnostic strings accumulating
+across repeated benchmark invocations & A checked-in tracing flag grew past 12 GiB and
+OOM-killed the WAL comparison. & \gainenabling: removes unbounded process-lifetime trace
+growth; tiny repro stayed bounded after reset. & Turning tracing on still has high
+overhead; reset must run before every repeated workload. & \stateactive \\
+\bottomrule
+\end{longtable}
+
+\section{Rejected, reverted, or deliberately optional experiments}
+
+These entries are part of the optimization history but are not unconditional current
+wins. Keeping them visible prevents rediscovering an unsafe shortcut without its context.
+
+\begin{longtable}{IORGKS}
+\toprule
+\textbf{Commit / location} & \textbf{Attempt} & \textbf{Why attempted} &
+\textbf{Observed result} & \textbf{Failure mode / risk} & \textbf{State} \\
+\midrule
+\endhead
+\commit{d565b2d}--\commit{5c26abb} & ORWC optimistic read/write coupling & Seek
+non-blocking upgradeable writers alongside free readers. & No trustworthy gain retained;
+about 460 lines were ultimately removed. & Repeated upgrade races, dangling readers, and
+eventual blocking made it duplicate OLC without a sound distinct guarantee. & \statereverted \\
+
+\commit{45cb048} & Hold one long-lived range-scan block guard & Avoid re-borrowing blocks
+during iteration. & Not retained. & GC did not know about the guard lifetime; reuse could
+invalidate the long-lived reference. & \statereverted \\
+
+Range items 1/2/4/5 in \code{range\_scan\_iteration.md} & Eager child-list reuse, small-page
+linear dedup, hybrid traversal, and lean frames & Remove allocation/hash work and release
+internal pages early. & Experimental single-set version appeared 18--20\% faster. & Equal
+boundaries cannot prove arbitrary historical intervals superseded; GC stress returned
+duplicate logical keys. & \statereverted \\
+
+\commit{0659d34} experiment & Retry alternate merge candidate immediately & Increase
+merge success when the first sibling cannot be upgraded. & No gain retained. & Tight
+retry loop lacked backoff and starved workers under contention. & \statereverted \\
+
+Overflow-headroom companion to \commit{85ac1b0} & Split leaves earlier to reserve more
+compaction space & Reduce the chance a pending write meets a completely full leaf. & No
+valid gain; stress hung. & More SMOs amplified contention while the actual off-by-one bug
+remained. & \statereverted \\
+
+Per-reader LCB survivor checks & Copy a predecessor if any active reader might need it &
+Attempt to avoid one global oldest-reader watermark. & Repro fired 517,748 checks in 12
+seconds for one fixed reader; no progress. & An open transaction may read any key, so the
+predicate protects nearly everything and creates self-reinforcing compaction livelock. &
+\statereverted \\
+
+Thread-local raw lock-free WAL buffer & Reuse encoding memory on the caller thread & Avoid
+one allocation per write. & No production gain: real calls already enter persistent
+\code{LocalBatch} buffers. & Dead code/complexity benefiting only the synthetic unbatched
+test path. & \statereverted \\
+
+\commit{6486d97}, mimalloc feature & Make cross-thread frees cheaper for sharded WAL &
+WalWriter allocates on producers and frees on flush threads. & YCSB-A +3.0\% at 8 threads,
++2.3\% at 16; lock-free backend within noise. TPC-C fell 3.3--4.9\%. & Workload-dependent
+allocator trade-off; jemalloc remains the default. & \stateoptional \\
+
+Very large \code{BigTreeSize} leaves & Defer compaction on the hottest tiny tables &
+Short tpmC results were flat and restart counts improve with size. & Aged 512 KiB scans
+were 4--6x slower than 32 KiB because they touch more dead records. & \stateoptional \\
+
+Unbatched \code{LockFreeWalWriter} & Remove all channels and batching & Simplest direct
+atomic-offset append. & 0.75M ops/s at 16 threads versus 1.35M for sharded WalWriter and
+5.09M for local batch-64. & One syscall per logical WAL record and shared inode-extension
+serialization. & \stateoptional, not recommended \\
+\bottomrule
+\end{longtable}
+
+\section{Combined measured gains at a glance}
+
+This final table repeats only repository-backed quantitative results. It is intentionally
+short and is the correct table to cite when a numerical gain is required.
+
+\begin{longtable}{p{6.1cm}p{5.2cm}p{5.5cm}p{6.6cm}}
+\toprule
+\textbf{Optimization set} & \textbf{Workload} & \textbf{Measured change} &
+\textbf{Qualification} \\
+\midrule
+\endhead
+4 KiB base-block tuning & Allocation / TLB profile & Alignment 25\% to 100\%; dTLB load
+misses $-9$ to $-12$\% & Exact object layout dependent. \\
+CRC32 + effective native build + four WAL shards & TPC-C, 16/64 threads & +7.4\% / +17.6\%
+& Combined result; do not assign all gain to one component. \\
+Same three WAL/build changes & YCSB-A, 16/64 & +25.4\% / +68.7\% & Short, single campaign;
+write-heavy Zipfian workload. \\
+Same three WAL/build changes & YCSB-E, 16/64 & +16.2\% / +49.8\% & Scan-heavy but with a
+write component. \\
+Same three WAL/build changes & YCSB-F, 16/64 & +20.7\% / +70.1\% & Read-modify-write. \\
+Ticket-less WAL + exact buffer hints & TPC-C / YCSB-A & +12.6\% / +25.3\% & Same short
+profiling setup before and after both fixes together. \\
+Ticket-less WAL + exact buffer hints & Synthetic WalWriter, 16 threads & +79\% & 8-byte
+payload makes removed ticket allocation unusually dominant. \\
+Lock-free local batch-64 & Synthetic WAL, 16 threads & 5.09M vs 1.35M ops/s & Debug-build
+microbenchmark; unbatched lock-free is slower. \\
+Zero-copy streaming range terminal & 200k-row full scan & 1.165--1.173x; about +16.8\% &
+40 alternating samples after warmup. \\
+Range-before-visibility predicate & CH Q4 / Q5 & about +18\% / +11--13\% & Indicative
+short contended runs; benefit is for narrow ranges only. \\
+Specialized count terminal & Full scan & about 49--53M rows/s & Absolute throughput, not a
+recorded controlled percentage versus current iterator. \\
+BigTreeSize 32 KiB default & District root restarts & 18.9M to 4.3M & Commit-reported,
+not reproduced in the later size sweep. \\
+Mimalloc feature & YCSB-A / TPC-C & +2.3--3.0\% / $-3.3$ to $-4.9$\% & Kept optional;
+not a universal optimization. \\
+Scaled complete test/benchmark smoke suite & Development test run & 135 passed, 0 ignored,
+8.23 s & Correctness/operability result, not production performance. \\
+\bottomrule
+\end{longtable}
+
+\section*{Maintenance rule}
+
+When adding an optimization, add one row to the appropriate detailed table and, only if
+a controlled number exists, one row to the measured-gains table. Record the workload,
+thread count, baseline, resulting value, and whether multiple changes were measured
+together. For correctness/bounded-growth changes, state the exact eliminated cost instead
+of manufacturing a percentage. Reverted experiments remain in the rejected table with
+their failure mode.
+
+\end{document}
