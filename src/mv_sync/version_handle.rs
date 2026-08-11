@@ -95,6 +95,15 @@ impl<'a,
         self.ctx.with_visibility_checker(reader_worker, reader_ts_start, f)
     }
 
+    /// See `TxContext::with_snapshot_cache_and_logs`'s doc.
+    #[inline(always)]
+    pub(crate) fn with_snapshot_cache_and_logs<R>(
+        &self,
+        f: impl FnOnce(&mut crate::mv_sync::visibility::SnapshotCache, &[crate::mv_sync::commit_log::CommitLog]) -> R,
+    ) -> R {
+        self.ctx.with_snapshot_cache_and_logs(f)
+    }
+
     /// Commits `worker_id`'s in-flight transaction against this tree's
     /// `ctx` — see `TxContext::commit_tx` for the prune-vs-plain-commit
     /// choice.
