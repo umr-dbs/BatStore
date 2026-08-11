@@ -349,20 +349,43 @@ def step_postgres() -> None:
     if shutil.which("psql") is None:
         sys.exit("psql not found - install the 'postgresql' apt package first (see step above).")
 
-    check = subprocess.run(
-        ["sudo", "-u", "postgres", "psql", "-tAc", f"SELECT 1 FROM pg_roles WHERE rolname='{PG_ROLE}'"],
-        capture_output=True, text=True,
-    )
+    # Package installation does not necessarily start PostgreSQL (notably in containers
+    # and on hosts where it was stopped previously).  Probe first so an already-running
+    # installation remains untouched, then start the service and retry.  Previously the
+    # failed probe was mistaken for "role absent", producing a misleading CREATE ROLE
+    # failure (and, later, ValueError from int('')).
+    probe_cmd = ["sudo", "-u", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1",
+                 "-tAc", "SELECT 1"]
+    probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+    if probe.returncode != 0:
+        log("PostgreSQL is not accepting connections; starting the service")
+        run(["sudo", "systemctl", "start", "postgresql"])
+        probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+        if probe.returncode != 0:
+            sys.exit(
+                "PostgreSQL was started but is still not accepting local connections:\n"
+                f"{probe.stderr.strip()}\n"
+                "Check `sudo systemctl status postgresql` and the PostgreSQL log."
+            )
+
+    def postgres_sql(sql: str) -> subprocess.CompletedProcess:
+        result = subprocess.run(
+            ["sudo", "-u", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1",
+             "-tAc", sql],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            sys.exit(f"PostgreSQL command failed:\n{result.stderr.strip()}")
+        return result
+
+    check = postgres_sql(f"SELECT 1 FROM pg_roles WHERE rolname='{PG_ROLE}'")
     if check.stdout.strip() == "1":
         print(f"Role '{PG_ROLE}' already exists, skipping.")
     else:
         run(["sudo", "-u", "postgres", "psql", "-c",
              f"CREATE ROLE {PG_ROLE} WITH LOGIN SUPERUSER PASSWORD '{PG_PASSWORD}';"])
 
-    check_db = subprocess.run(
-        ["sudo", "-u", "postgres", "psql", "-tAc", f"SELECT 1 FROM pg_database WHERE datname='{PG_DATABASE}'"],
-        capture_output=True, text=True,
-    )
+    check_db = postgres_sql(f"SELECT 1 FROM pg_database WHERE datname='{PG_DATABASE}'")
     if check_db.stdout.strip() == "1":
         print(f"Database '{PG_DATABASE}' already exists, skipping.")
     else:
@@ -374,10 +397,7 @@ def step_postgres() -> None:
     # terminal/thread, so the highest thread-count sweep points fail to even connect
     # without this. Sized well above 128 for headroom (superuser/monitoring connections
     # also count against the limit).
-    max_conn = subprocess.run(
-        ["sudo", "-u", "postgres", "psql", "-tAc", "SHOW max_connections"],
-        capture_output=True, text=True, check=True,
-    )
+    max_conn = postgres_sql("SHOW max_connections")
     if int(max_conn.stdout.strip()) < 300:
         log("Raising PostgreSQL max_connections to 300 (default 100 is below the thread sweep's ceiling)")
         run(["sudo", "-u", "postgres", "psql", "-c", "ALTER SYSTEM SET max_connections = 300;"])
@@ -437,7 +457,10 @@ def step_postgres_tmpfs() -> None:
     backup_dir = real_datadir.with_name(real_datadir.name + ".diskbackup")
 
     already_linked = real_datadir.is_symlink() and real_datadir.resolve() == PG_TMPFS_DATA_DIR.resolve()
-    tmpfs_populated = (PG_TMPFS_DATA_DIR / "PG_VERSION").exists()
+    tmpfs_populated = subprocess.run(
+        ["sudo", "-u", "postgres", "test", "-f",
+         str(PG_TMPFS_DATA_DIR / "PG_VERSION")]
+    ).returncode == 0
 
     if already_linked and tmpfs_populated:
         print(f"{real_datadir} is already a symlink into tmpfs and looks populated - skipping.")
@@ -619,8 +642,8 @@ def main() -> None:
         ("wiredtiger", args.skip_wiredtiger, step_wiredtiger),
         ("leanstore", args.skip_leanstore, step_leanstore),
         ("hugepages", args.skip_hugepages, step_vweaver_hugepages),
-        ("vweaver", args.skip_vweaver, step_vweaver_ermia),
-        ("vweaver-frugal", args.skip_vweaver_frugal, step_vweaver_ermia_frugal),
+        # ("vweaver", args.skip_vweaver, step_vweaver_ermia),
+        # ("vweaver-frugal", args.skip_vweaver_frugal, step_vweaver_ermia_frugal),
         ("postgres", args.skip_postgres, step_postgres),
         ("benchbase", args.skip_benchbase, step_benchbase),
         ("cmvbt", args.skip_cmvbt, step_cmvbt),

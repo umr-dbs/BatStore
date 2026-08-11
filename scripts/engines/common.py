@@ -107,8 +107,15 @@ def default_subprocess_timeout(duration: float) -> float:
 
 def _mount_fstype(path: Path) -> str:
     """The fstype of the mount `path` actually lives under - the longest /proc/mounts
-    mountpoint that's a prefix of `path` (path itself need not exist yet)."""
-    path_str = str(path)
+    mountpoint that's a prefix of `path` (path itself need not exist yet).
+
+    Resolve symlinks first: PostgreSQL's tmpfs setup intentionally leaves its configured
+    data_directory path in /var/lib/postgresql and makes that path a symlink into /dev/shm.
+    Checking the lexical /var/lib path incorrectly reports the filesystem containing the
+    symlink (ext4), rather than the filesystem containing PostgreSQL's actual data (tmpfs).
+    strict=False still supports fresh_scratch_dir's not-yet-created child paths.
+    """
+    path_str = str(path.resolve(strict=False))
     best_mnt, best_fstype = "", ""
     with open("/proc/mounts") as f:
         for line in f:
