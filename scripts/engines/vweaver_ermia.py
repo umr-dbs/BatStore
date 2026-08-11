@@ -13,7 +13,7 @@ from `mv_bench::tpch_queries::q1`/`q6` in the sibling cMVBT-OSIC harness - a ful
 `ORDER_LINE` table scan, pure aggregation, no joins, see that patch's inline comments for
 why only these 2 of CH-benCHmark's 22 queries). Passing `--enable-chbenchmark` in
 `-benchmark_options` spawns one dedicated thread (`tpcc_bench_runner::StartHtapThread`)
-rotating both queries concurrently with the normal OLTP `tpcc_worker` threads - the same
+repeating only the requested query concurrently with the normal OLTP `tpcc_worker` threads - the same
 "N OLTP threads + 1 always-on OLAP thread" convention every other engine here already uses
 for htap_q1/htap_q6 - and prints one `HTAP_SCAN,<mode>,<elapsed_secs>,<scanned_tuples>,
 <latency_ns>,<summary>` line per completed query to stdout (parsed by `_parse_htap_scan`
@@ -135,11 +135,12 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         threads = scale.tpcc_terminals
         # Standard TPC-C mix (NewOrder/Payment/OrderStatus/Delivery/StockLevel), no
         # warehouse-spread skew - matches benchmarks/run.sh's own plain "tpcc" default.
-        # --enable-chbenchmark (htap_q1/htap_q6 only) spawns the dedicated Q1/Q6 OLAP
+        # --enable-chbenchmark (htap_q1/htap_q6 only) spawns the dedicated query-specific OLAP
         # thread - see this module's own doc and patches/vweaver_ermia_chbenchmark.patch.
         benchmark_options = "--workload-mix=45,43,0,4,4,4,0,0 --warehouse-spread=0"
         if workload in common.HTAP_WORKLOADS:
-            benchmark_options += " --enable-chbenchmark"
+            query_flag = "--chbenchmark-q1" if workload == "htap_q1" else "--chbenchmark-q6"
+            benchmark_options += f" --enable-chbenchmark {query_flag}"
         args = [
             str(BINARY), "-verbose", "-benchmark", "tpcc",
             "-threads", str(threads), "-scale_factor", str(scale.tpcc_warehouses),

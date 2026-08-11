@@ -53,18 +53,19 @@
  
  #include "bench.h"
  #include "tpcc.h"
-@@ -47,6 +51,10 @@
+@@ -47,6 +51,11 @@
  static int g_uniform_item_dist = 0;
  static int g_order_status_scan_hack = 0;
  static int g_wh_temperature = 0;
-+// Runs one dedicated thread rotating CH-benCHmark Q1/Q6 (see RunChQ1/RunChQ6
++// Runs one dedicated query-specific CH-benCHmark thread (see RunChQ1/RunChQ6
 +// and tpcc_bench_runner::StartHtapThread below) concurrently with the normal
 +// OLTP tpcc_worker threads - see scripts/engines/vweaver_ermia.py.
 +static int g_enable_chbenchmark = 0;
++static int g_chbenchmark_query = 0;  // 0=rotate both (legacy), 1=Q1 only, 6=Q6 only
  static uint g_microbench_rows = 10;  // this many rows
  // can't have both ratio and rows at the same time
  static int g_microbench_wr_rows = 0;  // this number of rows to write
-@@ -2916,6 +2924,155 @@
+@@ -2916,6 +2925,155 @@
    std::unordered_map<uint, bool> s_i_ids;
  };
  
@@ -220,7 +221,7 @@
  rc_t tpcc_worker::txn_stock_level() {
    const uint warehouse_id = pick_wh(r);
    const uint threshold = RandomNumber(r, 10, 20);
-@@ -3534,10 +3691,98 @@
+@@ -3534,10 +3692,102 @@
      return ret;
    }
  
@@ -276,6 +277,7 @@
 +    // unrelated heap memory instead of failing loudly - reset explicitly every
 +    // iteration so nothing outlives one query call.
 +    arena.reset();
++    if (g_chbenchmark_query != 6) {
 +
 +    ch_q1_group groups[16] = {};
 +    size_t scanned_tuples = 0;
@@ -295,12 +297,14 @@
 +             elapsed_secs(), scanned_tuples, (long long)latency_ns,
 +             total_revenue);
 +    }
++    }
 +    if (!running) break;
++    if (g_chbenchmark_query != 1) {
 +    arena.reset();
 +
 +    double revenue = 0.0;
 +    auto q6_start = std::chrono::steady_clock::now();
-+    rc = RunChQ6(db, arena, txn_buf, order_line_tables, 0,
++    rc_t rc = RunChQ6(db, arena, txn_buf, order_line_tables, 0,
 +                std::numeric_limits<uint32_t>::max(), 24, revenue);
 +    if (!rc.IsAbort()) {
 +      auto latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -308,6 +312,7 @@
 +                            .count();
 +      printf("HTAP_SCAN,ch_q6_forecast_revenue,%.3f,%d,%lld,%.2f\n",
 +             elapsed_secs(), 1, (long long)latency_ns, revenue);
++    }
 +    }
 +  }
 +
@@ -319,11 +324,13 @@
  void tpcc_do_test(ermia::Engine *db, int argc, char **argv) {
    // parse options
    optind = 1;
-@@ -3552,6 +3797,7 @@
+@@ -3552,6 +3802,9 @@
          {"new-order-fast-id-gen", no_argument, &g_new_order_fast_id_gen, 1},
          {"uniform-item-dist", no_argument, &g_uniform_item_dist, 1},
          {"order-status-scan-hack", no_argument, &g_order_status_scan_hack, 1},
 +        {"enable-chbenchmark", no_argument, &g_enable_chbenchmark, 1},
++        {"chbenchmark-q1", no_argument, &g_chbenchmark_query, 1},
++        {"chbenchmark-q6", no_argument, &g_chbenchmark_query, 6},
          {"workload-mix", required_argument, 0, 'w'},
          {"warehouse-spread", required_argument, 0, 's'},
          {"80-20-dist", no_argument, &g_wh_temperature, 't'},

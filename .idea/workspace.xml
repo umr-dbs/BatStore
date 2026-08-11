@@ -16,11 +16,7 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Fix postgres script to resolve symlinks">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/engines/postgres_benchbase.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/postgres_benchbase.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/setup_environment.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/setup_environment.py" afterDir="false" />
-    </list>
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Fix other scripts" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -74,61 +70,61 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0122111507738414" />
-      <entry key="MS500" value="1.7992468968819297" />
-      <entry key="S2" value="6.213005313797431" />
-      <entry key="S5" value="12.543104443964785" />
-      <entry key="S10" value="17.939012829995004" />
-      <entry key="S30" value="26.38763317292886" />
-      <entry key="S60" value="37.95913108078598" />
-      <entry key="M2" value="55.93762316897966" />
-      <entry key="M5" value="89.70632375471406" />
-      <entry key="M10" value="122.09688304996538" />
-      <entry key="M15" value="147.35421130151838" />
-      <entry key="M30" value="244.36844712698505" />
-      <entry key="H1" value="426.53403316646916" />
-      <entry key="H2" value="630.2090770675877" />
-      <entry key="H4" value="840.1889045980047" />
-      <entry key="D1" value="2739.835209895229" />
-      <entry key="W1" value="9851.385445146512" />
+      <entry key="MS100" value="1.0136350705896422" />
+      <entry key="MS500" value="1.8121228783030592" />
+      <entry key="S2" value="6.5448886523321015" />
+      <entry key="S5" value="13.763521430412693" />
+      <entry key="S10" value="20.21901875032812" />
+      <entry key="S30" value="30.05528450823709" />
+      <entry key="S60" value="42.01909834293604" />
+      <entry key="M2" value="60.25686833970026" />
+      <entry key="M5" value="94.2762301406663" />
+      <entry key="M10" value="126.80627576393834" />
+      <entry key="M15" value="152.121232356036" />
+      <entry key="M30" value="249.17666462087098" />
+      <entry key="H1" value="431.36746230098305" />
+      <entry key="H2" value="635.0862775078963" />
+      <entry key="H4" value="845.1071363686292" />
+      <entry key="D1" value="2744.7908729902397" />
+      <entry key="W1" value="9856.362688258432" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
       <entry key="MS500" value="0.0" />
       <entry key="S2" value="0.0" />
       <entry key="S5" value="0.0" />
-      <entry key="S10" value="3.4654845664129066E-171" />
-      <entry key="S30" value="2.3930018453550054E-57" />
-      <entry key="S60" value="6.914756491809767E-29" />
-      <entry key="M2" value="1.1758474804535941E-14" />
-      <entry key="M5" value="4.0620550885192525E-6" />
-      <entry key="M10" value="0.002850627274011914" />
-      <entry key="M15" value="0.025399559969995177" />
-      <entry key="M30" value="0.2395926885997976" />
-      <entry key="H1" value="0.8796867751702351" />
-      <entry key="H2" value="2.142346298069489" />
-      <entry key="H4" value="8.229682142334692" />
-      <entry key="D1" value="210.16647607386156" />
-      <entry key="W1" value="959.7541017904389" />
+      <entry key="S10" value="3.013744459149962E-171" />
+      <entry key="S30" value="2.2841459583199113E-57" />
+      <entry key="S60" value="6.755652468465704E-29" />
+      <entry key="M2" value="1.1622410153519972E-14" />
+      <entry key="M5" value="4.043187582428927E-6" />
+      <entry key="M10" value="0.0028439992462977594" />
+      <entry key="M15" value="0.02536017348248368" />
+      <entry key="M30" value="0.2394068512150295" />
+      <entry key="H1" value="0.8793455493943741" />
+      <entry key="H2" value="2.1419307554569595" />
+      <entry key="H4" value="8.228883963845195" />
+      <entry key="D1" value="210.16307867371552" />
+      <entry key="W1" value="959.7518853901176" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.9846107006518598" />
-      <entry key="MS500" value="1.7813712609586614" />
-      <entry key="S2" value="6.171200494835928" />
-      <entry key="S5" value="12.508846001839318" />
-      <entry key="S10" value="17.915957737002437" />
-      <entry key="S30" value="26.374639987939187" />
-      <entry key="S60" value="37.94358944611139" />
-      <entry key="M2" value="55.91648591547146" />
-      <entry key="M5" value="89.68427409882989" />
-      <entry key="M10" value="122.08290441291192" />
-      <entry key="M15" value="147.36643002518215" />
-      <entry key="M30" value="244.5999443515249" />
-      <entry key="H1" value="427.40890140352707" />
-      <entry key="H2" value="632.3485503133455" />
-      <entry key="H4" value="848.4160948691422" />
-      <entry key="D1" value="2949.995476925604" />
-      <entry key="W1" value="10811.135688591567" />
+      <entry key="MS100" value="0.9859167270235062" />
+      <entry key="MS500" value="1.7959037765991779" />
+      <entry key="S2" value="6.50813573040367" />
+      <entry key="S5" value="13.728497137510299" />
+      <entry key="S10" value="20.193821031373254" />
+      <entry key="S30" value="30.04101985839135" />
+      <entry key="S60" value="42.00296369682547" />
+      <entry key="M2" value="60.235495450962176" />
+      <entry key="M5" value="94.25408961893427" />
+      <entry key="M10" value="126.79223278808023" />
+      <entry key="M15" value="152.13336752756067" />
+      <entry key="M30" value="249.40794996254164" />
+      <entry key="H1" value="432.241975013474" />
+      <entry key="H2" value="637.2253276829889" />
+      <entry key="H4" value="853.333524659947" />
+      <entry key="D1" value="2954.9477420469566" />
+      <entry key="W1" value="10816.110715215807" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -422,9 +418,9 @@
     <list>
       <item itemvalue="Cargo.Generate" />
       <item itemvalue="Cargo.Run" />
-      <item itemvalue="Cargo.Test ycsb_schema::tests" />
       <item itemvalue="Cargo.Test mv_test::tree_wal_consistency_tests::repro_concurrent_insert_update_delete_reports_all_failures" />
       <item itemvalue="Cargo.Test tx_context::tests" />
+      <item itemvalue="Cargo.Test ycsb_schema::tests" />
       <item itemvalue="Python.compare_engines" />
       <item itemvalue="Python.plot_suite" />
     </list>
@@ -1426,15 +1422,7 @@
       <workItem from="1786447348793" duration="9969000" />
       <workItem from="1786471720048" duration="2496000" />
       <workItem from="1786475215693" duration="2172000" />
-      <workItem from="1786477993361" duration="591000" />
-    </task>
-    <task id="LOCAL-00167" summary="Pin Root* for root_live reorg, without actual latching of root_live. Move node tag to single cacheline">
-      <option name="closed" value="true" />
-      <created>1779398028357</created>
-      <option name="number" value="00167" />
-      <option name="presentableId" value="LOCAL-00167" />
-      <option name="project" value="LOCAL" />
-      <updated>1779398028357</updated>
+      <workItem from="1786477993361" duration="1113000" />
     </task>
     <task id="LOCAL-00168" summary="Correct root* count">
       <option name="closed" value="true" />
@@ -1820,7 +1808,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786477677509</updated>
     </task>
-    <option name="localTasksCounter" value="216" />
+    <task id="LOCAL-00216" summary="Fix other scripts">
+      <option name="closed" value="true" />
+      <created>1786478827832</created>
+      <option name="number" value="00216" />
+      <option name="presentableId" value="LOCAL-00216" />
+      <option name="project" value="LOCAL" />
+      <updated>1786478827833</updated>
+    </task>
+    <option name="localTasksCounter" value="217" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1841,7 +1837,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Added benchmark suite for auto-testing and scripts for plot" />
     <MESSAGE value="Bulk improve system" />
     <MESSAGE value="Improve Tx conflict findings" />
     <MESSAGE value="Fix memory leak; Add leanstore, wiredtiger and postgresql drivers" />
@@ -1866,7 +1861,8 @@
     <MESSAGE value="Updated tree explorer" />
     <MESSAGE value="Added optimizations" />
     <MESSAGE value="Fix postgres script to resolve symlinks" />
-    <option name="LAST_COMMIT_MESSAGE" value="Fix postgres script to resolve symlinks" />
+    <MESSAGE value="Fix other scripts" />
+    <option name="LAST_COMMIT_MESSAGE" value="Fix other scripts" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
