@@ -190,6 +190,7 @@ impl<'a,
                     let records = leaf_page
                         .as_records();
 
+                    let before = self.buff.len();
                     tree.with_visibility_checker(self.worker_id, si, |is_visible| {
                         self.buff.extend(records
                             .iter()
@@ -197,6 +198,7 @@ impl<'a,
                                 r.version().matches(is_visible) && self.range.contains(r.key()))
                             .map(RecordPointResult::from));
                     });
+                    crate::mv_test::record_leaf_scan(records.len(), self.buff.len() - before);
 
                     self.path.pop();
 

@@ -86,3 +86,52 @@ metric that motivated `BigTreeSize` in the first place (per-table root-restart c
 `mv_test::dump_root_restarts_by_table`), which requires rebuilding with
 `mv_test::RESTART_TRACE = true` (off by default - it adds per-attempt tracing overhead).
 That rebuild+measurement was out of scope here.
+
+## Addendum (2026-08-11): the "flat scan latency" finding above was a duration artifact
+
+Re-investigated as part of a broader OLAP-performance pass. The "Scan p50/p99 flat
+across all five sizes" finding above does **not** hold at a longer time horizon, and the
+mechanism `tpcc_schema.rs`'s doc comment describes (bigger leaf -> deferred compaction ->
+more dead-version garbage per scan, since `mv_query::iter_query::RangeQueryIter` scans a
+leaf's whole physical record array, live and dead alike) reproduces cleanly once the OLAP
+thread's `scan_after_delay_once` snapshot is actually given time to age:
+
+8 warehouses/16 terminals, `sweep` OLAP mode (isolates the warehouse+district scan from
+every other table, unlike this doc's own `fresh_full_scan`-style default), `olap_param=5`
+(delays 0,1,2,3,4,5s), 30s run, release build, single run per point (not averaged - treat
+as indicative, not final):
+
+| Delay | KiB32 (`32kib`, default) scan latency | KiB512 (`512kib`) scan latency |
+|---|---|---|
+| 0s  | 155µs | 159µs |
+| 1s  |  56µs | 249µs |
+| 2s  |  39µs | 294µs |
+| 3s  |  58µs | 343µs |
+| 4s  |  61µs | 354µs |
+| 5s  |  60µs | 269µs |
+
+Both scans return the identical 88 rows (8 warehouses + 80 districts) every time - the
+latency gap is pure physical-record-touched overhead, not output size. KiB512 is
+consistently ~4-6x slower than the default past the first (near-zero-garbage) point. This
+session's original test above used the default `scan_sweep` olap_param (10, so delays
+0..=10) at only **8s per point** - the run ends before the OLAP thread's delay list even
+reaches the 4-5s range where the gap opens up, which is why it read as flat. The original
+`1f6d666`/`tpcc_schema.rs` claim (~100% -> ~21% of baseline OLAP throughput between the
+untouched leaf and `KiB512`) should be treated as the accurate one; this doc's "Scan
+p50/p99 flat" finding above was an artifact of too-short aging, not a real absence of the
+effect, and the "Medium ties for best-or-tied-for-best on every metric measured here"
+recommendation is only reliable for tpmC/RSS, not for scan cost under sustained load.
+
+Also added (this session): `mv_test::SCAN_TRACE` (off by default, same dead-code-
+eliminated-when-off idiom as `RESTART_TRACE`) - counts records-visited vs.
+records-matched per leaf across every `RangeQueryIter` scan in the process
+(`mv_test::record_leaf_scan`/`dump_scan_trace`). Enabling it for the same 30s run
+(system-wide, not isolated to the OLAP thread - it also counts every OLTP transaction's
+own point/range reads) showed **5.74x records visited per record matched**, identical at
+both leaf sizes - expected, since the other 12 (default-sized) tables' aggregate read
+volume swamps warehouse/district's contribution to the global counter. Confirms the
+visited-vs-matched "garbage tax" is a real, measurable, systemic phenomenon in this
+engine (worth keeping in mind generally, not just for `BigTreeSize`), but this coarse a
+counter can't isolate one table's contribution - a per-tree or per-table breakdown (the
+same pattern `dump_root_restarts_by_table` already uses for restarts) would be needed to
+attribute it the way the latency table above does directly.

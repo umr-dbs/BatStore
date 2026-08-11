@@ -172,6 +172,67 @@ pub fn dump_attempt_histogram(path: &str) {
     );
 }
 
+/// Diagnostic: measures the OLAP-scan-side counterpart to `RESTART_TRACE`
+/// above. `mv_query::iter_query::RangeQueryIter::refill` visits a leaf's
+/// *entire* physical record array (live and dead/superseded versions alike,
+/// per `LeafPage::as_records()`'s doc) and filters it down to whatever's
+/// actually visible to the scan's snapshot — so a leaf that's accumulated a
+/// lot of garbage since its last compaction (see `mv_tree::smo::split`'s
+/// `ByVersion` case, and `BigTreeSize`'s doc for why `Table::Warehouse`/
+/// `Table::District`'s bigger leaves defer that compaction longer) makes
+/// every scan over it pay for records it will just throw away. This counts
+/// `records visited` (the whole leaf, every call) vs. `records matched`
+/// (what actually passed the visibility+range filter) globally, across every
+/// tree — cheap enough to enable widely (two `fetch_add`s per leaf visited,
+/// not per record), unlike `RESTART_TRACE`'s per-page attribution. Off by
+/// default and dead-code-eliminated at every call site when off, same idiom
+/// as `RESTART_TRACE`. Flip to `true`, run a scan-heavy benchmark, then call
+/// `dump_scan_trace`.
+pub const SCAN_TRACE: bool = false;
+
+static SCAN_LEAVES_VISITED: AtomicU64 = AtomicU64::new(0);
+static SCAN_RECORDS_VISITED: AtomicU64 = AtomicU64::new(0);
+static SCAN_RECORDS_MATCHED: AtomicU64 = AtomicU64::new(0);
+
+/// Records one leaf visited by a range scan: `visited` is the leaf's whole
+/// physical record count (live + dead), `matched` is how many of those
+/// passed the scan's visibility+range filter. No-op, and dead-code
+/// eliminated, unless `SCAN_TRACE` is `true`.
+#[inline(always)]
+pub fn record_leaf_scan(visited: usize, matched: usize) {
+    if !SCAN_TRACE {
+        return;
+    }
+    SCAN_LEAVES_VISITED.fetch_add(1, Relaxed);
+    SCAN_RECORDS_VISITED.fetch_add(visited as u64, Relaxed);
+    SCAN_RECORDS_MATCHED.fetch_add(matched as u64, Relaxed);
+}
+
+/// Resets `record_leaf_scan`'s accumulators — same rationale as
+/// `reset_restart_trace`: call before a fresh run's first scan so a
+/// multi-run process (e.g. a backend-comparison loop) doesn't carry over a
+/// prior run's counts.
+pub fn reset_scan_trace() {
+    SCAN_LEAVES_VISITED.store(0, Relaxed);
+    SCAN_RECORDS_VISITED.store(0, Relaxed);
+    SCAN_RECORDS_MATCHED.store(0, Relaxed);
+}
+
+/// Prints the accumulated leaves/records-visited-vs-matched totals and their
+/// ratio (how many physical records a scan had to look at for every one it
+/// actually returned) to stdout. Only ever non-zero when `SCAN_TRACE` is
+/// `true`.
+pub fn dump_scan_trace() {
+    let leaves = SCAN_LEAVES_VISITED.load(Relaxed);
+    let visited = SCAN_RECORDS_VISITED.load(Relaxed);
+    let matched = SCAN_RECORDS_MATCHED.load(Relaxed);
+    let ratio = if matched == 0 { f64::NAN } else { visited as f64 / matched as f64 };
+    println!(
+        "dump_scan_trace: {leaves} leaves visited, {visited} records visited, \
+        {matched} records matched (visited/matched = {ratio:.2}x)"
+    );
+}
+
 /// Count of write-traversal restarts caused by root contention specifically
 /// (every writer touches the root, so this is expected to be nonzero; it's
 /// tracked separately from per-page attribution below since there's only

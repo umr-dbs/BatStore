@@ -195,6 +195,7 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     // accumulate every prior run's restart-trace data into this run's dump,
     // unbounded, whenever `RESTART_TRACE` is on.
     crate::mv_test::reset_restart_trace();
+    crate::mv_test::reset_scan_trace();
 
     let max_threads = crate::mv_tree::mvbt::default_max_workers().max(1);
 
@@ -390,6 +391,14 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     }
 
     mem_sampler.stop();
+
+    // Plain global atomics (no thread-local merge-on-drop, unlike
+    // `RESTART_TRACE` below), so this is safe to read any time — placed
+    // after the join purely to report a fully-settled count. No-op when
+    // `SCAN_TRACE` is off.
+    if crate::mv_test::SCAN_TRACE {
+        crate::mv_test::dump_scan_trace();
+    }
 
     // All terminal/OLAP worker threads are joined above, so every thread's
     // `RestartLocal` TLS has already torn down and merged into the global
