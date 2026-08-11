@@ -215,11 +215,56 @@ impl<const FAN_OUT: usize,
                 .as_records()
                 .iter()
                 .rev()
-                .skip_while(|r| r.version.insertion_stamp().ts_start() > reader_ts_start)
+                // No `skip_while` on `insertion_stamp().ts_start() >
+                // reader_ts_start` here (there used to be one) — it assumed
+                // a leaf's physical (append) order tracks `ts_start` order,
+                // so once a "future" (not-yet-visible) entry was skipped
+                // walking backwards, everything further back was assumed
+                // visible-or-older too. That assumption dates back to a
+                // single-global-version model (`git log -L` on this line:
+                // originally `r.version.insert_version > lookup_version`)
+                // and never held under OSIC's actual concurrency model: a
+                // transaction's `ts_start` is drawn at `begin()`, *before*
+                // it acquires the leaf's write lock to physically append —
+                // two concurrent writers can draw `ts_start` in one order
+                // but append in the other (whichever wins the lock lands in
+                // the leaf first), so physical order and `ts_start` order
+                // can diverge. When they did, this `skip_while` could walk
+                // straight past the one record actually visible to
+                // `reader_ts_start`, silently returning `None` for a live,
+                // definitely-committed key — confirmed as the mechanism
+                // behind `verify_concurrent_shared_keys`'s intermittent
+                // `v[0]` index-out-of-bounds panic (empty `MatchedRecords`
+                // for a key that's never deleted). `RangeQueryIter::refill`
+                // (`iter_query.rs`) never had this shortcut and scans every
+                // record regardless of order, which is why only the
+                // point-read path was ever affected. Removing the shortcut
+                // costs an unbounded scan back to this key's actual visible
+                // version in the pathological case — no worse than a range
+                // scan already pays over the same leaf.
                 .find(|r|
                     r.key() == key && r.version().matches(is_visible))
             {
-                None => CRUDOperationResult::MatchedRecords(Vec::with_capacity(0)),
+                None => {
+                    if crate::mv_test::DIAG {
+                        let same_key: Vec<String> = records.as_records().iter()
+                            .filter(|r| r.key() == key)
+                            .map(|r| format!(
+                                "insert=(w{},{}) invalid={} deleted={} is_vis_insert={} is_vis_del={:?}",
+                                r.version.insertion_stamp().worker_id(),
+                                r.version.insertion_stamp().ts_start(),
+                                r.version.insertion_stamp().is_invalid(),
+                                r.version.deletion_stamp().map(|d| d.to_string()).unwrap_or_else(|| "*".to_string()),
+                                is_visible(r.version.insertion_stamp()),
+                                r.version.deletion_stamp().map(|d| is_visible(d)),
+                            )).collect();
+                        eprintln!(
+                            "DIAG key_point_read_from_root: MISS key={key} reader=(w{reader_worker},{reader_ts_start}) leaf_len={} same_key_records={same_key:?}",
+                            records.as_records().len(),
+                        );
+                    }
+                    CRUDOperationResult::MatchedRecords(Vec::with_capacity(0))
+                }
                 Some(result) =>
                     CRUDOperationResult::MatchedRecords(vec![RecordPointResult::from(result)])
             }
@@ -246,16 +291,28 @@ impl<const FAN_OUT: usize,
                     .deref()
                     .as_records();
 
-                let start_pos_si = records.len() -
-                    records.binary_search_by(|r|
-                        r.version.insertion_stamp().ts_start().cmp(&reader_ts_start)
-                    ).unwrap_or_else(|pos| pos);
-
+                // No `binary_search_by` cutoff on `ts_start` here (there
+                // used to be one, computing a `start_pos_si` to `.skip()`
+                // below) — `binary_search_by`
+                // requires the slice to already be sorted by the key it
+                // searches on, and a leaf's physical (append) order does
+                // *not* track `ts_start` order under OSIC's actual
+                // concurrency model: a transaction's `ts_start` is drawn at
+                // `begin()`, before it acquires the leaf's write lock to
+                // physically append, so two concurrent writers can draw
+                // `ts_start` in one order but append in the other. On an
+                // unsorted slice, `binary_search_by` can land anywhere —
+                // not just "skip too much/too little" but a genuinely
+                // arbitrary cutoff — silently dropping matching records.
+                // See `key_point_read_from_root`'s identical (now-fixed)
+                // `skip_while` bug for the confirmed real-world symptom this
+                // exact assumption caused. Scanning the whole leaf (same
+                // cost `RangeQueryIter::refill`/`iter_query.rs` already
+                // always pays) is the honest fix.
                self.with_visibility_checker(reader_worker, reader_ts_start, |is_visible| {
                    records
                        .iter()
                        .rev()
-                       .skip(start_pos_si)
                        // Cheap range check before the indirect (`&mut dyn
                        // FnMut`, not inlinable) `matches` call — see
                        // `iter_query.rs::refill`'s identical reorder for why.
