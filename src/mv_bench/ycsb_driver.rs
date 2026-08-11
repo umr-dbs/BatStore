@@ -28,6 +28,9 @@ pub struct DriverConfig {
     pub distribution: RequestDistribution,
     /// YCSB `maxscanlength`: a Scan op's length is uniform in `[1, this]`.
     pub max_scan_length: u64,
+    /// YCSB `writeallfields`. False is the standard default: update one
+    /// randomly selected field while preserving the others.
+    pub write_all_fields: bool,
     pub gc: bool,
     pub update_in_place: bool,
     pub root_star_index: RootIndexType,
@@ -53,6 +56,10 @@ const INSERT: usize = 2;
 const SCAN: usize = 3;
 const RMW: usize = 4;
 const NUM_COUNTERS: usize = 5;
+/// Systematic latency sampling keeps percentile storage and clock reads
+/// bounded even when YCSB-E completes millions of tiny scans per second.
+const SCAN_LATENCY_SAMPLE_EVERY: u64 = 1024;
+const TIMESERIES_CLOCK_EVERY: u64 = 256;
 
 const COUNTER_NAMES: [&str; NUM_COUNTERS] = ["read", "update", "insert", "scan", "read_modify_write"];
 
@@ -73,6 +80,7 @@ fn worker_thread(
     mix: YcsbMix,
     sampler: Arc<KeySampler>,
     max_scan_length: u64,
+    write_all_fields: bool,
     current_max_key: Arc<AtomicU64>,
     duration: Duration,
     stop: Arc<AtomicBool>,
@@ -85,6 +93,8 @@ fn worker_thread(
     let mut scanned_tuples = 0u64;
     let mut scan_latencies_ns = Vec::new();
     let start = Instant::now();
+    let mut completed = 0u64;
+    let mut current_second = 0usize;
 
     while !stop.load(Relaxed) {
         let record_count = cfg.record_count;
@@ -98,7 +108,7 @@ fn worker_thread(
             }
             YcsbOpType::Update => {
                 let key = sampler.sample(record_count, max_key_now);
-                ycsb_txn::update(&tree, &cfg, key);
+                ycsb_txn::update(&tree, &cfg, key, write_all_fields);
                 totals[UPDATE] += 1;
             }
             YcsbOpType::Insert => {
@@ -111,20 +121,27 @@ fn worker_thread(
             YcsbOpType::Scan => {
                 let key = sampler.sample(record_count, max_key_now);
                 let len = random_scan_length(max_scan_length);
-                let scan_start = Instant::now();
-                scanned_tuples += ycsb_txn::scan(&tree, key, len) as u64;
-                scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
+                if totals[SCAN] % SCAN_LATENCY_SAMPLE_EVERY == 0 {
+                    let scan_start = Instant::now();
+                    scanned_tuples += ycsb_txn::scan(&tree, key, len) as u64;
+                    scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
+                } else {
+                    scanned_tuples += ycsb_txn::scan(&tree, key, len) as u64;
+                }
                 totals[SCAN] += 1;
             }
             YcsbOpType::ReadModifyWrite => {
                 let key = sampler.sample(record_count, max_key_now);
-                ycsb_txn::read_modify_write(&tree, &cfg, key);
+                ycsb_txn::read_modify_write(&tree, &cfg, key, write_all_fields);
                 totals[RMW] += 1;
             }
         }
 
-        let idx = (start.elapsed().as_secs() as usize).min(ops_per_sec.len() - 1);
-        ops_per_sec[idx] += 1;
+        completed += 1;
+        if completed % TIMESERIES_CLOCK_EVERY == 0 {
+            current_second = (start.elapsed().as_secs() as usize).min(ops_per_sec.len() - 1);
+        }
+        ops_per_sec[current_second] += 1;
     }
 
     WorkerStats { ops_per_sec, totals, scanned_tuples, scan_latencies_ns }
@@ -167,11 +184,12 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
          - mix                 = {:?}\n\
          - distribution        = {:?}\n\
          - max_scan_length     = {}\n\
+         - write_all_fields    = {}\n\
          - GC                  = {} (update_in_place={})\n\
          - WAL                 = {}\n\
          - root*               = {}",
         cfg.ycsb.record_count, cfg.ycsb.field_count, cfg.ycsb.field_length,
-        cfg.duration, cfg.mix, cfg.distribution, cfg.max_scan_length,
+        cfg.duration, cfg.mix, cfg.distribution, cfg.max_scan_length, cfg.write_all_fields,
         cfg.gc, cfg.update_in_place,
         match (&cfg.wal, cfg.wal_lockfree_batch_size) {
             (Some((path, interval)), None) => format!("On, batched ({} @ {interval:?} flush)", path.display()),
@@ -195,6 +213,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     let mix = cfg.mix;
     let ycsb_cfg = cfg.ycsb;
     let max_scan_length = cfg.max_scan_length;
+    let write_all_fields = cfg.write_all_fields;
 
     let handles: Vec<_> = (0..num_threads).map(|_| {
         let tree = tree.clone();
@@ -203,7 +222,8 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         let current_max_key = current_max_key.clone();
         let stop = stop.clone();
         let barrier = barrier.clone();
-        thread::spawn(move || worker_thread(tree, cfg, mix, sampler, max_scan_length, current_max_key, duration, stop, barrier))
+        thread::spawn(move || worker_thread(tree, cfg, mix, sampler, max_scan_length,
+            write_all_fields, current_max_key, duration, stop, barrier))
     }).collect();
 
     // Releases at the same instant as every worker, once loading is done —
@@ -247,9 +267,9 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
         ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
     }
 
-    // Summary (not raw per-op samples - a scan-heavy workload E run can complete millions
-    // of scans per second per thread, so a raw-sample CSV would blow up to tens of millions
-    // of rows at full sweep scale). Nearest-rank percentiles over the sorted latencies,
+    // Systematically sampled summary (one of every SCAN_LATENCY_SAMPLE_EVERY scans),
+    // avoiding a clock read and retained u64 for every one of millions of tiny scans.
+    // Nearest-rank percentiles over the sorted sample,
     // in microseconds - empty (all-zero) file for every other workload. Every engine's
     // wrapper computes this the same way (see scripts/engines/common.py's
     // read_latency_summary, mirroring this exact nearest-rank formula) so percentiles are
@@ -331,6 +351,7 @@ pub fn main_ycsb(parms: Vec<String>) {
     let wal_enabled: bool = arg(&parms, 14, false);
     let wal_path: String = parms.get(15).cloned().unwrap_or_else(|| "ycsb_wal.log".to_string());
     let wal_flush_ms: u64 = arg(&parms, 16, 5);
+    let write_all_fields: bool = arg(&parms, 17, false);
 
     run_ycsb(DriverConfig {
         ycsb: YcsbConfig { record_count, field_count, field_length },
@@ -339,6 +360,7 @@ pub fn main_ycsb(parms: Vec<String>) {
         mix,
         distribution,
         max_scan_length,
+        write_all_fields,
         gc,
         update_in_place,
         root_star_index,

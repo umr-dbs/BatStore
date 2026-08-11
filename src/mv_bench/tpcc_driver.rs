@@ -438,6 +438,8 @@ fn num_olap_mode_summary(mode: &OlapMode) -> &'static str {
         OlapMode::ScanDelaySweep { .. } => "scan_delay_sweep",
         OlapMode::RepeatedFreshFullScan => "repeated_fresh_full_scan",
         OlapMode::ChBenchmark { .. } => "ch_benchmark",
+        OlapMode::ChQ1 { .. } => "ch_q1",
+        OlapMode::ChQ6 { .. } => "ch_q6",
     }
 }
 
@@ -581,6 +583,12 @@ pub fn main_tpcc(parms: Vec<String>) {
             OlapMode::ChBenchmark { region_name: ch_region, date_lo: i64::MIN, date_hi: i64::MAX },
             num_olap_threads,
         ),
+        "ch_q1" => (OlapMode::ChQ1 { delivered_before: i64::MAX }, num_olap_threads),
+        "ch_q6" => (OlapMode::ChQ6 {
+            date_lo: i64::MIN,
+            date_hi: i64::MAX,
+            max_qty: 24,
+        }, num_olap_threads),
         _ => (
             OlapMode::ScanDelaySweep { delays: (0..=(olap_param.max(0.0) as u64)).map(Duration::from_secs).collect() },
             num_olap_threads,

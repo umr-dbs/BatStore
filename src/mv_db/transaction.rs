@@ -501,6 +501,11 @@ impl<
         if let TransactionState::InFlight = self.committed {
             self.committed = TransactionState::Committed;
 
+            if self.written.borrow().is_empty() {
+                self.db.end_snapshot(self.ts_start);
+                return None;
+            }
+
             let ts_commit = self.db.ctx.commit_tx( self.worker_id);
 
             if let Some( & (table, _)) = self.written.borrow().first() {

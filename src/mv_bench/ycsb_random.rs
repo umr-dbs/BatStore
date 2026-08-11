@@ -2,9 +2,7 @@
 //! SoCC 2010, §3): which key an operation targets, and the standard "Core
 //! Workloads" A-F op-type proportions.
 
-use rand::distr::Alphanumeric;
 use rand::prelude::*;
-use rand_distr::Zipf;
 use std::cell::RefCell;
 
 use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbKey, YcsbRow};
@@ -41,20 +39,114 @@ pub enum RequestDistribution {
     Latest { theta: f64 },
 }
 
-/// Precomputes the `Zipf` distribution once (construction has real setup
-/// cost — see the loop in `mv_test::olap_tests`, which does the same) and
-/// reuses it for every sampled key, rather than rebuilding it per op.
+/// Builds a Walker alias table once and reuses it for every sampled key.
+/// The O(n) setup performs Zipf's floating-point powers outside the timed
+/// request loop; each request then needs only two random draws and a lookup.
 pub struct KeySampler {
     dist: RequestDistribution,
-    zipf: Option<Zipf<f64>>,
+    zipf: Option<AliasZipf>,
+}
+
+/// Walker alias table for an exact finite Zipf distribution. Construction
+/// performs the O(n) floating-point powers once; sampling is O(1) and uses
+/// no `pow` in the benchmark's timed request path.
+struct AliasZipf {
+    probability: Vec<f32>,
+    alias: Vec<u32>,
+}
+
+impl AliasZipf {
+    fn new(n: usize, theta: f64) -> Self {
+        assert!(n > 0 && n <= u32::MAX as usize, "Zipf domain must fit u32");
+        assert!(theta.is_finite() && theta >= 0.0, "invalid Zipf theta");
+        let weights: Vec<f64> = (1..=n).map(|rank| (rank as f64).powf(-theta)).collect();
+        let sum: f64 = weights.iter().sum();
+        let mut scaled: Vec<f64> = weights
+            .into_iter()
+            .map(|weight| weight * n as f64 / sum)
+            .collect();
+        let mut small = Vec::with_capacity(n);
+        let mut large = Vec::with_capacity(n);
+        for (index, &value) in scaled.iter().enumerate() {
+            if value < 1.0 {
+                small.push(index);
+            } else {
+                large.push(index);
+            }
+        }
+        let mut probability = vec![1.0f32; n];
+        let mut alias: Vec<u32> = (0..n as u32).collect();
+        while !small.is_empty() && !large.is_empty() {
+            let low = small.pop().unwrap();
+            let high = large.pop().unwrap();
+            probability[low] = scaled[low] as f32;
+            alias[low] = high as u32;
+            scaled[high] = (scaled[high] + scaled[low]) - 1.0;
+            if scaled[high] < 1.0 {
+                small.push(high);
+            } else {
+                large.push(high);
+            }
+        }
+        Self { probability, alias }
+    }
+
+    #[inline]
+    fn sample(&self, rng: &mut SmallRng) -> u64 {
+        let column = rng.random_range(0..self.probability.len());
+        let index = if rng.random::<f32>() < self.probability[column] {
+            column
+        } else {
+            self.alias[column] as usize
+        };
+        index as u64 + 1
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    use rand::SeedableRng;
+
+    #[test]
+    fn alias_zipf_samples_the_domain_with_expected_skew() {
+        let zipf = AliasZipf::new(10, 0.99);
+        let mut rng = SmallRng::seed_from_u64(0xC0FFEE);
+        let mut counts = [0usize; 10];
+        for _ in 0..200_000 {
+            let rank = zipf.sample(&mut rng);
+            assert!((1..=10).contains(&rank));
+            counts[rank as usize - 1] += 1;
+        }
+        assert!(counts[0] > counts[1]);
+        assert!(counts[1] > counts[4]);
+        assert!(counts[4] > counts[9]);
+    }
+
+    #[test]
+    fn zero_theta_is_approximately_uniform() {
+        let zipf = AliasZipf::new(8, 0.0);
+        let mut rng = SmallRng::seed_from_u64(7);
+        let mut counts = [0usize; 8];
+        for _ in 0..160_000 {
+            counts[zipf.sample(&mut rng) as usize - 1] += 1;
+        }
+        assert!(
+            counts
+                .iter()
+                .all(|&count| (18_500..=21_500).contains(&count)),
+            "{counts:?}"
+        );
+    }
 }
 
 impl KeySampler {
     pub fn new(dist: RequestDistribution, record_count: u64) -> Self {
         let zipf = match dist {
             RequestDistribution::Uniform => None,
-            RequestDistribution::Zipfian { theta } | RequestDistribution::Latest { theta } =>
-                Some(Zipf::new(record_count.max(1) as f64, theta).expect("invalid zipfian theta")),
+            RequestDistribution::Zipfian { theta } | RequestDistribution::Latest { theta } => {
+                Some(AliasZipf::new(record_count.max(1) as usize, theta))
+            }
         };
         Self { dist, zipf }
     }
@@ -84,10 +176,9 @@ impl KeySampler {
     /// `SkewedLatestGenerator` also leaves unscrambled.
     pub fn sample(&self, record_count: u64, current_max_key: u64) -> YcsbKey {
         with_fast_rng(|rng| match self.dist {
-            RequestDistribution::Uniform =>
-                rng.random_range(1..=record_count.max(1)),
+            RequestDistribution::Uniform => rng.random_range(1..=record_count.max(1)),
             RequestDistribution::Zipfian { .. } => {
-                let rank = self.zipf.as_ref().unwrap().sample(rng) as u64;
+                let rank = self.zipf.as_ref().unwrap().sample(rng);
                 let rank = rank.clamp(1, record_count.max(1));
                 1 + fnv_hash64(rank) % record_count.max(1)
             }
@@ -95,7 +186,7 @@ impl KeySampler {
                 // Zipf sample in [1, record_count]; treated as a 0-based
                 // "how many keys back from the newest" offset, so an offset
                 // of 1 (the most likely draw) lands exactly on the newest key.
-                let offset = self.zipf.as_ref().unwrap().sample(rng) as u64;
+                let offset = self.zipf.as_ref().unwrap().sample(rng);
                 current_max_key.saturating_sub(offset - 1).max(1)
             }
         })
@@ -145,12 +236,48 @@ impl YcsbMix {
     /// - F: Read-modify-write — 50% read, 50% read-modify-write, zipfian.
     pub fn workload(name: &str) -> Option<Self> {
         Some(match name {
-            "a" => Self { read: 0.5, update: 0.5, insert: 0.0, scan: 0.0, read_modify_write: 0.0 },
-            "b" => Self { read: 0.95, update: 0.05, insert: 0.0, scan: 0.0, read_modify_write: 0.0 },
-            "c" => Self { read: 1.0, update: 0.0, insert: 0.0, scan: 0.0, read_modify_write: 0.0 },
-            "d" => Self { read: 0.95, update: 0.0, insert: 0.05, scan: 0.0, read_modify_write: 0.0 },
-            "e" => Self { read: 0.0, update: 0.0, insert: 0.05, scan: 0.95, read_modify_write: 0.0 },
-            "f" => Self { read: 0.5, update: 0.0, insert: 0.0, scan: 0.0, read_modify_write: 0.5 },
+            "a" => Self {
+                read: 0.5,
+                update: 0.5,
+                insert: 0.0,
+                scan: 0.0,
+                read_modify_write: 0.0,
+            },
+            "b" => Self {
+                read: 0.95,
+                update: 0.05,
+                insert: 0.0,
+                scan: 0.0,
+                read_modify_write: 0.0,
+            },
+            "c" => Self {
+                read: 1.0,
+                update: 0.0,
+                insert: 0.0,
+                scan: 0.0,
+                read_modify_write: 0.0,
+            },
+            "d" => Self {
+                read: 0.95,
+                update: 0.0,
+                insert: 0.05,
+                scan: 0.0,
+                read_modify_write: 0.0,
+            },
+            "e" => Self {
+                read: 0.0,
+                update: 0.0,
+                insert: 0.05,
+                scan: 0.95,
+                read_modify_write: 0.0,
+            },
+            "f" => Self {
+                read: 0.5,
+                update: 0.0,
+                insert: 0.0,
+                scan: 0.0,
+                read_modify_write: 0.5,
+            },
             _ => return None,
         })
     }
@@ -184,30 +311,64 @@ pub fn pick_op(mix: &YcsbMix) -> YcsbOpType {
     }
     let mut x = with_fast_rng(|rng| rng.random_range(0.0..total));
 
-    if x < mix.read { return YcsbOpType::Read; }
+    if x < mix.read {
+        return YcsbOpType::Read;
+    }
     x -= mix.read;
-    if x < mix.update { return YcsbOpType::Update; }
+    if x < mix.update {
+        return YcsbOpType::Update;
+    }
     x -= mix.update;
-    if x < mix.insert { return YcsbOpType::Insert; }
+    if x < mix.insert {
+        return YcsbOpType::Insert;
+    }
     x -= mix.insert;
-    if x < mix.scan { return YcsbOpType::Scan; }
+    if x < mix.scan {
+        return YcsbOpType::Scan;
+    }
     YcsbOpType::ReadModifyWrite
 }
 
 pub fn random_row(cfg: &YcsbConfig) -> YcsbRow {
-    // Samples `Alphanumeric` bytes directly into the flat buffer - every
-    // field is exactly `field_length` bytes, so there's no need to go via
-    // `tpcc_random::rnd_astring`'s `String` (which would mean allocating and
-    // UTF8-encoding one throwaway `String` per field, then copying its bytes
-    // out again) when a `u8` can be pushed straight in.
     let total_len = cfg.field_count * cfg.field_length;
-    let mut data = Vec::with_capacity(total_len);
+    YcsbRow::from_len_with(total_len, |bytes| {
+        with_fast_rng(|rng| fill_alphanumeric(rng, bytes))
+    })
+}
+
+/// Standard YCSB update (`writeallfields=false`): preserve the row and
+/// replace one uniformly selected field with new opaque bytes.
+pub fn random_field_patch(cfg: &YcsbConfig) -> (usize, Vec<u8>) {
+    if cfg.field_count == 0 || cfg.field_length == 0 {
+        return (0, Vec::new());
+    }
     with_fast_rng(|rng| {
-        for _ in 0..total_len {
-            data.push(rng.sample(Alphanumeric));
+        let field = rng.random_range(0..cfg.field_count);
+        let mut bytes = vec![0; cfg.field_length];
+        fill_alphanumeric(rng, &mut bytes);
+        (field, bytes)
+    })
+}
+
+/// Bulk random-byte generation plus rejection mapping. A 1 KiB row now
+/// needs roughly one PRNG bulk fill rather than 1,000 `Distribution::sample`
+/// calls. Rejecting bytes >= 248 keeps all 62 characters equiprobable.
+fn fill_alphanumeric(rng: &mut SmallRng, out: &mut [u8]) {
+    const ALPHABET: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut scratch = [0u8; 1024];
+    let mut written = 0;
+    while written < out.len() {
+        rng.fill_bytes(&mut scratch);
+        for &byte in &scratch {
+            if byte < 248 {
+                out[written] = ALPHABET[(byte % 62) as usize];
+                written += 1;
+                if written == out.len() {
+                    break;
+                }
+            }
         }
-    });
-    YcsbRow::from_bytes(&data)
+    }
 }
 
 /// Scan length, uniform in `[1, max_scan_length]` (YCSB `maxscanlength`).

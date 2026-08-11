@@ -1,5 +1,5 @@
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
@@ -12,11 +12,28 @@ use crate::mv_db::DbTransaction;
 
 type TestDb = Database<8, 8, u64, u64>;
 
-fn inc(k: u64) -> u64 { k.checked_add(1).unwrap_or(u64::MAX) }
-fn dec(k: u64) -> u64 { k.checked_sub(1).unwrap_or(u64::MIN) }
+fn inc(k: u64) -> u64 {
+    k.checked_add(1).unwrap_or(u64::MAX)
+}
+fn dec(k: u64) -> u64 {
+    k.checked_sub(1).unwrap_or(u64::MIN)
+}
 
 fn new_db() -> TestDb {
     Database::new(RootIndexType::default(), inc, dec, u64::MIN, u64::MAX)
+}
+
+#[test]
+fn empty_read_only_commit_does_not_advance_the_global_clock() {
+    let db = new_db();
+    let tx = DbTransaction::begin(&db);
+    let after_begin = db.current_version();
+    assert_eq!(tx.commit(), None);
+    assert_eq!(
+        db.current_version(),
+        after_begin,
+        "an empty read-only commit must only unregister its snapshot"
+    );
 }
 
 #[test]
@@ -25,14 +42,20 @@ fn db_transaction_zero_copy_range_terminals_share_its_snapshot() {
     let table = db.create_table("scan").table_id().unwrap();
     let load = DbTransaction::begin(&db);
     for key in 0..20 {
-        assert!(matches!(load.insert(table, key, key * 10), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            load.insert(table, key, key * 10),
+            CRUDOperationResult::Inserted(_)
+        ));
     }
     load.commit();
 
     let tx = DbTransaction::begin(&db);
     let range = crate::mv_query::interval::Interval::new(5, 14);
     assert_eq!(tx.range_count(table, range), 10);
-    assert_eq!(tx.range_fold(table, range, 0u64, |sum, _, payload| sum + *payload), 950);
+    assert_eq!(
+        tx.range_fold(table, range, 0u64, |sum, _, payload| sum + *payload),
+        950
+    );
 
     let mut keys = Vec::new();
     tx.range_for_each(table, range, |key, _| keys.push(key));
@@ -56,7 +79,10 @@ fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
     db.enable_gc(false);
 
     let setup = DbTransaction::begin(&db);
-    assert!(matches!(setup.insert(table, 1, 10), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        setup.insert(table, 1, 10),
+        CRUDOperationResult::Inserted(_)
+    ));
     setup.commit();
 
     // This snapshot predates every split and replacement below. It is not
@@ -66,9 +92,15 @@ fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
     let writer_db = db.clone();
     std::thread::spawn(move || {
         let update = DbTransaction::begin(&writer_db);
-        assert!(matches!(update.update(table, 1, 20), CRUDOperationResult::Updated(_)));
+        assert!(matches!(
+            update.update(table, 1, 20),
+            CRUDOperationResult::Updated(_)
+        ));
         for key in 2..=256 {
-            assert!(matches!(update.insert(table, key, key * 10), CRUDOperationResult::Inserted(_)));
+            assert!(matches!(
+                update.insert(table, key, key * 10),
+                CRUDOperationResult::Inserted(_)
+            ));
         }
         update.commit();
 
@@ -76,31 +108,49 @@ fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
         // reuse eligible blocks; blocks needed by `old` must remain exempt.
         for key in 257..=512 {
             let tx = DbTransaction::begin(&writer_db);
-            assert!(matches!(tx.insert(table, key, key * 10), CRUDOperationResult::Inserted(_)));
+            assert!(matches!(
+                tx.insert(table, key, key * 10),
+                CRUDOperationResult::Inserted(_)
+            ));
             tx.commit();
         }
-    }).join().unwrap();
+    })
+    .join()
+    .unwrap();
 
-    assert!(matches!(old.point(table, 1), CRUDOperationResult::MatchedRecords(r)
-        if r.len() == 1 && r[0].payload == 10));
-    assert_eq!(old.range_count(
-        table, crate::mv_query::interval::Interval::new(u64::MIN, u64::MAX)
-    ), 1);
+    assert!(
+        matches!(old.point(table, 1), CRUDOperationResult::MatchedRecords(r)
+        if r.len() == 1 && r[0].payload == 10)
+    );
+    assert_eq!(
+        old.range_count(
+            table,
+            crate::mv_query::interval::Interval::new(u64::MIN, u64::MAX)
+        ),
+        1
+    );
     old.commit();
 
     let current = DbTransaction::begin(&db);
-    assert!(matches!(current.point(table, 1), CRUDOperationResult::MatchedRecords(r)
-        if r.len() == 1 && r[0].payload == 20));
-    assert_eq!(current.range_count(
-        table, crate::mv_query::interval::Interval::new(u64::MIN, u64::MAX)
-    ), 512);
+    assert!(
+        matches!(current.point(table, 1), CRUDOperationResult::MatchedRecords(r)
+        if r.len() == 1 && r[0].payload == 20)
+    );
+    assert_eq!(
+        current.range_count(
+            table,
+            crate::mv_query::interval::Interval::new(u64::MIN, u64::MAX)
+        ),
+        512
+    );
     current.commit();
 }
 
 #[test]
 fn repeated_delete_reinsert_round_trips_through_wal_recovery() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_db_reinsert_recovery_test_{}.log", std::process::id()
+        "cmvbt_db_reinsert_recovery_test_{}.log",
+        std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(format!("{}.meta", path.display()));
@@ -109,26 +159,43 @@ fn repeated_delete_reinsert_round_trips_through_wal_recovery() {
     let table = db.create_table("t").table_id().unwrap();
     db.enable_wal(&path, Duration::from_millis(2)).unwrap();
     let setup = DbTransaction::begin(&db);
-    assert!(matches!(setup.insert(table, 1, 10), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        setup.insert(table, 1, 10),
+        CRUDOperationResult::Inserted(_)
+    ));
     setup.commit();
 
     let tx = DbTransaction::begin(&db);
     let ts_start = tx.ts_start();
     for value in 11..=100 {
-        assert!(matches!(tx.delete(table, 1), CRUDOperationResult::Deleted(_)));
-        assert!(matches!(tx.insert(table, 1, value), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            tx.delete(table, 1),
+            CRUDOperationResult::Deleted(_)
+        ));
+        assert!(matches!(
+            tx.insert(table, 1, value),
+            CRUDOperationResult::Inserted(_)
+        ));
     }
     tx.commit();
     db.table(table).unwrap().wait_wal_hardened(ts_start);
     drop(db);
 
     let recovered = TestDb::open_recovered(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        &path, Duration::from_millis(2),
-    ).unwrap();
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        &path,
+        Duration::from_millis(2),
+    )
+    .unwrap();
     let check = DbTransaction::begin(&recovered);
-    assert!(matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r)
-        if r.len() == 1 && r[0].payload == 100));
+    assert!(
+        matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r)
+        if r.len() == 1 && r[0].payload == 100)
+    );
     check.commit();
 
     let _ = std::fs::remove_file(&path);
@@ -146,8 +213,14 @@ fn db_cross_table_transaction_is_atomic_across_tables() {
     let t_b = db.create_table("b").table_id().unwrap();
 
     let tx1 = DbTransaction::begin(&db);
-    assert!(matches!(tx1.insert(t_a, 1, 100), CRUDOperationResult::Inserted(_)));
-    assert!(matches!(tx1.insert(t_b, 2, 200), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        tx1.insert(t_a, 1, 100),
+        CRUDOperationResult::Inserted(_)
+    ));
+    assert!(matches!(
+        tx1.insert(t_b, 2, 200),
+        CRUDOperationResult::Inserted(_)
+    ));
 
     // Own writes, across both tables, are visible within the same still-open transaction.
     assert!(matches!(tx1.point(t_a, 1), CRUDOperationResult::MatchedRecords(r) if r.len() == 1));
@@ -191,32 +264,51 @@ fn db_dropped_transaction_reverts_writes_across_tables_on_conflict() {
     let t_b = db.create_table("b").table_id().unwrap();
 
     let tx1 = DbTransaction::begin(&db);
-    assert!(matches!(tx1.insert(t_a, 1, 100), CRUDOperationResult::Inserted(_)));
-    assert!(matches!(tx1.insert(t_b, 2, 200), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        tx1.insert(t_a, 1, 100),
+        CRUDOperationResult::Inserted(_)
+    ));
+    assert!(matches!(
+        tx1.insert(t_b, 2, 200),
+        CRUDOperationResult::Inserted(_)
+    ));
 
     // A concurrent transaction inserts and commits a third key *after* tx1's
     // snapshot was already taken.
     let db_ref = &db;
     std::thread::scope(|scope| {
-        scope.spawn(move || {
-            let tx2 = DbTransaction::begin(db_ref);
-            assert!(matches!(tx2.insert(t_b, 3, 300), CRUDOperationResult::Inserted(_)));
-            tx2.commit();
-        }).join().unwrap();
+        scope
+            .spawn(move || {
+                let tx2 = DbTransaction::begin(db_ref);
+                assert!(matches!(
+                    tx2.insert(t_b, 3, 300),
+                    CRUDOperationResult::Inserted(_)
+                ));
+                tx2.commit();
+            })
+            .join()
+            .unwrap();
     });
 
     // tx1's snapshot predates tx2's insert, so tx1's own attempt to write
     // the same key must lose the race.
-    assert!(matches!(tx1.insert(t_b, 3, 999), CRUDOperationResult::Conflict));
+    assert!(matches!(
+        tx1.insert(t_b, 3, 999),
+        CRUDOperationResult::Conflict
+    ));
 
     // tx1 is dropped here without commit — both earlier writes must be reverted.
     drop(tx1);
 
     let tx3 = DbTransaction::begin(&db);
-    assert!(matches!(tx3.point(t_a, 1), CRUDOperationResult::MatchedRecords(r) if r.is_empty()),
-        "table a's write by since-aborted tx1 must not be visible");
-    assert!(matches!(tx3.point(t_b, 2), CRUDOperationResult::MatchedRecords(r) if r.is_empty()),
-        "table b's write by since-aborted tx1 must not be visible");
+    assert!(
+        matches!(tx3.point(t_a, 1), CRUDOperationResult::MatchedRecords(r) if r.is_empty()),
+        "table a's write by since-aborted tx1 must not be visible"
+    );
+    assert!(
+        matches!(tx3.point(t_b, 2), CRUDOperationResult::MatchedRecords(r) if r.is_empty()),
+        "table b's write by since-aborted tx1 must not be visible"
+    );
     tx3.commit();
 }
 
@@ -241,8 +333,14 @@ fn db_crash_recovery_round_trip_across_tables() {
 
         let tx = DbTransaction::begin(&db);
         let ts_start = tx.ts_start();
-        assert!(matches!(tx.insert(t_a, 1, 100), CRUDOperationResult::Inserted(_)));
-        assert!(matches!(tx.insert(t_b, 2, 200), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            tx.insert(t_a, 1, 100),
+            CRUDOperationResult::Inserted(_)
+        ));
+        assert!(matches!(
+            tx.insert(t_b, 2, 200),
+            CRUDOperationResult::Inserted(_)
+        ));
         tx.commit();
         // `wal_hardened_version` tracks the highest flushed *ts_start*, not
         // ts_commit (see `WalWriter::hardened`'s doc) — waiting on ts_commit
@@ -255,13 +353,21 @@ fn db_crash_recovery_round_trip_across_tables() {
     // No per-table sibling files (the TpccDatabase-style `path.<table>` shape).
     let sibling_a = std::path::PathBuf::from(format!("{}.a", path.display()));
     let sibling_b = std::path::PathBuf::from(format!("{}.b", path.display()));
-    assert!(!sibling_a.exists() && !sibling_b.exists(),
-        "expected a single shared WAL file, found per-table sibling(s) instead");
+    assert!(
+        !sibling_a.exists() && !sibling_b.exists(),
+        "expected a single shared WAL file, found per-table sibling(s) instead"
+    );
 
     let recovered = TestDb::open_recovered(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        &path, Duration::from_millis(2),
-    ).unwrap();
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        &path,
+        Duration::from_millis(2),
+    )
+    .unwrap();
 
     let version = recovered.current_version();
     let tree_a = recovered.table_named("a").unwrap();
@@ -288,7 +394,10 @@ fn db_crash_recovery_round_trip_across_tables() {
 /// `(worker_id, ts_start)`.
 #[test]
 fn db_single_commit_marker_per_cross_table_transaction() {
-    let path = std::env::temp_dir().join(format!("cmvbt_db_commit_marker_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "cmvbt_db_commit_marker_test_{}.log",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
 
     let db = new_db();
@@ -304,9 +413,18 @@ fn db_single_commit_marker_per_cross_table_transaction() {
     let tx = DbTransaction::begin(&db);
     let worker_id = tx.worker_id();
     let ts_start = tx.ts_start();
-    assert!(matches!(tx.insert(t_a, 1, 10), CRUDOperationResult::Inserted(_)));
-    assert!(matches!(tx.insert(t_b, 2, 20), CRUDOperationResult::Inserted(_)));
-    assert!(matches!(tx.insert(t_c, 3, 30), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        tx.insert(t_a, 1, 10),
+        CRUDOperationResult::Inserted(_)
+    ));
+    assert!(matches!(
+        tx.insert(t_b, 2, 20),
+        CRUDOperationResult::Inserted(_)
+    ));
+    assert!(matches!(
+        tx.insert(t_c, 3, 30),
+        CRUDOperationResult::Inserted(_)
+    ));
     tx.commit();
     // Wait on ts_start, not ts_commit — see the note in
     // `db_crash_recovery_round_trip_across_tables`.
@@ -316,15 +434,19 @@ fn db_single_commit_marker_per_cross_table_transaction() {
     let mut offset = 0usize;
     let mut commit_markers_for_this_tx = 0usize;
     while let Some((body, consumed)) = record::read_frame(&bytes[offset..]) {
-        if let Some((_, WalEntry::Commit { stamp, .. })) = record::decode_entry_for_table::<u64, u64>(body) {
+        if let Some((_, WalEntry::Commit { stamp, .. })) =
+            record::decode_entry_for_table::<u64, u64>(body)
+        {
             if stamp.worker_id() == worker_id && stamp.ts_start() == ts_start {
                 commit_markers_for_this_tx += 1;
             }
         }
         offset += consumed;
     }
-    assert_eq!(commit_markers_for_this_tx, 1,
-        "a transaction touching 3 tables on one shared WAL must log exactly one Commit marker");
+    assert_eq!(
+        commit_markers_for_this_tx, 1,
+        "a transaction touching 3 tables on one shared WAL must log exactly one Commit marker"
+    );
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(format!("{}.meta", path.display()));
@@ -336,7 +458,10 @@ fn db_single_commit_marker_per_cross_table_transaction() {
 /// `Database::create_table`'s doc).
 #[test]
 fn dynamic_table_created_after_wal_and_gc_enabled_inherits_both() {
-    let path = std::env::temp_dir().join(format!("cmvbt_db_dynamic_table_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "cmvbt_db_dynamic_table_test_{}.log",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
 
     let db = new_db();
@@ -353,19 +478,27 @@ fn dynamic_table_created_after_wal_and_gc_enabled_inherits_both() {
     // `mv_query::dispatch::tests::commit_log_stays_bounded_with_gc_enabled`
     // proves for a tree that had GC on from construction.
     for k in 0..10_000u64 {
-        assert!(matches!(db.dispatch_crud(t_late, CRUDOperation::Insert(k, k)), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            db.dispatch_crud(t_late, CRUDOperation::Insert(k, k)),
+            CRUDOperationResult::Inserted(_)
+        ));
     }
     let worker_id = late.worker_id();
     let max_workers = late.ctx.max_workers();
     let len = late.ctx.commit_log_len(worker_id);
-    assert!(len <= max_workers,
-        "expected late table's inherited-GC commit log to stay pruned near max_workers ({max_workers}), got {len}");
+    assert!(
+        len <= max_workers,
+        "expected late table's inherited-GC commit log to stay pruned near max_workers ({max_workers}), got {len}"
+    );
 
     // WAL inheritance: a write through "late" must survive crash + recovery.
     let ts_start = {
         let tx = DbTransaction::begin(&db);
         let ts_start = tx.ts_start();
-        assert!(matches!(tx.insert(t_late, 99_999, 12_345), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            tx.insert(t_late, 99_999, 12_345),
+            CRUDOperationResult::Inserted(_)
+        ));
         tx.commit();
         ts_start
     };
@@ -375,14 +508,26 @@ fn dynamic_table_created_after_wal_and_gc_enabled_inherits_both() {
     drop(db);
 
     let recovered = TestDb::open_recovered(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        &path, Duration::from_millis(2),
-    ).unwrap();
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        &path,
+        Duration::from_millis(2),
+    )
+    .unwrap();
 
     let version = recovered.current_version();
-    match recovered.table_named("late").unwrap().dispatch_crud(CRUDOperation::Point(99_999, version)) {
+    match recovered
+        .table_named("late")
+        .unwrap()
+        .dispatch_crud(CRUDOperation::Point(99_999, version))
+    {
         CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 12_345 => {}
-        other => panic!("late table's write should survive crash+recovery (WAL inheritance), got {other}"),
+        other => panic!(
+            "late table's write should survive crash+recovery (WAL inheritance), got {other}"
+        ),
     }
 
     let _ = std::fs::remove_file(&path);
@@ -400,7 +545,11 @@ fn table_ids_are_assigned_sequentially_by_creation_order() {
     let c = db.create_table("c").table_id().unwrap();
 
     assert_eq!((a, b, c), (0, 1, 2));
-    assert_eq!(db.create_table("b").table_id().unwrap(), b, "re-creating an existing table must return its original id");
+    assert_eq!(
+        db.create_table("b").table_id().unwrap(),
+        b,
+        "re-creating an existing table must return its original id"
+    );
 }
 
 /// The concrete proof of the catalog-file mechanism `create_table`/
@@ -411,7 +560,8 @@ fn table_ids_are_assigned_sequentially_by_creation_order() {
 /// per-name resolution of its own.
 #[test]
 fn catalog_file_records_tables_in_creation_order_and_survives_recovery() {
-    let path = std::env::temp_dir().join(format!("cmvbt_db_catalog_test_{}.log", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("cmvbt_db_catalog_test_{}.log", std::process::id()));
     let meta_path = format!("{}.meta", path.display());
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&meta_path);
@@ -425,12 +575,21 @@ fn catalog_file_records_tables_in_creation_order_and_survives_recovery() {
     }
 
     let catalog = std::fs::read_to_string(&meta_path).unwrap();
-    assert_eq!(catalog.lines().collect::<Vec<_>>(), vec!["first", "second", "third"]);
+    assert_eq!(
+        catalog.lines().collect::<Vec<_>>(),
+        vec!["first", "second", "third"]
+    );
 
     let recovered = TestDb::open_recovered(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        &path, Duration::from_millis(2),
-    ).unwrap();
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        &path,
+        Duration::from_millis(2),
+    )
+    .unwrap();
 
     assert_eq!(recovered.table_named("first").unwrap().table_id(), Some(0));
     assert_eq!(recovered.table_named("second").unwrap().table_id(), Some(1));

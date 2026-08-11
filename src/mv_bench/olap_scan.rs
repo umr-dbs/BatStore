@@ -78,6 +78,11 @@ pub enum OlapMode {
     /// every query but Q1 uses (Q1 only takes `date_hi`, as
     /// `delivered_before`).
     ChBenchmark { region_name: String, date_lo: i64, date_hi: i64 },
+    /// Runs only Q1. Used by the cross-engine `htap_q1` workload so Q4/Q5
+    /// cannot contaminate its OLTP-interference or query-latency results.
+    ChQ1 { delivered_before: i64 },
+    /// Runs only Q6, for the corresponding isolated `htap_q6` workload.
+    ChQ6 { date_lo: i64, date_hi: i64, max_qty: u8 },
 }
 
 fn sleep_checking_stop(dur: Duration, stop: &AtomicBool) {
@@ -220,6 +225,36 @@ fn ch_benchmark_queries_once(db: &TpccDatabase, region_name: &str, date_lo: i64,
     out
 }
 
+fn ch_q1_once(db: &TpccDatabase, delivered_before: i64, run_start: Instant) -> ScanResult {
+    let start = Instant::now();
+    let (q1, ts_start) = tpch_queries::q1(db, delivered_before);
+    ScanResult {
+        mode: "ch_q1_pricing_summary",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        delay_secs: 0.0,
+        snapshot: ts_start,
+        scanned_tuples: q1.len(),
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q1.iter().map(|g| g.sum_amount).sum()),
+        staleness_versions: Some(db.current_version().saturating_sub(ts_start)),
+    }
+}
+
+fn ch_q6_once(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8, run_start: Instant) -> ScanResult {
+    let start = Instant::now();
+    let (q6, ts_start) = tpch_queries::q6(db, date_lo, date_hi, max_qty);
+    ScanResult {
+        mode: "ch_q6_forecast_revenue",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        delay_secs: 0.0,
+        snapshot: ts_start,
+        scanned_tuples: 1,
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q6),
+        staleness_versions: Some(db.current_version().saturating_sub(ts_start)),
+    }
+}
+
 /// One OLAP worker thread's whole run, streaming each completed scan/hold
 /// back to `results` as it finishes. Runs until `stop` is set (checked
 /// between iterations, and — for `OpenAndSleep` — during the hold itself).
@@ -255,6 +290,16 @@ pub fn run_olap_worker(db: &TpccDatabase, mode: OlapMode, stop: &AtomicBool, res
                         break;
                     }
                 }
+            }
+        }
+        OlapMode::ChQ1 { delivered_before } => {
+            while !stop.load(Relaxed) {
+                let _ = results.send(ch_q1_once(db, delivered_before, run_start));
+            }
+        }
+        OlapMode::ChQ6 { date_lo, date_hi, max_qty } => {
+            while !stop.load(Relaxed) {
+                let _ = results.send(ch_q6_once(db, date_lo, date_hi, max_qty, run_start));
             }
         }
     }

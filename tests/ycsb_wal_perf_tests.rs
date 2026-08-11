@@ -34,6 +34,7 @@ fn config(num_threads: usize, wal_path: PathBuf, batch_size: Option<usize>) -> D
         mix: YcsbMix::workload("a").expect("workload 'a' must exist"),
         distribution: RequestDistribution::Zipfian { theta: 0.99 },
         max_scan_length: 100,
+        write_all_fields: false,
         gc: true,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,

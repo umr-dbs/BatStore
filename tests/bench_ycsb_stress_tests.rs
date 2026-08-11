@@ -60,7 +60,7 @@ fn stress_worker(
                 ycsb_txn::read(&tree, sampler.sample(record_count, max_key_now));
             }
             YcsbOpType::Update => {
-                ycsb_txn::update(&tree, &cfg, sampler.sample(record_count, max_key_now));
+                ycsb_txn::update(&tree, &cfg, sampler.sample(record_count, max_key_now), false);
             }
             YcsbOpType::Insert => {
                 let key = current_max_key.fetch_add(1, Relaxed) + 1;
@@ -71,7 +71,7 @@ fn stress_worker(
                 ycsb_txn::scan(&tree, key, random_scan_length(max_scan_length));
             }
             YcsbOpType::ReadModifyWrite => {
-                ycsb_txn::read_modify_write(&tree, &cfg, sampler.sample(record_count, max_key_now));
+                ycsb_txn::read_modify_write(&tree, &cfg, sampler.sample(record_count, max_key_now), false);
             }
         }
     }
