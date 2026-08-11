@@ -28,6 +28,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
+from xml.sax.saxutils import escape
 
 from . import common
 
@@ -55,9 +57,9 @@ TPCC_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 <parameters>
     <type>POSTGRES</type>
     <driver>org.postgresql.Driver</driver>
-    <url>jdbc:postgresql://localhost:5432/benchbase?sslmode=disable&amp;ApplicationName=tpcc&amp;reWriteBatchedInserts=true</url>
-    <username>admin</username>
-    <password>password</password>
+    <url>jdbc:postgresql://localhost:5432/{database}?sslmode=disable&amp;ApplicationName=tpcc&amp;reWriteBatchedInserts=true</url>
+    <username>{username}</username>
+    <password>{password}</password>
     <reconnectOnConnectionFailure>true</reconnectOnConnectionFailure>
     <isolation>TRANSACTION_REPEATABLE_READ</isolation>
     <batchsize>128</batchsize>
@@ -66,7 +68,9 @@ TPCC_CONFIG_TEMPLATE = """<?xml version="1.0"?>
     <works>
         <work>
             <time>{duration}</time>
-            <rate>10000</rate>
+            <!-- Measure saturation throughput; a numeric rate is a global BenchBase
+                 client-side request throttle and would flatten every thread sweep. -->
+            <rate>unlimited</rate>
             <weights>45,43,4,4,4</weights>
         </work>
     </works>
@@ -93,9 +97,9 @@ CHBENCHMARK_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 <parameters>
     <type>POSTGRES</type>
     <driver>org.postgresql.Driver</driver>
-    <url>jdbc:postgresql://localhost:5432/benchbase?sslmode=disable&amp;ApplicationName=chbenchmark&amp;reWriteBatchedInserts=true</url>
-    <username>admin</username>
-    <password>password</password>
+    <url>jdbc:postgresql://localhost:5432/{database}?sslmode=disable&amp;ApplicationName=chbenchmark&amp;reWriteBatchedInserts=true</url>
+    <username>{username}</username>
+    <password>{password}</password>
     <reconnectOnConnectionFailure>true</reconnectOnConnectionFailure>
     <isolation>TRANSACTION_SERIALIZABLE</isolation>
     <batchsize>128</batchsize>
@@ -108,7 +112,9 @@ CHBENCHMARK_CONFIG_TEMPLATE = """<?xml version="1.0"?>
     <works>
         <work>
             <time>{duration}</time>
-            <rate>10000</rate>
+            <!-- Neither the OLTP nor analytical client should impose a throughput cap. -->
+            <rate>unlimited</rate>
+            <rate bench="chbenchmark">unlimited</rate>
             <weights bench="tpcc">45,43,4,4,4</weights>
             <weights bench="chbenchmark">{ch_weights}</weights>
         </work>
@@ -151,9 +157,9 @@ YCSB_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 <parameters>
     <type>POSTGRES</type>
     <driver>org.postgresql.Driver</driver>
-    <url>jdbc:postgresql://localhost:5432/benchbase?sslmode=disable&amp;ApplicationName=ycsb&amp;reWriteBatchedInserts=true</url>
-    <username>admin</username>
-    <password>password</password>
+    <url>jdbc:postgresql://localhost:5432/{database}?sslmode=disable&amp;ApplicationName=ycsb&amp;reWriteBatchedInserts=true</url>
+    <username>{username}</username>
+    <password>{password}</password>
     <reconnectOnConnectionFailure>true</reconnectOnConnectionFailure>
     <isolation>TRANSACTION_REPEATABLE_READ</isolation>
     <batchsize>128</batchsize>
@@ -163,7 +169,9 @@ YCSB_CONFIG_TEMPLATE = """<?xml version="1.0"?>
     <works>
         <work>
             <time>{duration}</time>
-            <rate>10000</rate>
+            <!-- Measure saturation throughput rather than BenchBase's sample-config
+                 default ceiling of 10,000 requests/second. -->
+            <rate>unlimited</rate>
             <weights>{weights}</weights>
         </work>
     </works>
@@ -191,6 +199,20 @@ def _find_postmaster_pid() -> Optional[int]:
         return int(result.stdout.strip().splitlines()[0])
     except (ValueError, IndexError):
         return None
+
+
+def _template_connection_values() -> dict[str, str]:
+    """BenchBase XML values matching common's environment-overridable connection.
+
+    The database is a JDBC URL path component; credentials are XML text. Keeping these
+    transformations here avoids both malformed generated configs and silently connecting
+    as the old hardcoded admin/password user when PG_* overrides are set.
+    """
+    return {
+        "database": quote(common.PG_DATABASE, safe=""),
+        "username": escape(common.PG_ROLE),
+        "password": escape(common.PG_PASSWORD),
+    }
 
 
 def _set_autovacuum(enabled: bool) -> None:
@@ -319,6 +341,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         threads = scale.tpcc_terminals
         config_path.write_text(TPCC_CONFIG_TEMPLATE.format(
             warehouses=scale.tpcc_warehouses, terminals=threads, duration=duration,
+            **_template_connection_values(),
         ))
         bench_type = "tpcc"
         metric_name = "new_order_per_sec"
@@ -328,6 +351,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         config_path.write_text(CHBENCHMARK_CONFIG_TEMPLATE.format(
             warehouses=scale.tpcc_warehouses, terminals=threads, duration=duration,
             ch_weights=CHBENCHMARK_WEIGHTS[workload],
+            **_template_connection_values(),
         ))
         bench_type = "tpcc,chbenchmark"
         metric_name = "new_order_per_sec"
@@ -338,6 +362,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         config_path.write_text(YCSB_CONFIG_TEMPLATE.format(
             scalefactor=scale.ycsb_records / 1000.0, theta=scale.ycsb_theta,
             terminals=threads, duration=duration, weights=YCSB_WEIGHTS[letter],
+            **_template_connection_values(),
         ))
         bench_type = "ycsb"
         metric_name = "ops_per_sec"

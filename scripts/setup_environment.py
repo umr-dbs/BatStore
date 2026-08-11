@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -462,6 +463,25 @@ def step_postgres_tmpfs() -> None:
          str(PG_TMPFS_DATA_DIR / "PG_VERSION")]
     ).returncode == 0
 
+    # Running the whole script through sudo makes mkdir(parents=True) create the shared
+    # scratch root as root. Restore the actual invoking user's ownership so subsequent
+    # engines can create sibling directories such as libmdbx_data. PostgreSQL's child
+    # directory remains separately owned by postgres.
+    SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
+    if "SUDO_UID" in os.environ and "SUDO_GID" in os.environ:
+        invoking_uid = int(os.environ["SUDO_UID"])
+        invoking_gid = int(os.environ["SUDO_GID"])
+        os.chown(SCRATCH_ROOT, invoking_uid, invoking_gid)
+        # Repair engine scratch directories left by an earlier root-run too. Do not touch
+        # postgresql_data: the server correctly requires that tree to remain postgres-owned.
+        for name in (
+            "cmvbt_data", "leanstore_data", "wiredtiger_data", "libmdbx_data",
+            "vweaver_ermia_log", "vweaver_ermia_frugal_log",
+        ):
+            engine_dir = SCRATCH_ROOT / name
+            if engine_dir.exists():
+                run(["chown", "-R", f"{invoking_uid}:{invoking_gid}", str(engine_dir)])
+
     if already_linked and tmpfs_populated:
         print(f"{real_datadir} is already a symlink into tmpfs and looks populated - skipping.")
         return
@@ -601,7 +621,10 @@ def step_cmvbt() -> None:
         else common.CMVBT_REPO
     )
     log(f"Building cMVBT ({active_repo})")
-    run(["cargo", "build", "--release"], cwd=active_repo)
+    # setup_environment promises a binary usable by every wrapper, including libmdbx.
+    # Building without this feature makes `compare_engines.py --skip-build --engines
+    # libmdbx` fail because the mdbx_ycsb/mdbx_tpcc subcommands do not exist.
+    run(common.cmvbt_cargo_build_args("mdbx-backend"), cwd=active_repo)
 
 
 def step_python_venv() -> None:

@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
+import math
 import os
 import subprocess
 import sys
@@ -149,6 +150,18 @@ def main() -> None:
     for g in gc_list:
         if g not in ("on", "off"):
             sys.exit(f"unknown --gc value '{g}' (expected 'on' and/or 'off')")
+    if not engines or not workloads or not gc_list:
+        sys.exit("--engines, --workloads, and --gc must each contain at least one value")
+    if not thread_list or any(t <= 0 for t in thread_list):
+        sys.exit("--threads must contain positive integers")
+    if scale.tpcc_warehouses <= 0 or scale.tpcc_duration <= 0:
+        sys.exit("--warehouses and --tpcc-duration must be positive")
+    if scale.ycsb_records <= 0 or scale.ycsb_duration <= 0:
+        sys.exit("--ycsb-records and --ycsb-duration must be positive")
+    if not math.isfinite(scale.ycsb_theta) or scale.ycsb_theta < 0.0:
+        sys.exit("--theta must be a finite, non-negative number")
+    if scale.dram_gib <= 0:
+        sys.exit("--dram-gib must be positive")
 
     # Must be absolute: each engine wrapper spawns its subprocess with a different cwd
     # (output_dir for leanstore/wiredtiger, BENCHBASE_HOME for postgres), so a relative
@@ -224,11 +237,10 @@ def main() -> None:
             module = ENGINE_MODULES[engine_name]
             supports_gc = getattr(module, "SUPPORTS_GC_TOGGLE", False)
             gc_variants = gc_list if supports_gc else ["n/a"]
-            # Only meaningful for postgres_benchbase.py: True exactly once per
-            # (workload, engine), so its expensive --create/--load only runs on the first
-            # sweep point and every later (threads, gc) combo reuses that loaded data - see
-            # postgres_benchbase.run()'s `reload` docstring. Every other engine ignores it.
-            first_call = True
+            # Only meaningful for postgres_benchbase.py: remember which data-volume
+            # signature is currently loaded so identical sweep points can reuse it.
+            # Every other engine ignores reload and starts from fresh storage each time.
+            loaded_signature = None
             for threads in thread_list:
                 # TPC-C spec sizes populations at ~10 terminals per warehouse; a fixed
                 # warehouse count while terminals sweep up to 128 would push the
@@ -261,13 +273,29 @@ def main() -> None:
                     print(f"=== {workload} / {engine_name} / threads={threads} / gc={gc_variant} / "
                           f"dram_gib={scale_variant.dram_gib} ===")
                     try:
-                        result = module.run(workload, scale_variant, out_dir, gc=gc_variant, reload=first_call)
+                        # BenchBase alone persists and reuses its loaded database. TPC-C's
+                        # warehouse count can grow during the thread sweep, so reload when
+                        # that data-volume signature changes. A failed load/run must not
+                        # suppress loading at the next point either.
+                        data_signature = (
+                            scale_variant.tpcc_warehouses
+                            if workload in (["tpcc"] + common.HTAP_WORKLOADS)
+                            else scale_variant.ycsb_records
+                        )
+                        reload_data = engine_name == "postgres" and data_signature != loaded_signature
+                        result = module.run(
+                            workload, scale_variant, out_dir, gc=gc_variant, reload=reload_data,
+                        )
                     except Exception as e:  # noqa: BLE001 - one engine's failure shouldn't abort the whole matrix
                         result = common.NormalizedResult(
                             engine_name, workload, scale_variant.label, _workload_duration(workload, scale_variant),
                             "error", 0.0, 0.0, threads=threads, gc_enabled=gc_variant, notes=f"EXCEPTION: {e}",
                         )
-                    first_call = False
+                    if engine_name == "postgres" and not (
+                        result.primary_metric_name == "error"
+                        or result.notes.startswith(("FAILED", "TIMEOUT", "EXCEPTION"))
+                    ):
+                        loaded_signature = data_signature
                     common.append_manifest_row(manifest_path, result)
                     status = "OK" if not result.notes else result.notes
                     print(f"    {result.primary_metric_name}={result.primary_metric_value:.2f}  "

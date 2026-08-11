@@ -156,7 +156,17 @@ def fresh_scratch_dir(name: str) -> Path:
             f"`sudo mount -t tmpfs -o size=64G tmpfs {SCRATCH_ROOT}` (mkdir it first)."
         )
     scratch_dir = SCRATCH_ROOT / name
-    shutil.rmtree(scratch_dir, ignore_errors=True)
+    # Never ignore cleanup failures: reusing a partially stale database directory would
+    # contaminate the next measurement, and a root-owned directory should produce an
+    # actionable ownership error instead of failing later inside an engine.
+    if scratch_dir.exists():
+        try:
+            shutil.rmtree(scratch_dir)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"cannot reset benchmark scratch directory {scratch_dir}; repair ownership with "
+                f"`sudo chown -R $(id -u):$(id -g) {scratch_dir}`"
+            ) from exc
     scratch_dir.mkdir(parents=True, exist_ok=True)
     return scratch_dir
 

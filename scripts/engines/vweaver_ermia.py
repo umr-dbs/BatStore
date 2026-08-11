@@ -249,7 +249,7 @@ def _parse_throughput(stdout_path: Path, workload: str) -> float:
     if not stdout_path.exists():
         return 0.0
     text = stdout_path.read_text(errors="replace")
-    if workload == "tpcc":
+    if workload in (["tpcc"] + common.HTAP_WORKLOADS):
         for line in text.splitlines():
             m = _TXN_ROW_RE.match(line)
             if m and m.group(1) == "NewOrder":

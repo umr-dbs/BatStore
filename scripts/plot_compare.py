@@ -2,7 +2,7 @@
 """Plot figures for a scripts/compare_engines.py cross-engine comparison run:
 TPC-C and YCSB A-F throughput, peak memory, throughput-vs-threads, GC on/off
 comparison, and scan/OLAP latency, overlaid across
-cMVBT/LeanStore/WiredTiger/PostgreSQL.
+cMVBT/LeanStore/WiredTiger/PostgreSQL/vWeaver/libmdbx variants.
 
 Reads <run_dir>/manifest.csv (one row per engine/workload/threads/gc combo,
 written incrementally by compare_engines.py) and writes every figure as both
@@ -26,10 +26,6 @@ for them. Every plot's title/filename also says which thread count it's
 pinned to, since it's no longer the only data for that engine/workload in
 the manifest.
 
-Note: PostgreSQL's peak_rss_mb is always 0 (see engines/postgres_benchbase.py's
-docstring for why) - the memory plot excludes it rather than showing a
-misleading zero bar.
-
 The threads-sweep plots (x=threads, y=throughput, one line per engine - the whole point
 of compare_engines.py's thread sweep) are split by workload group rather than one giant
 figure or one-file-per-workload: threads_sweep_tpcc.svg (TPC-C, its own figure),
@@ -46,21 +42,25 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-ENGINE_ORDER = ["cmvbt", "leanstore", "wiredtiger", "postgres", "vweaver_ermia", "libmdbx"]
+ENGINE_ORDER = [
+    "cmvbt", "leanstore", "wiredtiger", "postgres", "vweaver_ermia",
+    "vweaver_ermia_frugal", "libmdbx",
+]
 ENGINE_LABELS = {
     "cmvbt": "cMVBT", "leanstore": "LeanStore", "wiredtiger": "WiredTiger", "postgres": "PostgreSQL",
-    "vweaver_ermia": "vWeaver/ERMIA", "libmdbx": "libmdbx",
+    "vweaver_ermia": "vWeaver/ERMIA", "vweaver_ermia_frugal": "Frugal/ERMIA",
+    "libmdbx": "libmdbx",
 }
 ENGINE_COLORS = {
     "cmvbt": "tab:green", "leanstore": "tab:blue", "wiredtiger": "tab:orange", "postgres": "tab:red",
-    "vweaver_ermia": "tab:purple", "libmdbx": "tab:brown",
+    "vweaver_ermia": "tab:purple", "vweaver_ermia_frugal": "tab:pink", "libmdbx": "tab:brown",
 }
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
 HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
 # Engines with a real, working GC on/off toggle (see engines/*.py's SUPPORTS_GC_TOGGLE) -
 # leanstore/wiredtiger only ever report gc_enabled="n/a" (no working toggle in this
 # checkout, see the plan's Context section), so they're excluded from GC-comparison plots.
-GC_TOGGLE_ENGINES = ["cmvbt", "postgres"]
+GC_TOGGLE_ENGINES = ["cmvbt", "postgres", "vweaver_ermia", "vweaver_ermia_frugal"]
 
 
 def _engine_sort_key(name: str):
@@ -70,9 +70,10 @@ def _engine_sort_key(name: str):
 def _save(fig, out_dir: Path, name: str):
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
-    path = out_dir / f"{name}.svg"
-    fig.savefig(path)
-    print(f"Wrote {path}")
+    for suffix in ("svg", "pdf"):
+        path = out_dir / f"{name}.{suffix}"
+        fig.savefig(path)
+        print(f"Wrote {path}")
     plt.close(fig)
 
 
@@ -91,7 +92,7 @@ def load_manifest(run_dir: Path) -> pd.DataFrame:
         raise SystemExit(f"{path} not found — is {run_dir} a compare_engines.py run directory?")
     df = pd.read_csv(path)
     df["notes"] = df["notes"].fillna("")
-    df["failed"] = df["notes"].str.startswith("FAILED") | df["notes"].str.startswith("EXCEPTION")
+    df["failed"] = df["notes"].str.startswith(("FAILED", "TIMEOUT", "EXCEPTION"))
     df["gc_enabled"] = df["gc_enabled"].fillna("n/a")
     return df
 
@@ -167,10 +168,10 @@ def plot_ycsb_throughput(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: s
 
 
 def plot_memory_usage(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str, out_dir: Path):
-    """Peak RSS by engine, per workload — PostgreSQL excluded (see module docstring)."""
-    df = ref_slice[ref_slice["engine"] != "postgres"].copy()
+    """Peak RSS by engine, per workload."""
+    df = ref_slice.copy()
     if df.empty:
-        print(f"No non-Postgres rows in manifest.csv for gc={gc_choice} — skipping memory plot.")
+        print(f"No rows in manifest.csv for gc={gc_choice} — skipping memory plot.")
         return
     workloads = sorted(df["workload"].unique(), key=lambda w: (w != "tpcc", w))
 
@@ -186,7 +187,7 @@ def plot_memory_usage(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str,
     for idx in range(len(workloads), rows * cols):
         axes[idx // cols][idx % cols].axis("off")
 
-    fig.suptitle(f"Peak memory usage by engine (threads={ref_threads}, gc={gc_choice}; PostgreSQL not tracked)")
+    fig.suptitle(f"Peak memory usage by engine (threads={ref_threads}, gc={gc_choice})")
     _save(fig, out_dir, f"memory_by_engine_gc_{gc_choice}")
 
 
@@ -315,15 +316,15 @@ def plot_throughput_vs_threads_htap(manifest: pd.DataFrame, out_dir: Path):
 
 
 def plot_gc_comparison(manifest: pd.DataFrame, ref_threads: int, out_dir: Path):
-    """Grouped gc=on vs gc=off bars, one subplot per workload - only cmvbt/postgres have a
-    real toggle (see GC_TOGGLE_ENGINES), at the reference thread count."""
+    """Grouped gc=on vs gc=off bars for engines with a real toggle, one subplot per
+    workload at the reference thread count."""
     df = manifest[
         (manifest["engine"].isin(GC_TOGGLE_ENGINES))
         & (manifest["threads"] == ref_threads)
         & (manifest["gc_enabled"].isin(["on", "off"]))
     ]
     if df.empty:
-        print("No gc=on/off rows for cmvbt/postgres — skipping GC comparison plot.")
+        print("No rows for engines with a GC toggle — skipping GC comparison plot.")
         return
     workloads = sorted(df["workload"].unique(), key=lambda w: (w != "tpcc", w))
     cols = 3
@@ -347,8 +348,8 @@ def plot_gc_comparison(manifest: pd.DataFrame, ref_threads: int, out_dir: Path):
             ax.legend(fontsize=8)
     for idx in range(len(workloads), rows * cols):
         axes[idx // cols][idx % cols].axis("off")
-    fig.suptitle(f"GC on vs. off throughput (threads={ref_threads}; leanstore/wiredtiger have no working "
-                 f"GC toggle in this checkout, not shown)")
+    fig.suptitle(f"GC on vs. off throughput (threads={ref_threads}; engines without a working "
+                 f"GC toggle are not shown)")
     _save(fig, out_dir, "gc_on_vs_off")
 
 
