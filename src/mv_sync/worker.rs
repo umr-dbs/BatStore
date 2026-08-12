@@ -46,8 +46,8 @@ impl WorkerRegistry {
     }
 }
 
-// Both caches below hold exactly one tree's worth of state per thread, not a
-// searchable collection of many: every real deployment of this tree (main
+// Both caches below keep the two most recently used trees inline per thread:
+// every real deployment of this tree (main
 // benchmark harnesses — `main_load`, TPC-C, YCSB — and any production use)
 // creates exactly one tree that lives for the whole process, so "does this
 // call's tree match the one we already have cached" is a single comparison,
@@ -61,7 +61,9 @@ impl WorkerRegistry {
 // back to a tree it had evicted, exactly like a genuinely new thread's first
 // touch. A prior version of this cache was a 16-slot searchable array sized
 // for the `#[test]`-reuse case — that's solving a test-harness inconvenience
-// with production-hot-path complexity; a single slot handles it just fine.
+// with production-hot-path complexity. Two MRU slots handle the realistic
+// alternating-tree case while keeping the common primary hit to one comparison;
+// a lazy overflow vector preserves identities/state for rarer additional trees.
 
 thread_local! {
     // Keyed by each tree's process-wide unique `tree_uid`, *not* its address:
@@ -81,33 +83,59 @@ thread_local! {
     // needs that, `get`/`set` round-trip it by value instead.) `u64::MAX`
     // marks an empty slot: real `tree_uid`s come from a `fetch_add` counter
     // starting at 0, so this value is unreachable as a genuine one.
-    static WORKER_CACHE: Cell<(u64, WorkerId)> = Cell::new((u64::MAX, 0));
+    static WORKER_CACHE: Cell<(u64, WorkerId, u64, WorkerId)> =
+        Cell::new((u64::MAX, 0, u64::MAX, 0));
+
+    // Cold-path storage for threads that touch more than two databases.
+    // Keeping it separate preserves WORKER_CACHE's single-comparison primary
+    // hit and avoids constructing or borrowing a Vec in the normal case.
+    static WORKER_CACHE_OVERFLOW: SafeCell<Vec<(u64, WorkerId)>> =
+        SafeCell::new(Vec::new());
 }
 
 /// Returns this thread's `WorkerId` for `registry`'s tree, assigning one on
-/// first use. Stable for the lifetime of the thread as long as this is still
-/// the last tree this thread touched (see the module-level doc for why a
-/// single cached entry, not a searchable collection, is the right shape
-/// here) — a call for a *different* tree overwrites the slot and draws a
-/// fresh `WorkerId` via `registry.acquire()`. That's still correct (this
-/// thread's earlier writes on the evicted tree just stop qualifying for the
-/// "my own write" fast path in `visibility::is_visible`, falling back to the
-/// slower cross-worker check, which still gives the right answer).
+/// first use. The two-entry MRU avoids consuming another permanent registry
+/// slot when a thread alternates between two trees. A third distinct tree
+/// evicts the least-recently-used entry and draws a fresh `WorkerId` if that
+/// tree is encountered again later. Such entries are retained in a lazily
+/// populated overflow vector so a registry slot is never acquired twice by
+/// the same thread/database pair.
 pub(crate) fn worker_id_for(registry: &WorkerRegistry) -> WorkerId {
     WORKER_CACHE.with(|cache| {
-        let (uid, id) = cache.get();
-        if uid == registry.db_uid {
-            return id;
+        let mut slot = cache.get();
+        if slot.0 == registry.db_uid {
+            return slot.1;
         }
 
-        let id = registry.acquire();
-        cache.set((registry.db_uid, id));
-        id
+        if slot.2 == registry.db_uid {
+            std::mem::swap(&mut slot.0, &mut slot.2);
+            std::mem::swap(&mut slot.1, &mut slot.3);
+        } else {
+            let requested = WORKER_CACHE_OVERFLOW.with(|overflow| {
+                let overflow = overflow.get_mut();
+                if let Some(index) = overflow.iter().position(|entry| entry.0 == registry.db_uid) {
+                    let requested = overflow[index];
+                    overflow[index] = (slot.2, slot.3);
+                    requested
+                } else {
+                    if slot.2 != u64::MAX {
+                        overflow.push((slot.2, slot.3));
+                    }
+                    (registry.db_uid, registry.acquire())
+                }
+            });
+            slot.2 = slot.0;
+            slot.3 = slot.1;
+            slot.0 = requested.0;
+            slot.1 = requested.1;
+        }
+        cache.set(slot);
+        slot.1
     })
 }
 
 thread_local! {
-    // Same keying rationale (and same single-slot-over-searchable-collection
+    // Same keying rationale (and same two-slot-over-searchable-collection
     // reasoning) as `WORKER_CACHE` above — see the module-level doc. Kept as
     // a separate cell (rather than folded into `WORKER_CACHE`) since it
     // holds a whole `SnapshotCache`, not just a `u16` id.
@@ -124,7 +152,16 @@ thread_local! {
     // `with_snapshot_cache`'s only two callers (`version_handle.rs`'s
     // `is_visible_stamp`/`with_visibility_checker`) pass a closure that never
     // calls back into `with_snapshot_cache` (or `worker_id_for`) itself.
-    static SNAPSHOT_CACHE: SafeCell<(u64, SnapshotCache)> = SafeCell::new((u64::MAX, SnapshotCache::new(0)));
+    // Two-entry MRU: the normal hot path still performs exactly the same one
+    // primary-UID comparison as before. Only a primary miss checks the second
+    // slot, avoiding allocation churn when one thread alternates between two
+    // databases without adding work to the overwhelmingly common hit path.
+    static SNAPSHOT_CACHE: SafeCell<(u64, SnapshotCache, u64, SnapshotCache)> =
+        SafeCell::new((u64::MAX, SnapshotCache::new(0), u64::MAX, SnapshotCache::new(0)));
+
+    // As above, this is never accessed on a primary or secondary inline hit.
+    static SNAPSHOT_CACHE_OVERFLOW: SafeCell<Vec<(u64, SnapshotCache)>> =
+        SafeCell::new(Vec::new());
 }
 
 /// Gives `f` this thread's own `SnapshotCache` for `registry`'s tree,
@@ -136,16 +173,37 @@ thread_local! {
 /// (accidentally or otherwise) touch another worker's cache, instead of
 /// merely relying on every call site happening to pass its own id.
 ///
-/// Eviction follows the same single-slot policy as `worker_id_for` — see the
-/// module-level doc; the only cost of evicting a tree's `SnapshotCache` here
-/// is that thread re-warming it (one `lcb` query per foreign worker it goes
-/// on to touch again), not a correctness issue.
+/// More than two databases spill into lazy cold-path storage, following the
+/// same MRU policy as `worker_id_for`. This retains warmed LCB entries without
+/// putting a collection access on the normal one-database path.
 pub(crate) fn with_snapshot_cache<R>(registry: &WorkerRegistry, f: impl FnOnce(&mut SnapshotCache) -> R) -> R {
     SNAPSHOT_CACHE.with(|cache| {
         let slot = cache.get_mut();
 
         if slot.0 != registry.db_uid {
-            *slot = (registry.db_uid, SnapshotCache::new(registry.max_workers()));
+            if slot.2 == registry.db_uid {
+                std::mem::swap(&mut slot.0, &mut slot.2);
+                std::mem::swap(&mut slot.1, &mut slot.3);
+            } else {
+                let requested = SNAPSHOT_CACHE_OVERFLOW.with(|overflow| {
+                    let overflow = overflow.get_mut();
+                    if let Some(index) = overflow.iter().position(|entry| entry.0 == registry.db_uid) {
+                        let requested = overflow.swap_remove(index);
+                        if slot.2 != u64::MAX {
+                            overflow.push((slot.2, std::mem::replace(&mut slot.3, SnapshotCache::new(0))));
+                        }
+                        requested
+                    } else {
+                        if slot.2 != u64::MAX {
+                            overflow.push((slot.2, std::mem::replace(&mut slot.3, SnapshotCache::new(0))));
+                        }
+                        (registry.db_uid, SnapshotCache::new(registry.max_workers()))
+                    }
+                });
+                slot.2 = slot.0;
+                slot.3 = std::mem::replace(&mut slot.1, requested.1);
+                slot.0 = requested.0;
+            }
         }
 
         f(&mut slot.1)

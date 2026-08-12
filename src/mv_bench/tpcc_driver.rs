@@ -228,18 +228,23 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
         .unwrap_or_else(|e| panic!("tpcc: failed to create output_dir {}: {e}", cfg.output_dir.display()));
     let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
-    let db = Arc::new(TpccDatabase::new_with_big_tree_size(cfg.root_star_index, cfg.big_tree_size));
+    let worker_capacity = 1 + num_terminals * terminal_cost + num_olap;
+    let db = Arc::new(match &cfg.wal {
+        Some((wal_path, flush_interval)) => {
+            let _ = fs::remove_file(wal_path);
+            TpccDatabase::new_with_big_tree_size_and_max_workers_and_wal(
+                cfg.root_star_index, cfg.big_tree_size, worker_capacity,
+                wal_path, *flush_interval, cfg.wal_lockfree_batch_size,
+            ).expect("failed to configure WAL at database construction")
+        }
+        None => TpccDatabase::new_with_big_tree_size_and_max_workers(
+            cfg.root_star_index, cfg.big_tree_size, worker_capacity,
+        ),
+    });
     if cfg.gc {
         db.enable_gc(cfg.update_in_place);
     }
 
-    if let Some((wal_path, flush_interval)) = &cfg.wal {
-        let _ = fs::remove_file(wal_path);
-        match cfg.wal_lockfree_batch_size {
-            Some(batch_size) => db.enable_wal_lockfree(wal_path, *flush_interval, batch_size).expect("failed to attach lock-free WAL"),
-            None => db.enable_wal(wal_path, *flush_interval).expect("failed to attach WAL"),
-        }
-    }
 
     println!(
         "TPC-C + OLAP scan benchmark\n\

@@ -43,8 +43,8 @@ fn crash_recovery_round_trip() {
     let path = temp_log_path("round_trip");
     let _ = fs::remove_file(&path);
 
-    let tree = TestTree::make_standard(RootIndexType::default());
-    tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
+    let tree = TestTree::make_standard(RootIndexType::default())
+        .with_wal(&path, Duration::from_millis(2)).unwrap();
 
     let mut oracle: HashMap<u64, u64> = HashMap::new();
 
@@ -118,8 +118,8 @@ fn concurrent_writers_crash_recovery_round_trip() {
     let path = temp_log_path("concurrent_round_trip");
     let _ = fs::remove_file(&path);
 
-    let tree = TestTree::make_standard(RootIndexType::default());
-    tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
+    let tree = TestTree::make_standard(RootIndexType::default())
+        .with_wal(&path, Duration::from_millis(2)).unwrap();
 
     const THREADS: u64 = 8;
     const KEYS_PER_THREAD: u64 = 200;
@@ -172,8 +172,8 @@ fn torn_write_stops_cleanly() {
     let _ = fs::remove_file(&path);
 
     {
-        let tree = TestTree::make_standard(RootIndexType::default());
-        tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
+        let tree = TestTree::make_standard(RootIndexType::default())
+            .with_wal(&path, Duration::from_millis(2)).unwrap();
         for k in 0..20u64 {
             tree.dispatch_crud(CRUDOperation::Insert(k, k * 10));
         }
@@ -217,8 +217,8 @@ fn wait_wal_hardened_reflects_real_on_disk_durability() {
     let path = temp_log_path("async_hardened");
     let _ = fs::remove_file(&path);
 
-    let tree = TestTree::make_standard(RootIndexType::default());
-    tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
+    let tree = TestTree::make_standard(RootIndexType::default())
+        .with_wal(&path, Duration::from_millis(2)).unwrap();
 
     let mut last_ts = 0;
     for k in 0..500u64 {
@@ -298,8 +298,8 @@ fn logged_but_never_committed_write_does_not_resurface_after_recovery() {
     let _ = fs::remove_file(&path);
 
     {
-        let tree = TestTree::make_standard(RootIndexType::default());
-        tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
+        let tree = TestTree::make_standard(RootIndexType::default())
+            .with_wal(&path, Duration::from_millis(2)).unwrap();
 
         assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(1, 100)), CRUDOperationResult::Inserted(_)));
 
@@ -357,7 +357,8 @@ fn replay_recovers_records_after_an_interior_hole() {
 
     fs::write(&path, &bytes).unwrap();
 
-    let tree = TestTree::make_standard(RootIndexType::default());
+    let tree = TestTree::make_standard(RootIndexType::default())
+        .with_wal_lockfree(&path, Duration::from_millis(500), 3).unwrap();
     let valid_len = crate::mv_wal::recovery::replay(&tree, &path).unwrap();
     assert_eq!(valid_len, bytes.len() as u64, "the whole file, hole included, is the valid prefix here - nothing trailing to truncate");
 
@@ -388,13 +389,13 @@ fn concurrent_writers_lockfree_batched_crash_recovery_round_trip() {
     let path = temp_log_path("lockfree_batched_round_trip");
     let _ = fs::remove_file(&path);
 
-    let tree = TestTree::make_standard(RootIndexType::default());
+    let tree = TestTree::make_standard(RootIndexType::default())
+        .with_wal_lockfree(&path, Duration::from_millis(500), 3).unwrap();
     // A generous flush_interval (deliberately longer than this test should
     // take to issue all its writes) plus a small batch_size: most of what
     // reaches disk here is forced out either by a batch filling up
     // (batch_size=3) or by the one final sweep `Drop` triggers, not by a
     // sweep firing mid-run.
-    tree.enable_wal_lockfree(&path, Duration::from_millis(500), 3).unwrap();
 
     const THREADS: u64 = 8;
     const KEYS_PER_THREAD: u64 = 200;

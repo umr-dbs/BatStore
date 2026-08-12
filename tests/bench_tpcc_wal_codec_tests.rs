@@ -120,8 +120,8 @@ fn crash_recovery_round_trip_for_boxed_rows() {
     let stock_key = k_stock(1, 7);
 
     {
-        let tree = TpccTree::make_standard(RootIndexType::default());
-        tree.enable_wal(&path, std::time::Duration::from_millis(2)).unwrap();
+        let tree = TpccTree::make_standard(RootIndexType::default())
+            .with_wal(&path, std::time::Duration::from_millis(2)).unwrap();
 
         assert!(matches!(
             tree.dispatch_crud(CRUDOperation::Insert(warehouse_key, TpccRow::Warehouse(Box::new(Warehouse {
@@ -213,8 +213,9 @@ fn tpcc_database_crash_recovery_round_trip_across_tables() {
     let customer_key = k_customer(1, 1, 42);
 
     {
-        let db = TpccDatabase::new(RootIndexType::default());
-        db.enable_wal(&base_path, std::time::Duration::from_millis(2)).unwrap();
+        let db = TpccDatabase::new_with_wal(
+            RootIndexType::default(), &base_path, std::time::Duration::from_millis(2),
+        ).unwrap();
 
         assert!(matches!(
             crate::mv_bench::tpcc_schema::dispatch_crud_big(&db, Table::Warehouse, CRUDOperation::Insert(warehouse_key, TpccRow::Warehouse(Box::new(Warehouse {

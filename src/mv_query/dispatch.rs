@@ -1,7 +1,6 @@
 use std::hash::Hash;
 use std::fmt::Display;
 use std::mem;
-use std::sync::atomic::Ordering::Relaxed;
 use itertools::Itertools;
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::{CRUDOperation, TxAtomicOperation};
@@ -16,6 +15,7 @@ use crate::mv_record_model::version_info::VersionInfo;
 use crate::mv_test::VERBOSE;
 use crate::mv_tree::mvbt::MVBTSt;
 use crate::mv_sync::smart_cell::sched_yield;
+use crate::mv_wal::backend::WalBackend;
 
 pub const RANGE_DISPATCH_LAZY: bool = true;
 
@@ -89,7 +89,7 @@ impl<
         }
 
         let payload = make_payload(leaf_page.as_records()[position].payload());
-        if !self.wal_ever_enabled.load(Relaxed) && self.decide_update_in_place(leaf_page, key) {
+        if matches!(self.wal.as_ref(), WalBackend::Off) && self.decide_update_in_place(leaf_page, key) {
             leaf_page.as_records_mut()[position].set_payload(payload);
             return CRUDOperationResult::Updated(self.current_version());
         }
@@ -184,7 +184,7 @@ impl<'a,
                 // represented in the WAL (one CRUDOperation = one version = one log
                 // record), so it's skipped entirely whenever a WAL is attached —
                 // every logged Update always takes the normal versioned path below.
-                if !self.wal_ever_enabled.load(Relaxed) && self.decide_update_in_place(leaf_page, key) {
+                if matches!(self.wal.as_ref(), WalBackend::Off) && self.decide_update_in_place(leaf_page, key) {
                     if let Some(record) = leaf_page
                         .as_records_mut()
                         .iter_mut()

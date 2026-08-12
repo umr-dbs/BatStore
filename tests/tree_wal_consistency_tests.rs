@@ -129,8 +129,8 @@ fn concurrent_inserts_are_present_in_tree_and_match_wal_exactly() {
     let path = temp_path("insert");
     let _ = std::fs::remove_file(&path);
 
-    let tree = TestTree::make_standard(RootIndexType::default());
-    tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
+    let tree = TestTree::make_standard(RootIndexType::default())
+        .with_wal(&path, Duration::from_millis(2)).unwrap();
 
     const THREADS: u64 = 8;
     const KEYS_PER_THREAD: u64 = 250;
@@ -203,8 +203,8 @@ fn concurrent_insert_update_delete_matches_wal_and_recovery() {
     const KEYS_PER_THREAD: u64 = 300;
 
     let final_state: HashMap<u64, u64> = {
-        let tree = TestTree::make_standard(RootIndexType::default());
-        tree.enable_wal(&path, Duration::from_millis(2)).unwrap();
+        let tree = TestTree::make_standard(RootIndexType::default())
+            .with_wal(&path, Duration::from_millis(2)).unwrap();
 
         let max_ts = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..THREADS)
@@ -302,11 +302,13 @@ fn concurrent_db_transactions_across_tables_match_shared_wal_exactly() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&meta_path);
 
-    let db: TestDb = Database::new(RootIndexType::default(), inc, dec, u64::MIN, u64::MAX);
+    let db: TestDb = Database::new_with_wal(
+        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
+        &path, Duration::from_millis(2),
+    ).unwrap();
     let t_a = db.create_table("a").table_id().unwrap();
     let t_b = db.create_table("b").table_id().unwrap();
     let t_c = db.create_table("c").table_id().unwrap();
-    db.enable_wal(&path, Duration::from_millis(2)).unwrap();
 
     const THREADS: u64 = 6;
     const TXNS_PER_THREAD: u64 = 100;
@@ -390,9 +392,11 @@ fn contended_concurrent_transactions_tree_and_wal_agree_despite_conflicts() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&meta_path);
 
-    let db: TestDb = Database::new(RootIndexType::default(), inc, dec, u64::MIN, u64::MAX);
+    let db: TestDb = Database::new_with_wal(
+        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
+        &path, Duration::from_millis(2),
+    ).unwrap();
     let t = db.create_table("t").table_id().unwrap();
-    db.enable_wal(&path, Duration::from_millis(2)).unwrap();
 
     const KEYS: u64 = 20;
     for k in 0..KEYS {

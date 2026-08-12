@@ -2,15 +2,6 @@ use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::commit_log::CommitLog;
 
-/// Hard cap on the `max_workers` a `SnapshotCache` can serve, chosen
-/// generously above any realistic core count so `entries` can be a
-/// fixed-size, inline array — no heap allocation for something created once
-/// per (tree, thread) and never resized afterward. `SnapshotCache::new`
-/// asserts the tree's actual `max_workers` (typically `num_cpus::get()`)
-/// against this once, at construction, rather than let it surface later as
-/// an out-of-bounds panic on `entries[worker_id]` deep inside `is_visible`.
-pub const MAX_WORKERS_CAP: usize = 256;
-
 /// A worker's memo of the last `LCB` result computed against each foreign
 /// worker, indexed by that foreign worker's id — the paper's "thread-local
 /// snapshot cache" (Listing 1). Each entry is only valid for the reader
@@ -24,16 +15,14 @@ pub const MAX_WORKERS_CAP: usize = 256;
 /// of that.
 pub struct SnapshotCache {
     // (cached reader ts_start, cached LCB result), indexed by foreign WorkerId.
-    entries: [(Version, Version); MAX_WORKERS_CAP],
+    // Exactly sized to this database's worker registry. A boxed slice keeps
+    // the allocation stable while avoiding a machine-independent inline cap.
+    entries: Box<[(Version, Version)]>,
 }
 
 impl SnapshotCache {
     pub fn new(max_workers: usize) -> Self {
-        assert!(
-            max_workers <= MAX_WORKERS_CAP,
-            "SnapshotCache: max_workers ({max_workers}) exceeds MAX_WORKERS_CAP ({MAX_WORKERS_CAP})"
-        );
-        Self { entries: [(0, 0); MAX_WORKERS_CAP] }
+        Self { entries: vec![(0, 0); max_workers].into_boxed_slice() }
     }
 }
 

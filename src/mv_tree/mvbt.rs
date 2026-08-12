@@ -1,8 +1,5 @@
 use std::fmt::Display;
 use std::hash::Hash;
-use std::sync;
-use std::sync::atomic::AtomicBool;
-use arc_swap::ArcSwapOption;
 use triomphe::Arc;
 use crate::mv_block::block_handle::BlockAllocManager;
 use crate::mv_gc::tracker_handle::{TrackerHandle, TrackerHandleSt};
@@ -41,9 +38,10 @@ pub type MVBT                   = MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>;
 pub const INIT_TREE_HEIGHT: Height = 1;
 
 /// Default size of a tree's fixed OSIC worker pool (§3.1: commit log size =
-/// #workers) — one per physical core, mirroring the paper's one-worker-per-
-/// core deployment model.
-pub fn default_max_workers() -> usize { crate::mv_sync::visibility::MAX_WORKERS_CAP }
+/// #workers). This is a runtime machine property, deliberately separate from
+/// `SnapshotCache`'s representation: the cache is sized to this value rather
+/// than imposing a compile-time worker cap.
+pub fn default_max_workers() -> usize { num_cpus::get().max(1) }
 // pub const MAX_TREE_HEIGHT: Height = Height::MAX;
 
 pub struct MVBTSt<
@@ -73,8 +71,9 @@ pub struct MVBTSt<
     /// group-commits everyone's pending records together into one file; or
     /// a `LockFreeWalWriter`, where every worker instead reserves its own
     /// byte range and writes it directly. `enable_wal`/`enable_wal_lockfree`/
-    /// `disable_wal` swap this atomically.
-    pub(crate) wal: ArcSwapOption<WalBackend<Key, Payload>>,
+    /// WAL selection is immutable after construction. `Off` gives the
+    /// in-memory configuration a direct enum fast path without ArcSwap.
+    pub(crate) wal: Arc<WalBackend<Key, Payload>>,
     /// `Some(id)` when this tree is one table of a `mv_db::Database`, whose
     /// tables all share one `WalBackend` (the *same* `Arc` cloned into every
     /// table's `wal` field via `attach_wal`) and must tag their WAL entries
@@ -87,16 +86,6 @@ pub struct MVBTSt<
     /// `mv_sync::version_handle`'s WAL-logging methods for how this branches
     /// between the plain and table-tagged wire encodings.
     pub(crate) table_id: Option<crate::mv_wal::record::TableId>,
-    /// Set once, the first time `enable_wal` is ever called — lets the write
-    /// dispatch path (`wal_start_commit`/`wal_log_write`) skip touching `wal`
-    /// at all on a tree that has never had a WAL attached, instead of paying
-    /// `ArcSwapOption::load`'s guard mechanism (measured ~4.5% of write-path
-    /// time in a WAL-off profile) on every single write for a lookup that
-    /// always turns out `None`. Never reset by `disable_wal` — once a tree
-    /// has ever had a WAL, later writes fall back to the real (cheap, no-op)
-    /// `wal.load()` check rather than trying to re-derive "definitely off"
-    /// from one flag, keeping this fast path's correctness trivial to see.
-    pub(crate) wal_ever_enabled: AtomicBool,
 }
 
 unsafe impl<const FAN_OUT: usize,
@@ -134,6 +123,13 @@ impl<const FAN_OUT: usize,
     pub fn make_standard(
         root_index_type: RootIndexType) -> Self
     {
+        Self::make_standard_with_max_workers(root_index_type, default_max_workers())
+    }
+
+    pub fn make_standard_with_max_workers(
+        root_index_type: RootIndexType,
+        max_workers: usize,
+    ) -> Self {
         fn inc_key(k: u64) -> u64 {
             k.checked_add(1).unwrap_or(u64::MAX)
         }
@@ -142,7 +138,24 @@ impl<const FAN_OUT: usize,
             k.checked_sub(1).unwrap_or(u64::MIN)
         }
 
-        Self::make(root_index_type, inc_key, dec_key, u64::MIN, u64::MAX)
+        Self::make_with_shared_ctx(
+            root_index_type, inc_key, dec_key, u64::MIN, u64::MAX,
+            Arc::new(TxContext::new(max_workers.max(1))), None,
+            Arc::new(WalBackend::Off),
+        )
+    }
+
+    pub fn make_standard_with_max_workers_and_wal(
+        root_index_type: RootIndexType,
+        max_workers: usize,
+        wal: Arc<WalBackend<u64, Payload>>,
+    ) -> Self {
+        fn inc_key(k: u64) -> u64 { k.saturating_add(1) }
+        fn dec_key(k: u64) -> u64 { k.saturating_sub(1) }
+        Self::make_with_shared_ctx(
+            root_index_type, inc_key, dec_key, u64::MIN, u64::MAX,
+            Arc::new(TxContext::new(max_workers.max(1))), None, wal,
+        )
     }
 
     // pub fn olc() -> Self {
@@ -182,9 +195,7 @@ impl<const FAN_OUT: usize,
             file.set_len(valid_len)?;
         }
 
-        tree.enable_wal(wal_path, flush_interval)?;
-
-        Ok(tree)
+        tree.with_wal(wal_path, flush_interval)
     }
 
     /// Same as `open_recovered`, but reattaches via `enable_wal_lockfree`
@@ -206,9 +217,34 @@ impl<const FAN_OUT: usize,
             file.set_len(valid_len)?;
         }
 
-        tree.enable_wal_lockfree(wal_path, flush_interval, batch_size)?;
+        tree.with_wal_lockfree(wal_path, flush_interval, batch_size)
+    }
 
-        Ok(tree)
+    /// Selects the immutable batched WAL backend before the tree is shared.
+    pub fn with_wal(
+        mut self,
+        path: &std::path::Path,
+        flush_interval: std::time::Duration,
+    ) -> std::io::Result<Self> {
+        self.wal = Arc::new(WalBackend::open_batched(path, flush_interval)?);
+        Ok(self)
+    }
+
+    /// Selects the immutable lock-free WAL backend before the tree is shared.
+    pub fn with_wal_lockfree(
+        mut self,
+        path: &std::path::Path,
+        flush_interval: std::time::Duration,
+        batch_size: usize,
+    ) -> std::io::Result<Self> {
+        self.wal = Arc::new(WalBackend::open_lockfree(
+            path, flush_interval, batch_size, self.ctx.max_workers(),
+        )?);
+        Ok(self)
+    }
+
+    pub(crate) fn set_wal_before_share(&mut self, wal: Arc<WalBackend<u64, Payload>>) {
+        self.wal = wal;
     }
 }
 
@@ -279,7 +315,8 @@ impl<const FAN_OUT: usize,
         let max_workers = default_max_workers().max(1);
         Self::make_with_shared_ctx(
             root_index_type, inc_key, dec_key, min_key, max_key,
-            Arc::new(TxContext::new(max_workers)), None)
+            Arc::new(TxContext::new(max_workers)), None,
+            Arc::new(WalBackend::Off))
     }
 
     /// Same as `make`, but takes a pre-built `ctx` instead of creating a
@@ -304,6 +341,7 @@ impl<const FAN_OUT: usize,
         max_key: Key,
         ctx: Arc<TxContext>,
         table_id: Option<crate::mv_wal::record::TableId>,
+        wal: Arc<WalBackend<Key, Payload>>,
     ) -> Self {
         let bm = BlockAllocManager::new();
         Self {
@@ -314,72 +352,9 @@ impl<const FAN_OUT: usize,
             dec_key,
             min_key,
             max_key,
-            wal: ArcSwapOption::empty(),
-            wal_ever_enabled: AtomicBool::new(false),
+            wal,
             table_id,
         }
-    }
-}
-
-/// Split from the block above: `enable_wal`/`enable_wal_lockfree`/
-/// `disable_wal` are the only methods that ever construct/attach a
-/// `WalBackend<Key, Payload>`, which (via `start_commit_logged`/
-/// `log_with_stamp`) requires `Payload: WalPayload` — everything else on
-/// `MVBTSt` (`enable_gc`, `make`, ...) stays usable for any `Payload`,
-/// WAL-capable or not.
-impl<const FAN_OUT: usize,
-    const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload
-> MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
-{
-    /// Attaches an already-open writer — the shared primitive behind
-    /// `enable_wal`/`enable_wal_lockfree` below, and also used directly by
-    /// `mv_db::Database` to hand every one of its tables a *clone of the
-    /// same* `Arc<WalBackend>` (rather than each table opening its own),
-    /// which is what makes a Database's WAL genuinely one shared file
-    /// instead of one per table.
-    pub(crate) fn attach_wal(&self, writer: sync::Arc<WalBackend<Key, Payload>>) {
-        self.wal.store(Some(writer));
-        self.wal_ever_enabled.store(true, sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Opens and attaches one live, batched (`WalWriter`) WAL writer at
-    /// `path` — after any bytes already there (a fresh file, or the valid
-    /// prefix a prior `mv_wal::recovery::replay` left behind). Cheap/no-op
-    /// when never called: the dispatch write path only touches the WAL
-    /// when this returns `Some`. Every worker enqueues into this single
-    /// writer's channel; its group-commit batches are fsynced every
-    /// `flush_interval`. See `enable_wal_lockfree` for the alternative,
-    /// lock-free backend.
-    pub fn enable_wal(&self, path: &std::path::Path, flush_interval: std::time::Duration) -> std::io::Result<()> {
-        self.attach_wal(sync::Arc::new(WalBackend::open_batched(path, flush_interval)?));
-        Ok(())
-    }
-
-    /// Same as `enable_wal`, but backed by `LockFreeWalWriter` (via
-    /// `WalBackend::LockFree`) instead: every worker locally batches its
-    /// own writes (see `mv_wal::lockfree_writer::LocalBatch`) up to
-    /// `batch_size` records, flushed early if that fills up or otherwise on
-    /// the next periodic sweep (bounded by `flush_interval`), with its own
-    /// `pwrite` rather than funneling through one shared background thread.
-    /// See `tests/wal_writer_throughput_bench.rs` for when this actually
-    /// wins over `enable_wal` (short answer: past a couple of concurrent
-    /// worker threads, provided `batch_size` isn't left at `1`).
-    pub fn enable_wal_lockfree(
-        &self,
-        path: &std::path::Path,
-        flush_interval: std::time::Duration,
-        batch_size: usize,
-    ) -> std::io::Result<()> {
-        self.attach_wal(sync::Arc::new(WalBackend::open_lockfree(path, flush_interval, batch_size, default_max_workers())?));
-        Ok(())
-    }
-
-    /// Detaches the WAL writer, if any, blocking until its background flush
-    /// thread drains and fsyncs any remaining buffered records.
-    pub fn disable_wal(&self) {
-        self.wal.store(None);
     }
 }
 
