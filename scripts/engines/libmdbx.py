@@ -44,7 +44,8 @@ def ensure_built() -> None:
     subprocess.run(common.cmvbt_cargo_build_args("mdbx-backend"), cwd=REPO_ROOT, check=True)
 
 
-def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", reload: bool = True) -> common.NormalizedResult:
+def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", reload: bool = True,
+        ycsb_payload: str = "standard", read_payload: bool = True) -> common.NormalizedResult:
     """`gc`/`reload` accepted for interface parity with the other engine wrappers but
     unused - see SUPPORTS_GC_TOGGLE above, and every run here is a fresh db_path."""
     del reload
@@ -59,6 +60,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         threads = scale.tpcc_terminals
         # Run only the query named by this workload, matching every other wrapper.
         htap_mode = workload.replace("htap_", "ch_") if workload in common.HTAP_WORKLOADS else "none"
+        field_count, field_length = ((1, 8) if ycsb_payload == "u64" else (10, 100))
         args = [
             str(BINARY), "mdbx_tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
             "100000", "3000", "3000", str(db_path), htap_mode,
@@ -71,7 +73,8 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         threads = scale.ycsb_threads
         args = [
             str(BINARY), "mdbx_ycsb", letter, str(scale.ycsb_records), str(threads),
-            str(duration), "default", str(scale.ycsb_theta), "10", "100", "100", str(db_path),
+            str(duration), "default", str(scale.ycsb_theta), str(field_count), str(field_length), "100", str(db_path),
+            str(read_payload).lower(),
         ]
         metric_name = "ops_per_sec"
         ts_file, ts_column = "ycsb_timeseries.csv", "ops_completed"

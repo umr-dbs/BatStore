@@ -37,6 +37,13 @@ from . import common
 BENCHBASE_HOME = common.BENCHBASE_HOME
 BENCHBASE_JAR = BENCHBASE_HOME / "benchbase.jar"
 
+def ensure_built() -> None:
+    repo = BENCHBASE_HOME.parent.parent
+    subprocess.run(["mvn", "package", "-P", "postgres", "-DskipTests",
+                    "-Dmaven.compiler.release=21"], cwd=repo, check=True)
+    tgz = repo / "target" / "benchbase-postgres.tgz"
+    subprocess.run(["tar", "xzf", str(tgz), "-C", str(repo / "target")], check=True)
+
 # Postgres has no literal "GC" flag; autovacuum (which cleans up dead/old row versions) is
 # the closest real, standard analog, toggled without a restart via ALTER SYSTEM + reload.
 SUPPORTS_GC_TOGGLE = True
@@ -166,6 +173,7 @@ YCSB_CONFIG_TEMPLATE = """<?xml version="1.0"?>
     <batchsize>128</batchsize>
     <scalefactor>{scalefactor}</scalefactor>
     <skewFactor>{theta}</skewFactor>
+    <fieldSize>{field_size}</fieldSize>
     <terminals>{terminals}</terminals>
     <works>
         <work>
@@ -257,7 +265,7 @@ def _verify_tmpfs_datadir() -> None:
     """Every other engine's on-disk data lives under common.fresh_scratch_dir, which fails
     loudly if SCRATCH_ROOT isn't tmpfs. PostgreSQL is a pre-existing system service this
     harness doesn't spawn, so it can't go through fresh_scratch_dir - its in-memory-only
-    guarantee instead depends on setup_environment.py's opt-in `--postgres-tmpfs` step
+    guarantee instead depends on setup_environment.py's default PostgreSQL tmpfs step
     having been run (and tmpfs surviving since, which a reboot would undo). Without an
     equivalent check here, a stale/never-run tmpfs setup would silently benchmark against
     real disk while every other engine's numbers are RAM-only - so ask the live server for
@@ -271,7 +279,7 @@ def _verify_tmpfs_datadir() -> None:
             f"PostgreSQL's data_directory ({data_dir}) is not tmpfs-backed (fstype={fstype!r}) - "
             f"refusing to run, since every other engine in this harness is guaranteed "
             f"in-memory-only (see common.fresh_scratch_dir). Run "
-            f"`python scripts/setup_environment.py --postgres-tmpfs` first (tmpfs doesn't "
+            f"`python scripts/setup_environment.py --reuse-checkouts` first (tmpfs doesn't "
             f"survive a reboot, so this can go stale)."
         )
 
@@ -285,8 +293,9 @@ def _set_unsafe_durability() -> None:
     `full_page_writes=off` skips the extra page image written on first modification after a
     checkpoint - all three are PGC_SIGHUP (take effect on pg_reload_conf(), no restart
     needed), same mechanism as the existing autovacuum toggle below. Safe here because
-    PGDATA is tmpfs-backed and wiped every run (_verify_tmpfs_datadir already refused to
-    run otherwise) - never do this against a real database.
+    PGDATA is tmpfs-backed (_verify_tmpfs_datadir already refused to run otherwise), and
+    compare_engines recreates the benchmark tables for every point - never do this against
+    a real database.
     """
     env = os.environ.copy()
     env["PGPASSWORD"] = common.PG_PASSWORD
@@ -335,12 +344,11 @@ def _latency_from_results(results_dir: Path, tx_type_name: str) -> dict:
     }
 
 
-def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True) -> common.NormalizedResult:
-    """`reload=False` skips BenchBase's (expensive) --create/--load steps and reuses
-    whatever data a prior call already loaded into the `benchbase` database for this
-    workload - safe as long as `scale`'s data-volume fields (warehouses/records) are
-    unchanged from that prior call, which compare_engines.py's thread/gc sweep guarantees
-    (only terminals/autovacuum vary within one workload's sweep).
+def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True,
+        ycsb_payload: str = "standard", read_payload: bool = True) -> common.NormalizedResult:
+    """`reload=False` can skip BenchBase's expensive --create/--load steps for direct
+    callers. compare_engines.py deliberately passes reload=True for every PostgreSQL point
+    so every measurement starts from freshly created and loaded benchmark tables.
     """
     _verify_tmpfs_datadir()
     _set_unsafe_durability()
@@ -376,6 +384,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         config_path.write_text(YCSB_CONFIG_TEMPLATE.format(
             scalefactor=scale.ycsb_records / 1000.0, theta=scale.ycsb_theta,
             terminals=threads, duration=duration, weights=YCSB_WEIGHTS[letter],
+            field_size=8 if ycsb_payload == "u64" else 100,
             **_template_connection_values(),
         ))
         bench_type = "ycsb"
@@ -396,8 +405,11 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         "-d", str(results_dir),
     ]
     timeout = common.default_subprocess_timeout(duration)
+    bench_env = os.environ.copy()
+    bench_env["YCSB_READ_PAYLOAD"] = "true" if read_payload else "false"
+    bench_env["YCSB_U64_PAYLOAD"] = "true" if ycsb_payload == "u64" else "false"
     returncode, _client_rss_unused = common.run_and_track_rss(
-        args, cwd=BENCHBASE_HOME, stdout_path=output_dir / "stdout.log", timeout=timeout,
+        args, cwd=BENCHBASE_HOME, env=bench_env, stdout_path=output_dir / "stdout.log", timeout=timeout,
     )
 
     server_peak_rss_mb = 0.0

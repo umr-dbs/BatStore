@@ -30,8 +30,27 @@ use crate::mv_query::interval::Interval;
 /// was found (a miss can only happen for a key beyond the currently-inserted
 /// range, e.g. a `Latest`-distribution read racing just ahead of a fresh
 /// `Insert`'s counter bump).
-pub fn read(tree: &YcsbTree, key: YcsbKey) -> bool {
-    tree.point_exists_si(key)
+pub fn read(tree: &YcsbTree, key: YcsbKey) -> bool { read_with_mode(tree, key, true) }
+
+pub fn read_with_mode(tree: &YcsbTree, key: YcsbKey, read_payload: bool) -> bool {
+    if !read_payload {
+        return tree.point_exists_si(key);
+    }
+    match tree.dispatch_crud(CRUDOperation::PointSi(key)) {
+        CRUDOperationResult::MatchedRecords(rows) => {
+            if let Some(row) = rows.first() {
+                // Consume the complete logical value. `black_box` prevents an optimizing
+                // build from reducing a YCSB read back to an existence check.
+                let checksum = row.payload.as_bytes().iter().fold(0u8, |a, b| a.wrapping_add(*b));
+                std::hint::black_box(checksum);
+                true
+            } else {
+                false
+            }
+        }
+        CRUDOperationResult::ZeroAffected(_) => false,
+        other => panic!("ycsb read: unexpected result: {other}"),
+    }
 }
 
 /// Updates a row using YCSB's `writeallfields` policy. When it is `true`, a
@@ -80,9 +99,22 @@ pub fn insert(tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey) {
 /// no result vector, `RecordPointResult`, or payload-handle clone is needed
 /// for YCSB's count-only scan result.
 pub fn scan(tree: &YcsbTree, start_key: YcsbKey, len: u64) -> usize {
+    scan_with_mode(tree, start_key, len, true)
+}
+
+pub fn scan_with_mode(tree: &YcsbTree, start_key: YcsbKey, len: u64, read_payload: bool) -> usize {
     let hi = start_key.saturating_add(len.saturating_sub(1));
     match tree.dispatch_crud(CRUDOperation::RangeIterSi(Interval::new(start_key, hi))) {
-        CRUDOperationResult::MatchedRecordIter(iter) => iter.count_ref(),
+        CRUDOperationResult::MatchedRecordIter(iter) => if read_payload {
+            let (count, checksum) = iter.fold_ref((0usize, 0u8), |(count, checksum), _, payload| {
+                let checksum = payload.as_bytes().iter().fold(checksum, |a, b| a.wrapping_add(*b));
+                (count + 1, checksum)
+            });
+            std::hint::black_box(checksum);
+            count
+        } else {
+            iter.count_ref()
+        },
         other => panic!("ycsb scan: unexpected result: {other}"),
     }
 }
@@ -98,6 +130,12 @@ pub fn read_modify_write(
     key: YcsbKey,
     write_all_fields: bool,
 ) -> bool {
-    let _ = read(tree, key);
+    read_modify_write_with_mode(tree, cfg, key, write_all_fields, true)
+}
+
+pub fn read_modify_write_with_mode(
+    tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey, write_all_fields: bool, read_payload: bool,
+) -> bool {
+    let _ = read_with_mode(tree, key, read_payload);
     update(tree, cfg, key, write_all_fields)
 }

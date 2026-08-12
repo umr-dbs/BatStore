@@ -31,6 +31,8 @@ pub struct DriverConfig {
     /// YCSB `writeallfields`. False is the standard default: update one
     /// randomly selected field while preserving the others.
     pub write_all_fields: bool,
+    /// Consume every payload byte on reads/scans. False measures key/visibility only.
+    pub read_payload: bool,
     pub gc: bool,
     pub update_in_place: bool,
     pub root_star_index: RootIndexType,
@@ -81,6 +83,7 @@ fn worker_thread(
     sampler: Arc<KeySampler>,
     max_scan_length: u64,
     write_all_fields: bool,
+    read_payload: bool,
     current_max_key: Arc<AtomicU64>,
     duration: Duration,
     stop: Arc<AtomicBool>,
@@ -103,7 +106,7 @@ fn worker_thread(
         match pick_op(&mix) {
             YcsbOpType::Read => {
                 let key = sampler.sample(record_count, max_key_now);
-                ycsb_txn::read(&tree, key);
+                ycsb_txn::read_with_mode(&tree, key, read_payload);
                 totals[READ] += 1;
             }
             YcsbOpType::Update => {
@@ -123,16 +126,16 @@ fn worker_thread(
                 let len = random_scan_length(max_scan_length);
                 if totals[SCAN] % SCAN_LATENCY_SAMPLE_EVERY == 0 {
                     let scan_start = Instant::now();
-                    scanned_tuples += ycsb_txn::scan(&tree, key, len) as u64;
+                    scanned_tuples += ycsb_txn::scan_with_mode(&tree, key, len, read_payload) as u64;
                     scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
                 } else {
-                    scanned_tuples += ycsb_txn::scan(&tree, key, len) as u64;
+                    scanned_tuples += ycsb_txn::scan_with_mode(&tree, key, len, read_payload) as u64;
                 }
                 totals[SCAN] += 1;
             }
             YcsbOpType::ReadModifyWrite => {
                 let key = sampler.sample(record_count, max_key_now);
-                ycsb_txn::read_modify_write(&tree, &cfg, key, write_all_fields);
+                ycsb_txn::read_modify_write_with_mode(&tree, &cfg, key, write_all_fields, read_payload);
                 totals[RMW] += 1;
             }
         }
@@ -185,11 +188,12 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
          - distribution        = {:?}\n\
          - max_scan_length     = {}\n\
          - write_all_fields    = {}\n\
+         - read_payload       = {}\n\
          - GC                  = {} (update_in_place={})\n\
          - WAL                 = {}\n\
          - root*               = {}",
         cfg.ycsb.record_count, cfg.ycsb.field_count, cfg.ycsb.field_length,
-        cfg.duration, cfg.mix, cfg.distribution, cfg.max_scan_length, cfg.write_all_fields,
+        cfg.duration, cfg.mix, cfg.distribution, cfg.max_scan_length, cfg.write_all_fields, cfg.read_payload,
         cfg.gc, cfg.update_in_place,
         match (&cfg.wal, cfg.wal_lockfree_batch_size) {
             (Some((path, interval)), None) => format!("On, batched ({} @ {interval:?} flush)", path.display()),
@@ -214,6 +218,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     let ycsb_cfg = cfg.ycsb;
     let max_scan_length = cfg.max_scan_length;
     let write_all_fields = cfg.write_all_fields;
+    let read_payload = cfg.read_payload;
 
     let handles: Vec<_> = (0..num_threads).map(|_| {
         let tree = tree.clone();
@@ -223,7 +228,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         let stop = stop.clone();
         let barrier = barrier.clone();
         thread::spawn(move || worker_thread(tree, cfg, mix, sampler, max_scan_length,
-            write_all_fields, current_max_key, duration, stop, barrier))
+            write_all_fields, read_payload, current_max_key, duration, stop, barrier))
     }).collect();
 
     // Releases at the same instant as every worker, once loading is done —
@@ -352,6 +357,7 @@ pub fn main_ycsb(parms: Vec<String>) {
     let wal_path: String = parms.get(15).cloned().unwrap_or_else(|| "ycsb_wal.log".to_string());
     let wal_flush_ms: u64 = arg(&parms, 16, 5);
     let write_all_fields: bool = arg(&parms, 17, false);
+    let read_payload: bool = arg(&parms, 18, true);
 
     run_ycsb(DriverConfig {
         ycsb: YcsbConfig { record_count, field_count, field_length },
@@ -361,6 +367,7 @@ pub fn main_ycsb(parms: Vec<String>) {
         distribution,
         max_scan_length,
         write_all_fields,
+        read_payload,
         gc,
         update_in_place,
         root_star_index,

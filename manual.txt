@@ -102,24 +102,23 @@ What it does, in order:
   10. Sets up the Python venv at scripts/.venv with pandas + matplotlib (needed only for
      plot_compare.py, not for running experiments).
 
-Flags to skip individual steps (useful if you already have one piece set up, or are
-re-running after fixing just one failure):
+By default the setup removes and freshly clones every setup-managed checkout under
+WORKSPACE_ROOT. Pass `--reuse-checkouts` only when you intentionally want incremental
+builds. vWeaver and its hugepage setup remain excluded unless `--full` is passed.
+
+Flags to skip individual steps:
 
     --skip-apt --skip-wiredtiger --skip-leanstore --skip-hugepages --skip-vweaver
     --skip-vweaver-frugal --skip-postgres --skip-benchbase --skip-cmvbt --skip-venv
+    --skip-postgres-tmpfs
 
 Example: `python3 scripts/setup_environment.py --skip-postgres --skip-benchbase`
 
-One step is the reverse - opt-IN, not run by default:
-
-    --postgres-tmpfs   Relocates PostgreSQL's real data directory onto tmpfs, so it gets
-                       the same in-memory-only guarantee as every other engine (see
-                       section 5's "In-memory only and PostgreSQL" bullet, and
-                       step_postgres_tmpfs's docstring in this file). Stops/restarts your
-                       actual PostgreSQL service and does NOT survive a reboot unattended -
-                       read the docstring before pointing this at a Postgres install you
-                       care about. Run step_postgres first (the default, role/db creation)
-                       so there's something real to copy onto tmpfs.
+PostgreSQL tmpfs relocation now runs by default. It stops/restarts the actual PostgreSQL
+service and preserves the original PGDATA as `<PGDATA>.diskbackup`; read
+step_postgres_tmpfs's docstring before using it on a server you care about. Use
+`--skip-postgres-tmpfs` to opt out (PostgreSQL benchmark runs will then refuse to start if
+PGDATA is not independently tmpfs-backed).
 
 
 MAVEN: mvn, not mvnw
@@ -218,6 +217,10 @@ Options:
                             (default: all seven)
   --workloads LIST           comma-separated subset of: tpcc, ycsb_a..ycsb_f, htap_q1,
                             htap_q6 (default: all)
+  --ycsb-payload MODE        standard (default: 10 fields x 100 bytes) or u64 (one
+                            8-byte value), applied consistently to every YCSB engine
+  --ycsb-key-only            only establish key/visibility matches; by default point
+                            reads and scans consume the selected payload's bytes
   --tiny                    small/fast smoke-test scale (1 warehouse, 10k YCSB records,
                             10s duration, threads=[2,4]) instead of the server scale
   --skip-build              skip each engine's build step (use if you already built
@@ -432,19 +435,16 @@ this rather than papering over it:
 
 - In-memory only (section 4) and PostgreSQL: SCRATCH_ROOT's tmpfs guarantee covers
   LeanStore/WiredTiger/libmdbx/vWeaver_ermia because this harness owns their data
-  directories directly. Getting PostgreSQL there too needs `setup_environment.py
-  --postgres-tmpfs` (opt-in, not run by default - see section 2 and
-  step_postgres_tmpfs's docstring): it stops the real PostgreSQL service, moves its actual
+  directories directly. The default setup's PostgreSQL tmpfs step stops the real
+  PostgreSQL service, moves its actual
   PGDATA onto tmpfs (preserving the original on real disk as `<PGDATA>.diskbackup`), and
-  restarts it. Without that flag, PostgreSQL's storage stays wherever it already was
+  restarts it. With `--skip-postgres-tmpfs`, PostgreSQL's storage stays wherever it already was
   (almost certainly real disk) and is NOT part of the in-memory-only guarantee the other
-  four engines now have. One caveat even after running it: tmpfs is volatile, so a reboot
-  wipes it and PostgreSQL will fail to start until you re-run `--postgres-tmpfs` (it
+  four engines now have. One caveat: tmpfs is volatile, so a reboot wipes it and
+  PostgreSQL will fail to start until you re-run the setup (it
   restores from the `.diskbackup` automatically - there's no systemd-level auto-restore on
-  boot, by design, see the docstring). At minimum, without --postgres-tmpfs, sizing
-  `shared_buffers`/`effective_cache_size` to cover the whole loaded dataset keeps reads
-  cache-resident (writes still reach disk via WAL fsync either way, unless PGDATA itself is
-  tmpfs).
+  boot, by design, see the docstring). The PostgreSQL wrapper verifies the live PGDATA
+  filesystem and refuses to benchmark unless it is tmpfs-backed.
 
 - Low-warehouse-count TPC-C contention: at very small scale (e.g. --tiny's 1 warehouse),
   TPC-C throughput can drop sharply once the terminal/thread count exceeds the warehouse

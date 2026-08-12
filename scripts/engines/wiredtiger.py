@@ -47,7 +47,8 @@ def _sum_stdout_column(stdout_path: Path, column: str) -> float:
     return total
 
 
-def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", reload: bool = True) -> common.NormalizedResult:
+def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", reload: bool = True,
+        ycsb_payload: str = "standard", read_payload: bool = True) -> common.NormalizedResult:
     """`gc`/`reload` accepted for interface parity with the other engine wrappers but
     unused - see SUPPORTS_GC_TOGGLE above, and every run here is a fresh ssd_dir."""
     del reload
@@ -99,6 +100,8 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
             f"--worker_threads={threads}",
             f"--zipf_factor={scale.ycsb_theta}",
             *leanstore_build.ycsb_gflags(letter),
+            f"--ycsb_payload_size={8 if ycsb_payload == 'u64' else 1000}",
+            f"--ycsb_read_payload={'true' if read_payload else 'false'}",
             f"--dram_gib={scale.dram_gib}",
             f"--ssd_path={ssd_dir}",
             f"--run_for_seconds={duration}",

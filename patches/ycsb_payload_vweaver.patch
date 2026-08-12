@@ -1,0 +1,65 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 460a460..728b137 100755
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,6 +12,8 @@ link_libraries(${LINK_FLAGS})
+ 
+ # Use masstree for index
+ add_definitions(-DMASSTREE)
++set(YCSB_PAYLOAD_BYTES "1000" CACHE STRING "Physical YCSB value bytes")
++add_definitions(-DYCSB_PAYLOAD_BYTES=${YCSB_PAYLOAD_BYTES})
+ 
+ set(MASSTREE_CONFIG "--enable-max-key-len=1024 --with-malloc=malloc")
+ 
+diff --git a/benchmarks/ycsb.cc b/benchmarks/ycsb.cc
+index 23e66ea..5b35079 100755
+--- a/benchmarks/ycsb.cc
++++ b/benchmarks/ycsb.cc
+@@ -26,6 +26,7 @@ int g_zipfian_rng = 0;
+ double g_zipfian_theta =
+     0.99;  // zipfian constant, [0, 1), more skewed as it approaches 1.
+ int g_distinct_keys = 0;
++int g_read_payload = 1;
+ 
+ // { insert, read, update, scan, rmw }
+ YcsbWorkload YcsbWorkloadA('A', 0, 50U, 100U, 0,
+@@ -140,8 +141,11 @@ class ycsb_worker : public bench_worker {
+       ALWAYS_ASSERT(rc._val == RC_TRUE);
+       ASSERT(*(char *)v.data() == 'a');
+ #endif
+-      memcpy((char *)(&v) + sizeof(ermia::varstr), (char *)v.data(),
+-             sizeof(YcsbRecord));
++      if (g_read_payload) {
++        volatile uint8_t checksum = 0;
++        for (size_t b = 0; b < sizeof(YcsbRecord); ++b) checksum += v.data()[b];
++        (void)checksum;
++      }
+     }
+     TryCatch(db->Commit(txn));
+     return {RC_TRUE};
+@@ -336,6 +340,7 @@ void ycsb_do_test(ermia::Engine *db, int argc, char **argv) {
+         {"zipfian", no_argument, &g_zipfian_rng, 1},
+         {"zipfian-theta", required_argument, 0, 'z'},
+         {"distinct-keys", no_argument, &g_distinct_keys, 1},
++        {"key-only", no_argument, &g_read_payload, 0},
+         {0, 0, 0, 0}};
+ 
+     int option_index = 0;
+diff --git a/benchmarks/ycsb.h b/benchmarks/ycsb.h
+index 6a6ebb9..2854fe1 100755
+--- a/benchmarks/ycsb.h
++++ b/benchmarks/ycsb.h
+@@ -4,9 +4,9 @@
+ // assume one field
+ // In FOEDUS, we have 10 and with the knobs it can choose from any one field
+ // randomly.
+-const uint32_t kFields = 1;
+-const uint32_t kFieldLength = 10;
+-const uint64_t kRecordSize = kFieldLength * kFields;
++const uint32_t kFields = YCSB_PAYLOAD_BYTES == 8 ? 1 : 10;
++const uint32_t kFieldLength = YCSB_PAYLOAD_BYTES == 8 ? 8 : 100;
++const uint64_t kRecordSize = YCSB_PAYLOAD_BYTES;
+ const uint32_t kMaxWorkers = 1024;
+ 
+ struct YcsbRecord {
+

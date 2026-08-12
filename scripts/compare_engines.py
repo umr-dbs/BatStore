@@ -41,6 +41,7 @@ import argparse
 import dataclasses
 import datetime
 import math
+import json
 import os
 import subprocess
 import sys
@@ -97,6 +98,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ycsb-records", type=int)
     p.add_argument("--ycsb-duration", type=int)
     p.add_argument("--theta", type=float)
+    p.add_argument("--ycsb-payload", choices=["standard", "u64"], default="standard",
+                   help="standard=10x100-byte YCSB row (default); u64=one 8-byte value")
+    p.add_argument("--ycsb-key-only", action="store_true",
+                   help="match/validate keys but do not consume payload bytes (default reads payload)")
     p.add_argument("--dram-gib", type=float)
     return p.parse_args()
 
@@ -132,6 +137,7 @@ def main() -> None:
     # module attribute, and why it's set unconditionally here even if "cmvbt"/"libmdbx"
     # aren't in --engines (harmless: the var is simply never read in that case).
     os.environ["CMVBT_ALLOCATOR"] = args.cmvbt_allocator
+    os.environ["YCSB_PAYLOAD_BYTES"] = "8" if args.ycsb_payload == "u64" else "1000"
     scale = build_scale(args)
     engines = [e.strip() for e in args.engines.split(",") if e.strip()]
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
@@ -170,6 +176,11 @@ def main() -> None:
     run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
     manifest_path = run_dir / "manifest.csv"
     common.write_manifest_header(manifest_path)
+    (run_dir / "run_config.json").write_text(json.dumps({
+        "ycsb_payload": args.ycsb_payload,
+        "ycsb_payload_bytes": 8 if args.ycsb_payload == "u64" else 1000,
+        "ycsb_read_payload": not args.ycsb_key_only,
+    }, indent=2) + "\n")
 
     total_runs = 0
     total_secs = 0.0
@@ -188,6 +199,7 @@ def main() -> None:
     print(f"engines       : {engines}")
     print(f"cmvbt alloc   : {args.cmvbt_allocator} (ignored unless 'cmvbt'/'libmdbx' is in --engines)")
     print(f"workloads     : {workloads}")
+    print(f"YCSB payload  : {args.ycsb_payload} ({'key-only' if args.ycsb_key_only else 'payload-read'})")
     print(f"threads sweep : {thread_list}")
     print(f"gc sweep      : {gc_list} (engines with no working GC toggle always run once, gc=n/a)")
     print(f"NUMA pinning  : numactl --cpubind={common.NUMA_NODE} --membind={common.NUMA_NODE} "
@@ -237,10 +249,6 @@ def main() -> None:
             module = ENGINE_MODULES[engine_name]
             supports_gc = getattr(module, "SUPPORTS_GC_TOGGLE", False)
             gc_variants = gc_list if supports_gc else ["n/a"]
-            # Only meaningful for postgres_benchbase.py: remember which data-volume
-            # signature is currently loaded so identical sweep points can reuse it.
-            # Every other engine ignores reload and starts from fresh storage each time.
-            loaded_signature = None
             for threads in thread_list:
                 # TPC-C spec sizes populations at ~10 terminals per warehouse; a fixed
                 # warehouse count while terminals sweep up to 128 would push the
@@ -273,29 +281,20 @@ def main() -> None:
                     print(f"=== {workload} / {engine_name} / threads={threads} / gc={gc_variant} / "
                           f"dram_gib={scale_variant.dram_gib} ===")
                     try:
-                        # BenchBase alone persists and reuses its loaded database. TPC-C's
-                        # warehouse count can grow during the thread sweep, so reload when
-                        # that data-volume signature changes. A failed load/run must not
-                        # suppress loading at the next point either.
-                        data_signature = (
-                            scale_variant.tpcc_warehouses
-                            if workload in (["tpcc"] + common.HTAP_WORKLOADS)
-                            else scale_variant.ycsb_records
-                        )
-                        reload_data = engine_name == "postgres" and data_signature != loaded_signature
+                        # PostgreSQL is also recreated and loaded for every point. This is
+                        # slower than reusing BenchBase tables across the thread/GC sweep,
+                        # but guarantees that mutations and vacuum state from a prior point
+                        # cannot contaminate the next measurement.
+                        reload_data = engine_name == "postgres"
                         result = module.run(
                             workload, scale_variant, out_dir, gc=gc_variant, reload=reload_data,
+                            ycsb_payload=args.ycsb_payload, read_payload=not args.ycsb_key_only,
                         )
                     except Exception as e:  # noqa: BLE001 - one engine's failure shouldn't abort the whole matrix
                         result = common.NormalizedResult(
                             engine_name, workload, scale_variant.label, _workload_duration(workload, scale_variant),
                             "error", 0.0, 0.0, threads=threads, gc_enabled=gc_variant, notes=f"EXCEPTION: {e}",
                         )
-                    if engine_name == "postgres" and not (
-                        result.primary_metric_name == "error"
-                        or result.notes.startswith(("FAILED", "TIMEOUT", "EXCEPTION"))
-                    ):
-                        loaded_signature = data_signature
                     common.append_manifest_row(manifest_path, result)
                     status = "OK" if not result.notes else result.notes
                     print(f"    {result.primary_metric_name}={result.primary_metric_value:.2f}  "

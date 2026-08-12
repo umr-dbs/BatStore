@@ -39,7 +39,7 @@ def ensure_built() -> None:
 
 def run(
     workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True,
-    big_tree_size: str = "medium",
+    big_tree_size: str = "medium", ycsb_payload: str = "standard", read_payload: bool = True,
 ) -> common.NormalizedResult:
     """`reload` is accepted for interface parity with postgres_benchbase.run() but unused -
     every cMVBT invocation is a fresh in-process population, there's no persisted state to
@@ -53,6 +53,7 @@ def run(
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
     gc_bool = "false" if gc == "off" else "true"
+    field_count, field_length = ((1, 8) if ycsb_payload == "u64" else (10, 100))
     # Fixed, wiped-before-every-run path (matches leanstore.py/wiredtiger.py's ssd_path
     # treatment) - the driver's own `fs::remove_file(wal_path)` before opening it means
     # this only needs to exist, not start empty, but wiping it here keeps behavior
@@ -101,7 +102,8 @@ def run(
         args = [
             str(BINARY), "ycsb", letter, str(scale.ycsb_records), str(threads),
             str(duration), "default", str(scale.ycsb_theta),
-            "10", "100", "100", "fg", gc_bool, "false", "true", str(wal_path), "5", "false",
+            str(field_count), str(field_length), "100", "fg", gc_bool, "false", "true", str(wal_path), "5", "false",
+            str(read_payload).lower(),
         ]
         metric_name = "ops_per_sec"
         ts_file, ts_column = "ycsb_timeseries.csv", "ops_completed"
@@ -117,6 +119,13 @@ def run(
             "cmvbt", workload, scale.label, duration, metric_name, 0.0, 0.0,
             threads=threads, gc_enabled=gc,
             notes=notes,
+        )
+
+    if not wal_path.is_file() or wal_path.stat().st_size == 0:
+        return common.NormalizedResult(
+            "cmvbt", workload, scale.label, duration, metric_name, 0.0, 0.0,
+            threads=threads, gc_enabled=gc,
+            notes=f"FAILED: cMVBT WAL was enabled but {wal_path} is missing or empty",
         )
 
     total_ops = common.sum_csv_column(output_dir / ts_file, ts_column)
