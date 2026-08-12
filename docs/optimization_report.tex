@@ -13,6 +13,8 @@
 \usepackage{amsmath}
 \usepackage{microtype}
 \usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,fit,backgrounds}
 
 \hypersetup{
   colorlinks=true,
@@ -216,6 +218,51 @@ range before loading the parallel data at all. This is a pure locality change: f
 \code{u64} keys and a one-word payload slot, one physical entry is still 32 bytes
 (8 bytes key, 24 bytes version+payload), so capacity is unaffected --- only how many
 unrelated cache lines a rejected key touches on the way to being rejected.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  cellK/.style={draw, fill=blue!22, minimum width=0.82cm, minimum height=0.68cm, font=\scriptsize, inner sep=0pt},
+  cellV/.style={draw, fill=orange!28, minimum width=0.82cm, minimum height=0.68cm, font=\scriptsize, inner sep=0pt},
+  cellP/.style={draw, fill=green!22, minimum width=0.82cm, minimum height=0.68cm, font=\scriptsize, inner sep=0pt},
+]
+  % --- array-of-structs row: 4 interleaved [K V P] records ---
+  \node[font=\bfseries\small, anchor=east] at (-0.35,1.35) {AoS};
+  \foreach \i in {0,...,3} {
+    \node[cellK] (k\i) at ({\i*2.46},1.35) {K\i};
+    \node[cellV] (v\i) at ({\i*2.46+0.82},1.35) {V\i};
+    \node[cellP] (p\i) at ({\i*2.46+1.64},1.35) {P\i};
+  }
+  \draw[dashed, thick, red!70!black]
+    ($(k0.north west)+(-0.05,0.07)$) rectangle ($(v1.south east)+(0.05,-0.07)$);
+  \node[red!70!black, font=\scriptsize, align=center] at (2.05,2.15)
+    {one $\sim$64B cache line already holds\\record 1's V, P -- even if K1 is rejected};
+
+  % --- structure-of-arrays row: key region, then data region ---
+  \node[font=\bfseries\small, anchor=east] at (-0.35,-0.55) {SoA};
+  \foreach \i in {0,...,3} {
+    \node[cellK] (sk\i) at ({\i*0.82},-0.55) {K\i};
+  }
+  \foreach \i in {0,...,3} {
+    \node[cellV] (sv\i) at ({3.6+\i*1.64},-0.55) {V\i};
+    \node[cellP] (sp\i) at ({3.6+\i*1.64+0.82},-0.55) {P\i};
+  }
+  \draw[dashed, thick, blue!60!black]
+    ($(sk0.north west)+(-0.05,0.07)$) rectangle ($(sk3.south east)+(0.05,-0.07)$);
+  \draw[dashed, thick, olive!70!black]
+    ($(sv0.north west)+(-0.05,0.07)$) rectangle ($(sp3.south east)+(0.05,-0.07)$);
+  \node[blue!60!black, font=\scriptsize, align=center] at (1.5,-1.35)
+    {key region: many more keys\\per cache line touched};
+  \node[olive!70!black, font=\scriptsize, align=center] at (6.05,-1.35)
+    {data region: touched\\only after a key matches};
+\end{tikzpicture}
+\caption{Array-of-structs (top) interleaves one record's key, version, and payload,
+  so rejecting a key still pulls its neighbors' version/payload bytes into cache.
+  Structure-of-arrays (bottom) separates the two regions, so a scan's key-rejection
+  pass touches only the key region, and the data region is paid for exactly once per
+  match, never per rejection.}
+\label{fig:layouts}
+\end{figure}
 
 \subsection{The leaf's live/validity mask}
 
@@ -760,6 +807,39 @@ win: the common case touches only the calling worker's own shard and its own cac
 lines, and the fallback path only runs when that shard genuinely has nothing to
 offer.
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  shard/.style={draw, rounded corners, minimum width=2.1cm, minimum height=2.5cm},
+  block/.style={draw, fill=gray!35, minimum width=1.7cm, minimum height=0.4cm, font=\scriptsize},
+  worker/.style={draw, rounded corners, fill=blue!12, font=\scriptsize, align=center},
+]
+  % four shards, each with a stack of retired-block markers rising from the bottom
+  \foreach \s/\n in {0/3,1/1,2/0,3/2} {
+    \node[shard] (shard\s) at ({\s*2.7},0) {};
+    \node[font=\scriptsize\bfseries, align=center] at ({\s*2.7},1.5) {Shard \s\\(Worker \s)};
+    \foreach \k in {1,...,\n} {
+      \node[block] at ({\s*2.7},{-1.05+\k*0.42}) {block};
+    }
+  }
+  \node[font=\scriptsize, align=center, red!70!black] at ({2*2.7},-0.7) {(empty)};
+
+  % worker 2 trying to reclaim a page
+  \node[worker] (w2) at ({2*2.7},-2.6) {Worker 2\\reclaiming};
+  \draw[-{Latex}, dashed, thick, red!70!black]
+    (w2) -- node[right, font=\scriptsize] {\textcircled{1} own shard first: empty} (shard2.south);
+  \draw[-{Latex}, thick, blue!60!black]
+    (w2.east) to[out=0,in=-90] node[below right, font=\scriptsize, align=left]
+      {\textcircled{2} steal: round-robin\\cursor moves to Shard 3} (shard3.south);
+\end{tikzpicture}
+\caption{Reclaiming worker 2 checks its own shard first (Shard 2, empty here) before
+  falling back to a shared round-robin cursor that advances to the next shard
+  (Shard 3) rather than always re-scanning from Shard 0 --- so no single remote
+  shard is favored repeatedly, and the common case (a worker's own shard already
+  has something) never touches this fallback path at all.}
+\label{fig:gc-shards}
+\end{figure}
+
 \subsection{Historical routing keeps old readers off the hot reclaim path}
 
 An older reader is never the reason a rebuild has to copy a record forward into a
@@ -886,6 +966,39 @@ if cache.snapshot_versions[index] < reader_ts_start {
 cache.lcb[index] > stamp.ts_start()
 \end{lstlisting}
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  cell/.style={draw, minimum width=0.85cm, minimum height=0.7cm, font=\scriptsize},
+]
+  \node[font=\scriptsize, anchor=east] at (-0.3,0.9) {\code{snapshot\_versions[]}};
+  \node[font=\scriptsize, anchor=east] at (-0.3,0) {\code{lcb[]}};
+  \foreach \i in {0,...,5} {
+    \node[cell] (sv\i) at ({\i*0.95},0.9) {\i};
+    \node[cell] (lc\i) at ({\i*0.95},0) {\i};
+  }
+  \draw[thick, red!70!black, rounded corners]
+    ($(sv3.north west)+(-0.05,0.05)$) rectangle ($(lc3.south east)+(0.05,-0.05)$);
+  \node[red!70!black, font=\scriptsize] at (3.3,1.65) {index = stamp.worker\_id()};
+  \draw[-{Latex}, red!70!black] (3.3,1.4) -- (sv3.north);
+
+  \node[draw, rounded corners, fill=green!12, font=\scriptsize, align=left, anchor=west] (hit) at (6.2,0.9)
+    {\textbf{cache hit} (common case):\\\code{lcb[i] > ts\_start} $\Rightarrow$ true\\touches \code{lcb} only};
+  \draw[-{Latex}, thick, green!45!black] (lc3.east) -- ++(0.3,0) |- (hit.west);
+
+  \node[draw, rounded corners, fill=orange!12, font=\scriptsize, align=left, anchor=west] (miss) at (6.2,-1.1)
+    {\textbf{cache miss}: locked query\\into \code{commit\_logs[i]}, then\\refreshes both arrays at \code{i}};
+  \draw[-{Latex}, thick, orange!70!black] (sv3.east) -- ++(0.3,0.4) |- (miss.north west);
+  \draw[-{Latex}, thick, orange!70!black] (lc3.east) -- ++(0.3,-0.4) |- (miss.west);
+\end{tikzpicture}
+\caption{The snapshot cache's two streams, indexed by the foreign worker's id. A
+  visibility check on the common, already-known-visible case reads only the
+  \code{lcb} row; only a genuine miss reaches into the writing worker's own commit
+  log and refreshes both rows at that one index, leaving every other worker's
+  entries untouched.}
+\label{fig:snapcache}
+\end{figure}
+
 An aborted write is rejected first, deliberately ahead of the same-worker fast path
 --- otherwise that fast path would keep an aborted write visible to its own writer
 forever, since it never consults the commit log at all and an uncommitted write's
@@ -983,6 +1096,42 @@ Lock-free, batched locally per thread & 2,549,030 ops/s & \textbf{5,089,502 ops/
 \bottomrule
 \end{tabular}
 \end{center}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  rec/.style={draw, minimum width=0.55cm, minimum height=0.5cm, font=\tiny},
+  batch/.style={draw, rounded corners, minimum width=2.15cm, minimum height=1cm},
+  seg/.style={draw, minimum height=0.75cm, font=\scriptsize, align=center},
+]
+  \foreach \t/\strokecol/\fillcol in {0/red!70!black/red!15,1/green!55!black/green!15,2/blue!60!black/blue!15} {
+    \node[batch] (batch\t) at ({\t*3.5},2.15) {};
+    \node[font=\scriptsize\bfseries, \strokecol] at ({\t*3.5},2.85) {Thread \t: LocalBatch};
+    \foreach \r in {0,1,2} {
+      \node[rec, fill=\fillcol] at ({\t*3.5-0.6+\r*0.6},2.15) {r\r};
+    }
+  }
+
+  \node[seg, minimum width=3cm, fill=red!12] (seg0) at (0,0) {Thread 0's\\reserved region};
+  \node[seg, minimum width=3cm, fill=green!12, right=0pt of seg0] (seg1) {Thread 1's\\reserved region};
+  \node[seg, minimum width=3cm, fill=blue!12, right=0pt of seg1] (seg2) {Thread 2's\\reserved region};
+  \node[seg, minimum width=1.6cm, dashed, right=0pt of seg2] (segnext) {next};
+  \node[font=\scriptsize, below=3pt of seg1.south] {shared, append-only log file};
+  \draw[-{Latex}, thick] ($(segnext.north)+(0,0.05)$) -- ++(0,0.45)
+    node[above, font=\scriptsize, align=center] {\code{tail.fetch\_add(len)}\\reserves the next region};
+
+  \draw[-{Latex}, thick, red!70!black] (batch0.south) -- node[left, font=\tiny] {one \code{pwrite}} (seg0.north);
+  \draw[-{Latex}, thick, green!55!black] (batch1.south) -- (seg1.north);
+  \draw[-{Latex}, thick, blue!60!black] (batch2.south) -- (seg2.north);
+\end{tikzpicture}
+\caption{Each thread accumulates its own records in a thread-local batch, with no
+  lock and no shared channel; only the flush at the end of a batch touches the
+  shared file, as one \code{pwrite} into a byte range that thread alone reserved via
+  one atomic \code{fetch\_add} on the file's tail. No two threads' reserved regions
+  ever overlap, so the flushes themselves need no coordination beyond that one
+  atomic counter.}
+\label{fig:wal-lockfree}
+\end{figure}
 
 Unbatched lock-free writes lose to the sharded channel past a handful of threads:
 each write still pays a full system call, and several threads extending the same
@@ -1104,6 +1253,88 @@ engine-side optimization measured against a benchmark that is itself spending
 unrelated CPU time on request generation will systematically understate its own
 effect.
 
+\subsection{Fast, thread-local randomness}
+
+The obvious choice for a random-number generator, \code{rand}'s default, is
+cryptographically secure (ChaCha-backed) --- unnecessary strength for load-generator
+data that never needs to be unpredictable, and expensive enough that it measured as
+\textbf{up to $\sim$14\% of all CPU cycles} in a read-heavy benchmark, spent purely on
+picking which key to touch next. The fix follows the same shape everywhere it is
+applied: seed a fast, non-cryptographic generator once per thread from the secure
+generator, then draw from that thread-local instance for every subsequent request ---
+paying the expensive seeding cost exactly once per thread's lifetime, not once per
+operation:
+
+\begin{lstlisting}
+thread_local! {
+    static FAST_RNG: RefCell<SmallRng> = RefCell::new(rand::make_rng());
+}
+fn with_fast_rng<R>(f: impl FnOnce(&mut SmallRng) -> R) -> R {
+    FAST_RNG.with(|rng| f(&mut rng.borrow_mut()))
+}
+\end{lstlisting}
+
+The key-value benchmark driver uses \code{SmallRng} (Xoshiro256++); the
+order-processing benchmark driver uses \code{fastrand}'s \code{Rng} (WyRand) instead
+--- two different concrete generators for two different drivers, but the identical
+pattern: a thread owns its own generator exclusively, with no shared state and no
+lock, the same principle behind every per-worker cache elsewhere in this document
+(\S\ref{sec:sharding}, \S\ref{sec:snapcache}).
+
+\subsection{The alias-table Zipf sampler}
+
+A Zipfian-skewed workload needs to draw a ``how popular is this key'' rank from a
+skewed distribution on every single request. Computed naively, that draw needs a
+floating-point power evaluation per request --- itself a real cost at millions of
+requests per second. Walker's alias method avoids this by doing all of the expensive
+work exactly once, at setup: it builds a small table of paired probabilities and
+alternate indices in $O(n)$ time (the only place a power computation ever runs), and
+after that, sampling is $O(1)$ --- one random index draw, one random comparison, and
+a table lookup, with no floating-point power anywhere in the timed request path:
+
+\begin{lstlisting}
+fn sample(&self, rng: &mut SmallRng) -> u64 {
+    let column = rng.random_range(0..self.probability.len());
+    let index = if rng.random::<f32>() < self.probability[column] {
+        column
+    } else {
+        self.alias[column] as usize
+    };
+    index as u64 + 1
+}
+\end{lstlisting}
+
+The table itself is immutable after construction, so every thread samples from the
+same one without needing a lock or a per-thread copy --- only the source of
+randomness driving the two draws above is thread-local, per the previous subsection.
+
+\subsection{Rank scrambling: a realism fix, not a speedup}
+
+One subtlety is easy to get wrong here. Left alone, a Zipf sample's rank is used
+directly as the key: rank 1 (the most popular draw) \emph{is} key 1, rank 2 is key
+2, and so on for the whole run. For this specific tree, that means the entire hot
+set of a Zipfian workload sits in the lowest few thousand keys for the run's whole
+duration --- physically, the same handful of leftmost leaf pages, every time. That
+is a windfall this engine did not earn: a page-based buffer-pool engine being
+compared against in the same benchmark has to keep a hot set that is \emph{spread
+across the full key range} warm under a fixed memory budget, which is a
+meaningfully harder problem than keeping a few always-resident leftmost pages warm.
+Comparing raw throughput under that asymmetry would not be comparing the two
+engines' actual concurrency/caching behavior at all.
+
+The fix hashes the drawn rank through an FNV-1 hash before treating it as a key,
+matching the scrambling real Zipfian workload generators apply for exactly this
+reason. This preserves the skew --- rank 1 is still drawn most often, and still
+resolves to one fixed key for the whole run --- while spreading \emph{which}
+physical keys are hot across the entire key range instead of clustering them at the
+bottom of it. This is deliberately \emph{not} applied to a ``read the most recently
+inserted keys'' access pattern, whose entire point is bias toward physically recent
+keys --- scrambling that would defeat the pattern it is meant to model. Unlike every
+other optimization in this document, this one does not make the engine faster: it
+makes the benchmark honest about what it is measuring.
+
+\subsection{Other workload-generation optimizations}
+
 \begin{center}
 \begin{tabular}{p{4.3cm}p{7.4cm}p{2.4cm}}
 \toprule
@@ -1119,11 +1350,8 @@ Single-field update mode & A standard update patches one field via a leaf-latche
   comparison). & \gainmeasured \\
 Hit/miss-only reads & A read that only needs to know whether a key exists tests
   visibility in place and returns a boolean, with no result vector or payload clone.
-  Combined with the sampler below, measured +106.8\% on a read-heavy benchmark. &
-  \gainmeasured \\
-Alias-table Zipf sampling & A finite alias table is built once at setup; sampling a
-  skewed key distribution then costs two random draws and a table lookup, replacing
-  a floating-point power computation on every single request. & included above \\
+  Combined with the alias sampler above, measured +106.8\% on a read-heavy
+  benchmark. & \gainmeasured \\
 Sampled scan-latency measurement & Only one in every 1,024 scans is individually
   timestamped, and the shared timeseries clock is refreshed every 256 operations
   rather than on every one. Measured +35.4\% on a scan-heavy benchmark. &
