@@ -40,6 +40,7 @@ CROSS-ENGINE BENCHMARK HARNESS - MANUAL
 
 ## Engineering notes
 
+- [Index optimization guide](docs/index_optimizations.md)
 - [Range-scan iteration: ordered routing and zero-copy streaming](docs/range_scan_iteration.md)
 - [Range-scan visibility-check optimization](docs/range_scan_visibility_check.md)
 - [Big-tree leaf-size benchmark](docs/bigtree_size_benchmark.md)

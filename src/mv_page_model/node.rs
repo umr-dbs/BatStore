@@ -2,20 +2,19 @@ use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::internal_page::InternalPage;
 use crate::mv_page_model::leaf_page::LeafPage;
 use crate::mv_query::interval::Interval;
-use crate::mv_record_model::record_point::RecordPoint;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::safe_cell::SafeCell;
 use itertools::Itertools;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::mem::ManuallyDrop;
-use std::sync::atomic::Ordering::{Acquire, Relaxed};
+use std::sync::atomic::Ordering::Acquire;
 use std::sync::atomic::{AtomicU32, fence};
 
-pub type PageLenField       = AtomicU32;
-pub type PageLenPrimitive   = u32;
-pub type Active             = u32;
-pub type Dead               = u32;
+pub type PageLenField = AtomicU32;
+pub type PageLenPrimitive = u32;
+pub type Active = u32;
+pub type Dead = u32;
 
 #[inline(always)]
 pub const fn from_len_sum(len: PageLenPrimitive) -> usize {
@@ -44,18 +43,20 @@ pub struct Node<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
+    Payload: Clone + Default,
 > {
     m_type: usize,
     _pad: [u8; PADDING],
     page: SafeCell<InnerPage<FAN_OUT, NUM_RECORDS, Key, Payload>>,
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
-> Drop for Node<FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Clone + Default,
+> Drop for Node<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     fn drop(&mut self) {
         match self.m_type() {
             PAGE_TYPE_INTERNAL => unsafe {
@@ -81,7 +82,7 @@ pub union InnerPage<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
+    Payload: Clone + Default,
 > {
     internal: ManuallyDrop<InternalPage<FAN_OUT, NUM_RECORDS, Key, Payload>>,
     leaf: ManuallyDrop<LeafPage<NUM_RECORDS, Key, Payload>>,
@@ -91,17 +92,20 @@ unsafe impl<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
-> Sync for InnerPage<FAN_OUT, NUM_RECORDS, Key, Payload> { }
+    Payload: Clone + Default,
+> Sync for InnerPage<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+}
 
 pub const PAGE_TYPE_INTERNAL: usize = 0;
 pub const PAGE_TYPE_LEAF: usize = 1;
 
-pub enum PageType<'a,
+pub enum PageType<
+    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
+    Payload: Clone + Default,
 > {
     LeafRef(&'a LeafPage<NUM_RECORDS, Key, Payload>),
     IndexRef(&'a InternalPage<FAN_OUT, NUM_RECORDS, Key, Payload>),
@@ -109,11 +113,13 @@ pub enum PageType<'a,
     IndexMut(&'a mut InternalPage<FAN_OUT, NUM_RECORDS, Key, Payload>),
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
-> Node<FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Clone + Default,
+> Node<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     #[inline(always)]
     pub const fn m_type(&self) -> usize {
         self.m_type
@@ -123,7 +129,7 @@ impl<const FAN_OUT: usize,
     pub fn as_page_ref(&self) -> PageType<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
         match self.m_type() {
             PAGE_TYPE_INTERNAL => PageType::IndexRef(unsafe { &self.page.internal }),
-            _ => PageType::LeafRef(unsafe { &self.page.leaf })
+            _ => PageType::LeafRef(unsafe { &self.page.leaf }),
         }
     }
 
@@ -131,17 +137,17 @@ impl<const FAN_OUT: usize,
     pub fn as_page_mut(&mut self) -> PageType<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
         match self.m_type() {
             PAGE_TYPE_INTERNAL => PageType::IndexMut(unsafe { &mut self.page.internal }),
-            _ => PageType::LeafMut(unsafe { &mut self.page.leaf })
+            _ => PageType::LeafMut(unsafe { &mut self.page.leaf }),
         }
     }
 
     #[inline(always)]
-    pub const fn new_leaf() -> Self {
+    pub fn new_leaf() -> Self {
         Self {
             m_type: PAGE_TYPE_LEAF,
             _pad: [0u8; PADDING],
             page: SafeCell::new(InnerPage {
-                leaf: ManuallyDrop::new(LeafPage::new())
+                leaf: ManuallyDrop::new(LeafPage::new()),
             }),
         }
     }
@@ -152,7 +158,7 @@ impl<const FAN_OUT: usize,
             m_type: PAGE_TYPE_INTERNAL,
             _pad: [0u8; PADDING],
             page: SafeCell::new(InnerPage {
-                internal: ManuallyDrop::new(InternalPage::new())
+                internal: ManuallyDrop::new(InternalPage::new()),
             }),
         }
     }
@@ -163,15 +169,16 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline(always)]
-    pub fn as_records(&self) -> &[RecordPoint<Key, Payload>] {
+    pub fn as_records(
+        &self,
+    ) -> crate::mv_page_model::leaf_page::LeafRecords<'_, NUM_RECORDS, Key, Payload> {
         match self.m_type() {
             PAGE_TYPE_LEAF => unsafe {
-                let deref
-                    = &self.page.leaf;
+                let deref = &self.page.leaf;
 
                 deref.as_records()
             },
-            _ => unreachable!("Sleepy Joe hit me -> Not tree Page .as_records")
+            _ => unreachable!("Sleepy Joe hit me -> Not tree Page .as_records"),
         }
     }
 
@@ -190,40 +197,43 @@ impl<const FAN_OUT: usize,
 
     #[inline(always)]
     pub unsafe fn keys(&self) -> &[Interval<Key>] {
-        match self.m_type()  {
+        match self.m_type() {
             PAGE_TYPE_INTERNAL => unsafe {
-                let deref
-                    = &self.page.internal;
+                let deref = &self.page.internal;
 
                 deref.keys()
             },
-            _ => unreachable!("Sleepy Joe hit me -> Not tree Page .keys")
+            _ => unreachable!("Sleepy Joe hit me -> Not tree Page .keys"),
         }
     }
 
     #[inline(always)]
     pub fn children(&self) -> &[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>] {
-        match self.m_type()  {
+        match self.m_type() {
             PAGE_TYPE_INTERNAL => unsafe {
-                let deref
-                    = &self.page.internal;
+                let deref = &self.page.internal;
 
                 deref.children()
             },
-            _ => unreachable!("Sleepy Joe hit me -> Not tree Page .children")
+            _ => unreachable!("Sleepy Joe hit me -> Not tree Page .children"),
         }
     }
 
     #[inline(always)]
-    pub fn keys_versions_pointers(&self) -> (&[Interval<Key>], &[Version], &[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>]) {
-        match self.m_type()  {
+    pub fn keys_versions_pointers(
+        &self,
+    ) -> (
+        &[Interval<Key>],
+        &[Version],
+        &[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>],
+    ) {
+        match self.m_type() {
             PAGE_TYPE_INTERNAL => unsafe {
-                let deref
-                    = &self.page.internal;
+                let deref = &self.page.internal;
 
                 deref.keys_versions_pointers()
             },
-            _ => unreachable!("Sleepy Joe hit me -> Not tree Page .keys_versions_pointers")
+            _ => unreachable!("Sleepy Joe hit me -> Not tree Page .keys_versions_pointers"),
         }
     }
 
@@ -233,7 +243,7 @@ impl<const FAN_OUT: usize,
     //         PAGE_TYPE_LEAF => unsafe {
     //             let derefmut
     //                 = &mut self.page.leaf;
-    // 
+    //
     //             derefmut.delete(key, del)
     //         },
     //         _ => None
@@ -242,17 +252,17 @@ impl<const FAN_OUT: usize,
 
     #[inline(always)]
     pub fn as_leaf_page(&mut self) -> &mut LeafPage<NUM_RECORDS, Key, Payload> {
-        match self.m_type()  {
+        match self.m_type() {
             PAGE_TYPE_LEAF => unsafe { &mut self.page.leaf },
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 
     #[inline(always)]
     pub fn as_leaf_page_ref(&self) -> &LeafPage<NUM_RECORDS, Key, Payload> {
-        match self.m_type()  {
+        match self.m_type() {
             PAGE_TYPE_LEAF => unsafe { &self.page.leaf },
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 
@@ -279,117 +289,131 @@ impl<const FAN_OUT: usize,
     /// regardless of which variant is logically "active".
     #[inline(always)]
     pub fn on_reuse(&mut self) {
-        match self.m_type()  {
+        match self.m_type() {
             PAGE_TYPE_INTERNAL => unsafe {
-                let derefmut
-                    = &mut self.page.internal;
+                let derefmut = &mut self.page.internal;
 
-                derefmut.on_reuse()
+                derefmut.on_reuse();
+                derefmut.force_reinit_pointer_region();
             },
             _ => unsafe {
-                let derefmut
-                    = &mut self.page.leaf;
+                let derefmut = &mut self.page.leaf;
 
                 derefmut.on_reuse()
             },
         }
 
-        unsafe {
-            self.page.leaf.len.store(0, Relaxed);
-            self.page.internal.len.store(0, Relaxed);
-            // See `InternalPage::force_reinit_pointer_region`'s doc: needed
-            // unconditionally, not just on a leaf->internal transition —
-            // it's always sound and the alternative is tracking the old
-            // type here too, for no benefit. Confirmed via gdb (GC-enabled
-            // heavy-concurrency repro) that skipping this is a real,
-            // reproducible null-pointer-deref crash, not just a theoretical
-            // gap: a block last used as a leaf, reused as an internal page,
-            // still had a leftover `RecordPoint` field sitting at
-            // `pointer_region`'s byte offset — `get_pointer` handed that
-            // back as a `BlockRef`, and `borrow_read` dereferenced it.
-            self.page.internal.force_reinit_pointer_region();
-        }
+        // Do not write the inactive union variant here. `LeafPage` now owns
+        // a validity-mask allocation, so interpreting its bytes as an
+        // `InternalPage` would overwrite the mask pointer. A type-changing
+        // `mark_leaf`/`mark_internal` constructs the destination variant
+        // properly; same-type internal reuse was reset in its branch above.
     }
 
     #[inline(always)]
     pub fn as_internal_page(&self) -> &mut InternalPage<FAN_OUT, NUM_RECORDS, Key, Payload> {
-        match self.m_type()  {
-            PAGE_TYPE_INTERNAL => unsafe { &mut self.page.get_mut().internal},
-            _ => unreachable!()
+        match self.m_type() {
+            PAGE_TYPE_INTERNAL => unsafe { &mut self.page.get_mut().internal },
+            _ => unreachable!(),
         }
     }
 
     #[inline(always)]
     pub fn as_internal_page_ref(&self) -> &InternalPage<FAN_OUT, NUM_RECORDS, Key, Payload> {
-        match self.m_type()  {
+        match self.m_type() {
             PAGE_TYPE_INTERNAL => unsafe { &self.page.internal },
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 
     #[inline(always)]
-    pub fn try_as_internal_page_ref(&self) -> Result<&InternalPage<FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
-        match self.m_type()  {
+    pub fn try_as_internal_page_ref(
+        &self,
+    ) -> Result<&InternalPage<FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
+        match self.m_type() {
             PAGE_TYPE_INTERNAL => unsafe { Ok(&self.page.internal) },
-            _ => Err(())
+            _ => Err(()),
         }
     }
 
     #[inline(always)]
     pub fn len(&self) -> usize {
-        match self.m_type()  {
+        match self.m_type() {
             PAGE_TYPE_INTERNAL => unsafe { self.page.internal.sum_len() },
             _ => unsafe { self.page.leaf.len() },
         }
     }
 
     #[inline(always)]
-    pub const fn mark_leaf(&mut self) {
-        self.m_type = PAGE_TYPE_LEAF
+    pub fn mark_leaf(&mut self) {
+        if self.m_type != PAGE_TYPE_LEAF {
+            unsafe {
+                ManuallyDrop::drop(&mut self.page.internal);
+                std::ptr::write(&mut self.page.leaf, ManuallyDrop::new(LeafPage::new()));
+            }
+            self.m_type = PAGE_TYPE_LEAF;
+        }
     }
 
     #[inline(always)]
-    pub const fn mark_internal(&mut self) {
-        self.m_type = PAGE_TYPE_INTERNAL
+    pub fn mark_internal(&mut self) {
+        if self.m_type != PAGE_TYPE_INTERNAL {
+            unsafe {
+                ManuallyDrop::drop(&mut self.page.leaf);
+                std::ptr::write(
+                    &mut self.page.internal,
+                    ManuallyDrop::new(InternalPage::new()),
+                );
+            }
+            self.m_type = PAGE_TYPE_INTERNAL;
+        }
     }
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
-> AsRef<Node<FAN_OUT, NUM_RECORDS, Key, Payload>> for Node<FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Clone + Default,
+> AsRef<Node<FAN_OUT, NUM_RECORDS, Key, Payload>> for Node<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     fn as_ref(&self) -> &Node<FAN_OUT, NUM_RECORDS, Key, Payload> {
         &self
     }
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
-> Default for Node<FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Clone + Default,
+> Default for Node<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     fn default() -> Self {
         Self {
             m_type: PAGE_TYPE_LEAF,
             _pad: [0u8; PADDING],
-            page: SafeCell::new(InnerPage { leaf: ManuallyDrop::new(LeafPage::new()) }),
+            page: SafeCell::new(InnerPage {
+                leaf: ManuallyDrop::new(LeafPage::new()),
+            }),
         }
     }
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
-> Clone for Node<FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Clone + Default,
+> Clone for Node<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     fn clone(&self) -> Self {
         if self.is_leaf() {
             Self {
                 m_type: PAGE_TYPE_LEAF,
                 _pad: [0u8; PADDING],
                 page: SafeCell::new(InnerPage {
-                    leaf: unsafe { self.page.leaf.clone() }
+                    leaf: unsafe { self.page.leaf.clone() },
                 }),
             }
         } else {
@@ -397,30 +421,40 @@ impl<const FAN_OUT: usize,
                 m_type: PAGE_TYPE_INTERNAL,
                 _pad: [0u8; PADDING],
                 page: SafeCell::new(InnerPage {
-                    internal: unsafe { self.page.internal.clone() }
+                    internal: unsafe { self.page.internal.clone() },
                 }),
             }
-
         }
     }
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
-> Display for Node<FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Clone + Default,
+> Display for Node<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "{}", match self.as_page_ref() {
-            PageType::LeafRef(leaf) => {
-                leaf.as_records().iter().join(",")
+        writeln!(
+            f,
+            "{}",
+            match self.as_page_ref() {
+                PageType::LeafRef(leaf) => {
+                    leaf.as_records().iter().join(",")
+                }
+                PageType::IndexRef(internal) => {
+                    format!(
+                        "keys: {}\nversions: {}",
+                        internal.keys().iter().join(","),
+                        internal.versions().iter().join(",")
+                    )
+                }
+                _ => {
+                    "".to_string()
+                }
             }
-            PageType::IndexRef(internal) => {
-                format!("keys: {}\nversions: {}", internal.keys().iter().join(","),
-                        internal.versions().iter().join(","))
-            }
-            _ => { "".to_string() }
-        })
+        )
     }
 }
 

@@ -109,13 +109,9 @@ pub(crate) fn insert_on_tree<
     let leaf_page = leaf_deref_mut.as_leaf_page();
     let stamp = TxStamp::new(worker_id, ts_start);
 
-    if let Some(record) = leaf_page
-        .as_records_mut()
-        .iter_mut()
-        .rfind(|r| r.key == key && !r.version.insertion_stamp().is_invalid())
-    {
-        if record.version.is_live() {
-            let crud_error = if record.version.insertion_stamp().worker_id() != worker_id {
+    if let Some(position) = leaf_page.latest_position(key, true) {
+        if leaf_page.version_at(position).is_live() {
+            let crud_error = if leaf_page.version_at(position).insertion_stamp().worker_id() != worker_id {
                 CRUDOperationResult::Conflict
             } else {
                 CRUDOperationResult::ZeroAffected(KeyAlreadyExists)
@@ -129,12 +125,12 @@ pub(crate) fn insert_on_tree<
         // an unbounded same-key chain. Its original write-set entry already
         // covers rollback; keeping the older predecessor untouched lets
         // abort restore the pre-transaction value.
-        if record.version.insertion_stamp() == stamp
-            && record.version.deletion_stamp() == Some(stamp)
+        if leaf_page.version_at(position).insertion_stamp() == stamp
+            && leaf_page.version_at(position).deletion_stamp() == Some(stamp)
         {
             tree.wal_log_write(stamp, |_| CRUDOperation::Insert(key, payload.clone()));
-            record.version.undelete();
-            record.set_payload(payload);
+            leaf_page.version_mut_at(position).undelete();
+            leaf_page.set_payload_at(position, payload);
             leaf_page.commit_delta(1, -1);
             return (CRUDOperationResult::Inserted(stamp.ts_start()), false);
         }
@@ -184,24 +180,20 @@ pub(crate) fn update_on_tree<
     // (since-aborted) entry, since its permanently-invisible stamp would
     // otherwise report a spurious `Conflict` for every later writer of this
     // key.
-    match leaf_page
-        .as_records_mut()
-        .iter_mut()
-        .rfind(|r| r.key() == key && !r.version.insertion_stamp().is_invalid())
-    {
-        Some(record) => {
-            if tree.is_visible_stamp(worker_id, ts_start, record.version.insertion_stamp()) {
+    match leaf_page.latest_position(key, true) {
+        Some(position) => {
+            if tree.is_visible_stamp(worker_id, ts_start, leaf_page.version_at(position).insertion_stamp()) {
                 let stamp = TxStamp::new(worker_id, ts_start);
 
                 tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
 
                 // Self-overwrite fast path — see `insert_on_tree`'s doc.
-                if record.version.insertion_stamp() == stamp {
-                    record.set_payload(payload);
+                if leaf_page.version_at(position).insertion_stamp() == stamp {
+                    leaf_page.set_payload_at(position, payload);
                     return (CRUDOperationResult::Updated(stamp.ts_start()), false);
                 }
 
-                if !record.version.delete(stamp) {
+                if !leaf_page.version_mut_at(position).delete(stamp) {
                     return (CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted), false);
                 }
 
@@ -242,17 +234,13 @@ pub(crate) fn delete_on_tree<
     let leaf_deref_mut = leaf_guard.deref_mut();
     let leaf_page = leaf_deref_mut.as_leaf_page();
 
-    match leaf_page
-        .as_records_mut()
-        .iter_mut()
-        .rfind(|r| r.key == key && !r.version.insertion_stamp().is_invalid())
-    {
-        Some(record) => {
-            if tree.is_visible_stamp(worker_id, ts_start, record.version.insertion_stamp()) {
+    match leaf_page.latest_position(key, true) {
+        Some(position) => {
+            if tree.is_visible_stamp(worker_id, ts_start, leaf_page.version_at(position).insertion_stamp()) {
                 let stamp = TxStamp::new(worker_id, ts_start);
                 tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));
 
-                if record.version.delete(stamp) {
+                if leaf_page.version_mut_at(position).delete(stamp) {
                     leaf_page.commit_delta(-1, 1);
                     (CRUDOperationResult::Deleted(stamp.ts_start()), true)
                 } else {

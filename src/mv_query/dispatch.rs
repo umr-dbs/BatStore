@@ -39,17 +39,17 @@ impl<
     /// are free to take this fast path whenever the heuristic says so. The
     /// WAL-relevant `Update` arm additionally gates this off entirely
     /// whenever a WAL is attached — see the call site.
-    pub(crate) fn decide_update_in_place_record(&self, record: &RecordPoint<Key, Payload>) -> bool {
+    pub(crate) fn decide_update_in_place_record(&self, version: &VersionInfo) -> bool {
         if !self.has_update_in_place() {
             return false;
         }
 
         match self.ctx.newest_live_si() {
             Some(newest_si) => {
-                record.version.insertion_stamp().ts_start() > newest_si
-                    && !record.version.insertion_stamp().is_invalid()
+                version.insertion_stamp().ts_start() > newest_si
+                    && !version.insertion_stamp().is_invalid()
             }
-            None => !record.version.insertion_stamp().is_invalid(),
+            None => !version.insertion_stamp().is_invalid(),
         }
     }
 }
@@ -74,20 +74,20 @@ impl<
         let Some(position) = leaf_page.latest_position(key, false) else {
             return CRUDOperationResult::ZeroAffected(KeyDoesNotExist);
         };
-        if !leaf_page.as_records()[position].version.is_live() {
+        if !leaf_page.version_at(position).is_live() {
             return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted);
         }
 
-        let payload = make_payload(leaf_page.as_records()[position].payload());
+        let payload = make_payload(leaf_page.payload_at(position));
         if matches!(self.cold.wal.as_ref(), WalBackend::Off)
-            && self.decide_update_in_place_record(&leaf_page.as_records()[position])
+            && self.decide_update_in_place_record(leaf_page.version_at(position))
         {
-            leaf_page.as_records_mut()[position].set_payload(payload);
+            leaf_page.set_payload_at(position, payload);
             return CRUDOperationResult::Updated(self.current_version());
         }
 
         let stamp = self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
-        if !leaf_page.as_records_mut()[position].version.delete(stamp) {
+        if !leaf_page.version_mut_at(position).delete(stamp) {
             return CRUDOperationResult::Error;
         }
         let current_len = leaf_page.len();
@@ -186,12 +186,11 @@ impl<
                 let latest_position = leaf_page.latest_position(key, false);
                 if let Some(position) = latest_position {
                     if matches!(self.cold.wal.as_ref(), WalBackend::Off)
-                        && self.decide_update_in_place_record(&leaf_page.as_records()[position])
+                        && self.decide_update_in_place_record(leaf_page.version_at(position))
                     {
-                        let record = &mut leaf_page.as_records_mut()[position];
-                        record.set_payload(payload);
-                        if record.version.is_deleted() {
-                            record.version_mut().undelete();
+                        leaf_page.set_payload_at(position, payload);
+                        if leaf_page.version_at(position).is_deleted() {
+                            leaf_page.version_mut_at(position).undelete();
 
                             leaf_page.commit_delta(1, -1);
                         }
@@ -201,11 +200,11 @@ impl<
                 }
 
                 match latest_position {
-                    Some(position) if leaf_page.as_records()[position].version.is_live() => {
+                    Some(position) if leaf_page.version_at(position).is_live() => {
                         let stamp =
                             self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
 
-                        if !leaf_page.as_records_mut()[position].version.delete(stamp) {
+                        if !leaf_page.version_mut_at(position).delete(stamp) {
                             return CRUDOperationResult::Error;
                         }
 
@@ -393,10 +392,9 @@ impl<
                 }
 
                 if let Some(position) = leaf_page.latest_position(key, false) {
-                    if self.decide_update_in_place_record(&leaf_page.as_records()[position]) {
-                        let record = &mut leaf_page.as_records_mut()[position];
-                        record.version_mut().undelete();
-                        record.set_payload(payload);
+                    if self.decide_update_in_place_record(leaf_page.version_at(position)) {
+                        leaf_page.version_mut_at(position).undelete();
+                        leaf_page.set_payload_at(position, payload);
                         leaf_page.commit_delta(1, -1);
 
                         return CRUDOperationResult::UpdatedRand(key, self.current_version());

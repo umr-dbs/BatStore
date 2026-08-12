@@ -2,22 +2,24 @@
 
 Date: 2026-08-12
 
-This microbenchmark compares the production-style array-of-structures (AoS) record
-layout with a proposed two-region layout, without tree traversal, latches, WAL, GC,
+This microbenchmark originally compared the former array-of-structures (AoS) record
+layout with the two-region layout now used by production, without tree traversal, latches, WAL, GC,
 transactions, allocation, or payload cloning. Its primary test uses 16,384 independently
 boxed leaf pages per layout, a 62.5 MiB working set for each representation.
 
 ## Layouts
 
-Both pages contain 125 physical records and occupy exactly 4,000 bytes.
+Both synthetic benchmark pages contain 125 physical records and occupy exactly 4,000
+bytes. Production uses 123 records because its 4 KiB boundary applies to the complete
+`OptCell<Block>`, including `cell_version` and page metadata, not only these arrays.
 
 - **AoS:** `[Record { key: u64, begin: u64, end: u64, payload: u64 }; 125]`
 - **Split:** `[key: u64; 125]` followed by
   `[RecordData { begin: u64, end: u64, payload: u64 }; 125]`
 
-The 32-byte AoS entry matches the size of the production leaf's
-`RecordPoint<u64, u64>`. The split layout uses an 8-byte key and 24 bytes of remaining
-record information, so capacity and total bytes are held constant.
+The former 32-byte AoS entry has the same per-slot size as the production leaf. The split
+layout uses an 8-byte key and 24 bytes of remaining record information, so capacity and
+total bytes are held constant within this layout-only experiment.
 
 Pages cycle through 25, 50, 75, 100, and 125 physical records: 20%, 40%, 60%, 80%, and
 100% occupancy, respectively. Thus no empty or less-than-20%-full leaf participates. Each
@@ -65,9 +67,10 @@ fits in cache and the second address stream can erase the benefit. The multi-lea
 more representative of a tree whose active leaves exceed cache, but it still isolates the
 physical leaf access rather than claiming an end-to-end tree speedup.
 
-This remains deliberately leaf-only. It does not measure tree traversal, writes,
-split/merge cost, concurrency, payload cloning, or the engineering impact of losing a
-directly addressable `&[RecordPoint]`. Both complete layout sets coexist in memory during
+This remains deliberately leaf-only. The result motivated adopting the split layout, but
+it does not measure tree traversal, writes, split/merge cost, concurrency, payload cloning,
+or the engineering impact of replacing a directly addressable `&[RecordPoint]` with
+borrowed record views. Both complete layout sets coexist in memory during
 the process, but only one is touched during a timed sample. Allocation and page creation
 are outside the timed region.
 
