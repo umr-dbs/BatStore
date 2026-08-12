@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::mv_bench::ycsb_driver::{DriverConfig, run_ycsb};
 use crate::mv_bench::ycsb_random::{RequestDistribution, YcsbMix};
-use crate::mv_bench::ycsb_driver::{run_ycsb, DriverConfig};
 use crate::mv_bench::ycsb_schema::YcsbConfig;
 use crate::mv_root::index_root::RootIndexType;
 
@@ -28,7 +28,12 @@ fn full_scale() -> bool {
     std::env::var_os("CMVBT_FULL_BENCH").is_some()
 }
 
-fn config(num_threads: usize, wal_path: PathBuf, batch_size: Option<usize>, full: bool) -> DriverConfig {
+fn config(
+    num_threads: usize,
+    wal_path: PathBuf,
+    batch_size: Option<usize>,
+    full: bool,
+) -> DriverConfig {
     DriverConfig {
         ycsb: YcsbConfig {
             record_count: if full { FULL_RECORD_COUNT } else { 20_000 },
@@ -45,6 +50,7 @@ fn config(num_threads: usize, wal_path: PathBuf, batch_size: Option<usize>, full
         max_scan_length: 100,
         write_all_fields: false,
         read_payload: true,
+        execution_mode: crate::mv_bench::ycsb_txn::YcsbExecutionMode::Atomic,
         gc: true,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,
@@ -62,15 +68,23 @@ fn compare_wal_backends_ycsb() {
     let thread_counts: &[usize] = if full { FULL_THREAD_COUNTS } else { &[2] };
     let dir = std::env::temp_dir();
     println!();
-    println!("=== YCSB workload A: WAL backend comparison ({record_count} records, {duration}s/run) ===");
+    println!(
+        "=== YCSB workload A: WAL backend comparison ({record_count} records, {duration}s/run) ==="
+    );
     for &threads in thread_counts {
         for &(label, batch_size) in BACKENDS {
-            let wal_path = dir.join(format!("cmvbt_ycsb_wal_bench_{label}_{threads}_{}.log", std::process::id()));
+            let wal_path = dir.join(format!(
+                "cmvbt_ycsb_wal_bench_{label}_{threads}_{}.log",
+                std::process::id()
+            ));
             let _ = std::fs::remove_file(&wal_path);
 
             let summary = run_ycsb(config(threads, wal_path.clone(), batch_size, full));
 
-            println!("YCSB  backend={label:<18} threads={threads:<3} ops/sec={:>10.1}", summary.throughput_ops_sec);
+            println!(
+                "YCSB  backend={label:<18} threads={threads:<3} ops/sec={:>10.1}",
+                summary.throughput_ops_sec
+            );
 
             let _ = std::fs::remove_file(&wal_path);
         }

@@ -18,19 +18,19 @@
   <component name="ChangeListManager">
     <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Optimize code">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/leaf_layout_benchmark.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/leaf_layout_benchmark.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/readme.md" beforeDir="false" afterPath="$PROJECT_DIR$/readme.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_schema.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_schema.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_bench/ycsb_schema.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/ycsb_schema.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_db/transaction.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_db/transaction.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_page_model/node.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/node.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/index_optimizations.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/index_optimizations.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/manual.txt" beforeDir="false" afterPath="$PROJECT_DIR$/manual.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/compare_engines.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/compare_engines.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/engines/cmvbt.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/engines/cmvbt.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/suite.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/suite.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/ycsb_driver.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/ycsb_driver.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/ycsb_txn.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/ycsb_txn.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/internal_page.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/iter_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/iter_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_record_model/record_point.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_record_model/record_point.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_tree/mvbt.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/mvbt.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/leaf_page_abort_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/leaf_page_abort_tests.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_viz/dump.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_viz/dump.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/ycsb_wal_backend_bench.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/ycsb_wal_backend_bench.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/ycsb_wal_perf_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/ycsb_wal_perf_tests.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBLoader.java" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBLoader.java" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadRecord.java" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadRecord.java" afterDir="false" />
@@ -1454,15 +1454,7 @@
       <workItem from="1786530617804" duration="641000" />
       <workItem from="1786532923325" duration="108000" />
       <workItem from="1786533170877" duration="2663000" />
-      <workItem from="1786541847276" duration="10953000" />
-    </task>
-    <task id="LOCAL-00174" summary="Updated overflow count, was set too eager. Its enough to trigger at &lt;= 1 slot left for keys, not &lt;= 3">
-      <option name="closed" value="true" />
-      <created>1781972477665</created>
-      <option name="number" value="00174" />
-      <option name="presentableId" value="LOCAL-00174" />
-      <option name="project" value="LOCAL" />
-      <updated>1781972477666</updated>
+      <workItem from="1786541847276" duration="12921000" />
     </task>
     <task id="LOCAL-00175" summary="Rust 2021 -&gt; Rust 2024. Moved page soft commits from Release to Relaxed semanstics, since they always follow by a Release store from the latch.">
       <option name="closed" value="true" />
@@ -1848,7 +1840,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786551745156</updated>
     </task>
-    <option name="localTasksCounter" value="223" />
+    <task id="LOCAL-00223" summary="Optimize code">
+      <option name="closed" value="true" />
+      <created>1786554142517</created>
+      <option name="number" value="00223" />
+      <option name="presentableId" value="LOCAL-00223" />
+      <option name="project" value="LOCAL" />
+      <updated>1786554142517</updated>
+    </task>
+    <option name="localTasksCounter" value="224" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

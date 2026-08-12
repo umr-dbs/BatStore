@@ -257,18 +257,17 @@ fn dump_node<
             if max_depth.is_some_and(|max| depth >= max) {
                 NodeDump::InternalTruncated { active, dead, min_key, max_key, child_count: children.len() }
             } else {
-                let live_mask = internal.live_mask();
                 let children = keys
                     .iter()
                     .zip(versions.iter())
                     .zip(children.iter())
-                    .zip(live_mask.iter())
-                    .map(|(((key, version), child), &live)| ChildDump {
+                    .enumerate()
+                    .map(|(index, ((key, version), child))| ChildDump {
                         node_id: dump_node(child, depth + 1, max_depth, visited, nodes),
                         key_lower: key.lower().to_string(),
                         key_upper: key.upper().to_string(),
                         version: *version,
-                        live,
+                        live: internal.is_slot_live(index),
                     })
                     .collect();
 

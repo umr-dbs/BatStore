@@ -770,15 +770,13 @@ impl<
 
         let mufasa_children = mufasa_internal_page.children();
 
-        let live = mufasa_internal_page.live_mask();
-
         let mut all_candidates = mufasa_children
             .iter()
             .enumerate()
             .zip(mufasa_internal_page.versions())
             .zip(mufasa_internal_page.keys())
             .filter(|(((index, ..), ..), ..)| *index != simba_index)
-            .filter(|(((index, ..), ..), ..)| live[*index])
+            .filter(|(((index, ..), ..), ..)| mufasa_internal_page.is_slot_live(*index))
             .sorted_by_key(|(.., fence)| fence.lower())
             .map(|(((index, bro), ..), fence)| (index, bro, fence))
             .collect_vec();
@@ -918,21 +916,21 @@ impl<
                     let (keys, versions, pointers) =
                         simba.as_internal_page_ref().keys_versions_pointers();
 
-                    let simba_live = simba.as_internal_page_ref().live_mask();
+                    let simba_internal = simba.as_internal_page_ref();
 
                     let (c_keys, c_versions, c_pointers) = candidate_cell
                         .deref()
                         .as_internal_page_ref()
                         .keys_versions_pointers();
 
-                    let candidate_live = candidate_cell.deref().as_internal_page_ref().live_mask();
+                    let candidate_internal = candidate_cell.deref().as_internal_page_ref();
 
                     let shadow_copy = keys
                         .iter()
                         .zip(versions.iter().copied())
                         .zip(pointers.iter())
                         .enumerate()
-                        .filter(|(index, ..)| simba_live[*index])
+                        .filter(|(index, ..)| simba_internal.is_slot_live(*index))
                         .map(|(_, rest)| rest)
                         .merge_by(
                             c_keys
@@ -940,7 +938,7 @@ impl<
                                       .zip(c_versions.iter().copied())
                                       .zip(c_pointers.iter())
                                       .enumerate()
-                                      .filter(|(index, ..)| candidate_live[*index])
+                                      .filter(|(index, ..)| candidate_internal.is_slot_live(*index))
                                       .map(|(_, rest)| rest),
                             |((.., v0), ..), ((.., v1), ..)| v0 <= v1,
                         )
@@ -1165,18 +1163,16 @@ impl<
                     let (c_keys, c_versions, c_children) =
                         candidate_internal_page.keys_versions_pointers();
 
-                    let candidate_live = candidate_internal_page.live_mask();
-
                     let (s_keys, s_version, s_children) = simba.keys_versions_pointers();
 
-                    let simba_live = simba.as_internal_page_ref().live_mask();
+                    let simba_internal = simba.as_internal_page_ref();
 
                     let mut joined = c_keys
                         .iter()
                         .zip(c_versions.iter().copied())
                         .zip(c_children.iter())
                         .enumerate()
-                        .filter(|(index, ..)| candidate_live[*index])
+                        .filter(|(index, ..)| candidate_internal_page.is_slot_live(*index))
                         .map(|(_, rest)| rest)
                         .sorted_by_key(|((k, ..), ..)| k.lower)
                         .merge_by(
@@ -1185,7 +1181,7 @@ impl<
                                       .zip(s_version.iter().copied())
                                       .zip(s_children.iter())
                                       .enumerate()
-                                      .filter(|(index, ..)| simba_live[*index])
+                                      .filter(|(index, ..)| simba_internal.is_slot_live(*index))
                                       .map(|(_, rest)| rest)
                                       .sorted_by_key(|((k, ..), ..)| k.lower),
                             |((f, ..), ..), ((s, ..), ..)| f.lower < s.lower,
@@ -1253,7 +1249,7 @@ impl<
         // protected one (`record_survives_gc`, same predicate `merge()`'s
         // `leaf_merge_would_overflow` already uses for the identical
         // hazard on the merge side - see that check's doc), or every
-        // `live_mask()`-live entry for an internal page. Under heavy
+        // current-live entry for an internal page. Under heavy
         // concurrent load with long-held reader snapshots (TPC-C's
         // signature), this can run well ahead of `active_block` alone, so
         // a block whose *active* count looks comfortably below 80%
@@ -1269,12 +1265,7 @@ impl<
                 .iter()
                 .filter(|r| self.record_survives_gc(r.version()))
                 .count(),
-            false => block
-                .as_internal_page_ref()
-                .live_mask()
-                .iter()
-                .filter(|live| **live)
-                .count(),
+            false => block.as_internal_page_ref().live_count(),
         };
 
         let capacity = if is_leaf { NUM_RECORDS } else { FAN_OUT };
@@ -1411,14 +1402,14 @@ impl<
 
                     let (key_intervals, versions, pointers) = block.keys_versions_pointers();
 
-                    let live = block.as_internal_page_ref().live_mask();
+                    let internal = block.as_internal_page_ref();
 
                     let mut filtered = key_intervals
                         .iter()
                         .zip(versions.iter().copied())
                         .zip(pointers.iter())
                         .enumerate()
-                        .filter(|(index, ..)| live[*index])
+                        .filter(|(index, ..)| internal.is_slot_live(*index))
                         .map(|(_, rest)| rest)
                         .sorted_by_key(|((i, ..), ..)| i.lower)
                         .collect_vec();
@@ -1524,14 +1515,14 @@ impl<
 
                     let (key_intervals, versions, pointers) = block.keys_versions_pointers();
 
-                    let live = block.as_internal_page_ref().live_mask();
+                    let internal = block.as_internal_page_ref();
 
                     let active_entries = key_intervals
                         .iter()
                         .zip(versions.iter().copied())
                         .zip(pointers.iter())
                         .enumerate()
-                        .filter(|(index, ..)| live[*index])
+                        .filter(|(index, ..)| internal.is_slot_live(*index))
                         .map(|(_, rest)| rest)
                         .collect_vec();
 

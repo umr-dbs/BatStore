@@ -11,6 +11,7 @@ coupling (OLC), and reclamation invariants still hold.
 |---|---|---|---|
 | Leaf layout | Array of complete records | Dense key array plus parallel version/payload array | More keys per cache line during lookup |
 | Invalid entries | Read every version header | Inline 128-bit validity mask | Reject aborted slots before loading record data |
+| Internal SMO liveness | Rebuild an allocated mask from all interval pairs | Inline 128-bit current-child mask | Constant-time filtering with no SMO allocation |
 | Page allocation | Size only the `Block` | Size `OptCell<Block>`, including `cell_version` | The normal allocation is exactly 4 KiB |
 | Reads | Latch every node | OLC traversal with version validation | Readers normally take no node latch |
 | Root lookup | Re-search root history | Cache the transaction's historical read root | Repeated reads avoid repeated root-index lookup |
@@ -72,7 +73,62 @@ straddling two physical pages.
 Internal pages already use separate key-interval, version, and child-pointer regions.
 Child pointers and immutable published metadata are plain slots: the page-length Release/
 Acquire publication edge makes initialized contents visible, so redundant per-slot atomics
-are avoided.
+are avoided. Two inline `AtomicU64`s track which appended child intervals form the current
+partition. Appending an interval clears older overlapping bits and sets its own bit; SMOs
+can therefore filter or count current children without allocating a `Vec<bool>` and doing
+an O(`FAN_OUT²`) overlap reconstruction. The 16-byte mask fits the internal page's previous
+union padding, so the 4096-byte production cell does not grow.
+
+This internal mask is deliberately not consulted by historical routing. A child that is
+superseded in the current partition may still be correct for an older snapshot, so those
+reads continue to select with immutable per-entry versions. Page writers serialize mask
+changes under the existing node guard, atomics keep incidental concurrent observation
+data-race-free, and the Release length publication makes newly appended slot data and its
+mask update visible together.
+
+### Internal-page live mask for SMOs
+
+Internal pages are append-only across structural versions. When a child is replaced or
+split, its old interval remains physically present for historical snapshots and one or
+more newer intervals are appended. The current child partition is represented separately:
+
+```text
+slot:          0          1          2
+interval:   [0,100]    [0,49]    [50,100]
+live bit:      0          1          1
+meaning:     old       current     current
+```
+
+For every appended interval, the page performs one bounded pass over older live slots:
+
+1. Clear the bit of each older interval that overlaps the new interval.
+2. Set the new slot's bit.
+3. Publish the new physical length with the existing Release store.
+
+The pass adds at most `FAN_OUT` inexpensive bit/interval checks to an internal-page append,
+which already occurs on the structural-maintenance path. It moves work out of later SMO
+consumers: merge candidate selection, key/version split copying, survivor counting, and
+tree dumps now use `is_slot_live(index)` or `live_count()` directly.
+
+| Property | Previous derived mask | Inline mask |
+|---|---:|---:|
+| Storage | Temporary heap `Vec<bool>` | 16 bytes inside the page |
+| Build cost per SMO consumer | O(`FAN_OUT²`) interval comparisons | None |
+| Test one slot | Vector indexing after reconstruction | One word load and bit test |
+| Count current children | Build mask, then scan it | Two word loads and popcounts |
+| Production cell size | 4096 bytes | 4096 bytes |
+
+Correctness rests on four boundaries:
+
+- The mask describes **current structural liveness**, not MVCC visibility.
+- Historical traversal continues to inspect immutable versions and may select a slot whose
+  current-live bit is clear.
+- Internal-page writers are serialized by the existing node write guard, so overlapping
+  mask updates do not compete with one another.
+- Cloning copies the mask, while page reuse clears it before publishing an empty length.
+
+This is therefore an SMO acceleration and compact current-state index, not a replacement
+for version metadata or snapshot validation.
 
 ### Payload indirection only when required
 
@@ -216,7 +272,7 @@ from the explanation above so that this section can be used independently during
 | Direct retirement where final | A consumed child guard can retire without a reversible lock upgrade | One CAS/upgrade during eligible SMOs | Only valid when the path cannot back out and reuse the child |
 | Length publishes slots | Slot writes happen before Release length update; readers load length with Acquire | Per-slot atomics for immutable key, payload, version, and child-pointer storage | No reader may index beyond its acquired prefix |
 | Plain internal versions/pointers | Published internal metadata is written once | Atomic load/store overhead per internal entry | Later in-place mutation would invalidate the proof |
-| Derived internal liveness | Select live, disjoint intervals instead of mutating an obsolete flag | One atomic field and obsolete-marking protocol | Live sibling intervals must remain disjoint |
+| Inline internal liveness | Maintain two page-level mask words as child intervals are appended | Allocating O(`FAN_OUT²`) liveness reconstruction during SMOs | Live sibling intervals must remain disjoint; historical reads still use versions |
 | Minimal fences/orderings | Acquire/Release only on real publication edges; Relaxed for independent counters | Redundant fences and global ordering | Weakening an actual ownership/publication edge is not allowed |
 | No master write-traversal guard | Root and node atomic state replace a global traversal guard | Global writer serialization | Root selection and unsafe-root handling remain validated |
 | Current-root fast path | OLTP write traversal begins from the newest safe root | Historical root-index predecessor search on ordinary writes | An unsafe root forces the existing SMO/retry path |
@@ -267,6 +323,117 @@ from the explanation above so that this section can be used independently during
 | Shared payload clones | Read/split results clone the handle, not a large row body | Allocation and memcpy for large records | Whole-value replacement protects readers from aliasing mutation |
 | One cross-table commit marker | Shared database WAL tags table records and commits the transaction once | Per-table commit markers and ambiguous partial commit | Recovery demultiplexes table IDs under the one transaction boundary |
 | Empty read-only commit elision | A transaction with an empty write set releases its snapshot without drawing `ts_commit` or appending a commit-log entry | Clock and commit-log work for read-only transactions | The existing optional commit-timestamp result represents this case |
+| Atomic-operation auto-commit | Single-key writes install their OSIC commit entry while the leaf is still write-locked, then publish by unlocking | Transaction object, table/root/write-set bookkeeping, snapshot registration, and the published-but-not-yet-committed conflict window | An unresolved version from a real transaction still causes a first-writer-wins conflict |
+| Configurable YCSB execution | `atomic` uses auto-commit; `transaction` uses begin/register, visibility checks, conflict retry, and commit | Makes fast-path cost directly measurable without changing YCSB data or mix | Transaction mode intentionally includes transaction overhead; RMW shares one snapshot only in this mode |
+
+#### Atomic-operation correctness
+
+An atomic operation is an auto-committed, single-key operation. It is not a
+multi-statement snapshot transaction with a one-entry write set. The write path is ordered
+as follows:
+
+```text
+short reclamation pin during traversal
+    → acquire the target leaf's exclusive OLC writer guard
+    → find the physically newest valid version
+    → verify that version is committed/visible at the current OSIC boundary
+    → draw the operation's insertion/deletion stamp and log its WAL write
+    → modify the leaf while it remains unobservable behind the writer guard
+    → append the operation to its worker's OSIC commit log
+    → release the leaf guard, publishing an already-committed version
+    → enqueue the WAL commit marker
+```
+
+The leaf-guard release is the index publication/linearization point for other successful
+OLC traversals. A reader can sample the leaf during the write, but its version validation
+cannot succeed across the locked/version-changing interval. By the first instant a reader
+can successfully validate the modified leaf, the new record's stamp is already present in
+the OSIC commit log. This closes the old “published leaf entry, commit log not updated yet”
+window that could make one auto-commit operation appear unresolved to the next one.
+
+The WAL commit marker may be enqueued after leaf publication because visibility and
+durability are separate guarantees in the asynchronous WAL configuration. Recovery applies
+the earlier write record only if it later finds the matching commit marker. A caller needing
+synchronous durability must still wait on the WAL hardened boundary.
+
+##### Why an atomic write does not call `begin_snapshot`
+
+`begin_snapshot` both draws a fixed visibility timestamp and registers it as live so GC
+cannot reclaim historical pages needed by a lock-free reader. A single-key atomic write
+does not retain such a view:
+
+- It wants the newest committed state, rather than a historical snapshot spanning several
+  statements.
+- Traversal is protected by the short reclamation pin, which prevents reuse of blocks it
+  may currently follow without adding an OSIC transaction registration.
+- Once the target leaf is exclusively guarded, writers cannot change it concurrently and
+  OLC readers cannot validate across the mutation.
+- It finishes and commits before releasing that guard; it retains no root, page, or
+  timestamp after the call.
+
+It still draws an OSIC `ts_start` for the record stamp and a `ts_commit` for the commit log.
+It merely avoids publishing the start as a long-lived active snapshot. The global clock's
+atomic modification order still places both timestamps in the same total OSIC order as
+ordinary transactions.
+
+Atomic reads and scans are deliberately different:
+
+| Operation | Snapshot registration | Protection and visibility requirement |
+|---|---:|---|
+| Atomic point read | Yes | Lock-free traversal needs a fixed visibility boundary and GC protection |
+| Atomic range scan | Yes, owned by the iterator | The iterator may outlive its constructor and cross many leaves/SMOs |
+| Atomic single-key write | No full snapshot; short reclamation pin | Exclusive leaf guard plus commit-before-publication |
+| Real transaction | Yes, once for its lifetime | One stable snapshot across several keys/tables and possible rollback |
+
+Replacing the reclamation pin with no protection would be incorrect: the writer can be
+descheduled between reading an ancestor pointer and acquiring the target leaf, while GC
+reuses the retired block. Conversely, using `begin_snapshot` would be correct but would
+add a clock tick, live-slot publication, nesting bookkeeping, and later release that the
+write protocol does not otherwise need.
+
+##### Coexistence with real transactions
+
+Atomic and real transactions use the same global clock, worker commit logs, `TxStamp`
+format, visibility function, root history, and WAL. There is no separate visibility domain.
+
+| Concurrent case | Required outcome | Why it is correct |
+|---|---|---|
+| Atomic write vs. atomic write on one key | Leaf guard serializes them; the second sees a committed predecessor | The first commits before releasing the guard |
+| Atomic write vs. atomic write on different leaves | They proceed independently | OSIC globally orders timestamps; no shared leaf state needs locking |
+| Atomic write encounters an unresolved real-transaction version | Return/retry `Conflict`; never overwrite it | Preserves first-writer-wins and the real transaction's ability to abort |
+| Real transaction begins before atomic commit | It retains its older snapshot and need not see the atomic value | Normal OSIC LCB visibility decides this |
+| Real transaction begins after atomic publication | It sees the committed atomic value | Commit-log entry precedes leaf publication |
+| Real transaction writes after seeing atomic predecessor | It uses ordinary first-writer-wins and write-set tracking | Atomic version is indistinguishable from any other committed version |
+| Real transaction aborts while an atomic operation waits/retries | Abort invalidates/restores its versions before a later retry proceeds | Atomic code never modifies an unresolved foreign version |
+
+Insert, update, field-patch update, and delete all follow this rule. The atomic insert must
+distinguish “committed live key” (`KeyAlreadyExists`) from “unresolved foreign live key”
+(`Conflict`). Update and delete likewise check OSIC visibility before mutating the newest
+valid slot. Invalid/aborted physical slots are skipped through the leaf validity mask.
+
+##### YCSB modes
+
+The YCSB driver exposes `atomic` and `transaction` without changing record shape, key
+distribution, operation mix, payload-read policy, GC, or WAL settings:
+
+- `atomic` is the default and uses the protocol above.
+- `transaction` registers a fresh snapshot, performs normal visibility/conflict checking,
+  commits after applying the operation, and retries a first-writer-wins conflict with a
+  fresh snapshot.
+- In `transaction` mode, YCSB Read-Modify-Write keeps the read and update under the same
+  registered snapshot. In `atomic` mode it retains standard YCSB's two sequential operation
+  calls, while the update/field patch itself remains atomic under the leaf guard.
+
+The cross-engine harness option is:
+
+```bash
+--cmvbt-ycsb-mode atomic
+--cmvbt-ycsb-mode transaction
+```
+
+This switch is intended to measure the cost of the transaction machinery and different
+RMW semantics explicitly. Results from the two modes should be labeled rather than mixed
+into one historical series.
 
 ### Split, merge, GC, and block reuse
 

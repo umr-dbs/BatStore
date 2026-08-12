@@ -96,8 +96,8 @@ impl<
             current_len,
         );
         leaf_page.commit_delta(0, 1);
-        drop(leaf_guard);
         let ts_commit = self.commit_tx(stamp.worker_id());
+        drop(leaf_guard);
         self.wal_log_commit(stamp, ts_commit);
         CRUDOperationResult::Updated(stamp.ts_start())
     }
@@ -125,14 +125,21 @@ impl<
 
                 let leaf_page = leaf_deref_mut.as_leaf_page();
 
-                if leaf_page
-                    .as_records()
-                    .iter()
-                    .rfind(|r| r.key == key)
-                    .map(|r| r.version.is_live())
-                    .unwrap_or(false)
-                {
-                    return CRUDOperationResult::ZeroAffected(KeyAlreadyExists);
+                if let Some(position) = leaf_page.latest_position(key, true) {
+                    let version = leaf_page.version_at(position);
+                    if version.is_live() {
+                        let reader_worker = self.worker_id();
+                        let now = self.current_version();
+                        return if self.is_visible_stamp(
+                            reader_worker,
+                            now,
+                            version.insertion_stamp(),
+                        ) {
+                            CRUDOperationResult::ZeroAffected(KeyAlreadyExists)
+                        } else {
+                            CRUDOperationResult::Conflict
+                        };
+                    }
                 }
 
                 let current_len = leaf_page.len();
@@ -159,13 +166,16 @@ impl<
                     ));
                 }
 
-                drop(leaf_guard);
-                // Commit (visibility) and return immediately — the WAL
+                // Commit while the leaf is still write-locked. OLC readers
+                // cannot validate the new prefix until the guard is
+                // released, so the version is already in OSIC's commit log
+                // at the first instant it can be observed successfully.
                 // record (if any) is flushed asynchronously in a batch by
                 // the writer's background thread, not waited on here. See
                 // `MVBTSt::wal_hardened_version`'s doc for how to check/wait
                 // for durability explicitly instead.
                 let ts_commit = self.commit_tx(stamp.worker_id());
+                drop(leaf_guard);
                 self.wal_log_commit(stamp, ts_commit);
 
                 CRUDOperationResult::Inserted(stamp.ts_start())
@@ -201,6 +211,15 @@ impl<
 
                 match latest_position {
                     Some(position) if leaf_page.version_at(position).is_live() => {
+                        let reader_worker = self.worker_id();
+                        let now = self.current_version();
+                        if !self.is_visible_stamp(
+                            reader_worker,
+                            now,
+                            leaf_page.version_at(position).insertion_stamp(),
+                        ) {
+                            return CRUDOperationResult::Conflict;
+                        }
                         let stamp =
                             self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
 
@@ -214,8 +233,8 @@ impl<
                         );
 
                         leaf_page.commit_delta(0, 1);
-                        drop(leaf_guard);
                         let ts_commit = self.commit_tx(stamp.worker_id());
+                        drop(leaf_guard);
                         self.wal_log_commit(stamp, ts_commit);
 
                         CRUDOperationResult::Updated(stamp.ts_start())
@@ -249,14 +268,20 @@ impl<
                     println!("[key={key}] - Loop start");
                 }
 
-                let stamp = self.wal_start_commit(|_| CRUDOperation::Delete(key));
-
-                if VERBOSE {
-                    println!(
-                        "[key={key}] - Commit succeeded: {}, Attempts: 0",
-                        stamp.ts_start()
-                    );
+                let position = leaf_page.latest_position(key, true);
+                if let Some(position) = position {
+                    let reader_worker = self.worker_id();
+                    let now = self.current_version();
+                    if !self.is_visible_stamp(
+                        reader_worker,
+                        now,
+                        leaf_page.version_at(position).insertion_stamp(),
+                    ) {
+                        return CRUDOperationResult::Conflict;
+                    }
                 }
+
+                let stamp = self.wal_start_commit(|_| CRUDOperation::Delete(key));
 
                 match leaf_page.delete(key, stamp) {
                     Ok(Some(..)) => {
@@ -268,9 +293,8 @@ impl<
                             );
                         }
 
-                        drop(leaf_guard);
-                        // Fire-and-forget WAL, see the Insert arm above.
                         let ts_commit = self.commit_tx(stamp.worker_id());
+                        drop(leaf_guard);
                         self.wal_log_commit(stamp, ts_commit);
                         CRUDOperationResult::Deleted(stamp.ts_start())
                     }

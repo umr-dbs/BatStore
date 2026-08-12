@@ -10,6 +10,9 @@ use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::AtomicU64;
+
+const INTERNAL_LIVE_MASK_WORDS: usize = 2;
 
 pub type Fence<Key> = Interval<Key>;
 
@@ -31,8 +34,8 @@ pub struct InternalPage<
     // writer (`mark_version_obsolete`, OR-ing an "obsolete" bit into an
     // already-published slot for a concurrent OLC reader to observe) which
     // needed `AtomicVersion` to avoid racing that in-place mutation against
-    // a lock-free reader; it's gone now — see `InternalPage::live_mask`'s
-    // doc for why liveness no longer needs a per-slot flag at all — so this
+    // a lock-free reader; it is gone now. Current liveness is maintained in
+    // a separate page-level mask, so `Version` itself remains immutable and
     // rides the exact same `len`-Acquire/Release happens-before edge
     // `pointer_region` already relies on, no atomicity needed on the slot
     // itself.
@@ -54,7 +57,58 @@ pub struct InternalPage<
     // for everything a writer stored (via `Release`) before its own `len`
     // bump — no per-slot atomicity needed on top of that.
     pointer_region: [BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>; FAN_OUT],
+    // Current-version liveness for SMOs. Production FAN_OUT is 123, so two
+    // words cover every slot and consume the internal page's existing 16
+    // bytes of union padding: the enclosing 4 KiB block does not grow.
+    // Historical traversal deliberately ignores this current-state cache
+    // and continues to select entries through `version_region`.
+    live_mask_region: [AtomicU64; INTERNAL_LIVE_MASK_WORDS],
     _marker: PhantomData<[(Key, BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)]>,
+}
+
+#[cfg(test)]
+mod live_mask_tests {
+    use super::*;
+
+    type Page = InternalPage<123, 123, u64, u64>;
+
+    #[test]
+    fn appended_split_intervals_supersede_the_old_child() {
+        let mut page = Page::new();
+        let null = SmartCell(ptr::null());
+
+        page.push_uncommitted(Interval::new(0, 100), Version::default(), null, 0);
+        page.commit_delta(1, 0);
+        assert!(page.is_slot_live(0));
+
+        page.push_uncommitted(Interval::new(0, 49), Version::default(), null, 1);
+        page.push_uncommitted(Interval::new(50, 100), Version::default(), null, 2);
+        page.commit_delta(1, 1);
+
+        assert!(!page.is_slot_live(0));
+        assert!(page.is_slot_live(1));
+        assert!(page.is_slot_live(2));
+        assert_eq!(page.live_count(), 2);
+    }
+
+    #[test]
+    fn clone_preserves_and_reuse_clears_current_liveness() {
+        let mut page = Page::new();
+        let null = SmartCell(ptr::null());
+        page.push_uncommitted(Interval::new(0, 100), Version::default(), null, 0);
+        page.commit_delta(1, 0);
+        page.push_uncommitted(Interval::new(0, 100), Version::default(), null, 1);
+        page.commit_delta(0, 1);
+
+        let cloned = page.clone();
+        assert!(!cloned.is_slot_live(0));
+        assert!(cloned.is_slot_live(1));
+        assert_eq!(cloned.live_count(), 1);
+
+        page.on_reuse();
+        assert_eq!(page.sum_len(), 0);
+        assert_eq!(page.live_count(), 0);
+    }
 }
 
 impl<const FAN_OUT: usize,
@@ -105,6 +159,10 @@ impl<const FAN_OUT: usize,
         let (active, dead)
             = from.active_dead_count();
 
+        for (dst, src) in new_page.live_mask_region.iter().zip(&from.live_mask_region) {
+            dst.store(src.load(Acquire), Relaxed);
+        }
+
         new_page.len.store(
             from_active_dead(active, dead), Release);
 
@@ -113,6 +171,8 @@ impl<const FAN_OUT: usize,
 
     #[inline(always)]
     pub const fn new() -> Self {
+        assert!(FAN_OUT <= INTERNAL_LIVE_MASK_WORDS * u64::BITS as usize,
+                "InternalPage live mask supports at most 128 slots");
         // debug_assert!(mem::size_of::<[Interval<Key>; FAN_OUT]>() +
         //                   mem::size_of::<[Version; FAN_OUT]>() +
         //                   mem::size_of::<[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>; FAN_OUT]>() +
@@ -128,6 +188,7 @@ impl<const FAN_OUT: usize,
             // see this struct's own doc), so a genuinely uninitialized
             // `MaybeUninit<Version>` here is never observed as-is.
             pointer_region: [SmartCell(ptr::null()); FAN_OUT],
+            live_mask_region: [const { AtomicU64::new(0) }; INTERNAL_LIVE_MASK_WORDS],
             _marker: PhantomData,
         }
     }
@@ -163,6 +224,7 @@ impl<const FAN_OUT: usize,
         // prior value to read/drop, and nothing here owns a refcount to
         // release either way (see `SmartCell`'s doc).
         self.pointer_region[index] = ptr;
+        self.publish_live_interval(index, &key_interval);
     }
 
     #[inline(always)]
@@ -184,6 +246,7 @@ impl<const FAN_OUT: usize,
         // (`sum_len() == 0` means no reader/accessor ever iterates to them)
         // until the next round of `push_uncommitted`/`bulk_push*` overwrites
         // them with fresh content.
+        self.clear_live_mask();
         self.len.store(0, Release);
     }
 
@@ -253,6 +316,8 @@ impl<const FAN_OUT: usize,
                         .add(index + len)
                         .write(*pointer);
                 }
+
+                self.publish_live_interval(index + len, key);
             });
 
         self.len.store(
@@ -295,6 +360,8 @@ impl<const FAN_OUT: usize,
                         .add(index + len)
                         .write(**pointer);
                 }
+
+                self.publish_live_interval(index + len, key);
             });
 
         self.len.store(
@@ -375,8 +442,7 @@ impl<const FAN_OUT: usize,
         unsafe { *(self.version_region.as_ptr().add(index) as *const Version) }
     }
 
-    /// Which of this page's own slots are still live, computed with no
-    /// per-slot flag at all — just this page's own key-intervals.
+    /// Whether a slot belongs to the page's current child partition.
     ///
     /// Live sibling entries within one page are always pairwise disjoint
     /// (children partition their parent's key range), and a slot, once
@@ -391,43 +457,74 @@ impl<const FAN_OUT: usize,
     /// which is exactly what plain `Interval::overlap` (not `covers`) is
     /// for, so no separate interval-subtraction bookkeeping is needed.
     ///
-    /// This is what let `mark_version_obsolete` — an in-place mutation of an
-    /// already-published, concurrently-read slot, the actual ThreadSanitizer-
-    /// confirmed race this replaced — be deleted rather than merely
-    /// re-ordered: once nothing reads a per-slot obsolete flag either, there
-    /// is no longer any writer *or* reader of that word after publication,
-    /// so the race doesn't just get fenced correctly, it stops being
-    /// possible.
-    ///
-    /// `O(FAN_OUT²)` worst case, all plain integer comparisons — this only
-    /// ever runs on the split/merge (SMO) cold path, never routing, so the
-    /// complexity trade against the removed per-slot atomic is a clear win.
-    #[inline]
-    pub fn live_mask(&self) -> Vec<bool> {
-        let keys = self.keys();
-        (0..keys.len())
-            .map(|i| !keys[i + 1..].iter().any(|later| later.overlap(&keys[i])))
-            .collect()
+    /// The two-word mask replaces the former allocating O(FAN_OUT^2)
+    /// reconstruction on every SMO. It is not an MVCC visibility oracle:
+    /// snapshot readers must keep using versions because an older slot can
+    /// be dead *now* and still be the correct child for an older snapshot.
+    #[inline(always)]
+    pub fn is_slot_live(&self, index: usize) -> bool {
+        debug_assert!(index < self.sum_len());
+        let word = index / u64::BITS as usize;
+        let bit = index % u64::BITS as usize;
+        self.live_mask_region[word].load(Acquire) & (1u64 << bit) != 0
     }
 
-    // tight loops; no slices etc
-    // pub fn live_mask(&self) -> Vec<bool> {
-    //     let keys = self.keys();
-    //     let n = keys.len();
-    //     let mut result = vec![true; n];
-    //
-    //     for i in 0..n {
-    //         let ki = &keys[i];
-    //         for j in i + 1..n {
-    //             if keys[j].overlap(ki) {
-    //                 result[i] = false;
-    //                 break;
-    //             }
-    //         }
-    //     }
-    //
-    //     result
-    // }
+    #[inline]
+    pub fn live_count(&self) -> usize {
+        let len = self.sum_len();
+        self.live_mask_region
+            .iter()
+            .enumerate()
+            .map(|(word_index, word)| {
+                let remaining = len.saturating_sub(word_index * u64::BITS as usize);
+                let valid_bits = remaining.min(u64::BITS as usize);
+                let tail_mask = if valid_bits == u64::BITS as usize {
+                    u64::MAX
+                } else if valid_bits == 0 {
+                    0
+                } else {
+                    (1u64 << valid_bits) - 1
+                };
+                (word.load(Acquire) & tail_mask).count_ones() as usize
+            })
+            .sum()
+    }
+
+    #[inline]
+    fn publish_live_interval(&self, index: usize, interval: &Interval<Key>) {
+        debug_assert!(index < FAN_OUT);
+
+        // Append order defines supersession: the new interval kills every
+        // older overlapping current entry. The page's writer/SMO lock
+        // serializes these updates; atomics only make concurrent diagnostic
+        // observation data-race-free. The following Release `len` store
+        // publishes both slot data and these Relaxed mask changes together.
+        for older in 0..index {
+            if self.is_slot_live_unchecked(older) && self.get_key(older).overlap(interval) {
+                let word = older / u64::BITS as usize;
+                let bit = older % u64::BITS as usize;
+                self.live_mask_region[word].fetch_and(!(1u64 << bit), Relaxed);
+            }
+        }
+
+        let word = index / u64::BITS as usize;
+        let bit = index % u64::BITS as usize;
+        self.live_mask_region[word].fetch_or(1u64 << bit, Relaxed);
+    }
+
+    #[inline(always)]
+    fn is_slot_live_unchecked(&self, index: usize) -> bool {
+        let word = index / u64::BITS as usize;
+        let bit = index % u64::BITS as usize;
+        self.live_mask_region[word].load(Relaxed) & (1u64 << bit) != 0
+    }
+
+    #[inline(always)]
+    fn clear_live_mask(&self) {
+        for word in &self.live_mask_region {
+            word.store(0, Relaxed);
+        }
+    }
     #[inline(always)]
     pub fn children(&self) -> &[BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>] {
         let len
