@@ -1,18 +1,19 @@
-use std::fmt::Display;
-use std::hash::Hash;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_query::SnapShot;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::Version;
 use crate::mv_tree::mvbt::MVBTSt;
+use std::fmt::Display;
+use std::hash::Hash;
 
 pub(crate) const START_VERSION: Version = 1;
 
-impl<'a,
+impl<
+    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     #[inline]
@@ -51,6 +52,13 @@ impl<'a,
         self.ctx.begin_snapshot()
     }
 
+    /// Protects raw page references during a current-tree traversal without
+    /// consuming a global OSIC timestamp.
+    #[inline(always)]
+    pub(crate) fn with_reclamation_pin<R>(&self, f: impl FnOnce() -> R) -> R {
+        self.ctx.with_reclamation_pin(f)
+    }
+
     #[inline(always)]
     pub(crate) fn end_snapshot(&self, ts_start: Version) {
         self.ctx.end_snapshot(ts_start);
@@ -78,7 +86,8 @@ impl<'a,
         reader_ts_start: Version,
         stamp: TxStamp,
     ) -> bool {
-        self.ctx.is_visible_stamp(reader_worker, reader_ts_start, stamp)
+        self.ctx
+            .is_visible_stamp(reader_worker, reader_ts_start, stamp)
     }
 
     /// Same OSIC check as `is_visible_stamp`, but for a whole batch of
@@ -91,14 +100,18 @@ impl<'a,
         reader_ts_start: Version,
         f: impl FnOnce(&mut dyn FnMut(TxStamp) -> bool) -> R,
     ) -> R {
-        self.ctx.with_visibility_checker(reader_worker, reader_ts_start, f)
+        self.ctx
+            .with_visibility_checker(reader_worker, reader_ts_start, f)
     }
 
     /// See `TxContext::with_snapshot_cache_and_logs`'s doc.
     #[inline(always)]
     pub(crate) fn with_snapshot_cache_and_logs<R>(
         &self,
-        f: impl FnOnce(&mut crate::mv_sync::visibility::SnapshotCache, &[crate::mv_sync::commit_log::CommitLog]) -> R,
+        f: impl FnOnce(
+            &mut crate::mv_sync::visibility::SnapshotCache,
+            &[crate::mv_sync::commit_log::CommitLog],
+        ) -> R,
     ) -> R {
         self.ctx.with_snapshot_cache_and_logs(f)
     }
@@ -133,7 +146,7 @@ impl<'a,
     /// value.
     #[inline(always)]
     pub fn wal_hardened_version(&self) -> Version {
-        self.wal.hardened_version()
+        self.cold.wal.hardened_version()
     }
 
     /// Blocks until `wal_hardened_version()` reaches `target` — i.e. until
@@ -155,11 +168,12 @@ impl<'a,
 /// actually encode a record onto the `WalWriter`, so only they need
 /// `Payload: WalPayload` — every other method here (snapshots, commit log,
 /// visibility, ...) stays usable for any `Payload`.
-impl<'a,
+impl<
+    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload
+    Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     /// Mints a fresh OSIC stamp for a single, auto-committing write (the
@@ -185,7 +199,7 @@ impl<'a,
     ) -> TxStamp {
         let worker_id = self.worker_id();
 
-        match self.wal.as_ref() {
+        match self.cold.wal.as_ref() {
             // `self.table_id` is `Some` only for a `mv_db::Database` table
             // (see `MVBTSt::table_id`'s doc) — its writer is shared with
             // every other table on that database, so every entry must carry
@@ -193,8 +207,13 @@ impl<'a,
             // demultiplex the interleaved file. `None` (every other caller,
             // including `TpccDatabase`'s own per-table files) keeps today's
             // plain, untagged encoding, byte-for-byte unchanged.
-            writer => match self.table_id {
-                Some(table_id) => writer.start_commit_logged_for_table(table_id, self.ctx.global_clock(), worker_id, build),
+            writer => match self.cold.table_id {
+                Some(table_id) => writer.start_commit_logged_for_table(
+                    table_id,
+                    self.ctx.global_clock(),
+                    worker_id,
+                    build,
+                ),
                 None => writer.start_commit_logged(self.ctx.global_clock(), worker_id, build),
             },
         }
@@ -213,9 +232,15 @@ impl<'a,
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) {
-        match self.table_id {
-            Some(table_id) => { self.wal.log_with_stamp_for_table(table_id, stamp, build); }
-            None => { self.wal.log_with_stamp(stamp, build); }
+        match self.cold.table_id {
+            Some(table_id) => {
+                self.cold
+                    .wal
+                    .log_with_stamp_for_table(table_id, stamp, build);
+            }
+            None => {
+                self.cold.wal.log_with_stamp(stamp, build);
+            }
         }
     }
 
@@ -228,9 +253,13 @@ impl<'a,
     /// otherwise, same model as every other WAL call here.
     #[inline(always)]
     pub(crate) fn wal_log_commit(&self, stamp: TxStamp, ts_commit: Version) {
-        match self.table_id {
-            Some(_) => { self.wal.log_commit_for_table(stamp, ts_commit); }
-            None => { self.wal.log_commit(stamp, ts_commit); }
+        match self.cold.table_id {
+            Some(_) => {
+                self.cold.wal.log_commit_for_table(stamp, ts_commit);
+            }
+            None => {
+                self.cold.wal.log_commit(stamp, ts_commit);
+            }
         }
     }
 
@@ -246,10 +275,25 @@ impl<'a,
     /// alone, with no separate WAL-side abort record needed here.
     #[inline]
     pub(crate) fn abort_write(&self, key: Key, stamp: TxStamp) {
-        let leaf_guard = self.traversal_write_olc(key);
+        self.abort_writes(key, stamp, 1);
+    }
+
+    /// Reverts a consecutive run of writes to one key. Normally all of its
+    /// versions reside in one leaf and therefore require one traversal and
+    /// one latch. The defensive retry preserves the old one-call-per-entry
+    /// behavior if a run is ever distributed across leaves.
+    #[inline]
+    pub(crate) fn abort_writes(&self, key: Key, stamp: TxStamp, count: usize) {
+        let mut remaining = count;
+        while remaining != 0 {
+            let leaf_guard = self.traversal_write_olc_registered(key);
         let leaf_deref_mut = leaf_guard.deref_mut();
         let leaf_page = leaf_deref_mut.as_leaf_page();
-
-        leaf_page.abort_write(key, stamp);
+            let reverted = leaf_page.abort_writes(key, stamp, remaining);
+            if reverted == 0 {
+                break;
+            }
+            remaining -= reverted;
+        }
     }
 }

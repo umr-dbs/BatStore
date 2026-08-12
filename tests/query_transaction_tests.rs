@@ -6,13 +6,17 @@ use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_root::index_root::RootIndexType;
 use crate::mv_sync::clock::GlobalClock;
 use crate::mv_sync::commit_log::CommitLog;
-use crate::mv_sync::visibility::{is_visible, SnapshotCache};
+use crate::mv_sync::visibility::{SnapshotCache, is_visible};
 
 const FAN: usize = 8;
 type TestDb = Database<FAN, FAN, u64, u64>;
 
-fn inc(k: u64) -> u64 { k.checked_add(1).unwrap_or(u64::MAX) }
-fn dec(k: u64) -> u64 { k.checked_sub(1).unwrap_or(u64::MIN) }
+fn inc(k: u64) -> u64 {
+    k.checked_add(1).unwrap_or(u64::MAX)
+}
+fn dec(k: u64) -> u64 {
+    k.checked_sub(1).unwrap_or(u64::MIN)
+}
 
 fn new_db() -> TestDb {
     Database::new(RootIndexType::default(), inc, dec, u64::MIN, u64::MAX)
@@ -20,9 +24,87 @@ fn new_db() -> TestDb {
 
 fn new_db_with_wal(path: &std::path::Path) -> TestDb {
     Database::new_with_wal(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        path, std::time::Duration::from_millis(2),
-    ).unwrap()
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        path,
+        std::time::Duration::from_millis(2),
+    )
+    .unwrap()
+}
+
+#[test]
+fn transaction_resolves_each_tables_read_root_only_once() {
+    let db = new_db();
+    let first = db.create_table("first").table_id().unwrap();
+    let second = db.create_table("second").table_id().unwrap();
+
+    let mut setup = DbTransaction::begin(&db);
+    assert!(matches!(
+        setup.insert(first, 1, 10),
+        CRUDOperationResult::Inserted(_)
+    ));
+    assert!(matches!(
+        setup.insert(second, 2, 20),
+        CRUDOperationResult::Inserted(_)
+    ));
+    setup.commit();
+
+    let mut tx = DbTransaction::begin(&db);
+    assert_eq!(tx.cached_read_root_count(), 0);
+    assert!(
+        matches!(tx.point(first, 1), CRUDOperationResult::MatchedRecords(rows) if rows.len() == 1)
+    );
+    assert_eq!(tx.cached_read_root_count(), 1);
+    assert!(
+        matches!(tx.point(first, 1), CRUDOperationResult::MatchedRecords(rows) if rows.len() == 1)
+    );
+    assert_eq!(
+        tx.cached_read_root_count(),
+        1,
+        "a repeated point read must reuse the root"
+    );
+    assert_eq!(
+        tx.range_count(first, crate::mv_query::interval::Interval::new(0, 10)),
+        1
+    );
+    assert_eq!(
+        tx.cached_read_root_count(),
+        1,
+        "point and range reads share the same cache"
+    );
+    assert!(
+        matches!(tx.point(second, 2), CRUDOperationResult::MatchedRecords(rows) if rows.len() == 1)
+    );
+    assert_eq!(tx.cached_read_root_count(), 2);
+    tx.commit();
+}
+
+#[test]
+fn transaction_owned_olc_traversals_do_not_draw_nested_snapshots() {
+    let db = new_db();
+    let table = db.create_table("t").table_id().unwrap();
+    let mut tx = DbTransaction::begin(&db);
+    let clock_after_outer_snapshot = db.current_version();
+
+    assert!(matches!(
+        tx.insert(table, 1, 10),
+        CRUDOperationResult::Inserted(_)
+    ));
+    assert_eq!(
+        db.current_version(),
+        clock_after_outer_snapshot,
+        "the transaction's existing registration must cover its OLC write traversal"
+    );
+
+    assert!(tx.abort());
+    assert_eq!(
+        db.current_version(),
+        clock_after_outer_snapshot,
+        "rollback traversal must reuse the same still-live outer registration"
+    );
 }
 
 /// Mirrors the paper's Figure 3 worked example: worker W1 commits two
@@ -52,12 +134,18 @@ fn transitive_commit_invariant_worked_example() {
     let f_ts_start = glc.next_timestamp();
     let mut f_cache = SnapshotCache::new(3);
 
-    assert!(is_visible(&logs, &mut f_cache, W3, f_ts_start, stamp_a),
-        "f must see a: committed on W1 before f's snapshot");
-    assert!(is_visible(&logs, &mut f_cache, W3, f_ts_start, stamp_e),
-        "f must see e: also committed on W1 before f's snapshot");
-    assert!(!is_visible(&logs, &mut f_cache, W3, f_ts_start, stamp_d),
-        "f must NOT see d: W2 never committed it");
+    assert!(
+        is_visible(&logs, &mut f_cache, W3, f_ts_start, stamp_a),
+        "f must see a: committed on W1 before f's snapshot"
+    );
+    assert!(
+        is_visible(&logs, &mut f_cache, W3, f_ts_start, stamp_e),
+        "f must see e: also committed on W1 before f's snapshot"
+    );
+    assert!(
+        !is_visible(&logs, &mut f_cache, W3, f_ts_start, stamp_d),
+        "f must NOT see d: W2 never committed it"
+    );
 }
 
 #[test]
@@ -65,8 +153,11 @@ fn multi_op_transaction_sees_own_writes_and_isolates_others() {
     let db = new_db();
     let t = db.create_table("t").table_id().unwrap();
 
-    let tx1 = DbTransaction::begin(&db);
-    assert!(matches!(tx1.insert(t, 1, 100), CRUDOperationResult::Inserted(_)));
+    let mut tx1 = DbTransaction::begin(&db);
+    assert!(matches!(
+        tx1.insert(t, 1, 100),
+        CRUDOperationResult::Inserted(_)
+    ));
 
     // Own writes are visible within the same still-open transaction.
     match tx1.point(t, 1) {
@@ -79,14 +170,17 @@ fn multi_op_transaction_sees_own_writes_and_isolates_others() {
     // A transaction on a different worker, snapshotting before tx1
     // commits, must not see tx1's (still uncommitted) insert.
     std::thread::scope(|scope| {
-        scope.spawn(move || {
-            let tx2 = DbTransaction::begin(db_ref);
+        scope
+            .spawn(move || {
+                let mut tx2 = DbTransaction::begin(db_ref);
             match tx2.point(t, 1) {
                 CRUDOperationResult::MatchedRecords(r) if r.is_empty() => {}
                 other => panic!("tx2 should not see tx1's uncommitted insert yet, got {other}"),
             }
             tx2.commit();
-        }).join().unwrap();
+            })
+            .join()
+            .unwrap();
     });
 
     tx1.commit();
@@ -94,14 +188,18 @@ fn multi_op_transaction_sees_own_writes_and_isolates_others() {
     // A transaction on yet another worker, snapshotting after tx1's
     // commit, must now see it.
     std::thread::scope(|scope| {
-        scope.spawn(move || {
-            let tx3 = DbTransaction::begin(db_ref);
+        scope
+            .spawn(move || {
+                let mut tx3 = DbTransaction::begin(db_ref);
             match tx3.point(t, 1) {
-                CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 100 => {}
+                    CRUDOperationResult::MatchedRecords(r)
+                        if r.len() == 1 && r[0].payload == 100 => {}
                 other => panic!("tx3 should see tx1's now-committed insert, got {other}"),
             }
             tx3.commit();
-        }).join().unwrap();
+            })
+            .join()
+            .unwrap();
     });
 }
 
@@ -109,24 +207,36 @@ fn multi_op_transaction_sees_own_writes_and_isolates_others() {
 fn first_writer_wins_conflict() {
     let db = new_db();
     let t = db.create_table("t").table_id().unwrap();
-    assert!(matches!(db.dispatch_crud(t, CRUDOperation::Insert(1, 100)), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        db.dispatch_crud(t, CRUDOperation::Insert(1, 100)),
+        CRUDOperationResult::Inserted(_)
+    ));
 
-    let tx1 = DbTransaction::begin(&db);
+    let mut tx1 = DbTransaction::begin(&db);
 
     // A concurrent transaction on another worker updates and commits
     // key 1 *after* tx1's snapshot was already taken.
     let db_ref = &db;
     std::thread::scope(|scope| {
-        scope.spawn(move || {
-            let tx2 = DbTransaction::begin(db_ref);
-            assert!(matches!(tx2.update(t, 1, 200), CRUDOperationResult::Updated(_)));
+        scope
+            .spawn(move || {
+                let mut tx2 = DbTransaction::begin(db_ref);
+                assert!(matches!(
+                    tx2.update(t, 1, 200),
+                    CRUDOperationResult::Updated(_)
+                ));
             tx2.commit();
-        }).join().unwrap();
+            })
+            .join()
+            .unwrap();
     });
 
     // tx1's snapshot predates tx2's write, so tx1 must lose the race
     // instead of silently overwriting it.
-    assert!(matches!(tx1.update(t, 1, 999), CRUDOperationResult::Conflict));
+    assert!(matches!(
+        tx1.update(t, 1, 999),
+        CRUDOperationResult::Conflict
+    ));
 }
 
 /// A multi-op `DbTransaction`'s writes must survive a crash: each
@@ -148,11 +258,20 @@ fn multi_op_transaction_writes_are_durable_across_recovery() {
         db.create_table("t");
         let t = db.table_named("t").unwrap().table_id().unwrap();
 
-        let tx = DbTransaction::begin(&db);
+        let mut tx = DbTransaction::begin(&db);
         let ts_start = tx.ts_start();
-        assert!(matches!(tx.insert(t, 1, 100), CRUDOperationResult::Inserted(_)));
-        assert!(matches!(tx.insert(t, 2, 200), CRUDOperationResult::Inserted(_)));
-        assert!(matches!(tx.update(t, 1, 101), CRUDOperationResult::Updated(_)));
+        assert!(matches!(
+            tx.insert(t, 1, 100),
+            CRUDOperationResult::Inserted(_)
+        ));
+        assert!(matches!(
+            tx.insert(t, 2, 200),
+            CRUDOperationResult::Inserted(_)
+        ));
+        assert!(matches!(
+            tx.update(t, 1, 101),
+            CRUDOperationResult::Updated(_)
+        ));
         assert!(matches!(tx.delete(t, 2), CRUDOperationResult::Deleted(_)));
         tx.commit();
         // `wait_wal_hardened` tracks the highest flushed *ts_start*, not
@@ -163,8 +282,15 @@ fn multi_op_transaction_writes_are_durable_across_recovery() {
     }
 
     let recovered = TestDb::open_recovered(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        &path, std::time::Duration::from_millis(2)).unwrap();
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        &path,
+        std::time::Duration::from_millis(2),
+    )
+    .unwrap();
     let recovered_version = recovered.current_version();
     let tree = recovered.table_named("t").unwrap();
 
@@ -194,23 +320,35 @@ fn dropped_transaction_reverts_its_earlier_writes_on_conflict() {
     let db = new_db();
     let t = db.create_table("t").table_id().unwrap();
 
-    let tx1 = DbTransaction::begin(&db);
-    assert!(matches!(tx1.insert(t, 1, 100), CRUDOperationResult::Inserted(_)));
+    let mut tx1 = DbTransaction::begin(&db);
+    assert!(matches!(
+        tx1.insert(t, 1, 100),
+        CRUDOperationResult::Inserted(_)
+    ));
 
     // A concurrent transaction on another worker inserts and commits
     // key 2 *after* tx1's snapshot was already taken.
     let db_ref = &db;
     std::thread::scope(|scope| {
-        scope.spawn(move || {
-            let tx2 = DbTransaction::begin(db_ref);
-            assert!(matches!(tx2.insert(t, 2, 999), CRUDOperationResult::Inserted(_)));
+        scope
+            .spawn(move || {
+                let mut tx2 = DbTransaction::begin(db_ref);
+                assert!(matches!(
+                    tx2.insert(t, 2, 999),
+                    CRUDOperationResult::Inserted(_)
+                ));
             tx2.commit();
-        }).join().unwrap();
+            })
+            .join()
+            .unwrap();
     });
 
     // tx1's snapshot predates tx2's insert of key 2, so tx1's own
     // attempt to write key 2 must lose the race.
-    assert!(matches!(tx1.insert(t, 2, 111), CRUDOperationResult::Conflict));
+    assert!(matches!(
+        tx1.insert(t, 2, 111),
+        CRUDOperationResult::Conflict
+    ));
 
     // tx1 is dropped here without commit — its earlier write (key 1)
     // must be reverted, not left stuck as if committed.
@@ -219,7 +357,7 @@ fn dropped_transaction_reverts_its_earlier_writes_on_conflict() {
     // A later transaction on the *same* worker (same thread) must not
     // see the aborted insert — before this feature, the same-worker
     // visibility fast path would have shown it forever.
-    let tx3 = DbTransaction::begin(&db);
+    let mut tx3 = DbTransaction::begin(&db);
     match tx3.point(t, 1) {
         CRUDOperationResult::MatchedRecords(r) if r.is_empty() => {}
         other => panic!("key 1 (written by since-aborted tx1) must not be visible, got {other}"),
@@ -234,7 +372,10 @@ fn dropped_transaction_reverts_its_earlier_writes_on_conflict() {
 /// the same "never really happened" result the live abort produced.
 #[test]
 fn aborted_transaction_write_does_not_resurface_after_recovery() {
-    let path = std::env::temp_dir().join(format!("cmvbt_tx_abort_wal_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "cmvbt_tx_abort_wal_test_{}.log",
+        std::process::id()
+    ));
     let meta_path = format!("{}.meta", path.display());
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&meta_path);
@@ -246,10 +387,16 @@ fn aborted_transaction_write_does_not_resurface_after_recovery() {
 
         // Pre-existing, committed key that the aborting transaction
         // will delete — its abort must undelete it.
-        assert!(matches!(db.dispatch_crud(t, CRUDOperation::Insert(2, 200)), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            db.dispatch_crud(t, CRUDOperation::Insert(2, 200)),
+            CRUDOperationResult::Inserted(_)
+        ));
 
-        let tx = DbTransaction::begin(&db);
-        assert!(matches!(tx.insert(t, 1, 100), CRUDOperationResult::Inserted(_)));
+        let mut tx = DbTransaction::begin(&db);
+        assert!(matches!(
+            tx.insert(t, 1, 100),
+            CRUDOperationResult::Inserted(_)
+        ));
         assert!(matches!(tx.delete(t, 2), CRUDOperationResult::Deleted(_)));
         // Dropped without commit(): both writes must be reverted, and
         // both reversals WAL-logged.
@@ -259,8 +406,15 @@ fn aborted_transaction_write_does_not_resurface_after_recovery() {
     }
 
     let recovered = TestDb::open_recovered(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        &path, std::time::Duration::from_millis(2)).unwrap();
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        &path,
+        std::time::Duration::from_millis(2),
+    )
+    .unwrap();
     let recovered_version = recovered.current_version();
     let tree = recovered.table_named("t").unwrap();
 
@@ -270,7 +424,9 @@ fn aborted_transaction_write_does_not_resurface_after_recovery() {
     }
     match tree.dispatch_crud(CRUDOperation::Point(2, recovered_version)) {
         CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 200 => {}
-        other => panic!("key 2's aborted delete must be undone (restored) after recovery, got {other}"),
+        other => {
+            panic!("key 2's aborted delete must be undone (restored) after recovery, got {other}")
+        }
     }
 
     let _ = std::fs::remove_file(&path);

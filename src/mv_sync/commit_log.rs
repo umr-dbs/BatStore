@@ -1,6 +1,6 @@
-use parking_lot::Mutex;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::clock::GlobalClock;
+use parking_lot::Mutex;
 
 /// Per-worker OSIC Commit Log (§3.1): a small, ascending list of a single
 /// worker's commit timestamps, guarded by one mutex, matching the paper
@@ -22,12 +22,24 @@ use crate::mv_sync::clock::GlobalClock;
 /// asynchronously, in batches, independently of this log; see
 /// `MVBTSt::wal_hardened_version` for that side.
 pub struct CommitLog {
-    entries: Mutex<Vec<Version>>,
+    state: Mutex<CommitLogState>,
+}
+
+struct CommitLogState {
+    entries: Vec<Version>,
+    /// Reused by every prune instead of allocating a fresh bitmap on the
+    /// commit path. Capacity follows the largest observed log size.
+    keep: Vec<bool>,
 }
 
 impl CommitLog {
     pub fn new() -> Self {
-        Self { entries: Mutex::new(Vec::new()) }
+        Self {
+            state: Mutex::new(CommitLogState {
+                entries: Vec::new(),
+                keep: Vec::new(),
+            }),
+        }
     }
 
     /// Draws `ts_commit` from `glc` and appends it, without ever pruning.
@@ -53,9 +65,9 @@ impl CommitLog {
     /// cost too; not done here since it's a real rewrite of `prune`/
     /// `lcb_index`'s cross-block search, not a one-line change.
     pub fn commit(&self, glc: &GlobalClock) -> Version {
-        let mut entries = self.entries.lock();
+        let mut state = self.state.lock();
         let ts_commit = glc.next_timestamp();
-        entries.push(ts_commit);
+        state.entries.push(ts_commit);
         ts_commit
     }
 
@@ -70,41 +82,43 @@ impl CommitLog {
         max_workers: usize,
         active_snapshots: impl Iterator<Item = Version>,
     ) -> Version {
-        let mut entries = self.entries.lock();
+        let mut state = self.state.lock();
         let ts_commit = glc.next_timestamp();
-        entries.push(ts_commit);
+        state.entries.push(ts_commit);
 
-        if entries.len() >= max_workers {
-            Self::prune(&mut entries, active_snapshots);
+        if state.entries.len() >= max_workers {
+            Self::prune(&mut state, active_snapshots);
         }
 
         ts_commit
     }
 
-    fn prune(entries: &mut Vec<Version>, active_snapshots: impl Iterator<Item = Version>) {
-        let mut keep = vec![false; entries.len()];
+    fn prune(state: &mut CommitLogState, active_snapshots: impl Iterator<Item = Version>) {
+        let len = state.entries.len();
+        state.keep.resize(len, false);
+        state.keep.fill(false);
 
         for ts_start in active_snapshots {
-            if let Some(i) = Self::lcb_index(entries, ts_start) {
-                keep[i] = true;
+            if let Some(i) = Self::lcb_index(&state.entries, ts_start) {
+                state.keep[i] = true;
             }
         }
 
         // The newest entry is always the LCB for any future ts_start drawn
         // after this prune and before this worker's next commit — keep it
         // unconditionally so `lcb` stays correct for transactions not born yet.
-        if let Some(last) = keep.last_mut() {
+        if let Some(last) = state.keep.last_mut() {
             *last = true;
         }
 
         let mut kept = 0;
-        for i in 0..entries.len() {
-            if keep[i] {
-                entries[kept] = entries[i];
+        for i in 0..len {
+            if state.keep[i] {
+                state.entries[kept] = state.entries[i];
                 kept += 1;
             }
         }
-        entries.truncate(kept);
+        state.entries.truncate(kept);
     }
 
     #[inline]
@@ -116,15 +130,21 @@ impl CommitLog {
     /// before `ts`, or `0` (safe sentinel — record `ts_start`s are always
     /// `>= START_VERSION == 1`) if this worker has never committed before `ts`.
     pub fn lcb(&self, ts: Version) -> Version {
-        let entries = self.entries.lock();
-        Self::lcb_index(&entries, ts).map(|i| entries[i]).unwrap_or(0)
+        let state = self.state.lock();
+        Self::lcb_index(&state.entries, ts)
+            .map(|i| state.entries[i])
+            .unwrap_or(0)
     }
 
     /// Current entry count — for tests/diagnostics confirming pruning keeps
     /// this bounded rather than growing without limit.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.entries.lock().len()
+        self.state.lock().entries.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prune_scratch_capacity(&self) -> usize {
+        self.state.lock().keep.capacity()
     }
 }
-

@@ -32,8 +32,8 @@
 //! matching transaction regression tests and likewise reuses the pending
 //! tuple after its first replacement.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
@@ -44,8 +44,12 @@ use crate::mv_root::index_root::RootIndexType;
 const FAN: usize = 16;
 type TestDb = Database<FAN, FAN, u64, u64>;
 
-fn inc(k: u64) -> u64 { k.checked_add(1).unwrap_or(u64::MAX) }
-fn dec(k: u64) -> u64 { k.checked_sub(1).unwrap_or(u64::MIN) }
+fn inc(k: u64) -> u64 {
+    k.checked_add(1).unwrap_or(u64::MAX)
+}
+fn dec(k: u64) -> u64 {
+    k.checked_sub(1).unwrap_or(u64::MIN)
+}
 
 const HOT_KEY: u64 = 1;
 const MISC_KEYS_PER_THREAD: u64 = 5;
@@ -59,13 +63,22 @@ const MISC_KEYS_PER_THREAD: u64 = 5;
 /// identical at production scale, just far rarer there.
 #[test]
 fn concurrent_multi_step_transactions_never_overflow_or_lose_a_committed_update() {
-    let db: Arc<TestDb> = Arc::new(Database::new(RootIndexType::default(), inc, dec, u64::MIN, u64::MAX));
+    let db: Arc<TestDb> = Arc::new(Database::new(
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+    ));
     let hot_t = db.create_table("hot").table_id().unwrap();
     let misc_t = db.create_table("misc").table_id().unwrap();
 
     {
-        let setup = DbTransaction::begin(&db);
-        assert!(matches!(setup.insert(hot_t, HOT_KEY, 0u64), CRUDOperationResult::Inserted(_)));
+        let mut setup = DbTransaction::begin(&db);
+        assert!(matches!(
+            setup.insert(hot_t, HOT_KEY, 0u64),
+            CRUDOperationResult::Inserted(_)
+        ));
         setup.commit();
     }
 
@@ -77,31 +90,40 @@ fn concurrent_multi_step_transactions_never_overflow_or_lose_a_committed_update(
     // writes never conflict with each other - the only *contended* key in
     // this whole test is the one shared hot key.
     {
-        let setup = DbTransaction::begin(&db);
+        let mut setup = DbTransaction::begin(&db);
         for t in 0..num_threads as u64 {
             for i in 0..MISC_KEYS_PER_THREAD {
                 let k = 1_000 + t * MISC_KEYS_PER_THREAD + i;
-                assert!(matches!(setup.insert(misc_t, k, 0u64), CRUDOperationResult::Inserted(_)));
+                assert!(matches!(
+                    setup.insert(misc_t, k, 0u64),
+                    CRUDOperationResult::Inserted(_)
+                ));
             }
         }
         setup.commit();
     }
 
-    let handles: Vec<_> = (0..num_threads).map(|t| {
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
         let db = db.clone();
         let stop = stop.clone();
         let hot_success_count = hot_success_count.clone();
-        let my_misc_keys: Vec<u64> = (0..MISC_KEYS_PER_THREAD).map(|i| 1_000 + t as u64 * MISC_KEYS_PER_THREAD + i).collect();
+            let my_misc_keys: Vec<u64> = (0..MISC_KEYS_PER_THREAD)
+                .map(|i| 1_000 + t as u64 * MISC_KEYS_PER_THREAD + i)
+                .collect();
         thread::spawn(move || {
             while !stop.load(Relaxed) {
-                let tx = DbTransaction::begin(&db);
+                    let mut tx = DbTransaction::begin(&db);
 
                 for &k in &my_misc_keys {
                     let cur = match tx.point(misc_t, k) {
                         CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
                         other => panic!("unexpected misc point result: {other}"),
                     };
-                    assert!(matches!(tx.update(misc_t, k, cur + 1), CRUDOperationResult::Updated(_)));
+                        assert!(matches!(
+                            tx.update(misc_t, k, cur + 1),
+                            CRUDOperationResult::Updated(_)
+                        ));
                 }
 
                 let cur = match tx.point(hot_t, HOT_KEY) {
@@ -110,7 +132,10 @@ fn concurrent_multi_step_transactions_never_overflow_or_lose_a_committed_update(
                 };
                 match tx.update(hot_t, HOT_KEY, cur + 1) {
                     CRUDOperationResult::Updated(_) => {}
-                    CRUDOperationResult::Conflict => { drop(tx); continue; }
+                        CRUDOperationResult::Conflict => {
+                            drop(tx);
+                            continue;
+                        }
                     other => panic!("unexpected hot update result: {other}"),
                 }
 
@@ -123,7 +148,8 @@ fn concurrent_multi_step_transactions_never_overflow_or_lose_a_committed_update(
                 }
             }
         })
-    }).collect();
+        })
+        .collect();
 
     thread::sleep(Duration::from_millis(300));
     stop.store(true, Relaxed);
@@ -132,7 +158,7 @@ fn concurrent_multi_step_transactions_never_overflow_or_lose_a_committed_update(
     }
 
     let final_value = {
-        let tx = DbTransaction::begin(&db);
+        let mut tx = DbTransaction::begin(&db);
         let v = match tx.point(hot_t, HOT_KEY) {
             CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
             other => panic!("unexpected final point result: {other}"),

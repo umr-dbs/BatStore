@@ -53,7 +53,11 @@ pub struct ScanResult {
 
 impl ScanResult {
     pub fn tuples_per_sec(&self) -> f64 {
-        if self.latency_ns == 0 { 0.0 } else { self.scanned_tuples as f64 / (self.latency_ns as f64 / 1e9) }
+        if self.latency_ns == 0 {
+            0.0
+        } else {
+            self.scanned_tuples as f64 / (self.latency_ns as f64 / 1e9)
+        }
     }
 }
 
@@ -77,12 +81,20 @@ pub enum OlapMode {
     /// filter; `date_lo`/`date_hi` bound the entry/delivery-date filters
     /// every query but Q1 uses (Q1 only takes `date_hi`, as
     /// `delivered_before`).
-    ChBenchmark { region_name: String, date_lo: i64, date_hi: i64 },
+    ChBenchmark {
+        region_name: String,
+        date_lo: i64,
+        date_hi: i64,
+    },
     /// Runs only Q1. Used by the cross-engine `htap_q1` workload so Q4/Q5
     /// cannot contaminate its OLTP-interference or query-latency results.
     ChQ1 { delivered_before: i64 },
     /// Runs only Q6, for the corresponding isolated `htap_q6` workload.
-    ChQ6 { date_lo: i64, date_hi: i64, max_qty: u8 },
+    ChQ6 {
+        date_lo: i64,
+        date_hi: i64,
+        max_qty: u8,
+    },
 }
 
 fn sleep_checking_stop(dur: Duration, stop: &AtomicBool) {
@@ -100,37 +112,55 @@ fn sleep_checking_stop(dur: Duration, stop: &AtomicBool) {
 
 /// Fig. 1/9-style: open a snapshot, hold it for `hold` (or until `stop`),
 /// then release without ever reading — the worst case for OLTP robustness.
-fn open_and_sleep_once(db: &TpccDatabase, hold: Duration, stop: &AtomicBool, run_start: Instant) -> ScanResult {
+fn open_and_sleep_once(
+    db: &TpccDatabase,
+    hold: Duration,
+    stop: &AtomicBool,
+    run_start: Instant,
+) -> ScanResult {
     let tx = TpccTxn::begin(db);
     let snapshot = tx.ts_start();
     sleep_checking_stop(hold, stop);
     tx.commit();
 
     ScanResult {
-        mode: "open_and_sleep", elapsed_secs: run_start.elapsed().as_secs_f64(), delay_secs: hold.as_secs_f64(),
-        snapshot, scanned_tuples: 0, latency_ns: hold.as_nanos(), summary: None, staleness_versions: None,
+        mode: "open_and_sleep",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        delay_secs: hold.as_secs_f64(),
+        snapshot,
+        scanned_tuples: 0,
+        latency_ns: hold.as_nanos(),
+        summary: None,
+        staleness_versions: None,
     }
 }
 
 /// Fig. 10-style: fixes a snapshot, ages it by `delay`, then scans the
 /// warehouse+district relations under that aged snapshot.
 fn scan_after_delay_once(db: &TpccDatabase, delay: Duration, run_start: Instant) -> ScanResult {
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
     let snapshot = tx.ts_start();
     std::thread::sleep(delay);
 
     let start = Instant::now();
-    let scanned = |table, range| match tx.range(table, range, true) {
+    let mut scanned = |table, range| match tx.range(table, range, true) {
         CRUDOperationResult::MatchedRecords(v) => v.len(),
         other => panic!("tpcc olap scan: unexpected range result: {other}"),
     };
-    let scanned = scanned(Table::Warehouse, warehouse_table_range()) + scanned(Table::District, district_table_range());
+    let scanned = scanned(Table::Warehouse, warehouse_table_range())
+        + scanned(Table::District, district_table_range());
     let latency = start.elapsed();
     tx.commit();
 
     ScanResult {
-        mode: "scan_after_delay", elapsed_secs: run_start.elapsed().as_secs_f64(), delay_secs: delay.as_secs_f64(),
-        snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None, staleness_versions: None,
+        mode: "scan_after_delay",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        delay_secs: delay.as_secs_f64(),
+        snapshot,
+        scanned_tuples: scanned,
+        latency_ns: latency.as_nanos(),
+        summary: None,
+        staleness_versions: None,
     }
 }
 
@@ -139,20 +169,27 @@ fn scan_after_delay_once(db: &TpccDatabase, delay: Duration, run_start: Instant)
 /// scan in one call — see `mv_bench::tpcc_schema` module docs), this sums a
 /// full-range scan over every table instead.
 fn fresh_full_scan_once(db: &TpccDatabase, run_start: Instant) -> ScanResult {
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
     let snapshot = tx.ts_start();
 
     let start = Instant::now();
     let full_range = crate::mv_query::interval::Interval::new(TpccKey::MIN, TpccKey::MAX);
-    let scanned = Table::ALL.iter()
+    let scanned = Table::ALL
+        .iter()
         .map(|&table| tx.range_count(table, full_range))
         .sum();
     let latency = start.elapsed();
     tx.commit();
 
     ScanResult {
-        mode: "fresh_full_scan", elapsed_secs: run_start.elapsed().as_secs_f64(), delay_secs: 0.0,
-        snapshot, scanned_tuples: scanned, latency_ns: latency.as_nanos(), summary: None, staleness_versions: None,
+        mode: "fresh_full_scan",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        delay_secs: 0.0,
+        snapshot,
+        scanned_tuples: scanned,
+        latency_ns: latency.as_nanos(),
+        summary: None,
+        staleness_versions: None,
     }
 }
 
@@ -166,7 +203,13 @@ fn fresh_full_scan_once(db: &TpccDatabase, run_start: Instant) -> ScanResult {
 /// revenue). `staleness_versions` is `tree.current_version()` (read right
 /// after each query returns) minus that query's own snapshot — see
 /// `ScanResult::staleness_versions` and `tpch_queries` module docs.
-fn ch_benchmark_queries_once(db: &TpccDatabase, region_name: &str, date_lo: i64, date_hi: i64, run_start: Instant) -> Vec<ScanResult> {
+fn ch_benchmark_queries_once(
+    db: &TpccDatabase,
+    region_name: &str,
+    date_lo: i64,
+    date_hi: i64,
+    run_start: Instant,
+) -> Vec<ScanResult> {
     let mut out = Vec::with_capacity(4);
     let staleness = |ts_start: Version| Some(db.current_version().saturating_sub(ts_start));
 
@@ -197,7 +240,12 @@ fn ch_benchmark_queries_once(db: &TpccDatabase, region_name: &str, date_lo: i64,
     });
 
     let start = Instant::now();
-    let (q4, ts_start) = tpch_queries::q4(db, date_lo, date_hi, Duration::from_secs(3600 * 24).as_millis() as i64);
+    let (q4, ts_start) = tpch_queries::q4(
+        db,
+        date_lo,
+        date_hi,
+        Duration::from_secs(3600 * 24).as_millis() as i64,
+    );
     out.push(ScanResult {
         mode: "ch_q4_order_priority",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
@@ -240,7 +288,13 @@ fn ch_q1_once(db: &TpccDatabase, delivered_before: i64, run_start: Instant) -> S
     }
 }
 
-fn ch_q6_once(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8, run_start: Instant) -> ScanResult {
+fn ch_q6_once(
+    db: &TpccDatabase,
+    date_lo: i64,
+    date_hi: i64,
+    max_qty: u8,
+    run_start: Instant,
+) -> ScanResult {
     let start = Instant::now();
     let (q6, ts_start) = tpch_queries::q6(db, date_lo, date_hi, max_qty);
     ScanResult {
@@ -258,7 +312,12 @@ fn ch_q6_once(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8, run_st
 /// One OLAP worker thread's whole run, streaming each completed scan/hold
 /// back to `results` as it finishes. Runs until `stop` is set (checked
 /// between iterations, and — for `OpenAndSleep` — during the hold itself).
-pub fn run_olap_worker(db: &TpccDatabase, mode: OlapMode, stop: &AtomicBool, results: &Sender<ScanResult>) {
+pub fn run_olap_worker(
+    db: &TpccDatabase,
+    mode: OlapMode,
+    stop: &AtomicBool,
+    results: &Sender<ScanResult>,
+) {
     let run_start = Instant::now();
     match mode {
         OlapMode::OpenAndSleep { hold } => {
@@ -282,7 +341,11 @@ pub fn run_olap_worker(db: &TpccDatabase, mode: OlapMode, stop: &AtomicBool, res
                 let _ = results.send(r);
             }
         }
-        OlapMode::ChBenchmark { region_name, date_lo, date_hi } => {
+        OlapMode::ChBenchmark {
+            region_name,
+            date_lo,
+            date_hi,
+        } => {
             while !stop.load(Relaxed) {
                 for r in ch_benchmark_queries_once(db, &region_name, date_lo, date_hi, run_start) {
                     let _ = results.send(r);
@@ -297,7 +360,11 @@ pub fn run_olap_worker(db: &TpccDatabase, mode: OlapMode, stop: &AtomicBool, res
                 let _ = results.send(ch_q1_once(db, delivered_before, run_start));
             }
         }
-        OlapMode::ChQ6 { date_lo, date_hi, max_qty } => {
+        OlapMode::ChQ6 {
+            date_lo,
+            date_hi,
+            max_qty,
+        } => {
             while !stop.load(Relaxed) {
                 let _ = results.send(ch_q6_once(db, date_lo, date_hi, max_qty, run_start));
             }

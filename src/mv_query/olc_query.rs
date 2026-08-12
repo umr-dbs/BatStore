@@ -7,19 +7,20 @@ use crate::mv_block::block::BlockGuard;
 use crate::mv_page_model::{Attempts, BlockRef};
 
 use crate::mv_page_model::node::PageType;
+use crate::mv_sync::smart_cell::sched_yield;
 use crate::mv_test;
 use crate::mv_test::{LOG_REORG, VERBOSE};
 use crate::mv_tree::mvbt::MVBTSt;
-use crate::mv_sync::smart_cell::sched_yield;
 use crate::mv_tree::smo::BlockUnsafeDegree;
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
-    /// Registers this traversal as a live reader of the tree's *current*
+    /// Pins page reclamation for this traversal of the tree's *current*
     /// state for the whole descent, closing a gap `Point`/`Range` reads
     /// don't have: `get_pointer` reads a child pointer with no
     /// synchronization of its own (see `InternalPage::pointer_region`'s
@@ -33,25 +34,32 @@ impl<const FAN_OUT: usize,
     /// a node reclaimed and reset (`Node::on_reuse`) while still mid-descent
     /// through it. Registering here, rather than once per call site in
     /// `dispatch.rs`, covers all of them for free and scopes the
-    /// registration tightly to just the traversal, not the write that
-    /// follows it. Nesting inside an already-registered `DbTransaction` is
-    /// fine — deliberately so, see `TxContext::live_tx`'s doc: nested
-    /// `begin_snapshot`/`end_snapshot` pairs for the same worker are cheap
-    /// (a reentrancy-depth bump, no shared state touched) and correctly
-    /// leave the outer registration's protection in place throughout.
-    /// `TxContext::on_tx_start`/`on_tx_completed` used to short-circuit
-    /// (zero overhead) whenever block reclaim (GC) was disabled - no longer
-    /// true, since `record_survives_gc`'s own use of this same registration
-    /// is needed regardless of the GC toggle (see `on_tx_start`'s doc); this
-    /// registration now always does real work, just a cheap depth-bump in
-    /// the common (already-registered) case.
+    /// pin tightly to just the traversal, not the write that follows it.
+    /// This is deliberately not a real snapshot: current-tree writers need
+    /// allocation lifetime, not MVCC visibility, so no GLC tick is drawn.
+    /// An enclosing transaction's live snapshot already supplies the pin.
     #[inline]
-    pub(crate) fn traversal_write_olc(&self, key: Key) -> BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let ts_start = self.begin_snapshot();
+    pub(crate) fn traversal_write_olc(
+        &self,
+        key: Key,
+    ) -> BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        self.with_reclamation_pin(|| self.traversal_write_olc_registered(key))
+    }
 
+    /// OLC descent for a caller that already owns a live snapshot
+    /// registration covering the entire operation. `DbTransaction` and
+    /// `TpccTxn` register once at begin and release only after commit/abort,
+    /// so drawing and nesting another snapshot for every write would add a
+    /// global-clock increment plus depth bookkeeping without adding any
+    /// reclamation protection.
+    #[inline]
+    pub(crate) fn traversal_write_olc_registered(
+        &self,
+        key: Key,
+    ) -> BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let mut attempt = 0;
 
-        let guard = loop {
+        loop {
             match self.traversal_write_internal_olc(key, attempt) {
                 Err(n_attempt) => {
                     attempt = n_attempt;
@@ -62,27 +70,20 @@ impl<const FAN_OUT: usize,
                     if mv_test::RESTART_TRACE {
                         mv_test::record_write_attempts(attempt as usize);
                     }
-                    break guard
-                },
+                    break guard;
+                }
             }
-        };
-
-        self.end_snapshot(ts_start);
-
-        guard
+            }
     }
 
     #[inline]
     pub(crate) fn retrieve_root_write_olc(
         &self,
         mut attempts: Attempts,
-    ) -> (BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>,
-        Attempts)
-    {
+    ) -> (BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>, Attempts) {
         loop {
             match self.retrieve_root_write_internal_olc() {
-                Ok(guard) =>
-                    break (guard, attempts),
+                Ok(guard) => break (guard, attempts),
                 _ => {
                     attempts += 1;
                     if VERBOSE {
@@ -95,32 +96,31 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline]
-    fn retrieve_root_write_internal_olc(&self) -> Result<
-        BlockGuard<FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
-    {
-        let root
-            = &self.root;
+    fn retrieve_root_write_internal_olc(
+        &self,
+    ) -> Result<BlockGuard<FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
+        let root = &self.root;
 
-        let mut master_guard
-            = root.borrow_read();
+        let mut master_guard = root.borrow_read();
 
-        let root_block
-            = master_guard.block();
+        let root_block = master_guard.block();
 
-        let mut root_guard
-            = root_block.borrow_read();
+        let mut root_guard = root_block.borrow_read();
 
         if LOG_REORG {
-            let r
-                = root_guard.deref().unsafe_degree_root();
+            let r = root_guard.deref().unsafe_degree_root();
 
             match r {
                 BlockUnsafeDegree::Overflow => unsafe {
-                    mv_test::SPLITS_ROOT_COUNTER.lock().push(self.current_version())
-                }
+                    mv_test::SPLITS_ROOT_COUNTER
+                        .lock()
+                        .push(self.current_version())
+                },
                 BlockUnsafeDegree::ActiveUnderflow => unsafe {
-                    mv_test::MERGE_ROOT_COUNTER.lock().push(self.current_version())
-                }
+                    mv_test::MERGE_ROOT_COUNTER
+                        .lock()
+                        .push(self.current_version())
+                },
                 _ => {}
             }
         }
@@ -131,9 +131,9 @@ impl<const FAN_OUT: usize,
             // arm is reached the old root is unconditionally superseded).
             // Same reasoning as `on_overflow_node`'s `simba`; see
             // `SmartGuard::try_retire`'s doc.
-            BlockUnsafeDegree::Overflow
-            if master_guard.upgrade_write_lock()
-            => self.split_root(master_guard, root_guard, root.height()),
+            BlockUnsafeDegree::Overflow if master_guard.upgrade_write_lock() => {
+                self.split_root(master_guard, root_guard, root.height())
+            }
             // Unlike the `Overflow` arm above, `root_guard` here DOES need
             // `upgrade_write_lock()` — `merge_root` never retires
             // `root_guard` itself, it only reads `root_guard.last_child()`
@@ -160,7 +160,9 @@ impl<const FAN_OUT: usize,
             // against a state that's still genuinely at `active == 1`.
             BlockUnsafeDegree::ActiveUnderflow
             if master_guard.upgrade_write_lock() && root_guard.upgrade_write_lock() =>
-                self.merge_root(master_guard, root_guard, root.height()),
+            {
+                self.merge_root(master_guard, root_guard, root.height())
+            }
             BlockUnsafeDegree::Ok => Ok(root_guard),
             _ => {
                 if mv_test::RESTART_TRACE {
@@ -173,16 +175,19 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline]
-    fn traversal_write_internal_olc(&'_ self, key: Key, attempts: Attempts)
-    -> Result<BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>, Attempts>
-    {
-        let (mut curr_guard,
-            attempts) = self.retrieve_root_write_olc(attempts);
+    fn traversal_write_internal_olc(
+        &'_ self,
+        key: Key,
+        attempts: Attempts,
+    ) -> Result<BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>, Attempts> {
+        let (mut curr_guard, attempts) = self.retrieve_root_write_olc(attempts);
 
         let mut i =  0;
         loop {
             if VERBOSE {
-                println!("traversal_write_internal_olc: Loop: {i}, attempts {attempts}, key: {key}");
+                println!(
+                    "traversal_write_internal_olc: Loop: {i}, attempts {attempts}, key: {key}"
+                );
                 i += 1;
             }
 
@@ -224,14 +229,17 @@ impl<const FAN_OUT: usize,
                         Some(v) => v,
                         None => {
                             if mv_test::RESTART_TRACE {
-                                mv_test::record_restart(curr_guard.inner().0 as usize, &key, "checked_live_version");
+                                mv_test::record_restart(
+                                    curr_guard.inner().0 as usize,
+                                    &key,
+                                    "checked_live_version",
+                                );
                             }
-                            return Err(attempts + 1)
-                        },
+                            return Err(attempts + 1);
+                            }
                     };
 
-                    let keys_page = internal_page
-                        .keys();
+                    let keys_page = internal_page.keys();
 
                     // No liveness check needed here: appends within a page
                     // are strictly index-ordered by recency, and a split/
@@ -253,42 +261,50 @@ impl<const FAN_OUT: usize,
                             println!("traversal_write_internal_olc: None Index");
                         }
                         if mv_test::RESTART_TRACE {
-                            mv_test::record_restart(curr_guard.inner().0 as usize, &key, "index_lookup_miss");
+                            mv_test::record_restart(
+                                curr_guard.inner().0 as usize,
+                                &key,
+                                "index_lookup_miss",
+                            );
                         }
                         return Err(attempts + 1);
                     }
 
-                    let index
-                        = index.unwrap();
+                    let index = index.unwrap();
 
                     // `get_pointer` also reads `pointer_region`, written by
                     // the same `push_uncommitted`/`bulk_push*` calls that
                     // mutate `key_interval_region`/`version_region` — keep
                     // it inside the validated window too, not just the
                     // index lookup above.
-                    let next_curr_guard = internal_page
-                        .get_pointer(index)
-                        .borrow_read();
+                    let next_curr_guard = internal_page.get_pointer(index).borrow_read();
 
                     if curr_guard.live_version() != curr_version_before {
                         if VERBOSE {
-                            println!("traversal_write_internal_olc: curr_guard changed during index lookup");
+                            println!(
+                                "traversal_write_internal_olc: curr_guard changed during index lookup"
+                            );
                         }
                         if mv_test::RESTART_TRACE {
-                            mv_test::record_restart(curr_guard.inner().0 as usize, &key, "index_lookup_race");
+                            mv_test::record_restart(
+                                curr_guard.inner().0 as usize,
+                                &key,
+                                "index_lookup_race",
+                            );
                         }
                         return Err(attempts + 1);
                     }
 
                     if LOG_REORG {
-                        let r
-                            = next_curr_guard.deref().unsafe_degree();
+                        let r = next_curr_guard.deref().unsafe_degree();
 
                         match r {
-                            BlockUnsafeDegree::Overflow =>
-                                mv_test::SPLITS_COUNTER.lock().push(self.current_version()),
-                            BlockUnsafeDegree::ActiveUnderflow =>
-                                mv_test::MERGES_COUNTER.lock().push(self.current_version()),
+                            BlockUnsafeDegree::Overflow => {
+                                mv_test::SPLITS_COUNTER.lock().push(self.current_version())
+                            }
+                            BlockUnsafeDegree::ActiveUnderflow => {
+                                mv_test::MERGES_COUNTER.lock().push(self.current_version())
+                            }
                             _ => {}
                         }
                     }
@@ -304,49 +320,65 @@ impl<const FAN_OUT: usize,
                         // read, and once reached, always used — see that
                         // function's doc). Only `curr_guard`/`mufasa`
                         // (mutated in place) needs the ordinary upgrade.
-                        BlockUnsafeDegree::Overflow
-                        if curr_guard.upgrade_write_lock()
-                        => match self.on_overflow_node(curr_guard, next_curr_guard, index) {
+                        BlockUnsafeDegree::Overflow if curr_guard.upgrade_write_lock() => {
+                            match self.on_overflow_node(curr_guard, next_curr_guard, index) {
                                 Ok(guard) => curr_guard = guard,
                                 Err(..) => {
                                     if VERBOSE {
-                                        println!("traversal_write_internal_olc: on_overflow_node Err()");
+                                        println!(
+                                            "traversal_write_internal_olc: on_overflow_node Err()"
+                                        );
                                     }
                                     if mv_test::RESTART_TRACE {
-                                        mv_test::record_restart(curr_page_addr, &key, "on_overflow_node");
+                                        mv_test::record_restart(
+                                            curr_page_addr,
+                                            &key,
+                                            "on_overflow_node",
+                                        );
                                     }
-                                    return Err(attempts + 1)
+                                    return Err(attempts + 1);
                                 }
-                            },
+                                    }
+                                }
                         // `next_curr_guard` also stays an unexcluded
                         // `Reader` here now — `on_underflow_node` retires
                         // it itself via `try_retire()`, with an explicit
                         // revert (`clear_retired()`) on the one path where
                         // `merge()` fails after that point. See that
                         // function's doc for why the revert is sound.
-                        BlockUnsafeDegree::ActiveUnderflow
-                        if curr_guard.upgrade_write_lock()
-                        => match self.on_underflow_node(curr_guard, next_curr_guard, index) {
+                        BlockUnsafeDegree::ActiveUnderflow if curr_guard.upgrade_write_lock() => {
+                            match self.on_underflow_node(curr_guard, next_curr_guard, index) {
                                 Ok(guard) => curr_guard = guard,
                                 Err(..) => {
                                     if VERBOSE {
-                                        println!("traversal_write_internal_olc: on_underflow_node Err()");
+                                        println!(
+                                            "traversal_write_internal_olc: on_underflow_node Err()"
+                                        );
                                     }
                                     if mv_test::RESTART_TRACE {
-                                        mv_test::record_restart(curr_page_addr, &key, "on_underflow_node");
+                                        mv_test::record_restart(
+                                            curr_page_addr,
+                                            &key,
+                                            "on_underflow_node",
+                                        );
                                     }
-                                    return Err(attempts + 1)
+                                    return Err(attempts + 1);
                                 }
-                            },
+                                    }
+                                }
                         BlockUnsafeDegree::Ok => curr_guard = next_curr_guard,
                         _ => {
                             if mv_test::RESTART_TRACE {
-                                mv_test::record_restart(curr_page_addr, &key, "parent_fix_write_lock");
-                            }
-                            return Err(attempts + 1)
+                                mv_test::record_restart(
+                                    curr_page_addr,
+                                    &key,
+                                    "parent_fix_write_lock",
+                                );
                         }
+                            return Err(attempts + 1);
                     }
                 }
+                },
                 _ => {
                     let leaf_addr = if mv_test::RESTART_TRACE {
                         curr_guard.inner().0 as usize
@@ -363,7 +395,7 @@ impl<const FAN_OUT: usize,
                             mv_test::record_restart(leaf_addr, &key, "leaf_write_lock");
                         }
                         Err(attempts + 1)
-                    }
+                    };
                 }
             }
         }

@@ -25,11 +25,18 @@ const FAN: usize = 8;
 type TestTree = MVBTSt<FAN, FAN, u64, u64>;
 type TestDb = Database<FAN, FAN, u64, u64>;
 
-fn inc(k: u64) -> u64 { k.checked_add(1).unwrap_or(u64::MAX) }
-fn dec(k: u64) -> u64 { k.checked_sub(1).unwrap_or(u64::MIN) }
+fn inc(k: u64) -> u64 {
+    k.checked_add(1).unwrap_or(u64::MAX)
+}
+fn dec(k: u64) -> u64 {
+    k.checked_sub(1).unwrap_or(u64::MIN)
+}
 
 fn temp_path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("cmvbt_consistency_{name}_{}.log", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "cmvbt_consistency_{name}_{}.log",
+        std::process::id()
+    ))
 }
 
 /// Reconstructs "key -> final committed payload" purely from a plain
@@ -59,7 +66,9 @@ fn reconstruct_from_wal(path: &std::path::Path) -> HashMap<u64, u64> {
     let mut committed: Vec<(Version, usize, CRUDOperation<u64, u64>)> = writes
         .into_iter()
         .filter_map(|(worker, ts_start, seq, op)| {
-            commits.get(&(worker, ts_start)).map(|&ts_commit| (ts_commit, seq, op))
+            commits
+                .get(&(worker, ts_start))
+                .map(|&ts_commit| (ts_commit, seq, op))
         })
         .collect();
     committed.sort_by_key(|(ts_commit, seq, _)| (*ts_commit, *seq));
@@ -67,8 +76,12 @@ fn reconstruct_from_wal(path: &std::path::Path) -> HashMap<u64, u64> {
     let mut state = HashMap::new();
     for (_, _, op) in committed {
         match op {
-            CRUDOperation::Insert(k, v) | CRUDOperation::Update(k, v) => { state.insert(k, v); }
-            CRUDOperation::Delete(k) => { state.remove(&k); }
+            CRUDOperation::Insert(k, v) | CRUDOperation::Update(k, v) => {
+                state.insert(k, v);
+            }
+            CRUDOperation::Delete(k) => {
+                state.remove(&k);
+            }
             _ => {}
         }
     }
@@ -89,7 +102,13 @@ fn reconstruct_from_table_wal(path: &std::path::Path) -> HashMap<(TableId, u64),
     while let Some((body, consumed)) = record::read_frame(&bytes[offset..]) {
         match record::decode_entry_for_table::<u64, u64>(body) {
             Some((table_id, WalEntry::Write(rec))) => {
-                writes.push((rec.stamp.worker_id(), rec.stamp.ts_start(), seq, table_id, rec.op));
+                writes.push((
+                    rec.stamp.worker_id(),
+                    rec.stamp.ts_start(),
+                    seq,
+                    table_id,
+                    rec.op,
+                ));
                 seq += 1;
             }
             Some((_, WalEntry::Commit { stamp, ts_commit })) => {
@@ -103,7 +122,9 @@ fn reconstruct_from_table_wal(path: &std::path::Path) -> HashMap<(TableId, u64),
     let mut committed: Vec<(Version, usize, TableId, CRUDOperation<u64, u64>)> = writes
         .into_iter()
         .filter_map(|(worker, ts_start, seq, table_id, op)| {
-            commits.get(&(worker, ts_start)).map(|&ts_commit| (ts_commit, seq, table_id, op))
+            commits
+                .get(&(worker, ts_start))
+                .map(|&ts_commit| (ts_commit, seq, table_id, op))
         })
         .collect();
     committed.sort_by_key(|(ts_commit, seq, _, _)| (*ts_commit, *seq));
@@ -111,8 +132,12 @@ fn reconstruct_from_table_wal(path: &std::path::Path) -> HashMap<(TableId, u64),
     let mut state = HashMap::new();
     for (_, _, table_id, op) in committed {
         match op {
-            CRUDOperation::Insert(k, v) | CRUDOperation::Update(k, v) => { state.insert((table_id, k), v); }
-            CRUDOperation::Delete(k) => { state.remove(&(table_id, k)); }
+            CRUDOperation::Insert(k, v) | CRUDOperation::Update(k, v) => {
+                state.insert((table_id, k), v);
+            }
+            CRUDOperation::Delete(k) => {
+                state.remove(&(table_id, k));
+            }
             _ => {}
         }
     }
@@ -130,7 +155,8 @@ fn concurrent_inserts_are_present_in_tree_and_match_wal_exactly() {
     let _ = std::fs::remove_file(&path);
 
     let tree = TestTree::make_standard(RootIndexType::default())
-        .with_wal(&path, Duration::from_millis(2)).unwrap();
+        .with_wal(&path, Duration::from_millis(2))
+        .unwrap();
 
     const THREADS: u64 = 8;
     const KEYS_PER_THREAD: u64 = 250;
@@ -153,7 +179,11 @@ fn concurrent_inserts_are_present_in_tree_and_match_wal_exactly() {
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).max().unwrap()
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .max()
+            .unwrap()
     });
 
     tree.wait_wal_hardened(max_ts);
@@ -164,7 +194,8 @@ fn concurrent_inserts_are_present_in_tree_and_match_wal_exactly() {
             let key = t * KEYS_PER_THREAD + i;
             let expected = key * 31 + 7;
             match tree.dispatch_crud(CRUDOperation::Point(key, version)) {
-                CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == expected => {}
+                CRUDOperationResult::MatchedRecords(r)
+                    if r.len() == 1 && r[0].payload == expected => {}
                 other => panic!("tree missing/wrong data for key {key}: {other}"),
             }
         }
@@ -180,7 +211,11 @@ fn concurrent_inserts_are_present_in_tree_and_match_wal_exactly() {
         for i in 0..KEYS_PER_THREAD {
             let key = t * KEYS_PER_THREAD + i;
             let expected = key * 31 + 7;
-            assert_eq!(wal_state.get(&key), Some(&expected), "WAL data for key {key} doesn't match what was inserted");
+            assert_eq!(
+                wal_state.get(&key),
+                Some(&expected),
+                "WAL data for key {key} doesn't match what was inserted"
+            );
         }
     }
 
@@ -204,7 +239,8 @@ fn concurrent_insert_update_delete_matches_wal_and_recovery() {
 
     let final_state: HashMap<u64, u64> = {
         let tree = TestTree::make_standard(RootIndexType::default())
-            .with_wal(&path, Duration::from_millis(2)).unwrap();
+            .with_wal(&path, Duration::from_millis(2))
+            .unwrap();
 
         let max_ts = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..THREADS)
@@ -225,7 +261,9 @@ fn concurrent_insert_update_delete_matches_wal_and_recovery() {
                             }
                             if key % 2 == 0 {
                                 match tree.dispatch_crud(CRUDOperation::Delete(key)) {
-                                    CRUDOperationResult::Deleted(ts) => local_max = local_max.max(ts),
+                                    CRUDOperationResult::Deleted(ts) => {
+                                        local_max = local_max.max(ts)
+                                    }
                                     other => panic!("delete {key} failed: {other}"),
                                 }
                             }
@@ -234,7 +272,11 @@ fn concurrent_insert_update_delete_matches_wal_and_recovery() {
                     })
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).max().unwrap()
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .max()
+                .unwrap()
         });
 
         tree.wait_wal_hardened(max_ts);
@@ -252,7 +294,8 @@ fn concurrent_insert_update_delete_matches_wal_and_recovery() {
                 } else {
                     let expected_payload = key * 3 + 2;
                     match tree.dispatch_crud(CRUDOperation::Point(key, version)) {
-                        CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == expected_payload => {}
+                        CRUDOperationResult::MatchedRecords(r)
+                            if r.len() == 1 && r[0].payload == expected_payload => {}
                         other => panic!("key {key} wrong/missing, got {other}"),
                     }
                     expected.insert(key, expected_payload);
@@ -264,14 +307,20 @@ fn concurrent_insert_update_delete_matches_wal_and_recovery() {
 
     // Cross-check 1: independent reconstruction of the raw WAL bytes.
     let wal_state = reconstruct_from_wal(&path);
-    assert_eq!(wal_state, final_state, "WAL-reconstructed state must exactly match the live tree's final state");
+    assert_eq!(
+        wal_state, final_state,
+        "WAL-reconstructed state must exactly match the live tree's final state"
+    );
 
     // Cross-check 2: the real recovery path (open_recovered) agrees too.
-    let recovered = TestTree::open_recovered(RootIndexType::default(), &path, Duration::from_millis(2)).unwrap();
+    let recovered =
+        TestTree::open_recovered(RootIndexType::default(), &path, Duration::from_millis(2))
+            .unwrap();
     let recovered_version = recovered.current_version();
     for (&key, &expected_payload) in &final_state {
         match recovered.dispatch_crud(CRUDOperation::Point(key, recovered_version)) {
-            CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == expected_payload => {}
+            CRUDOperationResult::MatchedRecords(r)
+                if r.len() == 1 && r[0].payload == expected_payload => {}
             other => panic!("recovered tree wrong/missing for key {key}: {other}"),
         }
     }
@@ -281,7 +330,9 @@ fn concurrent_insert_update_delete_matches_wal_and_recovery() {
             if key % 2 == 0 {
                 match recovered.dispatch_crud(CRUDOperation::Point(key, recovered_version)) {
                     CRUDOperationResult::MatchedRecords(r) if r.is_empty() => {}
-                    other => panic!("recovered tree should not have deleted key {key}, got {other}"),
+                    other => {
+                        panic!("recovered tree should not have deleted key {key}, got {other}")
+                    }
                 }
             }
         }
@@ -303,9 +354,15 @@ fn concurrent_db_transactions_across_tables_match_shared_wal_exactly() {
     let _ = std::fs::remove_file(&meta_path);
 
     let db: TestDb = Database::new_with_wal(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        &path, Duration::from_millis(2),
-    ).unwrap();
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        &path,
+        Duration::from_millis(2),
+    )
+    .unwrap();
     let t_a = db.create_table("a").table_id().unwrap();
     let t_b = db.create_table("b").table_id().unwrap();
     let t_c = db.create_table("c").table_id().unwrap();
@@ -321,12 +378,21 @@ fn concurrent_db_transactions_across_tables_match_shared_wal_exactly() {
                     let mut local_max = 0;
                     for i in 0..TXNS_PER_THREAD {
                         let key = t * TXNS_PER_THREAD + i;
-                        let tx = DbTransaction::begin(db_ref);
+                        let mut tx = DbTransaction::begin(db_ref);
                         let ts_start = tx.ts_start();
 
-                        assert!(matches!(tx.insert(t_a, key, key * 2 + 1), CRUDOperationResult::Inserted(_)));
-                        assert!(matches!(tx.insert(t_b, key, key * 3 + 1), CRUDOperationResult::Inserted(_)));
-                        assert!(matches!(tx.insert(t_c, key, key * 5 + 1), CRUDOperationResult::Inserted(_)));
+                        assert!(matches!(
+                            tx.insert(t_a, key, key * 2 + 1),
+                            CRUDOperationResult::Inserted(_)
+                        ));
+                        assert!(matches!(
+                            tx.insert(t_b, key, key * 3 + 1),
+                            CRUDOperationResult::Inserted(_)
+                        ));
+                        assert!(matches!(
+                            tx.insert(t_c, key, key * 5 + 1),
+                            CRUDOperationResult::Inserted(_)
+                        ));
                         tx.commit();
 
                         local_max = local_max.max(ts_start);
@@ -335,7 +401,11 @@ fn concurrent_db_transactions_across_tables_match_shared_wal_exactly() {
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).max().unwrap()
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .max()
+            .unwrap()
     });
 
     // `wait_wal_hardened` tracks the highest flushed *ts_start*, not
@@ -346,16 +416,31 @@ fn concurrent_db_transactions_across_tables_match_shared_wal_exactly() {
     for t in 0..THREADS {
         for i in 0..TXNS_PER_THREAD {
             let key = t * TXNS_PER_THREAD + i;
-            match db.table(t_a).unwrap().dispatch_crud(CRUDOperation::Point(key, version)) {
-                CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == key * 2 + 1 => {}
+            match db
+                .table(t_a)
+                .unwrap()
+                .dispatch_crud(CRUDOperation::Point(key, version))
+            {
+                CRUDOperationResult::MatchedRecords(r)
+                    if r.len() == 1 && r[0].payload == key * 2 + 1 => {}
                 other => panic!("table a missing/wrong for key {key}: {other}"),
             }
-            match db.table(t_b).unwrap().dispatch_crud(CRUDOperation::Point(key, version)) {
-                CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == key * 3 + 1 => {}
+            match db
+                .table(t_b)
+                .unwrap()
+                .dispatch_crud(CRUDOperation::Point(key, version))
+            {
+                CRUDOperationResult::MatchedRecords(r)
+                    if r.len() == 1 && r[0].payload == key * 3 + 1 => {}
                 other => panic!("table b missing/wrong for key {key}: {other}"),
             }
-            match db.table(t_c).unwrap().dispatch_crud(CRUDOperation::Point(key, version)) {
-                CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == key * 5 + 1 => {}
+            match db
+                .table(t_c)
+                .unwrap()
+                .dispatch_crud(CRUDOperation::Point(key, version))
+            {
+                CRUDOperationResult::MatchedRecords(r)
+                    if r.len() == 1 && r[0].payload == key * 5 + 1 => {}
                 other => panic!("table c missing/wrong for key {key}: {other}"),
             }
         }
@@ -366,9 +451,21 @@ fn concurrent_db_transactions_across_tables_match_shared_wal_exactly() {
     for t in 0..THREADS {
         for i in 0..TXNS_PER_THREAD {
             let key = t * TXNS_PER_THREAD + i;
-            assert_eq!(wal_state.get(&(t_a, key)), Some(&(key * 2 + 1)), "table a WAL mismatch for key {key}");
-            assert_eq!(wal_state.get(&(t_b, key)), Some(&(key * 3 + 1)), "table b WAL mismatch for key {key}");
-            assert_eq!(wal_state.get(&(t_c, key)), Some(&(key * 5 + 1)), "table c WAL mismatch for key {key}");
+            assert_eq!(
+                wal_state.get(&(t_a, key)),
+                Some(&(key * 2 + 1)),
+                "table a WAL mismatch for key {key}"
+            );
+            assert_eq!(
+                wal_state.get(&(t_b, key)),
+                Some(&(key * 3 + 1)),
+                "table b WAL mismatch for key {key}"
+            );
+            assert_eq!(
+                wal_state.get(&(t_c, key)),
+                Some(&(key * 5 + 1)),
+                "table c WAL mismatch for key {key}"
+            );
         }
     }
 
@@ -393,14 +490,23 @@ fn contended_concurrent_transactions_tree_and_wal_agree_despite_conflicts() {
     let _ = std::fs::remove_file(&meta_path);
 
     let db: TestDb = Database::new_with_wal(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        &path, Duration::from_millis(2),
-    ).unwrap();
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        &path,
+        Duration::from_millis(2),
+    )
+    .unwrap();
     let t = db.create_table("t").table_id().unwrap();
 
     const KEYS: u64 = 20;
     for k in 0..KEYS {
-        assert!(matches!(db.dispatch_crud(t, CRUDOperation::Insert(k, 0)), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            db.dispatch_crud(t, CRUDOperation::Insert(k, 0)),
+            CRUDOperationResult::Inserted(_)
+        ));
     }
 
     const THREADS: u64 = 12;
@@ -417,7 +523,7 @@ fn contended_concurrent_transactions_tree_and_wal_agree_despite_conflicts() {
                         let key = (thread_id * ATTEMPTS_PER_THREAD + i) % KEYS;
                         let payload = thread_id * 1_000_000 + i; // uniquely identifies (thread, attempt)
 
-                        let tx = DbTransaction::begin(db_ref);
+                        let mut tx = DbTransaction::begin(db_ref);
                         // Extract an owned result first: `tx.update(..)`
                         // returns a `CRUDOperationResult<'static, ..>`, but
                         // matching on it while `tx` is still borrowed would
@@ -451,15 +557,24 @@ fn contended_concurrent_transactions_tree_and_wal_agree_despite_conflicts() {
             results.iter().map(|r| r.1).sum::<u64>(),
         )
     });
-    assert!(total_committed > 0, "expected at least some updates to actually commit under contention");
+    assert!(
+        total_committed > 0,
+        "expected at least some updates to actually commit under contention"
+    );
 
     db.table(t).unwrap().wait_wal_hardened(max_ts);
 
     let version = db.current_version();
     let mut tree_state = HashMap::new();
     for k in 0..KEYS {
-        match db.table(t).unwrap().dispatch_crud(CRUDOperation::Point(k, version)) {
-            CRUDOperationResult::MatchedRecords(r) if r.len() == 1 => { tree_state.insert((t, k), *r[0].payload); }
+        match db
+            .table(t)
+            .unwrap()
+            .dispatch_crud(CRUDOperation::Point(k, version))
+        {
+            CRUDOperationResult::MatchedRecords(r) if r.len() == 1 => {
+                tree_state.insert((t, k), *r[0].payload);
+            }
             other => panic!("key {k} missing from tree: {other}"),
         }
     }
@@ -491,9 +606,13 @@ const REPRO_ITERATIONS: usize = 20;
 // range + live record keys, to see whether a "missing" key's expected
 // position is covered by *some* leaf's fence (a lost-write-during-split) or
 // falls into a genuine gap between siblings' fences (an unreachable leaf).
-fn dump_tree(tree: &TestTree, version: crate::mv_record_model::version_info::Version, target_key: u64) {
-    use crate::mv_page_model::node::PageType;
+fn dump_tree(
+    tree: &TestTree,
+    version: crate::mv_record_model::version_info::Version,
+    target_key: u64,
+) {
     use crate::mv_page_model::BlockRef;
+    use crate::mv_page_model::node::PageType;
     use crate::mv_page_model::time_matcher::TimeMatcher;
     use std::fmt::Write as _;
 
@@ -512,34 +631,65 @@ fn dump_tree(tree: &TestTree, version: crate::mv_record_model::version_info::Ver
                 // `active=true` in the listing pass, then skip it in the
                 // recursion pass moments later, on the exact same node).
                 let (keys, versions) = internal_page.keys_versions();
-                let entries: Vec<_> = keys.iter().zip(versions.iter())
+                let entries: Vec<_> = keys
+                    .iter()
+                    .zip(versions.iter())
                     .map(|(range, ver)| (*range, ver.is_active()))
                     .collect();
-                let _ = writeln!(out, "[K{target_key}]{indent}[internal] page={:p} sum_len={} active_len={} entries:", internal_page as *const _, internal_page.sum_len(), internal_page.active_len());
+                let _ = writeln!(
+                    out,
+                    "[K{target_key}]{indent}[internal] page={:p} sum_len={} active_len={} entries:",
+                    internal_page as *const _,
+                    internal_page.sum_len(),
+                    internal_page.active_len()
+                );
                 for (pos, (range, active)) in entries.iter().enumerate() {
                     let covers = range.contains(target_key);
-                    let _ = writeln!(out, "[K{target_key}]{indent}  #{pos} range=[{},{}] active={} covers_target={}",
-                        range.lower, range.upper, active, covers);
+                    let _ = writeln!(
+                        out,
+                        "[K{target_key}]{indent}  #{pos} range=[{},{}] active={} covers_target={}",
+                        range.lower, range.upper, active, covers
+                    );
                 }
                 for (pos, (range, active)) in entries.iter().enumerate() {
                     if *active {
                         let child = internal_page.get_pointer(pos);
-                        let _ = writeln!(out, "[K{target_key}]{indent}  -> descending into #{pos} range=[{},{}]", range.lower, range.upper);
+                        let _ = writeln!(
+                            out,
+                            "[K{target_key}]{indent}  -> descending into #{pos} range=[{},{}]",
+                            range.lower, range.upper
+                        );
                         walk(&child, depth + 1, target_key, out);
                     }
                 }
             }
             PageType::LeafRef(leaf_page) => {
                 let records = leaf_page.as_records();
-                let live_keys: Vec<u64> = records.iter().filter(|r| r.version().is_live()).map(|r| r.key).collect();
+                let live_keys: Vec<u64> = records
+                    .iter()
+                    .filter(|r| r.version().is_live())
+                    .map(|r| r.key)
+                    .collect();
                 let has_target = live_keys.contains(&target_key);
-                let _ = writeln!(out, "[K{target_key}]{indent}[leaf] len={} live_keys={:?} HAS_TARGET={}", records.len(), live_keys, has_target);
+                let _ = writeln!(
+                    out,
+                    "[K{target_key}]{indent}[leaf] len={} live_keys={:?} HAS_TARGET={}",
+                    records.len(),
+                    live_keys,
+                    has_target
+                );
                 for (pos, r) in records.iter().enumerate() {
                     if r.key == target_key {
-                        let _ = writeln!(out, "[K{target_key}]{indent}  #{pos} MATCH key={} is_live={} is_deleted={} insert_invalid={} worker={} ts_start={}",
-                            r.key, r.version().is_live(), r.version().is_deleted(),
+                        let _ = writeln!(
+                            out,
+                            "[K{target_key}]{indent}  #{pos} MATCH key={} is_live={} is_deleted={} insert_invalid={} worker={} ts_start={}",
+                            r.key,
+                            r.version().is_live(),
+                            r.version().is_deleted(),
                             r.version().insertion_stamp().is_invalid(),
-                            r.version().insertion_stamp().worker_id(), r.version().insertion_stamp().ts_start());
+                            r.version().insertion_stamp().worker_id(),
+                            r.version().insertion_stamp().ts_start()
+                        );
                     }
                 }
             }
@@ -548,7 +698,10 @@ fn dump_tree(tree: &TestTree, version: crate::mv_record_model::version_info::Ver
     }
 
     let mut out = String::new();
-    let _ = writeln!(out, "=== DUMP for target_key={target_key} at version={version} ===");
+    let _ = writeln!(
+        out,
+        "=== DUMP for target_key={target_key} at version={version} ==="
+    );
     let root = tree.retrieve_root_for(version);
     walk(&root, 0, target_key, &mut out);
     let _ = writeln!(out, "=== END DUMP for target_key={target_key} ===");
@@ -571,9 +724,14 @@ fn repro_run_range(tree: &TestTree, t: u64) {
                 dump_tree(tree, v, key);
                 if crate::mv_tree::smo::TRACE_KEY_DEBUG {
                     let log = crate::mv_tree::smo::drain_trace_log().join("\n");
-                    let _ = std::fs::write("/tmp/claude-1000/-home-amir-RustroverProjects-cMVBT/f3d9fdfb-aec9-4964-9963-71106541c3dd/scratchpad/trace_log_dump.txt", &log);
+                    let _ = std::fs::write(
+                        "/tmp/claude-1000/-home-amir-RustroverProjects-cMVBT/f3d9fdfb-aec9-4964-9963-71106541c3dd/scratchpad/trace_log_dump.txt",
+                        &log,
+                    );
                 }
-                panic!("update {key} failed: {other}; immediate Point({key}, {v})={point}; immediate retry Update={retry}");
+                panic!(
+                    "update {key} failed: {other}; immediate Point({key}, {v})={point}; immediate retry Update={retry}"
+                );
             }
         }
         if key % 2 == 0 {
@@ -583,7 +741,9 @@ fn repro_run_range(tree: &TestTree, t: u64) {
                     let v = tree.current_version();
                     let point = tree.dispatch_crud(CRUDOperation::Point(key, v));
                     let retry = tree.dispatch_crud(CRUDOperation::Delete(key));
-                    panic!("delete {key} failed: {other}; immediate Point({key}, {v})={point}; immediate retry Delete={retry}");
+                    panic!(
+                        "delete {key} failed: {other}; immediate Point({key}, {v})={point}; immediate retry Delete={retry}"
+                    );
                 }
             }
         }
@@ -648,7 +808,9 @@ fn repro_concurrent_insert_update_delete_with_gc() {
 // query_dispatch_tests.rs's repeated_failed_updates_do_not_corrupt_later_state.
 fn repro_run_shuffled(tree: &TestTree, t: u64) {
     use rand::prelude::SliceRandom;
-    let mut keys: Vec<u64> = (0..REPRO_KEYS_PER_THREAD).map(|i| t * REPRO_KEYS_PER_THREAD + i).collect();
+    let mut keys: Vec<u64> = (0..REPRO_KEYS_PER_THREAD)
+        .map(|i| t * REPRO_KEYS_PER_THREAD + i)
+        .collect();
     keys.shuffle(&mut rand::rng());
     for key in keys {
         match tree.dispatch_crud(CRUDOperation::Insert(key, key * 3 + 1)) {
@@ -727,9 +889,13 @@ fn concurrent_inserts_into_splitting_leaf_are_not_lost() {
                 other => missing.push((key, format!("{other}"))),
             }
         }
-        assert!(missing.is_empty(),
+        assert!(
+            missing.is_empty(),
             "iteration {iter}: {} of {} keys inserted successfully but not found afterward: {:?}",
-            missing.len(), RACE_KEY_COUNT, &missing[..missing.len().min(20)]);
+            missing.len(),
+            RACE_KEY_COUNT,
+            &missing[..missing.len().min(20)]
+        );
     }
 }
 
@@ -814,12 +980,14 @@ fn repro_run_point_after_insert(tree: &TestTree, t: u64) {
 
         let v = tree.current_version();
         match tree.dispatch_crud(CRUDOperation::Point(key, v)) {
-            CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == key * 3 + 1 => {}
+            CRUDOperationResult::MatchedRecords(r)
+                if r.len() == 1 && r[0].payload == key * 3 + 1 => {}
             other => {
                 dump_tree(tree, v, key);
                 panic!(
                     "Point({key}, {v}) immediately after a successful insert returned {other}, \
-                     expected the just-inserted payload {}", key * 3 + 1
+                     expected the just-inserted payload {}",
+                    key * 3 + 1
                 );
             }
         }
@@ -887,18 +1055,27 @@ fn repro_run_range_collect(tree: &TestTree, t: u64, failures: &Mutex<Vec<(u64, S
         match tree.dispatch_crud(CRUDOperation::Insert(key, key * 3 + 1)) {
             CRUDOperationResult::Inserted(_) => {}
             other => {
-                failures.lock().unwrap().push((key, format!("insert: {other}")));
+                failures
+                    .lock()
+                    .unwrap()
+                    .push((key, format!("insert: {other}")));
                 continue;
             }
         }
         match tree.dispatch_crud(CRUDOperation::Update(key, key * 3 + 2)) {
             CRUDOperationResult::Updated(_) => {}
-            other => failures.lock().unwrap().push((key, format!("update: {other}"))),
+            other => failures
+                .lock()
+                .unwrap()
+                .push((key, format!("update: {other}"))),
         }
         if key % 2 == 0 {
             match tree.dispatch_crud(CRUDOperation::Delete(key)) {
                 CRUDOperationResult::Deleted(_) => {}
-                other => failures.lock().unwrap().push((key, format!("delete: {other}"))),
+                other => failures
+                    .lock()
+                    .unwrap()
+                    .push((key, format!("delete: {other}"))),
             }
         }
     }
@@ -919,12 +1096,20 @@ fn repro_concurrent_insert_update_delete_reports_all_failures() {
         });
         let failures = failures.into_inner().unwrap();
         if !failures.is_empty() {
-            per_iteration.push((iter, failures.len(), failures.into_iter().take(5).collect::<Vec<_>>()));
+            per_iteration.push((
+                iter,
+                failures.len(),
+                failures.into_iter().take(5).collect::<Vec<_>>(),
+            ));
         }
     }
-    assert!(per_iteration.is_empty(),
+    assert!(
+        per_iteration.is_empty(),
         "{} of {} iterations had lost writes (iteration, count, first few): {:?}",
-        per_iteration.len(), REPRO_ITERATIONS, per_iteration);
+        per_iteration.len(),
+        REPRO_ITERATIONS,
+        per_iteration
+    );
 }
 
 /// Regression test for the specific mechanism confirmed via `dump_tree`
@@ -960,7 +1145,10 @@ fn repro_high_thread_count_insert_update_delete_reports_all_failures() {
                         match tree.dispatch_crud(CRUDOperation::Insert(key, key * 3 + 1)) {
                             CRUDOperationResult::Inserted(_) => {}
                             other => {
-                                failures.lock().unwrap().push((key, format!("insert: {other}")));
+                                failures
+                                    .lock()
+                                    .unwrap()
+                                    .push((key, format!("insert: {other}")));
                                 continue;
                             }
                         }
@@ -970,8 +1158,10 @@ fn repro_high_thread_count_insert_update_delete_reports_all_failures() {
                                 let v = tree.current_version();
                                 let point = tree.dispatch_crud(CRUDOperation::Point(key, v));
                                 dump_tree(tree, v, key);
-                                failures.lock().unwrap().push((key,
-                                    format!("update: {other}; immediate Point({key}, {v})={point}")));
+                                failures.lock().unwrap().push((
+                                    key,
+                                    format!("update: {other}; immediate Point({key}, {v})={point}"),
+                                ));
                             }
                         }
                         if key % 2 == 0 {
@@ -981,8 +1171,12 @@ fn repro_high_thread_count_insert_update_delete_reports_all_failures() {
                                     let v = tree.current_version();
                                     let point = tree.dispatch_crud(CRUDOperation::Point(key, v));
                                     dump_tree(tree, v, key);
-                                    failures.lock().unwrap().push((key,
-                                        format!("delete: {other}; immediate Point({key}, {v})={point}")));
+                                    failures.lock().unwrap().push((
+                                        key,
+                                        format!(
+                                            "delete: {other}; immediate Point({key}, {v})={point}"
+                                        ),
+                                    ));
                                 }
                             }
                         }
@@ -992,10 +1186,18 @@ fn repro_high_thread_count_insert_update_delete_reports_all_failures() {
         });
         let failures = failures.into_inner().unwrap();
         if !failures.is_empty() {
-            per_iteration.push((iter, failures.len(), failures.into_iter().take(5).collect::<Vec<_>>()));
+            per_iteration.push((
+                iter,
+                failures.len(),
+                failures.into_iter().take(5).collect::<Vec<_>>(),
+            ));
         }
     }
-    assert!(per_iteration.is_empty(),
+    assert!(
+        per_iteration.is_empty(),
         "{} of {} high-contention iterations had lost writes (iteration, count, first few): {:?}",
-        per_iteration.len(), HIGH_CONTENTION_ITERATIONS, per_iteration);
+        per_iteration.len(),
+        HIGH_CONTENTION_ITERATIONS,
+        per_iteration
+    );
 }

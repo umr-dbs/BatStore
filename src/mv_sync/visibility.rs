@@ -14,15 +14,19 @@ use crate::mv_sync::commit_log::CommitLog;
 /// `RefCell`/`SafeCell` here would just be a second, redundant layer on top
 /// of that.
 pub struct SnapshotCache {
-    // (cached reader ts_start, cached LCB result), indexed by foreign WorkerId.
-    // Exactly sized to this database's worker registry. A boxed slice keeps
-    // the allocation stable while avoiding a machine-independent inline cap.
-    entries: Box<[(Version, Version)]>,
+    // Structure-of-arrays: snapshot identity and LCB values are scanned or
+    // refreshed independently and no longer force 16-byte tuple traffic.
+    // This also leaves each stream densely packed for worker-indexed access.
+    snapshot_versions: Box<[Version]>,
+    lcb: Box<[Version]>,
 }
 
 impl SnapshotCache {
     pub fn new(max_workers: usize) -> Self {
-        Self { entries: vec![(0, 0); max_workers].into_boxed_slice() }
+        Self {
+            snapshot_versions: vec![0; max_workers].into_boxed_slice(),
+            lcb: vec![0; max_workers].into_boxed_slice(),
+        }
     }
 }
 
@@ -60,18 +64,18 @@ pub fn is_visible(
         return stamp.ts_start() <= reader_ts_start;
     }
 
-    let slot = &mut cache.entries[stamp.worker_id() as usize];
+    let index = stamp.worker_id() as usize;
 
-    if slot.1 > stamp.ts_start() {
+    if cache.lcb[index] > stamp.ts_start() {
         return true; // cache hit: already known-visible
     }
 
-    if slot.0 < reader_ts_start {
+    if cache.snapshot_versions[index] < reader_ts_start {
         // Cache is stale for this reader_ts_start (or never queried this
         // worker before) — refresh via a real (locked) LCB query.
-        slot.1 = commit_logs[stamp.worker_id() as usize].lcb(reader_ts_start);
-        slot.0 = reader_ts_start;
+        cache.lcb[index] = commit_logs[index].lcb(reader_ts_start);
+        cache.snapshot_versions[index] = reader_ts_start;
     }
 
-    slot.1 > stamp.ts_start()
+    cache.lcb[index] > stamp.ts_start()
 }

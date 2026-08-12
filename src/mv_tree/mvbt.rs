@@ -1,12 +1,12 @@
-use std::fmt::Display;
-use std::hash::Hash;
-use triomphe::Arc;
 use crate::mv_block::block_handle::BlockAllocManager;
 use crate::mv_gc::tracker_handle::{TrackerHandle, TrackerHandleSt};
 use crate::mv_page_model::Height;
 use crate::mv_root::index_root::{RootIndex, RootIndexType};
 use crate::mv_sync::tx_context::TxContext;
 use crate::mv_wal::backend::WalBackend;
+use std::fmt::Display;
+use std::hash::Hash;
+use triomphe::Arc;
 
 /// `RecordPoint<Key, Payload>` is 32B for `Key = Payload = u64` (`VersionInfo`
 /// packs down to 16B — see `mv_record_model::tx_stamp::TxStamp`'s doc), so
@@ -28,12 +28,12 @@ use crate::mv_wal::backend::WalBackend;
 /// 4032B, leaving exactly enough room for `OptCell`'s extra 8B (rounded to
 /// 4096B) to land back on a page boundary with zero waste - confirmed
 /// empirically at 64/64 (100%) page-aligned.
-pub const FAN_OUT: usize        = 123;
-pub const NUM_RECORDS: usize    = 123;
-pub type Key                    = u64;
-pub type Payload                = u64;
+pub const FAN_OUT: usize = 123;
+pub const NUM_RECORDS: usize = 123;
+pub type Key = u64;
+pub type Payload = u64;
 // pub type Payload = PayloadIndirection;
-pub type MVBT                   = MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>;
+pub type MVBT = MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>;
 
 pub const INIT_TREE_HEIGHT: Height = 1;
 
@@ -41,14 +41,29 @@ pub const INIT_TREE_HEIGHT: Height = 1;
 /// #workers). This is a runtime machine property, deliberately separate from
 /// `SnapshotCache`'s representation: the cache is sized to this value rather
 /// than imposing a compile-time worker cap.
-pub fn default_max_workers() -> usize { num_cpus::get().max(1) }
+pub fn default_max_workers() -> usize {
+    num_cpus::get().max(1)
+}
 // pub const MAX_TREE_HEIGHT: Height = Height::MAX;
+
+/// Construction-time configuration kept off the traversal-critical tree
+/// header. Point/range traversal normally needs only `root`,
+/// `block_manager`, and `ctx`; grouping these colder fields behind one
+/// pointer lets those hot fields occupy fewer cache lines.
+pub(crate) struct MVBTCold<Key, Payload> {
+    pub(crate) inc_key: fn(Key) -> Key,
+    pub(crate) dec_key: fn(Key) -> Key,
+    pub(crate) min_key: Key,
+    pub(crate) max_key: Key,
+    pub(crate) wal: Arc<WalBackend<Key, Payload>>,
+    pub(crate) table_id: Option<crate::mv_wal::record::TableId>,
+}
 
 pub struct MVBTSt<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static,
 > {
     pub(crate) root: RootIndex<FAN_OUT, NUM_RECORDS, Key, Payload>,
     pub block_manager: BlockAllocManager<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -60,10 +75,6 @@ pub struct MVBTSt<
     /// transaction spanning those tables stays atomic/snapshot-isolated as
     /// one unit (see `mv_bench::tpcc_schema::TpccDatabase`).
     pub(crate) ctx: Arc<TxContext>,
-    pub(crate) inc_key: fn(Key) -> Key,
-    pub(crate) dec_key: fn(Key) -> Key,
-    pub(crate) min_key: Key,
-    pub(crate) max_key: Key,
     /// One unified `WalBackend` for this tree — either kind (see that
     /// type's doc): a `WalWriter`, where every worker enqueues into its
     /// single channel (a lock-free MPSC queue, so concurrent workers still
@@ -73,7 +84,6 @@ pub struct MVBTSt<
     /// byte range and writes it directly. `enable_wal`/`enable_wal_lockfree`/
     /// WAL selection is immutable after construction. `Off` gives the
     /// in-memory configuration a direct enum fast path without ArcSwap.
-    pub(crate) wal: Arc<WalBackend<Key, Payload>>,
     /// `Some(id)` when this tree is one table of a `mv_db::Database`, whose
     /// tables all share one `WalBackend` (the *same* `Arc` cloned into every
     /// table's `wal` field via `attach_wal`) and must tag their WAL entries
@@ -85,44 +95,50 @@ pub struct MVBTSt<
     /// existing one-writer-per-table design) — see
     /// `mv_sync::version_handle`'s WAL-logging methods for how this branches
     /// between the plain and table-tagged wire encodings.
-    pub(crate) table_id: Option<crate::mv_wal::record::TableId>,
+    pub(crate) cold: Box<MVBTCold<Key, Payload>>,
 }
-
-unsafe impl<const FAN_OUT: usize,
-    const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Clone + Default + Display + Sync + 'static
-> Sync for MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload> {}
 
 unsafe impl<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
-> Send for MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload> {}
+    Payload: Clone + Default + Display + Sync + 'static,
+> Sync for MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+}
 
-impl<const FAN_OUT: usize,
+unsafe impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Payload: Display + Clone + Default + Sync + 'static
-> Default for MVBTSt<FAN_OUT, NUM_RECORDS, u64, Payload> {
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static,
+> Send for MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+}
+
+impl<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Payload: Display + Clone + Default + Sync + 'static,
+> Default for MVBTSt<FAN_OUT, NUM_RECORDS, u64, Payload>
+{
     fn default() -> Self {
         Self::make_standard(RootIndexType::default())
     }
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static,
 > MVBTSt<FAN_OUT, NUM_RECORDS, u64, Payload>
 {
     pub fn count_roots(&self) -> usize {
         self.root.count_roots()
     }
-    
+
     #[inline]
-    pub fn make_standard(
-        root_index_type: RootIndexType) -> Self
-    {
+    pub fn make_standard(root_index_type: RootIndexType) -> Self {
         Self::make_standard_with_max_workers(root_index_type, default_max_workers())
     }
 
@@ -139,8 +155,13 @@ impl<const FAN_OUT: usize,
         }
 
         Self::make_with_shared_ctx(
-            root_index_type, inc_key, dec_key, u64::MIN, u64::MAX,
-            Arc::new(TxContext::new(max_workers.max(1))), None,
+            root_index_type,
+            inc_key,
+            dec_key,
+            u64::MIN,
+            u64::MAX,
+            Arc::new(TxContext::new(max_workers.max(1))),
+            None,
             Arc::new(WalBackend::Off),
         )
     }
@@ -150,11 +171,21 @@ impl<const FAN_OUT: usize,
         max_workers: usize,
         wal: Arc<WalBackend<u64, Payload>>,
     ) -> Self {
-        fn inc_key(k: u64) -> u64 { k.saturating_add(1) }
-        fn dec_key(k: u64) -> u64 { k.saturating_sub(1) }
+        fn inc_key(k: u64) -> u64 {
+            k.saturating_add(1)
+        }
+        fn dec_key(k: u64) -> u64 {
+            k.saturating_sub(1)
+        }
         Self::make_with_shared_ctx(
-            root_index_type, inc_key, dec_key, u64::MIN, u64::MAX,
-            Arc::new(TxContext::new(max_workers.max(1))), None, wal,
+            root_index_type,
+            inc_key,
+            dec_key,
+            u64::MIN,
+            u64::MAX,
+            Arc::new(TxContext::new(max_workers.max(1))),
+            None,
+            wal,
         )
     }
 
@@ -168,9 +199,10 @@ impl<const FAN_OUT: usize,
 /// and `mv_wal::recovery::replay`), so only it should require that bound —
 /// `make_standard`/`count_roots` stay usable for any `Payload`, WAL-capable
 /// or not.
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload
+    Payload: Display + Clone + Default + Sync + 'static + crate::mv_wal::record::WalPayload,
 > MVBTSt<FAN_OUT, NUM_RECORDS, u64, Payload>
 {
     /// Builds a fresh tree, replays any existing WAL found at `wal_path`
@@ -226,7 +258,7 @@ impl<const FAN_OUT: usize,
         path: &std::path::Path,
         flush_interval: std::time::Duration,
     ) -> std::io::Result<Self> {
-        self.wal = Arc::new(WalBackend::open_batched(path, flush_interval)?);
+        self.cold.wal = Arc::new(WalBackend::open_batched(path, flush_interval)?);
         Ok(self)
     }
 
@@ -237,21 +269,25 @@ impl<const FAN_OUT: usize,
         flush_interval: std::time::Duration,
         batch_size: usize,
     ) -> std::io::Result<Self> {
-        self.wal = Arc::new(WalBackend::open_lockfree(
-            path, flush_interval, batch_size, self.ctx.max_workers(),
+        self.cold.wal = Arc::new(WalBackend::open_lockfree(
+            path,
+            flush_interval,
+            batch_size,
+            self.ctx.max_workers(),
         )?);
         Ok(self)
     }
 
     pub(crate) fn set_wal_before_share(&mut self, wal: Arc<WalBackend<u64, Payload>>) {
-        self.wal = wal;
+        self.cold.wal = wal;
     }
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     /// Turns on this table's own block reclaim
@@ -274,7 +310,9 @@ impl<const FAN_OUT: usize,
     }
 
     pub fn disable_gc(&self) {
-        self.block_manager.tracker().set_block_reclaim_enabled(false);
+        self.block_manager
+            .tracker()
+            .set_block_reclaim_enabled(false);
         self.ctx.set_block_reclaim_enabled(false);
     }
 
@@ -292,7 +330,7 @@ impl<const FAN_OUT: usize,
     /// that database's table list — `None` for every standalone/single-tree
     /// caller. See this struct's `table_id` field doc.
     pub fn table_id(&self) -> Option<crate::mv_wal::record::TableId> {
-        self.table_id
+        self.cold.table_id
     }
 
     #[inline(always)]
@@ -306,17 +344,24 @@ impl<const FAN_OUT: usize,
     }
 
     #[inline]
-    fn make(root_index_type: RootIndexType,
-            inc_key: fn(Key) -> Key,
-            dec_key: fn(Key) -> Key,
-            min_key: Key,
-            max_key: Key,
+    fn make(
+        root_index_type: RootIndexType,
+        inc_key: fn(Key) -> Key,
+        dec_key: fn(Key) -> Key,
+        min_key: Key,
+        max_key: Key,
     ) -> Self {
         let max_workers = default_max_workers().max(1);
         Self::make_with_shared_ctx(
-            root_index_type, inc_key, dec_key, min_key, max_key,
-            Arc::new(TxContext::new(max_workers)), None,
-            Arc::new(WalBackend::Off))
+            root_index_type,
+            inc_key,
+            dec_key,
+            min_key,
+            max_key,
+            Arc::new(TxContext::new(max_workers)),
+            None,
+            Arc::new(WalBackend::Off),
+        )
     }
 
     /// Same as `make`, but takes a pre-built `ctx` instead of creating a
@@ -348,12 +393,14 @@ impl<const FAN_OUT: usize,
             root: RootIndex::new(root_index_type, &bm, &ctx),
             block_manager: bm,
             ctx,
-            inc_key,
-            dec_key,
-            min_key,
-            max_key,
-            wal,
-            table_id,
+            cold: Box::new(MVBTCold {
+                inc_key,
+                dec_key,
+                min_key,
+                max_key,
+                wal,
+                table_id,
+            }),
         }
     }
 }
@@ -363,17 +410,22 @@ impl<const FAN_OUT: usize,
 /// it, but individual `impl` blocks only get what they themselves declare) —
 /// every other method on `MVBTSt` stays available without it.
 #[cfg(feature = "tree-viz")]
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     /// Dumps this tree's full root* list and the (de-duplicated) block graph
     /// they reach to a JSON file at `path` for `tools/tree_visualizer.html` —
     /// see `mv_viz::dump::dump_tree_to_file`'s doc for the format and the
     /// quiescent-read-only caveat.
-    pub fn dump_to_file(&self, path: impl AsRef<std::path::Path>, max_depth: Option<usize>) -> std::io::Result<()> {
+    pub fn dump_to_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        max_depth: Option<usize>,
+    ) -> std::io::Result<()> {
         crate::mv_viz::dump::dump_tree_to_file(self, path, max_depth)
     }
 }

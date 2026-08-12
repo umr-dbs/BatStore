@@ -133,12 +133,7 @@ fn on_tx_start_then_completed_leaves_no_live_registration() {
     assert_eq!(ctx.live_min_snapshot(), None);
 }
 
-/// `mv_query::olc_query::traversal_write_olc` registers its own throwaway
-/// snapshot on every insert/update/delete traversal, nested inside an
-/// already-registered `DbTransaction`'s own live one — deliberately, per
-/// that function's doc. The per-worker slot must keep publishing the
-/// *outer* registration throughout, not get clobbered by the nested one,
-/// and must not clear early when only the inner one completes.
+/// Ordinary nested snapshot registrations must preserve the outer value.
 #[test]
 fn nested_registration_on_the_same_worker_keeps_the_outer_one_published() {
     let ctx = TxContext::new(1);
@@ -154,19 +149,55 @@ fn nested_registration_on_the_same_worker_keeps_the_outer_one_published() {
         ctx.on_tx_start(ts_start);
         ts_start
     });
-    assert!(inner > outer, "the global clock is monotonic, so the nested draw must be strictly newer");
+    assert!(
+        inner > outer,
+        "the global clock is monotonic, so the nested draw must be strictly newer"
+    );
     assert_eq!(
-        ctx.live_min_snapshot(), Some(outer),
+        ctx.live_min_snapshot(),
+        Some(outer),
         "the outer (still-running) transaction's snapshot must stay published, \
          not get overwritten by the nested traversal's throwaway one"
     );
 
     ctx.end_snapshot(inner);
     assert_eq!(
-        ctx.live_min_snapshot(), Some(outer),
+        ctx.live_min_snapshot(),
+        Some(outer),
         "completing the nested registration must not clear the still-live outer one"
     );
 
     ctx.end_snapshot(outer);
     assert_eq!(ctx.live_min_snapshot(), None);
+}
+
+#[test]
+fn reclamation_pin_protects_without_advancing_the_clock() {
+    let ctx = TxContext::new(1);
+    ctx.set_block_reclaim_enabled(true);
+    let before = ctx.current_version();
+
+    ctx.with_reclamation_pin(|| {
+        assert_eq!(ctx.live_min_snapshot(), Some(before));
+        assert_eq!(ctx.current_version(), before);
+    });
+
+    assert_eq!(ctx.live_min_snapshot(), None);
+    assert_eq!(ctx.current_version(), before);
+}
+
+#[test]
+fn reclamation_pin_nested_in_transaction_uses_outer_snapshot() {
+    let ctx = TxContext::new(1);
+    ctx.set_block_reclaim_enabled(true);
+    let outer = ctx.begin_snapshot();
+    let clock_after_begin = ctx.current_version();
+
+    ctx.with_reclamation_pin(|| {
+        assert_eq!(ctx.live_min_snapshot(), Some(outer));
+        assert_eq!(ctx.current_version(), clock_after_begin);
+    });
+
+    assert_eq!(ctx.live_min_snapshot(), Some(outer));
+    ctx.end_snapshot(outer);
 }

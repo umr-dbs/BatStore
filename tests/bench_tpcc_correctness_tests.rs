@@ -25,10 +25,10 @@ use std::sync::atomic::AtomicU64;
 
 use crate::mv_bench::tpcc_load::{populate_items, populate_warehouse};
 use crate::mv_bench::tpcc_schema::{
-    k_customer, k_district, k_new_order_district_bounds, k_order, k_order_line_bounds, k_warehouse,
-    Table, TpccConfig, TpccDatabase, TpccKey, TpccRow,
+    Table, TpccConfig, TpccDatabase, TpccKey, TpccRow, k_customer, k_district,
+    k_new_order_district_bounds, k_order, k_order_line_bounds, k_warehouse,
 };
-use crate::mv_bench::tpcc_txn::{self, many, one, TpccTxn, TxnOutcome};
+use crate::mv_bench::tpcc_txn::{self, TpccTxn, TxnOutcome, many, one};
 use crate::mv_query::interval::Interval;
 use crate::mv_record_model::record_point::RecordPointResult;
 use crate::mv_root::index_root::RootIndexType;
@@ -53,30 +53,41 @@ fn full_range() -> Interval<TpccKey> {
 }
 
 fn scan_all(db: &TpccDatabase, table: Table) -> Vec<RecordPointResult<TpccKey, TpccRow>> {
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
     let rows = many(tx.range(table, full_range(), true));
     tx.commit();
     rows
 }
 
 fn district_next_o_id(db: &TpccDatabase) -> u32 {
-    let tx = TpccTxn::begin(db);
-    let v = one(tx.point(Table::District, k_district(1, 1))).expect("district exists").payload.as_district().d_next_o_id;
+    let mut tx = TpccTxn::begin(db);
+    let v = one(tx.point(Table::District, k_district(1, 1)))
+        .expect("district exists")
+        .payload
+        .as_district()
+        .d_next_o_id;
     tx.commit();
     v
 }
 
 fn warehouse_ytd(db: &TpccDatabase) -> f64 {
-    let tx = TpccTxn::begin(db);
-    let v = one(tx.point(Table::Warehouse, k_warehouse(1))).expect("warehouse exists").payload.as_warehouse().w_ytd;
+    let mut tx = TpccTxn::begin(db);
+    let v = one(tx.point(Table::Warehouse, k_warehouse(1)))
+        .expect("warehouse exists")
+        .payload
+        .as_warehouse()
+        .w_ytd;
     tx.commit();
     v
 }
 
 fn customer_balance_and_ytd(db: &TpccDatabase, c_id: u32) -> (f64, f64) {
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
     let c = one(tx.point(Table::Customer, k_customer(1, 1, c_id))).expect("customer exists");
-    let v = (c.payload.as_customer().c_balance, c.payload.as_customer().c_ytd_payment);
+    let v = (
+        c.payload.as_customer().c_balance,
+        c.payload.as_customer().c_ytd_payment,
+    );
     tx.commit();
     v
 }
@@ -104,12 +115,21 @@ fn new_order_keeps_district_counter_stock_and_order_lines_consistent() {
     let new_order_before = scan_all(&db, Table::NewOrder).len();
 
     let order_lines_before = scan_all(&db, Table::OrderLine);
-    let qty_before: u64 = order_lines_before.iter().map(|r| r.payload.as_order_line().ol_quantity as u64).sum();
+    let qty_before: u64 = order_lines_before
+        .iter()
+        .map(|r| r.payload.as_order_line().ol_quantity as u64)
+        .sum();
     let ol_count_before = order_lines_before.len();
 
     let stock_before = scan_all(&db, Table::Stock);
-    let ytd_before: f64 = stock_before.iter().map(|r| r.payload.as_stock().s_ytd).sum();
-    let order_cnt_before: u64 = stock_before.iter().map(|r| r.payload.as_stock().s_order_cnt as u64).sum();
+    let ytd_before: f64 = stock_before
+        .iter()
+        .map(|r| r.payload.as_stock().s_ytd)
+        .sum();
+    let order_cnt_before: u64 = stock_before
+        .iter()
+        .map(|r| r.payload.as_stock().s_order_cnt as u64)
+        .sum();
 
     let mut committed: u32 = 0;
     for _ in 0..8 {
@@ -117,19 +137,39 @@ fn new_order_keeps_district_counter_stock_and_order_lines_consistent() {
             TxnOutcome::Committed => committed += 1,
             // Spec's own ~1% intentional rollback on an invalid item id.
             TxnOutcome::UserAbort => {}
-            TxnOutcome::Conflict => panic!("single-threaded run: nothing to lose a first-writer-wins race against"),
+            TxnOutcome::Conflict => {
+                panic!("single-threaded run: nothing to lose a first-writer-wins race against")
+            }
         }
     }
 
-    assert_eq!(district_next_o_id(&db) - d_next_o_id_before, committed, "one district-counter bump per committed New-Order");
-    assert_eq!(scan_all(&db, Table::Orders).len() - orders_before, committed as usize, "one Orders row per committed New-Order");
-    assert_eq!(scan_all(&db, Table::NewOrder).len() - new_order_before, committed as usize, "one NewOrder row per committed New-Order");
+    assert_eq!(
+        district_next_o_id(&db) - d_next_o_id_before,
+        committed,
+        "one district-counter bump per committed New-Order"
+    );
+    assert_eq!(
+        scan_all(&db, Table::Orders).len() - orders_before,
+        committed as usize,
+        "one Orders row per committed New-Order"
+    );
+    assert_eq!(
+        scan_all(&db, Table::NewOrder).len() - new_order_before,
+        committed as usize,
+        "one NewOrder row per committed New-Order"
+    );
 
     let order_lines_after = scan_all(&db, Table::OrderLine);
-    let qty_after: u64 = order_lines_after.iter().map(|r| r.payload.as_order_line().ol_quantity as u64).sum();
+    let qty_after: u64 = order_lines_after
+        .iter()
+        .map(|r| r.payload.as_order_line().ol_quantity as u64)
+        .sum();
     let stock_after = scan_all(&db, Table::Stock);
     let ytd_after: f64 = stock_after.iter().map(|r| r.payload.as_stock().s_ytd).sum();
-    let order_cnt_after: u64 = stock_after.iter().map(|r| r.payload.as_stock().s_order_cnt as u64).sum();
+    let order_cnt_after: u64 = stock_after
+        .iter()
+        .map(|r| r.payload.as_stock().s_order_cnt as u64)
+        .sum();
 
     assert!(
         (ytd_after - ytd_before - (qty_after - qty_before) as f64).abs() < 1e-9,
@@ -151,7 +191,9 @@ fn new_order_keeps_district_counter_stock_and_order_lines_consistent() {
 fn payment_moves_matching_amounts_across_customer_history_and_warehouse() {
     let (cfg, db, history_seq) = setup();
 
-    let balances_before: Vec<(f64, f64)> = (1..=cfg.customers_per_district).map(|c| customer_balance_and_ytd(&db, c)).collect();
+    let balances_before: Vec<(f64, f64)> = (1..=cfg.customers_per_district)
+        .map(|c| customer_balance_and_ytd(&db, c))
+        .collect();
     let w_ytd_before = warehouse_ytd(&db);
     let history_before = scan_all(&db, Table::History).len();
 
@@ -167,18 +209,29 @@ fn payment_moves_matching_amounts_across_customer_history_and_warehouse() {
         match tpcc_txn::payment(&db, &cfg, 1, false, &history_seq) {
             TxnOutcome::Committed => committed += 1,
             TxnOutcome::UserAbort => {}
-            TxnOutcome::Conflict => panic!("iteration {i}: single-threaded run: nothing to lose a first-writer-wins race against"),
+            TxnOutcome::Conflict => panic!(
+                "iteration {i}: single-threaded run: nothing to lose a first-writer-wins race against"
+            ),
         }
     }
 
-    assert_eq!(scan_all(&db, Table::History).len() - history_before, committed as usize, "one History row per committed Payment, none for an aborted one");
+    assert_eq!(
+        scan_all(&db, Table::History).len() - history_before,
+        committed as usize,
+        "one History row per committed Payment, none for an aborted one"
+    );
 
-    let balances_after: Vec<(f64, f64)> = (1..=cfg.customers_per_district).map(|c| customer_balance_and_ytd(&db, c)).collect();
+    let balances_after: Vec<(f64, f64)> = (1..=cfg.customers_per_district)
+        .map(|c| customer_balance_and_ytd(&db, c))
+        .collect();
     let mut total_amount_applied = 0.0f64;
     for ((b0, y0), (b1, y1)) in balances_before.iter().zip(&balances_after) {
         let balance_delta = b1 - b0;
         let ytd_delta = y1 - y0;
-        assert!((balance_delta + ytd_delta).abs() < 1e-9, "c_balance must move by exactly -1x whatever c_ytd_payment moved by");
+        assert!(
+            (balance_delta + ytd_delta).abs() < 1e-9,
+            "c_balance must move by exactly -1x whatever c_ytd_payment moved by"
+        );
         total_amount_applied += ytd_delta;
     }
 
@@ -199,8 +252,10 @@ fn delivery_dequeues_oldest_new_order_and_credits_the_right_customer_by_the_righ
 
     let (lo, hi) = k_new_order_district_bounds(1, 1);
     let oldest = {
-        let tx = TpccTxn::begin(&db);
-        let r = tx.range_min(Table::NewOrder, Interval::new(lo, hi)).expect("tiny cfg always seeds at least one queued new-order");
+        let mut tx = TpccTxn::begin(&db);
+        let r = tx
+            .range_min(Table::NewOrder, Interval::new(lo, hi))
+            .expect("tiny cfg always seeds at least one queued new-order");
         tx.commit();
         r
     };
@@ -210,12 +265,15 @@ fn delivery_dequeues_oldest_new_order_and_credits_the_right_customer_by_the_righ
     };
 
     let (c_id, expected_credit) = {
-        let tx = TpccTxn::begin(&db);
-        let order = one(tx.point(Table::Orders, k_order(1, 1, o_id))).expect("order exists for its own queued new-order");
+        let mut tx = TpccTxn::begin(&db);
+        let order = one(tx.point(Table::Orders, k_order(1, 1, o_id)))
+            .expect("order exists for its own queued new-order");
         let c_id = order.payload.as_order().o_c_id;
         let (ol_lo, ol_hi) = k_order_line_bounds(1, 1, o_id);
         let total: f64 = many(tx.range(Table::OrderLine, Interval::new(ol_lo, ol_hi), true))
-            .iter().map(|l| l.payload.as_order_line().ol_amount).sum();
+            .iter()
+            .map(|l| l.payload.as_order_line().ol_amount)
+            .sum();
         tx.commit();
         (c_id, total)
     };
@@ -223,15 +281,29 @@ fn delivery_dequeues_oldest_new_order_and_credits_the_right_customer_by_the_righ
 
     let new_order_before = scan_all(&db, Table::NewOrder).len();
     let out = tpcc_txn::delivery(&db, &cfg, 1);
-    assert_eq!((out.delivered_districts, out.empty_districts, out.conflicts), (1, 0, 0), "single district, a new-order was queued, single-threaded: must deliver cleanly");
-    assert_eq!(new_order_before - scan_all(&db, Table::NewOrder).len(), 1, "exactly the delivered order's NewOrder row must be gone");
+    assert_eq!(
+        (out.delivered_districts, out.empty_districts, out.conflicts),
+        (1, 0, 0),
+        "single district, a new-order was queued, single-threaded: must deliver cleanly"
+    );
+    assert_eq!(
+        new_order_before - scan_all(&db, Table::NewOrder).len(),
+        1,
+        "exactly the delivered order's NewOrder row must be gone"
+    );
 
-    let tx = TpccTxn::begin(&db);
+    let mut tx = TpccTxn::begin(&db);
     let order = one(tx.point(Table::Orders, k_order(1, 1, o_id))).unwrap();
-    assert!(order.payload.as_order().o_carrier_id.is_some(), "delivered order must have a carrier assigned");
+    assert!(
+        order.payload.as_order().o_carrier_id.is_some(),
+        "delivered order must have a carrier assigned"
+    );
     let (ol_lo, ol_hi) = k_order_line_bounds(1, 1, o_id);
     for line in many(tx.range(Table::OrderLine, Interval::new(ol_lo, ol_hi), true)) {
-        assert!(line.payload.as_order_line().ol_delivery_d.is_some(), "every order-line of a delivered order must be stamped delivered");
+        assert!(
+            line.payload.as_order_line().ol_delivery_d.is_some(),
+            "every order-line of a delivered order must be stamped delivered"
+        );
     }
     tx.commit();
 
@@ -252,12 +324,22 @@ fn order_status_and_stock_level_never_mutate_any_table() {
     let before: Vec<usize> = Table::ALL.iter().map(|&t| scan_all(&db, t).len()).collect();
 
     for _ in 0..5 {
-        assert_ne!(tpcc_txn::order_status(&db, &cfg, 1), TxnOutcome::Conflict, "single-threaded run: nothing to conflict with");
+        assert_ne!(
+            tpcc_txn::order_status(&db, &cfg, 1),
+            TxnOutcome::Conflict,
+            "single-threaded run: nothing to conflict with"
+        );
     }
     for _ in 0..5 {
-        assert_eq!(tpcc_txn::stock_level(&db, &cfg, 1, 50), TxnOutcome::Committed);
+        assert_eq!(
+            tpcc_txn::stock_level(&db, &cfg, 1, 50),
+            TxnOutcome::Committed
+        );
     }
 
     let after: Vec<usize> = Table::ALL.iter().map(|&t| scan_all(&db, t).len()).collect();
-    assert_eq!(before, after, "read-only transactions must not add or remove rows in any table");
+    assert_eq!(
+        before, after,
+        "read-only transactions must not add or remove rows in any table"
+    );
 }

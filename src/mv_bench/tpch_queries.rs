@@ -54,11 +54,19 @@ pub struct OrderLineSummary {
 
 impl OrderLineSummary {
     pub fn avg_qty(&self) -> f64 {
-        if self.count == 0 { 0.0 } else { self.sum_qty as f64 / self.count as f64 }
+        if self.count == 0 {
+            0.0
+        } else {
+            self.sum_qty as f64 / self.count as f64
+        }
     }
 
     pub fn avg_amount(&self) -> f64 {
-        if self.count == 0 { 0.0 } else { self.sum_amount / self.count as f64 }
+        if self.count == 0 {
+            0.0
+        } else {
+            self.sum_amount / self.count as f64
+        }
     }
 }
 
@@ -69,14 +77,18 @@ impl OrderLineSummary {
 /// aggregating count/sum(quantity)/sum(amount). One full `ORDER_LINE`
 /// table scan.
 pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, Version) {
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
-    let mut groups: [OrderLineSummary; 16] =
-        std::array::from_fn(|i| OrderLineSummary { ol_number: i as u8, ..Default::default() });
+    let mut groups: [OrderLineSummary; 16] = std::array::from_fn(|i| OrderLineSummary {
+        ol_number: i as u8,
+        ..Default::default()
+    });
 
     tx.range_for_each(Table::OrderLine, order_line_table_range(), |key, row| {
         let ol = row.as_order_line();
-        let Some(delivered) = ol.ol_delivery_d else { return };
+        let Some(delivered) = ol.ol_delivery_d else {
+            return;
+        };
         if delivered > delivered_before {
             return;
         }
@@ -97,14 +109,14 @@ pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, V
 /// `[date_lo, date_hi)` whose quantity is below `max_qty`. One full
 /// `ORDER_LINE` table scan.
 pub fn q6(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, Version) {
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
     let mut revenue = 0.0;
     tx.range_for_each(Table::OrderLine, order_line_table_range(), |_, row| {
         let ol = row.as_order_line();
-        if ol.ol_delivery_d.is_some_and(|delivered|
-            delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty)
-        {
+        if ol.ol_delivery_d.is_some_and(|delivered| {
+            delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty
+        }) {
             revenue += ol.ol_amount;
         }
     });
@@ -128,8 +140,13 @@ pub struct OrderPriorityCount {
 /// table scan, plus one `ORDER_LINE` range scan per order entered in range
 /// (a correlated semi-join / "exists" check, done as a nested loop since
 /// there's no join operator here — see module docs).
-pub fn q4(db: &TpccDatabase, date_lo: i64, date_hi: i64, late_slack_millis: i64) -> (Vec<OrderPriorityCount>, Version) {
-    let tx = TpccTxn::begin(db);
+pub fn q4(
+    db: &TpccDatabase,
+    date_lo: i64,
+    date_hi: i64,
+    late_slack_millis: i64,
+) -> (Vec<OrderPriorityCount>, Version) {
+    let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
     let orders = many(tx.range(Table::Orders, orders_table_range(), true));
 
@@ -142,7 +159,9 @@ pub fn q4(db: &TpccDatabase, date_lo: i64, date_hi: i64, late_slack_millis: i64)
         let (w_id, d_id, o_id) = decode_order_key(order_rec.key);
         let (lo, hi) = k_order_line_bounds(w_id, d_id, o_id);
         let lines = many(tx.range(Table::OrderLine, Interval::new(lo, hi), true));
-        let late = lines.iter().any(|l| match l.payload.as_order_line().ol_delivery_d {
+        let late = lines
+            .iter()
+            .any(|l| match l.payload.as_order_line().ol_delivery_d {
             Some(d) => d > order.o_entry_d + late_slack_millis,
             None => true,
         });
@@ -152,8 +171,12 @@ pub fn q4(db: &TpccDatabase, date_lo: i64, date_hi: i64, late_slack_millis: i64)
     }
     tx.commit();
 
-    let mut out: Vec<_> = counts.into_iter()
-        .map(|(o_ol_cnt, order_count)| OrderPriorityCount { o_ol_cnt, order_count })
+    let mut out: Vec<_> = counts
+        .into_iter()
+        .map(|(o_ol_cnt, order_count)| OrderPriorityCount {
+            o_ol_cnt,
+            order_count,
+        })
         .collect();
     out.sort_by_key(|c| c.o_ol_cnt);
     (out, ts_start)
@@ -181,13 +204,19 @@ pub struct NationRevenue {
 /// still exercises the same join shape and the same region/date filter +
 /// group-by + aggregate as the original, without bolting an obscure
 /// data-model hack onto this schema.
-pub fn q5(db: &TpccDatabase, region_name: &str, date_lo: i64, date_hi: i64) -> (Vec<NationRevenue>, Version) {
-    let tx = TpccTxn::begin(db);
+pub fn q5(
+    db: &TpccDatabase,
+    region_name: &str,
+    date_lo: i64,
+    date_hi: i64,
+) -> (Vec<NationRevenue>, Version) {
+    let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
 
     // Small dimension tables loaded once into memory — see module docs.
     let regions = many(tx.range(Table::Region, region_table_range(), true));
-    let Some(region_id) = regions.iter()
+    let Some(region_id) = regions
+        .iter()
         .find(|r| r.payload.as_region().r_name == region_name)
         .map(|r| decode_region_id(r.key))
     else {
@@ -196,14 +225,26 @@ pub fn q5(db: &TpccDatabase, region_name: &str, date_lo: i64, date_hi: i64) -> (
     };
 
     let nations = many(tx.range(Table::Nation, nation_table_range(), true));
-    let nation_names: HashMap<u8, String> = nations.iter()
+    let nation_names: HashMap<u8, String> = nations
+        .iter()
         .filter(|n| n.payload.as_nation().n_regionkey == region_id)
-        .map(|n| (decode_nation_id(n.key), n.payload.as_nation().n_name.clone()))
+        .map(|n| {
+            (
+                decode_nation_id(n.key),
+                n.payload.as_nation().n_name.clone(),
+            )
+        })
         .collect();
 
     let suppliers = many(tx.range(Table::Supplier, supplier_table_range(), true));
-    let supplier_nation: HashMap<u32, u8> = suppliers.iter()
-        .map(|s| (decode_supplier_id(s.key), s.payload.as_supplier().s_nationkey))
+    let supplier_nation: HashMap<u32, u8> = suppliers
+        .iter()
+        .map(|s| {
+            (
+                decode_supplier_id(s.key),
+                s.payload.as_supplier().s_nationkey,
+            )
+        })
         .collect();
 
     let orders = many(tx.range(Table::Orders, orders_table_range(), true));
@@ -217,9 +258,14 @@ pub fn q5(db: &TpccDatabase, region_name: &str, date_lo: i64, date_hi: i64) -> (
         let (lo, hi) = k_order_line_bounds(w_id, d_id, o_id);
         for line in many(tx.range(Table::OrderLine, Interval::new(lo, hi), true)) {
             let ol = line.payload.as_order_line();
-            let Some(stock) = one(tx.point(Table::Stock, k_stock(ol.ol_supply_w_id, ol.ol_i_id))) else { continue };
+            let Some(stock) = one(tx.point(Table::Stock, k_stock(ol.ol_supply_w_id, ol.ol_i_id)))
+            else {
+                continue;
+            };
             let su_id = stock.payload.as_stock().s_su_suppkey;
-            let Some(&nation_id) = supplier_nation.get(&su_id) else { continue };
+            let Some(&nation_id) = supplier_nation.get(&su_id) else {
+                continue;
+            };
             if !nation_names.contains_key(&nation_id) {
                 continue; // supplier's nation isn't in the requested region
             }
@@ -228,8 +274,14 @@ pub fn q5(db: &TpccDatabase, region_name: &str, date_lo: i64, date_hi: i64) -> (
     }
     tx.commit();
 
-    let mut out: Vec<_> = revenue.into_iter()
-        .filter_map(|(nation_id, rev)| nation_names.get(&nation_id).map(|name| NationRevenue { n_name: name.clone(), revenue: rev }))
+    let mut out: Vec<_> = revenue
+        .into_iter()
+        .filter_map(|(nation_id, rev)| {
+            nation_names.get(&nation_id).map(|name| NationRevenue {
+                n_name: name.clone(),
+                revenue: rev,
+            })
+        })
         .collect();
     out.sort_by(|a, b| b.revenue.partial_cmp(&a.revenue).unwrap());
     (out, ts_start)
