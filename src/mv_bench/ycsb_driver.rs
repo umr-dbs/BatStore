@@ -13,11 +13,14 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::mv_bench::mem_stats::{MemSampler, DEFAULT_SAMPLE_INTERVAL};
+use crate::mv_bench::mem_stats::{DEFAULT_SAMPLE_INTERVAL, MemSampler};
 use crate::mv_bench::ycsb_load::populate;
-use crate::mv_bench::ycsb_random::{pick_op, random_scan_length, KeySampler, RequestDistribution, YcsbMix, YcsbOpType};
+use crate::mv_bench::ycsb_random::{
+    KeySampler, RequestDistribution, YcsbMix, YcsbOpType, pick_op, random_scan_length,
+};
 use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbTree};
 use crate::mv_bench::ycsb_txn;
+use crate::mv_bench::ycsb_txn::YcsbExecutionMode;
 use crate::mv_root::index_root::RootIndexType;
 
 pub struct DriverConfig {
@@ -33,6 +36,9 @@ pub struct DriverConfig {
     pub write_all_fields: bool,
     /// Consume every payload byte on reads/scans. False measures key/visibility only.
     pub read_payload: bool,
+    /// Single-operation commit-before-publish fast path, or the ordinary
+    /// registered transaction lifecycle for controlled comparison.
+    pub execution_mode: YcsbExecutionMode,
     pub gc: bool,
     pub update_in_place: bool,
     pub root_star_index: RootIndexType,
@@ -63,7 +69,8 @@ const NUM_COUNTERS: usize = 5;
 const SCAN_LATENCY_SAMPLE_EVERY: u64 = 1024;
 const TIMESERIES_CLOCK_EVERY: u64 = 256;
 
-const COUNTER_NAMES: [&str; NUM_COUNTERS] = ["read", "update", "insert", "scan", "read_modify_write"];
+const COUNTER_NAMES: [&str; NUM_COUNTERS] =
+    ["read", "update", "insert", "scan", "read_modify_write"];
 
 struct WorkerStats {
     ops_per_sec: Vec<u64>,
@@ -84,6 +91,7 @@ fn worker_thread(
     max_scan_length: u64,
     write_all_fields: bool,
     read_payload: bool,
+    execution_mode: YcsbExecutionMode,
     current_max_key: Arc<AtomicU64>,
     duration: Duration,
     stop: Arc<AtomicBool>,
@@ -111,14 +119,20 @@ fn worker_thread(
             }
             YcsbOpType::Update => {
                 let key = sampler.sample(record_count, max_key_now);
-                ycsb_txn::update(&tree, &cfg, key, write_all_fields);
+                ycsb_txn::update_with_execution_mode(
+                    &tree,
+                    &cfg,
+                    key,
+                    write_all_fields,
+                    execution_mode,
+                );
                 totals[UPDATE] += 1;
             }
             YcsbOpType::Insert => {
                 // Mints the next never-before-used key, past the initially
                 // loaded range and every key inserted by this run so far.
                 let key = current_max_key.fetch_add(1, Relaxed) + 1;
-                ycsb_txn::insert(&tree, &cfg, key);
+                ycsb_txn::insert_with_execution_mode(&tree, &cfg, key, execution_mode);
                 totals[INSERT] += 1;
             }
             YcsbOpType::Scan => {
@@ -126,16 +140,25 @@ fn worker_thread(
                 let len = random_scan_length(max_scan_length);
                 if totals[SCAN] % SCAN_LATENCY_SAMPLE_EVERY == 0 {
                     let scan_start = Instant::now();
-                    scanned_tuples += ycsb_txn::scan_with_mode(&tree, key, len, read_payload) as u64;
+                    scanned_tuples +=
+                        ycsb_txn::scan_with_mode(&tree, key, len, read_payload) as u64;
                     scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
                 } else {
-                    scanned_tuples += ycsb_txn::scan_with_mode(&tree, key, len, read_payload) as u64;
+                    scanned_tuples +=
+                        ycsb_txn::scan_with_mode(&tree, key, len, read_payload) as u64;
                 }
                 totals[SCAN] += 1;
             }
             YcsbOpType::ReadModifyWrite => {
                 let key = sampler.sample(record_count, max_key_now);
-                ycsb_txn::read_modify_write_with_mode(&tree, &cfg, key, write_all_fields, read_payload);
+                ycsb_txn::read_modify_write_with_execution_mode(
+                    &tree,
+                    &cfg,
+                    key,
+                    write_all_fields,
+                    read_payload,
+                    execution_mode,
+                );
                 totals[RMW] += 1;
             }
         }
@@ -147,38 +170,60 @@ fn worker_thread(
         ops_per_sec[current_second] += 1;
     }
 
-    WorkerStats { ops_per_sec, totals, scanned_tuples, scan_latencies_ns }
+    WorkerStats {
+        ops_per_sec,
+        totals,
+        scanned_tuples,
+        scan_latencies_ns,
+    }
 }
 
 pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
-    assert!(cfg.ycsb.record_count >= 1, "ycsb: record_count must be >= 1");
+    assert!(
+        cfg.ycsb.record_count >= 1,
+        "ycsb: record_count must be >= 1"
+    );
 
     let max_threads = crate::mv_tree::mvbt::default_max_workers().max(1);
     let mut num_threads = cfg.num_threads.max(1);
     // +1: the main thread also acquires a WorkerId, for the sequential
     // population phase before any worker thread is spawned (see tpcc_driver).
     if 1 + num_threads > max_threads {
-        println!("!! 1 loader + {num_threads} workers > max_workers ({max_threads} = num_cpus); clamping.");
+        println!(
+            "!! 1 loader + {num_threads} workers > max_workers ({max_threads} = num_cpus); clamping."
+        );
         num_threads = max_threads.saturating_sub(1).max(1);
     }
 
-    fs::create_dir_all(&cfg.output_dir)
-        .unwrap_or_else(|e| panic!("ycsb: failed to create output_dir {}: {e}", cfg.output_dir.display()));
-    let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
+    fs::create_dir_all(&cfg.output_dir).unwrap_or_else(|e| {
+        panic!(
+            "ycsb: failed to create output_dir {}: {e}",
+            cfg.output_dir.display()
+        )
+    });
+    let mem_sampler = MemSampler::start(
+        cfg.output_dir.join("mem_stats.csv"),
+        DEFAULT_SAMPLE_INTERVAL,
+    );
 
     let tree = match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);
-            let base = YcsbTree::make_standard_with_max_workers(
-                cfg.root_star_index, 1 + num_threads,
-            );
-            Arc::new(match cfg.wal_lockfree_batch_size {
-                Some(batch_size) => base.with_wal_lockfree(wal_path, *flush_interval, batch_size),
-                None => base.with_wal(wal_path, *flush_interval),
-            }.expect("failed to configure WAL at tree construction"))
+            let base =
+                YcsbTree::make_standard_with_max_workers(cfg.root_star_index, 1 + num_threads);
+            Arc::new(
+                match cfg.wal_lockfree_batch_size {
+                    Some(batch_size) => {
+                        base.with_wal_lockfree(wal_path, *flush_interval, batch_size)
+                    }
+                    None => base.with_wal(wal_path, *flush_interval),
+                }
+                .expect("failed to configure WAL at tree construction"),
+            )
         }
         None => Arc::new(YcsbTree::make_standard_with_max_workers(
-            cfg.root_star_index, 1 + num_threads,
+            cfg.root_star_index,
+            1 + num_threads,
         )),
     };
     if cfg.gc {
@@ -196,15 +241,29 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
          - max_scan_length     = {}\n\
          - write_all_fields    = {}\n\
          - read_payload       = {}\n\
+         - execution_mode    = {:?}\n\
          - GC                  = {} (update_in_place={})\n\
          - WAL                 = {}\n\
          - root*               = {}",
-        cfg.ycsb.record_count, cfg.ycsb.field_count, cfg.ycsb.field_length,
-        cfg.duration, cfg.mix, cfg.distribution, cfg.max_scan_length, cfg.write_all_fields, cfg.read_payload,
-        cfg.gc, cfg.update_in_place,
+        cfg.ycsb.record_count,
+        cfg.ycsb.field_count,
+        cfg.ycsb.field_length,
+        cfg.duration,
+        cfg.mix,
+        cfg.distribution,
+        cfg.max_scan_length,
+        cfg.write_all_fields,
+        cfg.read_payload,
+        cfg.execution_mode,
+        cfg.gc,
+        cfg.update_in_place,
         match (&cfg.wal, cfg.wal_lockfree_batch_size) {
-            (Some((path, interval)), None) => format!("On, batched ({} @ {interval:?} flush)", path.display()),
-            (Some((path, interval)), Some(batch_size)) => format!("On, lock-free batch={batch_size} ({} @ {interval:?} flush)", path.display()),
+            (Some((path, interval)), None) =>
+                format!("On, batched ({} @ {interval:?} flush)", path.display()),
+            (Some((path, interval)), Some(batch_size)) => format!(
+                "On, lock-free batch={batch_size} ({} @ {interval:?} flush)",
+                path.display()
+            ),
             (None, _) => "Off".to_string(),
         },
         cfg.root_star_index,
@@ -213,7 +272,11 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     println!("Loading {} records...", cfg.ycsb.record_count);
     let load_start = Instant::now();
     populate(&tree, &cfg.ycsb);
-    println!("Loaded {} records in {:?}.", cfg.ycsb.record_count, load_start.elapsed());
+    println!(
+        "Loaded {} records in {:?}.",
+        cfg.ycsb.record_count,
+        load_start.elapsed()
+    );
 
     let sampler = Arc::new(KeySampler::new(cfg.distribution, cfg.ycsb.record_count));
     let current_max_key = Arc::new(AtomicU64::new(cfg.ycsb.record_count));
@@ -226,17 +289,34 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     let max_scan_length = cfg.max_scan_length;
     let write_all_fields = cfg.write_all_fields;
     let read_payload = cfg.read_payload;
+    let execution_mode = cfg.execution_mode;
 
-    let handles: Vec<_> = (0..num_threads).map(|_| {
-        let tree = tree.clone();
-        let cfg = ycsb_cfg;
-        let sampler = sampler.clone();
-        let current_max_key = current_max_key.clone();
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        thread::spawn(move || worker_thread(tree, cfg, mix, sampler, max_scan_length,
-            write_all_fields, read_payload, current_max_key, duration, stop, barrier))
-    }).collect();
+    let handles: Vec<_> = (0..num_threads)
+        .map(|_| {
+            let tree = tree.clone();
+            let cfg = ycsb_cfg;
+            let sampler = sampler.clone();
+            let current_max_key = current_max_key.clone();
+            let stop = stop.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                worker_thread(
+                    tree,
+                    cfg,
+                    mix,
+                    sampler,
+                    max_scan_length,
+                    write_all_fields,
+                    read_payload,
+                    execution_mode,
+                    current_max_key,
+                    duration,
+                    stop,
+                    barrier,
+                )
+            })
+        })
+        .collect();
 
     // Releases at the same instant as every worker, once loading is done —
     // so the timed phase excludes load time entirely (see tpcc_driver).
@@ -254,7 +334,12 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     write_results(&stats, duration, actual_wall, &cfg.output_dir)
 }
 
-fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wall: Duration, out_dir: &Path) -> YcsbRunSummary {
+fn write_results(
+    stats: &[WorkerStats],
+    requested_duration: Duration,
+    actual_wall: Duration,
+    out_dir: &Path,
+) -> YcsbRunSummary {
     let series_len = requested_duration.as_secs() as usize + 2;
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_COUNTERS];
@@ -273,10 +358,16 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
 
     let ts_path = out_dir.join("ycsb_timeseries.csv");
     let _ = fs::remove_file(&ts_path);
-    let mut ts_file = OpenOptions::new().create(true).append(true).open(&ts_path).unwrap();
+    let mut ts_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&ts_path)
+        .unwrap();
     ts_file.write_all(b"elapsed_sec,ops_completed\n").unwrap();
     for (sec, count) in per_sec.iter().enumerate() {
-        ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
+        ts_file
+            .write_all(format!("{sec},{count}\n").as_bytes())
+            .unwrap();
     }
 
     // Systematically sampled summary (one of every SCAN_LATENCY_SAMPLE_EVERY scans),
@@ -289,13 +380,20 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
     scan_latencies_ns.sort_unstable();
     let scan_latency_path = out_dir.join("ycsb_scan_latency_summary.csv");
     let _ = fs::remove_file(&scan_latency_path);
-    let mut scan_latency_file = OpenOptions::new().create(true).append(true).open(&scan_latency_path).unwrap();
-    scan_latency_file.write_all(b"p50_us,p95_us,p99_us,count,avg_us\n").unwrap();
+    let mut scan_latency_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&scan_latency_path)
+        .unwrap();
+    scan_latency_file
+        .write_all(b"p50_us,p95_us,p99_us,count,avg_us\n")
+        .unwrap();
     let pct = |p: f64| -> f64 {
         if scan_latencies_ns.is_empty() {
             0.0
         } else {
-            let idx = ((p * (scan_latencies_ns.len() - 1) as f64).round() as usize).min(scan_latencies_ns.len() - 1);
+            let idx = ((p * (scan_latencies_ns.len() - 1) as f64).round() as usize)
+                .min(scan_latencies_ns.len() - 1);
             scan_latencies_ns[idx] as f64 / 1000.0
         }
     };
@@ -304,10 +402,19 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
     } else {
         scan_latencies_ns.iter().sum::<u64>() as f64 / scan_latencies_ns.len() as f64 / 1000.0
     };
-    scan_latency_file.write_all(format!(
-        "{:.3},{:.3},{:.3},{},{:.3}\n",
-        pct(0.50), pct(0.95), pct(0.99), scan_latencies_ns.len(), avg_us,
-    ).as_bytes()).unwrap();
+    scan_latency_file
+        .write_all(
+            format!(
+                "{:.3},{:.3},{:.3},{},{:.3}\n",
+                pct(0.50),
+                pct(0.95),
+                pct(0.99),
+                scan_latencies_ns.len(),
+                avg_us,
+            )
+            .as_bytes(),
+        )
+        .unwrap();
 
     let total_ops: u64 = totals.iter().sum();
     let throughput = total_ops as f64 / actual_wall.as_secs_f64();
@@ -322,25 +429,40 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
     if !scan_latencies_ns.is_empty() {
         println!("{:<20} {}", "scan ops timed", scan_latencies_ns.len());
     }
-    println!("Wrote {} and {}", ts_path.display(), scan_latency_path.display());
+    println!(
+        "Wrote {} and {}",
+        ts_path.display(),
+        scan_latency_path.display()
+    );
 
-    YcsbRunSummary { throughput_ops_sec: throughput, totals }
+    YcsbRunSummary {
+        throughput_ops_sec: throughput,
+        totals,
+    }
 }
 
 pub fn main_ycsb(parms: Vec<String>) {
     fn arg<T: std::str::FromStr>(parms: &[String], idx: usize, default: T) -> T {
-        parms.get(idx).and_then(|s| s.parse().ok()).unwrap_or(default)
+        parms
+            .get(idx)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
     }
 
     let workload: String = parms.get(2).cloned().unwrap_or_else(|| "a".to_string());
-    let mix = YcsbMix::workload(&workload)
-        .unwrap_or_else(|| panic!("ycsb: unknown workload '{workload}' (expected one of a, b, c, d, e, f)"));
+    let mix = YcsbMix::workload(&workload).unwrap_or_else(|| {
+        panic!("ycsb: unknown workload '{workload}' (expected one of a, b, c, d, e, f)")
+    });
 
     let record_count: u64 = arg(&parms, 3, 100_000);
     let num_threads: usize = arg(&parms, 4, num_cpus::get());
     let duration_secs: u64 = arg(&parms, 5, 30);
 
-    let distribution_str = parms.get(6).map(|s| s.as_str()).unwrap_or("default").to_string();
+    let distribution_str = parms
+        .get(6)
+        .map(|s| s.as_str())
+        .unwrap_or("default")
+        .to_string();
     let theta: f64 = arg(&parms, 7, 0.99);
     let distribution = match distribution_str.as_str() {
         "uniform" => RequestDistribution::Uniform,
@@ -361,13 +483,25 @@ pub fn main_ycsb(parms: Vec<String>) {
     let gc: bool = arg(&parms, 12, true);
     let update_in_place: bool = if gc { arg(&parms, 13, false) } else { false };
     let wal_enabled: bool = arg(&parms, 14, false);
-    let wal_path: String = parms.get(15).cloned().unwrap_or_else(|| "ycsb_wal.log".to_string());
+    let wal_path: String = parms
+        .get(15)
+        .cloned()
+        .unwrap_or_else(|| "ycsb_wal.log".to_string());
     let wal_flush_ms: u64 = arg(&parms, 16, 5);
     let write_all_fields: bool = arg(&parms, 17, false);
     let read_payload: bool = arg(&parms, 18, true);
+    let execution_mode = match parms.get(19).map(String::as_str).unwrap_or("atomic") {
+        "transaction" | "tx" => YcsbExecutionMode::Transaction,
+        "atomic" | "auto" | "autocommit" => YcsbExecutionMode::Atomic,
+        other => panic!("ycsb: invalid execution mode '{other}' (expected atomic or transaction)"),
+    };
 
     run_ycsb(DriverConfig {
-        ycsb: YcsbConfig { record_count, field_count, field_length },
+        ycsb: YcsbConfig {
+            record_count,
+            field_count,
+            field_length,
+        },
         num_threads,
         duration: Duration::from_secs(duration_secs),
         mix,
@@ -375,10 +509,16 @@ pub fn main_ycsb(parms: Vec<String>) {
         max_scan_length,
         write_all_fields,
         read_payload,
+        execution_mode,
         gc,
         update_in_place,
         root_star_index,
-        wal: wal_enabled.then(|| (std::path::PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
+        wal: wal_enabled.then(|| {
+            (
+                std::path::PathBuf::from(wal_path),
+                Duration::from_millis(wal_flush_ms),
+            )
+        }),
         wal_lockfree_batch_size: None,
         output_dir: PathBuf::from("."),
     });

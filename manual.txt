@@ -221,6 +221,9 @@ Options:
                             8-byte value), applied consistently to every YCSB engine
   --ycsb-key-only            only establish key/visibility matches; by default point
                             reads and scans consume the selected payload's bytes
+  --cmvbt-ycsb-mode MODE     cMVBT only: atomic (default) uses the one-operation
+                            commit-before-publish path; transaction uses the ordinary
+                            registered transaction lifecycle
   --tiny                    small/fast smoke-test scale (1 warehouse, 10k YCSB records,
                             10s duration, threads=[2,4]) instead of the server scale
   --skip-build              skip each engine's build step (use if you already built

@@ -102,6 +102,8 @@ def parse_args() -> argparse.Namespace:
                    help="standard=10x100-byte YCSB row (default); u64=one 8-byte value")
     p.add_argument("--ycsb-key-only", action="store_true",
                    help="match/validate keys but do not consume payload bytes (default reads payload)")
+    p.add_argument("--cmvbt-ycsb-mode", choices=["atomic", "transaction"], default="atomic",
+                   help="cMVBT YCSB path: commit-before-publish auto-commit (default), or ordinary transaction lifecycle")
     p.add_argument("--dram-gib", type=float)
     return p.parse_args()
 
@@ -138,6 +140,7 @@ def main() -> None:
     # aren't in --engines (harmless: the var is simply never read in that case).
     os.environ["CMVBT_ALLOCATOR"] = args.cmvbt_allocator
     os.environ["YCSB_PAYLOAD_BYTES"] = "8" if args.ycsb_payload == "u64" else "1000"
+    os.environ["CMVBT_YCSB_MODE"] = args.cmvbt_ycsb_mode
     scale = build_scale(args)
     engines = [e.strip() for e in args.engines.split(",") if e.strip()]
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]

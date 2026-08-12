@@ -13,6 +13,7 @@ is genuine serialization/fsync cost, not real disk I/O.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -104,6 +105,7 @@ def run(
             str(duration), "default", str(scale.ycsb_theta),
             str(field_count), str(field_length), "100", "fg", gc_bool, "false", "true", str(wal_path), "5", "false",
             str(read_payload).lower(),
+            os.environ.get("CMVBT_YCSB_MODE", "atomic"),
         ]
         metric_name = "ops_per_sec"
         ts_file, ts_column = "ycsb_timeseries.csv", "ops_completed"

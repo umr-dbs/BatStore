@@ -1,12 +1,17 @@
 //! YCSB's five Core Workload operations (Cooper et al., SoCC 2010, §3):
 //! Read, Update, Insert, Scan and Read-Modify-Write. Each is dispatched as
 //! one (or, for read-modify-write, two sequential) plain `CRUDOperation`
-//! calls through `AtomicTxDispatcher::dispatch_crud` — YCSB ops are single-
+//! calls through `AtomicTxDispatcher::dispatch_crud` in the default
+//! `atomic` mode — YCSB ops are single-
 //! key (Read-Modify-Write included: real YCSB backends run it as a plain
 //! read call followed by a plain write call, timed together as one logical
 //! operation, not as one multi-statement DB transaction), so there's no need
 //! for the heavier multi-op `mv_db::transaction::DbTransaction` that
 //! `tpcc_txn` uses to span several tables atomically in one snapshot.
+//! The configurable `transaction` mode is a controlled comparison using
+//! ordinary snapshot registration, visibility/conflict checks, retry, and
+//! commit for each operation. Its Read-Modify-Write keeps both halves under
+//! one registered snapshot.
 //!
 //! Point/range reads use `CRUDOperation::PointSi`/`RangeSi` ("read the
 //! current snapshot") rather than a snapshot held open across several
@@ -24,13 +29,96 @@ use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbKey, YcsbTree};
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::mv_db::transaction::{insert_on_tree, point_on_tree, update_on_tree};
 use crate::mv_query::interval::Interval;
+use crate::mv_record_model::tx_stamp::TxStamp;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum YcsbExecutionMode {
+    /// Specialized one-operation path: commit before publishing the leaf.
+    Atomic,
+    /// Ordinary registered transaction lifecycle, including write-set-style
+    /// conflict semantics and commit after the operation has been applied.
+    Transaction,
+}
+
+fn own_write_result(
+    result: CRUDOperationResult<
+        '_,
+        { crate::mv_bench::ycsb_schema::YCSB_FAN_OUT },
+        { crate::mv_bench::ycsb_schema::YCSB_NUM_RECORDS },
+        YcsbKey,
+        crate::mv_bench::ycsb_schema::YcsbRow,
+    >,
+) -> CRUDOperationResult<
+    'static,
+    { crate::mv_bench::ycsb_schema::YCSB_FAN_OUT },
+    { crate::mv_bench::ycsb_schema::YCSB_NUM_RECORDS },
+    YcsbKey,
+    crate::mv_bench::ycsb_schema::YcsbRow,
+> {
+    match result {
+        CRUDOperationResult::Inserted(v) => CRUDOperationResult::Inserted(v),
+        CRUDOperationResult::Updated(v) => CRUDOperationResult::Updated(v),
+        CRUDOperationResult::Deleted(v) => CRUDOperationResult::Deleted(v),
+        CRUDOperationResult::ZeroAffected(reason) => CRUDOperationResult::ZeroAffected(reason),
+        CRUDOperationResult::Conflict => CRUDOperationResult::Conflict,
+        CRUDOperationResult::Error => CRUDOperationResult::Error,
+        _ => panic!("YCSB write path returned a read result"),
+    }
+}
+
+fn transactional_update(
+    tree: &YcsbTree,
+    key: YcsbKey,
+    payload: crate::mv_bench::ycsb_schema::YcsbRow,
+) -> CRUDOperationResult<
+    'static,
+    { crate::mv_bench::ycsb_schema::YCSB_FAN_OUT },
+    { crate::mv_bench::ycsb_schema::YCSB_NUM_RECORDS },
+    YcsbKey,
+    crate::mv_bench::ycsb_schema::YcsbRow,
+> {
+    let worker = tree.worker_id();
+    let ts_start = tree.begin_snapshot();
+    let (result, wrote) = update_on_tree(tree, worker, ts_start, key, payload);
+    if wrote {
+        let ts_commit = tree.commit_tx(worker);
+        tree.wal_log_commit(TxStamp::new(worker, ts_start), ts_commit);
+    }
+    tree.end_snapshot(ts_start);
+    result
+}
+
+fn transactional_insert(
+    tree: &YcsbTree,
+    key: YcsbKey,
+    payload: crate::mv_bench::ycsb_schema::YcsbRow,
+) -> CRUDOperationResult<
+    'static,
+    { crate::mv_bench::ycsb_schema::YCSB_FAN_OUT },
+    { crate::mv_bench::ycsb_schema::YCSB_NUM_RECORDS },
+    YcsbKey,
+    crate::mv_bench::ycsb_schema::YcsbRow,
+> {
+    let worker = tree.worker_id();
+    let ts_start = tree.begin_snapshot();
+    let (result, wrote) = insert_on_tree(tree, worker, ts_start, key, payload);
+    if wrote {
+        let ts_commit = tree.commit_tx(worker);
+        tree.wal_log_commit(TxStamp::new(worker, ts_start), ts_commit);
+    }
+    tree.end_snapshot(ts_start);
+    result
+}
 
 /// Point read of the freshest committed version. Returns whether the row
 /// was found (a miss can only happen for a key beyond the currently-inserted
 /// range, e.g. a `Latest`-distribution read racing just ahead of a fresh
 /// `Insert`'s counter bump).
-pub fn read(tree: &YcsbTree, key: YcsbKey) -> bool { read_with_mode(tree, key, true) }
+pub fn read(tree: &YcsbTree, key: YcsbKey) -> bool {
+    read_with_mode(tree, key, true)
+}
 
 pub fn read_with_mode(tree: &YcsbTree, key: YcsbKey, read_payload: bool) -> bool {
     if !read_payload {
@@ -41,7 +129,11 @@ pub fn read_with_mode(tree: &YcsbTree, key: YcsbKey, read_payload: bool) -> bool
             if let Some(row) = rows.first() {
                 // Consume the complete logical value. `black_box` prevents an optimizing
                 // build from reducing a YCSB read back to an existence check.
-                let checksum = row.payload.as_bytes().iter().fold(0u8, |a, b| a.wrapping_add(*b));
+                let checksum = row
+                    .payload
+                    .as_bytes()
+                    .iter()
+                    .fold(0u8, |a, b| a.wrapping_add(*b));
                 std::hint::black_box(checksum);
                 true
             } else {
@@ -60,32 +152,109 @@ pub fn read_with_mode(tree: &YcsbTree, key: YcsbKey, read_payload: bool) -> bool
 /// different fields cannot overwrite each other's already-committed bytes.
 /// Returns `false` if the key does not currently exist.
 pub fn update(tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey, write_all_fields: bool) -> bool {
+    update_with_execution_mode(tree, cfg, key, write_all_fields, YcsbExecutionMode::Atomic)
+}
+
+pub fn update_with_execution_mode(
+    tree: &YcsbTree,
+    cfg: &YcsbConfig,
+    key: YcsbKey,
+    write_all_fields: bool,
+    mode: YcsbExecutionMode,
+) -> bool {
+    loop {
+        match update_once(tree, cfg, key, write_all_fields, mode) {
+            CRUDOperationResult::Updated(_) => return true,
+            CRUDOperationResult::ZeroAffected(_) => return false,
+            CRUDOperationResult::Conflict if mode == YcsbExecutionMode::Transaction => {
+                std::hint::spin_loop();
+            }
+            other => panic!("ycsb update: unexpected result: {other}"),
+        }
+    }
+}
+
+fn update_once(
+    tree: &YcsbTree,
+    cfg: &YcsbConfig,
+    key: YcsbKey,
+    write_all_fields: bool,
+    mode: YcsbExecutionMode,
+) -> CRUDOperationResult<
+    'static,
+    { crate::mv_bench::ycsb_schema::YCSB_FAN_OUT },
+    { crate::mv_bench::ycsb_schema::YCSB_NUM_RECORDS },
+    YcsbKey,
+    crate::mv_bench::ycsb_schema::YcsbRow,
+> {
     let replacement = if write_all_fields {
         Some(random_row(cfg))
     } else {
         None
     };
     let result = if let Some(replacement) = replacement {
-        tree.dispatch_crud(CRUDOperation::Update(key, replacement))
+        match mode {
+            YcsbExecutionMode::Atomic => {
+                own_write_result(tree.dispatch_crud(CRUDOperation::Update(key, replacement)))
+            }
+            YcsbExecutionMode::Transaction => transactional_update(tree, key, replacement),
+        }
     } else if cfg.field_count == 0 || cfg.field_length == 0 {
-        return tree.point_exists_si(key);
+        return if tree.point_exists_si(key) {
+            CRUDOperationResult::Updated(tree.current_version())
+        } else {
+            CRUDOperationResult::ZeroAffected(
+                crate::mv_crud_model::crud_operation_result::CRUDOperationInnerReason::KeyDoesNotExist,
+            )
+        };
     } else {
         let (field, bytes) = random_field_patch(cfg);
-        tree.update_with(key, |old| {
-            old.copy_with_field(field, cfg.field_length, &bytes)
-        })
+        match mode {
+            YcsbExecutionMode::Atomic => own_write_result(tree.update_with(key, |old| {
+                old.copy_with_field(field, cfg.field_length, &bytes)
+            })),
+            YcsbExecutionMode::Transaction => {
+                let worker = tree.worker_id();
+                let ts_start = tree.begin_snapshot();
+                let current = point_on_tree(tree, worker, ts_start, key);
+                let result = match current {
+                    CRUDOperationResult::MatchedRecords(rows) if !rows.is_empty() => {
+                        let payload = rows[0].payload.copy_with_field(field, cfg.field_length, &bytes);
+                        let (result, wrote) = update_on_tree(tree, worker, ts_start, key, payload);
+                        if wrote {
+                            let ts_commit = tree.commit_tx(worker);
+                            tree.wal_log_commit(TxStamp::new(worker, ts_start), ts_commit);
+                        }
+                        result
+                    }
+                    _ => CRUDOperationResult::ZeroAffected(crate::mv_crud_model::crud_operation_result::CRUDOperationInnerReason::KeyDoesNotExist),
+                };
+                tree.end_snapshot(ts_start);
+                result
+            }
+        }
     };
-    match result {
-        CRUDOperationResult::Updated(_) => true,
-        CRUDOperationResult::ZeroAffected(_) => false,
-        other => panic!("ycsb update: unexpected result: {other}"),
-    }
+    result
 }
 
 /// Inserts a brand-new row at `key` (expected to be beyond every key handed
 /// out so far — see the driver's key-minting counter).
 pub fn insert(tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey) {
-    match tree.dispatch_crud(CRUDOperation::Insert(key, random_row(cfg))) {
+    insert_with_execution_mode(tree, cfg, key, YcsbExecutionMode::Atomic)
+}
+
+pub fn insert_with_execution_mode(
+    tree: &YcsbTree,
+    cfg: &YcsbConfig,
+    key: YcsbKey,
+    mode: YcsbExecutionMode,
+) {
+    let payload = random_row(cfg);
+    let result = match mode {
+        YcsbExecutionMode::Atomic => tree.dispatch_crud(CRUDOperation::Insert(key, payload)),
+        YcsbExecutionMode::Transaction => transactional_insert(tree, key, payload),
+    };
+    match result {
         CRUDOperationResult::Inserted(_) => {}
         other => panic!("ycsb insert: unexpected result: {other}"),
     }
@@ -105,16 +274,22 @@ pub fn scan(tree: &YcsbTree, start_key: YcsbKey, len: u64) -> usize {
 pub fn scan_with_mode(tree: &YcsbTree, start_key: YcsbKey, len: u64, read_payload: bool) -> usize {
     let hi = start_key.saturating_add(len.saturating_sub(1));
     match tree.dispatch_crud(CRUDOperation::RangeIterSi(Interval::new(start_key, hi))) {
-        CRUDOperationResult::MatchedRecordIter(iter) => if read_payload {
-            let (count, checksum) = iter.fold_ref((0usize, 0u8), |(count, checksum), _, payload| {
-                let checksum = payload.as_bytes().iter().fold(checksum, |a, b| a.wrapping_add(*b));
-                (count + 1, checksum)
-            });
-            std::hint::black_box(checksum);
-            count
-        } else {
-            iter.count_ref()
-        },
+        CRUDOperationResult::MatchedRecordIter(iter) => {
+            if read_payload {
+                let (count, checksum) =
+                    iter.fold_ref((0usize, 0u8), |(count, checksum), _, payload| {
+                        let checksum = payload
+                            .as_bytes()
+                            .iter()
+                            .fold(checksum, |a, b| a.wrapping_add(*b));
+                        (count + 1, checksum)
+                    });
+                std::hint::black_box(checksum);
+                count
+            } else {
+                iter.count_ref()
+            }
+        }
         other => panic!("ycsb scan: unexpected result: {other}"),
     }
 }
@@ -134,8 +309,69 @@ pub fn read_modify_write(
 }
 
 pub fn read_modify_write_with_mode(
-    tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey, write_all_fields: bool, read_payload: bool,
+    tree: &YcsbTree,
+    cfg: &YcsbConfig,
+    key: YcsbKey,
+    write_all_fields: bool,
+    read_payload: bool,
 ) -> bool {
     let _ = read_with_mode(tree, key, read_payload);
     update(tree, cfg, key, write_all_fields)
+}
+
+pub fn read_modify_write_with_execution_mode(
+    tree: &YcsbTree,
+    cfg: &YcsbConfig,
+    key: YcsbKey,
+    write_all_fields: bool,
+    read_payload: bool,
+    mode: YcsbExecutionMode,
+) -> bool {
+    match mode {
+        YcsbExecutionMode::Atomic => {
+            read_modify_write_with_mode(tree, cfg, key, write_all_fields, read_payload)
+        }
+        YcsbExecutionMode::Transaction => loop {
+            let worker = tree.worker_id();
+            let ts_start = tree.begin_snapshot();
+            let current = point_on_tree(tree, worker, ts_start, key);
+            let result = match current {
+                    CRUDOperationResult::MatchedRecords(rows) if !rows.is_empty() => {
+                        if read_payload {
+                            let checksum = rows[0]
+                                .payload
+                                .as_bytes()
+                                .iter()
+                                .fold(0u8, |a, b| a.wrapping_add(*b));
+                            std::hint::black_box(checksum);
+                        }
+                        let payload = if write_all_fields {
+                            random_row(cfg)
+                        } else {
+                            let (field, bytes) = random_field_patch(cfg);
+                            rows[0]
+                                .payload
+                                .copy_with_field(field, cfg.field_length, &bytes)
+                        };
+                        let (result, wrote) =
+                            update_on_tree(tree, worker, ts_start, key, payload);
+                        if wrote {
+                            let ts_commit = tree.commit_tx(worker);
+                            tree.wal_log_commit(TxStamp::new(worker, ts_start), ts_commit);
+                        }
+                        result
+                    }
+                    _ => CRUDOperationResult::ZeroAffected(
+                        crate::mv_crud_model::crud_operation_result::CRUDOperationInnerReason::KeyDoesNotExist,
+                    ),
+                };
+            tree.end_snapshot(ts_start);
+            match result {
+                CRUDOperationResult::Updated(_) => break true,
+                CRUDOperationResult::ZeroAffected(_) => break false,
+                CRUDOperationResult::Conflict => std::hint::spin_loop(),
+                other => panic!("ycsb transactional RMW: unexpected result: {other}"),
+            }
+        },
+    }
 }
