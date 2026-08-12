@@ -172,6 +172,7 @@ fn run_one(experiment: &str, scale: Scale, gc: bool, out_dir: PathBuf) -> (&'sta
                 distribution,
                 max_scan_length: 100,
                 write_all_fields: false,
+                read_payload: true,
                 gc,
                 update_in_place: false,
                 root_star_index: RootIndexType::FrugalList,

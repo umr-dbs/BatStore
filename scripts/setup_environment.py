@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Bootstraps everything scripts/compare_engines.py needs, FROM NOTHING: clones every
-sibling repo (LeanStore, WiredTiger, BenchBase, vWeaver_ermia/ERMIA - cMVBT itself only if
-it's reachable, see step_cmvbt), applies this harness's required patches, then builds
-each one, sets up PostgreSQL, and creates the Python plotting venv.
+"""Bootstraps the standard engines used by scripts/compare_engines.py, FROM NOTHING:
+clones their sibling repos (cMVBT itself only if it's reachable, see step_cmvbt), applies
+this harness's required patches, then builds each one, sets up PostgreSQL, and creates the
+Python plotting venv. The failure-prone vWeaver/ERMIA variants and their hugepage setup are
+excluded by default; pass --full to include them.
 
 Everything is cloned/built under WORKSPACE_ROOT (scripts/engines/common.py -
 <the directory you invoke this script from>/tx_tests by default, override via the
 WORKSPACE_ROOT env var) - run this from wherever you want the whole workspace to live;
 nothing here assumes a specific machine's home directory layout.
 
-Idempotent - safe to re-run. Every step checks whether its target already
-exists/works before doing anything, so a second run after a partial failure
-just picks up where it left off.
+Reproducible by default: setup-managed checkouts are deleted and cloned again before
+building. Pass --reuse-checkouts for the older incremental/idempotent behavior.
 
 apt-get/postgres steps run via plain `sudo ...` (no `-y`, so apt's own
 "Do you want to continue?" prompt still gates the install) - run this
@@ -20,6 +20,7 @@ password. It never tries to elevate privileges silently.
 
 Usage:
     python3 scripts/setup_environment.py
+    python3 scripts/setup_environment.py --full
     python3 scripts/setup_environment.py --skip-postgres --skip-benchbase
     WORKSPACE_ROOT=/data/tx_tests python3 scripts/setup_environment.py
 """
@@ -57,8 +58,11 @@ CMVBT_WORKSPACE_CLONE = WORKSPACE_ROOT / "cmvbt"
 LEANSTORE_URL = "https://github.com/leanstore/leanstore.git"
 LEANSTORE_PATCH_COMMIT = "90fcf185c1c8506344a7aa779928787d494348f4"
 LEANSTORE_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "leanstore.patch"
+LEANSTORE_YCSB_PAYLOAD_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_payload_leanstore.patch"
 WIREDTIGER_URL = "https://github.com/wiredtiger/wiredtiger.git"
 BENCHBASE_URL = "https://github.com/cmu-db/benchbase.git"
+BENCHBASE_PATCH_COMMIT = "33c00473807ebd49304d114a6d769d2d2b2bbb34"
+BENCHBASE_YCSB_PAYLOAD_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_payload_benchbase.patch"
 VWEAVER_URL = "https://github.com/SNU-DBXLab-papers/vWeaver_ermia.git"
 # Pinned so patches/vweaver_ermia.patch (one fix: a dead `#include <sys/vtimes.h>`, removed
 # from modern glibc) always applies cleanly. This is the SNU-DBXLab-papers repo's own
@@ -88,6 +92,7 @@ VWEAVER_FRUGAL_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" /
 # all), so - like vweaver_ermia_frugal.patch - it's applied unconditionally onto the one
 # shared checkout regardless of which variant(s) actually get built from it.
 VWEAVER_CHBENCHMARK_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "vweaver_ermia_chbenchmark.patch"
+VWEAVER_YCSB_PAYLOAD_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_payload_vweaver.patch"
 # dbcore/burt-hash.cpp is gitignored upstream (dbcore/.gitignore) and meant to be generated
 # fresh at build time by `python2 dbcore/burt-hash.py` (see dbcore/CMakeLists.txt) - no
 # python2 on this system, so this repo ships a Python 3 port instead (see that file's header).
@@ -107,16 +112,13 @@ VWEAVER_BURT_HASH_GEN = Path(__file__).resolve().parent.parent / "patches" / "vw
 APT_PACKAGES = [
     "cmake", "libtbb-dev", "libaio-dev", "libsnappy-dev", "zlib1g-dev",
     "libbz2-dev", "liblz4-dev", "libzstd-dev", "liburing-dev", "numactl",
-    "postgresql", "postgresql-contrib", "maven", "clang", "libnuma-dev",
-    # vWeaver_ermia/ERMIA-specific: Google's logging library (linked unconditionally via
-    # its CMakeLists.txt's LINK_FLAGS) and libibverbs (its dbcore/rdma.cpp is always
-    # compiled in even though this harness never exercises RDMA replication).
-    "libgoogle-glog-dev", "libibverbs-dev",
+    "postgresql", "postgresql-contrib", "maven",
 ]
+VWEAVER_APT_PACKAGES = ["clang", "libnuma-dev", "libgoogle-glog-dev", "libibverbs-dev"]
 
 PG_ROLE = common.PG_ROLE
 PG_PASSWORD = common.PG_PASSWORD
-# Only used by --postgres-tmpfs (see step_postgres_tmpfs) - lives under the same
+# Used by the default PostgreSQL tmpfs step (see step_postgres_tmpfs) - lives under the same
 # tmpfs-verified SCRATCH_ROOT every other engine's data now uses (see common.py::
 # fresh_scratch_dir), so PostgreSQL's storage gets the identical in-memory-only guarantee.
 PG_TMPFS_DATA_DIR = common.SCRATCH_ROOT / "postgresql_data"
@@ -139,9 +141,10 @@ def is_apt_package_installed(pkg: str) -> bool:
     return result.returncode == 0 and "install ok installed" in result.stdout
 
 
-def step_apt_packages() -> None:
+def step_apt_packages(full: bool = False) -> None:
     log("Checking apt dependencies")
-    missing = [p for p in APT_PACKAGES if not is_apt_package_installed(p)]
+    packages = APT_PACKAGES + (VWEAVER_APT_PACKAGES if full else [])
+    missing = [p for p in packages if not is_apt_package_installed(p)]
     if not missing:
         print("All required apt packages already installed.")
         return
@@ -149,6 +152,31 @@ def step_apt_packages() -> None:
     print("Running sudo apt-get install (you'll be prompted for your password, "
           "and apt will ask its own yes/no confirmation before installing).")
     run(["sudo", "apt-get", "install"] + missing)
+
+
+def step_fresh_checkouts() -> None:
+    """Delete only checkouts owned by this setup under WORKSPACE_ROOT.
+
+    Exact-path and containment checks make WORKSPACE_ROOT/environment overrides unable to
+    turn this into a broad recursive deletion. The source checkout containing this script
+    is never one of these targets.
+    """
+    log("Removing setup-managed checkouts for a reproducible fresh build")
+    workspace = WORKSPACE_ROOT.resolve()
+    targets = [
+        WIREDTIGER_REPO, LEANSTORE_REPO, BENCHBASE_REPO, VWEAVER_REPO,
+        CMVBT_WORKSPACE_CLONE,
+    ]
+    for target in targets:
+        resolved = target.resolve(strict=False)
+        if resolved.parent != workspace:
+            sys.exit(
+                f"refusing to delete setup checkout {target}: expected a direct child of "
+                f"WORKSPACE_ROOT={workspace}. Use --reuse-checkouts with custom repo paths."
+            )
+        if resolved.exists():
+            print(f"Deleting stale setup checkout: {resolved}")
+            shutil.rmtree(resolved)
 
 
 def shutil_cpu_count() -> int:
@@ -183,10 +211,6 @@ def step_leanstore() -> None:
     log("Cloning + patching + building LeanStore (native tpcc/ycsb + WiredTiger-adapter frontends)")
     targets = ["tpcc", "ycsb", "wiredtiger_tpcc", "wiredtiger_ycsb"]
     binaries = [LEANSTORE_BUILD_DIR / "frontend" / t for t in targets]
-    if all(b.exists() for b in binaries):
-        print("All 4 frontend binaries already built, skipping.")
-        return
-
     if not LEANSTORE_REPO.exists():
         run(["git", "clone", LEANSTORE_URL, str(LEANSTORE_REPO)])
         run(["git", "checkout", LEANSTORE_PATCH_COMMIT], cwd=LEANSTORE_REPO)
@@ -194,6 +218,10 @@ def step_leanstore() -> None:
             f"YCSB-E/HTAP scan-latency instrumentation, New-Order-only counters, WiredTiger "
             f"adapter log=(enabled=true) so its WAL isn't silently off in this comparison)")
         run(["git", "apply", str(LEANSTORE_PATCH_PATH)], cwd=LEANSTORE_REPO)
+    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_YCSB_PAYLOAD_PATCH_PATH)],
+                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        log(f"Applying {LEANSTORE_YCSB_PAYLOAD_PATCH_PATH.name} (canonical/u64 YCSB payloads and explicit payload reads)")
+        run(["git", "apply", str(LEANSTORE_YCSB_PAYLOAD_PATCH_PATH)], cwd=LEANSTORE_REPO)
 
     LEANSTORE_BUILD_DIR.mkdir(parents=True, exist_ok=True)
     common.check_release_build(LEANSTORE_BUILD_DIR, "LeanStore")
@@ -256,9 +284,6 @@ def step_vweaver_hugepages() -> None:
 def step_vweaver_ermia() -> None:
     log("Cloning + building vWeaver_ermia (ERMIA) - ermia_SI target only")
     binary = VWEAVER_BUILD_DIR / "ermia_SI"
-    if binary.exists():
-        print(f"{binary} already built, skipping.")
-        return
     if not VWEAVER_REPO.exists():
         run(["git", "clone", VWEAVER_URL, str(VWEAVER_REPO)])
         run(["git", "checkout", VWEAVER_PATCH_COMMIT], cwd=VWEAVER_REPO)
@@ -271,6 +296,10 @@ def step_vweaver_ermia() -> None:
         log(f"Applying {VWEAVER_CHBENCHMARK_PATCH_PATH.name} (adds CH-benCHmark Q1/Q6 - "
             f"htap_q1/htap_q6 - support to both build variants)")
         run(["git", "apply", str(VWEAVER_CHBENCHMARK_PATCH_PATH)], cwd=VWEAVER_REPO)
+    if subprocess.run(["git", "apply", "--reverse", "--check", str(VWEAVER_YCSB_PAYLOAD_PATCH_PATH)],
+                      cwd=VWEAVER_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        log(f"Applying {VWEAVER_YCSB_PAYLOAD_PATCH_PATH.name} (canonical/u64 YCSB payloads and key-only option)")
+        run(["git", "apply", str(VWEAVER_YCSB_PAYLOAD_PATCH_PATH)], cwd=VWEAVER_REPO)
 
     burt_hash_cpp = VWEAVER_REPO / "dbcore" / "burt-hash.cpp"
     if not burt_hash_cpp.exists() or burt_hash_cpp.stat().st_size == 0:
@@ -425,10 +454,10 @@ def step_postgres_tmpfs() -> None:
     under common.SCRATCH_ROOT - the same tmpfs-verified root every other engine's data now
     uses, see common.py::fresh_scratch_dir), so PostgreSQL gets the same in-memory-only
     guarantee LeanStore/WiredTiger/libmdbx/vWeaver_ermia already have from that function,
-    and cMVBT already has by construction (no on-disk WAL in this harness's config).
+    and cMVBT already has for its tmpfs-backed WAL.
 
-    Opt-in only (--postgres-tmpfs, not run by default like the other steps) - unlike every
-    other step here, this one STOPS your real, already-running PostgreSQL SERVER (not a
+    Run by default (disable with --skip-postgres-tmpfs). Unlike every other step here,
+    this one STOPS your real, already-running PostgreSQL SERVER (not a
     subprocess this harness spawns and owns) and relocates its actual data. Run
     step_postgres() (role/db/max_connections) first - this rsyncs whatever's already in
     the real data directory, so the `admin` role and `benchbase` database created there
@@ -445,12 +474,10 @@ def step_postgres_tmpfs() -> None:
     would mean authoring/testing a systemd dependency override against a real production
     Postgres install, which this harness deliberately does not attempt sight-unseen). If
     the machine reboots, PostgreSQL will fail to start (empty tmpfs dir) until you re-run
-    `python3 scripts/setup_environment.py --skip-apt --skip-wiredtiger --skip-leanstore
-    --skip-hugepages --skip-vweaver --skip-vweaver-frugal --skip-benchbase --skip-cmvbt
-    --skip-venv --postgres-tmpfs` (or the full script) - which restores tmpfs from
+    the setup script (the full default invocation is simplest), which restores tmpfs from
     `.diskbackup` automatically, the same as a first run.
     """
-    log("Relocating PostgreSQL's data directory onto tmpfs (--postgres-tmpfs)")
+    log("Relocating PostgreSQL's data directory onto tmpfs")
     if shutil.which("psql") is None:
         sys.exit("psql not found - install the 'postgresql' apt package first (see step above).")
 
@@ -570,12 +597,18 @@ def _patch_benchbase_pom(pom_path: Path) -> None:
 
 def step_benchbase() -> None:
     log("Building BenchBase (PostgreSQL TPC-C/YCSB client)")
-    if BENCHBASE_DIST.exists():
-        print(f"{BENCHBASE_DIST} already built, skipping.")
-        return
-
     if not BENCHBASE_REPO.exists():
-        run(["git", "clone", "--depth", "1", BENCHBASE_URL, str(BENCHBASE_REPO)])
+        run(["git", "clone", BENCHBASE_URL, str(BENCHBASE_REPO)])
+        run(["git", "checkout", BENCHBASE_PATCH_COMMIT], cwd=BENCHBASE_REPO)
+
+    # Kept as a main-repository patch because BenchBase is an external checkout under
+    # ignored tx_tests/. This makes the JDBC column fix and payload/read modes reproducible.
+    reverse = subprocess.run(
+        ["git", "apply", "--reverse", "--check", str(BENCHBASE_YCSB_PAYLOAD_PATCH_PATH)],
+        cwd=BENCHBASE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if reverse.returncode != 0:
+        run(["git", "apply", str(BENCHBASE_YCSB_PAYLOAD_PATCH_PATH)], cwd=BENCHBASE_REPO)
 
     _patch_benchbase_pom(BENCHBASE_REPO / "pom.xml")
 
@@ -640,6 +673,15 @@ def step_python_venv() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--full", action="store_true",
+        help="also set up both vWeaver/ERMIA variants and their required hugepages "
+             "(excluded from the default setup)",
+    )
+    parser.add_argument(
+        "--reuse-checkouts", action="store_true",
+        help="do not delete and freshly clone setup-managed repositories (default is fresh)",
+    )
     parser.add_argument("--skip-apt", action="store_true")
     parser.add_argument("--skip-wiredtiger", action="store_true")
     parser.add_argument("--skip-leanstore", action="store_true")
@@ -651,22 +693,25 @@ def main() -> None:
     parser.add_argument("--skip-cmvbt", action="store_true")
     parser.add_argument("--skip-venv", action="store_true")
     parser.add_argument(
-        "--postgres-tmpfs", action="store_true",
-        help="Opt-in, NOT run by default (unlike every other step here): relocates the real "
-             "PostgreSQL server's data directory onto tmpfs (see step_postgres_tmpfs's docstring) "
+        "--skip-postgres-tmpfs", action="store_true",
+        help="do not relocate the PostgreSQL server's data directory onto tmpfs "
+             "(see step_postgres_tmpfs's docstring) "
              "so it gets the same in-memory-only guarantee as every other engine. Stops/restarts "
              "your actual PostgreSQL service and does not survive a reboot unattended - read the "
              "docstring before using this on a Postgres install you care about.",
     )
     args = parser.parse_args()
 
+    if not args.reuse_checkouts:
+        step_fresh_checkouts()
+
     steps = [
-        ("apt", args.skip_apt, step_apt_packages),
+        ("apt", args.skip_apt, lambda: step_apt_packages(args.full)),
         ("wiredtiger", args.skip_wiredtiger, step_wiredtiger),
         ("leanstore", args.skip_leanstore, step_leanstore),
-        ("hugepages", args.skip_hugepages, step_vweaver_hugepages),
-        # ("vweaver", args.skip_vweaver, step_vweaver_ermia),
-        # ("vweaver-frugal", args.skip_vweaver_frugal, step_vweaver_ermia_frugal),
+        ("hugepages", not args.full or args.skip_hugepages, step_vweaver_hugepages),
+        ("vweaver", not args.full or args.skip_vweaver, step_vweaver_ermia),
+        ("vweaver-frugal", not args.full or args.skip_vweaver_frugal, step_vweaver_ermia_frugal),
         ("postgres", args.skip_postgres, step_postgres),
         ("benchbase", args.skip_benchbase, step_benchbase),
         ("cmvbt", args.skip_cmvbt, step_cmvbt),
@@ -677,7 +722,10 @@ def main() -> None:
     print(f"workspace root: {WORKSPACE_ROOT}")
     for name, skip, fn in steps:
         if skip:
-            print(f"\n>>> Skipping {name} (--skip-{name})")
+            if name in {"hugepages", "vweaver", "vweaver-frugal"} and not args.full:
+                print(f"\n>>> Skipping {name} (excluded by default; pass --full to include it)")
+            else:
+                print(f"\n>>> Skipping {name} (--skip-{name})")
             continue
         try:
             fn()
@@ -685,7 +733,7 @@ def main() -> None:
             sys.exit(f"\nStep '{name}' failed ({e}). Fix the issue above and re-run - "
                      f"earlier steps will be skipped since they're already done.")
 
-    if args.postgres_tmpfs:
+    if not args.skip_postgres_tmpfs and not args.skip_postgres:
         try:
             step_postgres_tmpfs()
         except subprocess.CalledProcessError as e:
@@ -693,8 +741,8 @@ def main() -> None:
                      f"stopped or mid-move - check `systemctl status postgresql` and the step's "
                      f"docstring before re-running.")
     else:
-        print("\n>>> Skipping postgres-tmpfs (pass --postgres-tmpfs to relocate PostgreSQL's data "
-              "directory onto tmpfs too - opt-in, see --help)")
+        reason = "--skip-postgres" if args.skip_postgres else "--skip-postgres-tmpfs"
+        print(f"\n>>> Skipping postgres-tmpfs ({reason})")
 
     print("\n########## setup complete ##########")
     print(f"Run the comparison with: python3 scripts/compare_engines.py --tiny")

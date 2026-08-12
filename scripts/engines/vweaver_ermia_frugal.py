@@ -52,11 +52,10 @@ SUPPORTS_GC_TOGGLE = True
 
 
 def ensure_built() -> None:
-    if BINARY.exists():
-        return
     subprocess.run(
         ["cmake", "-S", str(REPO), "-B", str(BUILD_DIR),
-         "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_BUILD_PARAM=Eval_skiplist"],
+         "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_BUILD_PARAM=Eval_skiplist",
+         f"-DYCSB_PAYLOAD_BYTES={os.environ.get('YCSB_PAYLOAD_BYTES', '1000')}"],
         cwd=REPO, env=_clang_env(), check=True,
     )
     subprocess.run(
@@ -66,7 +65,8 @@ def ensure_built() -> None:
     )
 
 
-def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True) -> common.NormalizedResult:
+def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True,
+        ycsb_payload: str = "standard", read_payload: bool = True) -> common.NormalizedResult:
     """See vweaver_ermia.run() - identical shape, `reload` unused for the same reason."""
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -94,6 +94,11 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         metric_name = "new_order_per_sec"
     else:
         letter = workload.split("_", 1)[1].upper()
+        if letter not in ("C", "F"):
+            raise RuntimeError(
+                f"Frugal/ERMIA YCSB-{letter} is disabled: upstream TxnInsert/TxnUpdate/TxnScan "
+                "handlers are stubs; only payload-reading YCSB-C and RMW YCSB-F are implemented"
+            )
         duration = scale.ycsb_duration
         threads = scale.ycsb_threads
         args = [
@@ -104,7 +109,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
             "-parallel_loading",
             "-benchmark_options",
             f"--workload={letter} --initial-table-size={scale.ycsb_records} "
-            f"--zipfian --zipfian-theta={scale.ycsb_theta}",
+            f"--zipfian --zipfian-theta={scale.ycsb_theta} " + ("" if read_payload else "--key-only"),
         ]
         metric_name = "ops_per_sec"
 

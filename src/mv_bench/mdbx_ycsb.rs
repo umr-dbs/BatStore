@@ -52,6 +52,7 @@ pub struct MdbxYcsbConfig {
     pub mix: YcsbMix,
     pub distribution: RequestDistribution,
     pub max_scan_length: u64,
+    pub read_payload: bool,
     /// The libmdbx environment directory - caller is responsible for wiping
     /// it beforehand (see scripts/engines/libmdbx.py's use of
     /// common.fresh_scratch_dir), matching this suite's own `--trunc`-style
@@ -101,10 +102,16 @@ fn encode_row(cfg: &YcsbConfig) -> Vec<u8> {
     buf
 }
 
-fn mdbx_read(db: &Database<WriteMap>, key: YcsbKey) -> bool {
+fn mdbx_read(db: &Database<WriteMap>, key: YcsbKey, read_payload: bool) -> bool {
     let txn = db.begin_ro_txn().expect("mdbx_ycsb: begin_ro_txn");
     let table = txn.open_table(None).expect("mdbx_ycsb: open_table");
-    txn.get::<Vec<u8>>(&table, &key.to_be_bytes()).expect("mdbx_ycsb: get").is_some()
+    let value = txn.get::<Vec<u8>>(&table, &key.to_be_bytes()).expect("mdbx_ycsb: get");
+    if read_payload {
+        if let Some(bytes) = &value {
+            std::hint::black_box(bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
+        }
+    }
+    value.is_some()
 }
 
 fn mdbx_update(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> bool {
@@ -129,7 +136,7 @@ fn mdbx_insert(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) {
 
 /// Returns the number of rows actually scanned (can be `< len` near the end of the loaded
 /// key range) - same contract as `ycsb_txn::scan`.
-fn mdbx_scan(db: &Database<WriteMap>, start_key: YcsbKey, len: u64) -> usize {
+fn mdbx_scan(db: &Database<WriteMap>, start_key: YcsbKey, len: u64, read_payload: bool) -> usize {
     let txn = db.begin_ro_txn().expect("mdbx_ycsb: begin_ro_txn");
     let table = txn.open_table(None).expect("mdbx_ycsb: open_table");
     let mut cursor = txn.cursor(&table).expect("mdbx_ycsb: cursor");
@@ -138,6 +145,11 @@ fn mdbx_scan(db: &Database<WriteMap>, start_key: YcsbKey, len: u64) -> usize {
         .set_range::<Vec<u8>, Vec<u8>>(&start_key.to_be_bytes())
         .expect("mdbx_ycsb: cursor.set_range");
     while item.is_some() && count < len {
+        if read_payload {
+            if let Some((_, bytes)) = &item {
+                std::hint::black_box(bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
+            }
+        }
         count += 1;
         if count >= len {
             break;
@@ -147,8 +159,8 @@ fn mdbx_scan(db: &Database<WriteMap>, start_key: YcsbKey, len: u64) -> usize {
     count as usize
 }
 
-fn mdbx_read_modify_write(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> bool {
-    let _ = mdbx_read(db, key);
+fn mdbx_read_modify_write(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey, read_payload: bool) -> bool {
+    let _ = mdbx_read(db, key, read_payload);
     mdbx_update(db, cfg, key)
 }
 
@@ -189,6 +201,7 @@ fn worker_thread(
     mix: YcsbMix,
     sampler: Arc<KeySampler>,
     max_scan_length: u64,
+    read_payload: bool,
     current_max_key: Arc<AtomicU64>,
     duration: Duration,
     stop: Arc<AtomicBool>,
@@ -209,7 +222,7 @@ fn worker_thread(
         match pick_op(&mix) {
             YcsbOpType::Read => {
                 let key = sampler.sample(record_count, max_key_now);
-                mdbx_read(&db, key);
+                mdbx_read(&db, key, read_payload);
                 totals[READ] += 1;
             }
             YcsbOpType::Update => {
@@ -226,13 +239,13 @@ fn worker_thread(
                 let key = sampler.sample(record_count, max_key_now);
                 let len = random_scan_length(max_scan_length);
                 let scan_start = Instant::now();
-                scanned_tuples += mdbx_scan(&db, key, len) as u64;
+                scanned_tuples += mdbx_scan(&db, key, len, read_payload) as u64;
                 scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
                 totals[SCAN] += 1;
             }
             YcsbOpType::ReadModifyWrite => {
                 let key = sampler.sample(record_count, max_key_now);
-                mdbx_read_modify_write(&db, &cfg, key);
+                mdbx_read_modify_write(&db, &cfg, key, read_payload);
                 totals[RMW] += 1;
             }
         }
@@ -282,6 +295,7 @@ pub fn run_mdbx_ycsb(cfg: MdbxYcsbConfig) -> MdbxYcsbRunSummary {
     let mix = cfg.mix;
     let ycsb_cfg = cfg.ycsb;
     let max_scan_length = cfg.max_scan_length;
+    let read_payload = cfg.read_payload;
 
     let handles: Vec<_> = (0..num_threads).map(|_| {
         let db = db.clone();
@@ -290,7 +304,7 @@ pub fn run_mdbx_ycsb(cfg: MdbxYcsbConfig) -> MdbxYcsbRunSummary {
         let current_max_key = current_max_key.clone();
         let stop = stop.clone();
         let barrier = barrier.clone();
-        thread::spawn(move || worker_thread(db, cfg, mix, sampler, max_scan_length, current_max_key, duration, stop, barrier))
+        thread::spawn(move || worker_thread(db, cfg, mix, sampler, max_scan_length, read_payload, current_max_key, duration, stop, barrier))
     }).collect();
 
     barrier.wait();
@@ -402,6 +416,7 @@ pub fn main_mdbx_ycsb(parms: Vec<String>) {
     let field_length: usize = arg(&parms, 9, 100);
     let max_scan_length: u64 = arg(&parms, 10, 100);
     let db_path: String = parms.get(11).cloned().unwrap_or_else(|| "mdbx_ycsb_db".to_string());
+    let read_payload: bool = arg(&parms, 12, true);
 
     run_mdbx_ycsb(MdbxYcsbConfig {
         ycsb: YcsbConfig { record_count, field_count, field_length },
@@ -410,6 +425,7 @@ pub fn main_mdbx_ycsb(parms: Vec<String>) {
         mix,
         distribution,
         max_scan_length,
+        read_payload,
         db_path: PathBuf::from(db_path),
         output_dir: PathBuf::from("."),
     });

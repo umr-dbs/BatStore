@@ -1,0 +1,89 @@
+diff --git a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBLoader.java b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBLoader.java
+index 6c73146..50e9ba4 100644
+--- a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBLoader.java
++++ b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBLoader.java
+@@ -71,7 +71,8 @@ class YCSBLoader extends Loader<YCSBBenchmark> {
+       for (int i = start; i < stop; i++) {
+         stmt.setInt(1, i);
+         for (int j = 0; j < YCSBConstants.NUM_FIELDS; j++) {
+-          stmt.setString(j + 2, TextGenerator.randomStr(rng(), benchmark.fieldSize));
++          boolean u64Payload = Boolean.parseBoolean(System.getenv().getOrDefault("YCSB_U64_PAYLOAD", "false"));
++          stmt.setString(j + 2, u64Payload && j > 0 ? "" : TextGenerator.randomStr(rng(), benchmark.fieldSize));
+         }
+         stmt.addBatch();
+         total++;
+diff --git a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java
+index 614ddb8..45fb107 100644
+--- a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java
++++ b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java
+@@ -136,7 +136,8 @@ class YCSBWorker extends Worker<YCSBBenchmark> {
+ 
+   private void buildParameters() {
+     for (int i = 0; i < this.params.length; i++) {
+-      this.params[i] = new String(TextGenerator.randomFastChars(rng(), this.data));
++      boolean u64Payload = Boolean.parseBoolean(System.getenv().getOrDefault("YCSB_U64_PAYLOAD", "false"));
++      this.params[i] = u64Payload && i > 0 ? "" : new String(TextGenerator.randomFastChars(rng(), this.data));
+     }
+   }
+ }
+diff --git a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadRecord.java b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadRecord.java
+index 49b43f1..5884b81 100644
+--- a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadRecord.java
++++ b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadRecord.java
+@@ -29,15 +29,20 @@ import java.sql.SQLException;
+ 
+ public class ReadRecord extends Procedure {
+   public final SQLStmt readStmt = new SQLStmt("SELECT * FROM " + TABLE_NAME + " WHERE YCSB_KEY=?");
++  public final SQLStmt keyOnlyStmt = new SQLStmt("SELECT YCSB_KEY FROM " + TABLE_NAME + " WHERE YCSB_KEY=?");
+ 
+   // FIXME: The value in ysqb is a byteiterator
+   public void run(Connection conn, int keyname, String[] results) throws SQLException {
+-    try (PreparedStatement stmt = this.getPreparedStatement(conn, readStmt)) {
++    boolean readPayload = Boolean.parseBoolean(System.getenv().getOrDefault("YCSB_READ_PAYLOAD", "true"));
++    try (PreparedStatement stmt = this.getPreparedStatement(conn, readPayload ? readStmt : keyOnlyStmt)) {
+       stmt.setInt(1, keyname);
+       try (ResultSet r = stmt.executeQuery()) {
+         while (r.next()) {
+-          for (int i = 0; i < YCSBConstants.NUM_FIELDS; i++) {
+-            results[i] = r.getString(i + 1);
++          if (!readPayload) continue;
++          int fields = Boolean.parseBoolean(System.getenv().getOrDefault("YCSB_U64_PAYLOAD", "false")) ? 1 : YCSBConstants.NUM_FIELDS;
++          for (int i = 0; i < fields; i++) {
++            // Column 1 is YCSB_KEY; payload fields start at JDBC column 2.
++            results[i] = r.getString(i + 2);
+           }
+         }
+       }
+diff --git a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ScanRecord.java b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ScanRecord.java
+index 3e52a38..2f45a31 100644
+--- a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ScanRecord.java
++++ b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ScanRecord.java
+@@ -31,18 +31,24 @@ import java.util.List;
+ public class ScanRecord extends Procedure {
+   public final SQLStmt scanStmt =
+       new SQLStmt("SELECT * FROM " + TABLE_NAME + " WHERE YCSB_KEY>? AND YCSB_KEY<?");
++  public final SQLStmt keyOnlyScanStmt =
++      new SQLStmt("SELECT YCSB_KEY FROM " + TABLE_NAME + " WHERE YCSB_KEY>? AND YCSB_KEY<?");
+ 
+   // FIXME: The value in ysqb is a byteiterator
+   public void run(Connection conn, int start, int count, List<String[]> results)
+       throws SQLException {
+-    try (PreparedStatement stmt = this.getPreparedStatement(conn, scanStmt)) {
++    boolean readPayload = Boolean.parseBoolean(System.getenv().getOrDefault("YCSB_READ_PAYLOAD", "true"));
++    try (PreparedStatement stmt = this.getPreparedStatement(conn, readPayload ? scanStmt : keyOnlyScanStmt)) {
+       stmt.setInt(1, start);
+       stmt.setInt(2, start + count);
+       try (ResultSet r = stmt.executeQuery()) {
+         while (r.next()) {
+           String[] data = new String[YCSBConstants.NUM_FIELDS];
+-          for (int i = 0; i < data.length; i++) {
+-            data[i] = r.getString(i + 1);
++          int fields = Boolean.parseBoolean(System.getenv().getOrDefault("YCSB_U64_PAYLOAD", "false")) ? 1 : data.length;
++          if (!readPayload) fields = 0;
++          for (int i = 0; i < fields; i++) {
++            // Column 1 is YCSB_KEY; payload fields start at JDBC column 2.
++            data[i] = r.getString(i + 2);
+           }
+           results.add(data);
+         }
+
