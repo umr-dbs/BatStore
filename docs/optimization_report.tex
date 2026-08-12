@@ -542,6 +542,7 @@ distinct keys remain freely splittable at a key boundary --- the version-growth
 problem this section opened with never gets a chance to occur.
 
 \subsection{Caching resolved roots across a transaction's lifetime}
+\label{sec:rootcache}
 
 Finding ``the root as of my snapshot'' for a given table requires a lookup into that
 table's root-version index (\S\ref{sec:root}). A transaction that reads or writes the
@@ -570,12 +571,76 @@ fn read_tree_and_root(&mut self, table: TableId) -> (Arc<Tree>, BlockRef) {
 
 The first read or write against a table resolves and caches its root; every
 subsequent operation against that same table, for the rest of the transaction, reuses
-the cached handle instead of re-walking the root index. The per-transaction table
-list is inline for the common case (a handful of tables touched by an ordinary
-multi-table transaction) and spills to the heap only for unusually wide transactions,
-so an ordinary transaction pays no allocation for this bookkeeping at all.
+the cached handle instead of re-walking the root index.
+
+\subsection{Inline bookkeeping: \code{SmallVec} instead of a pointer chase}
+\label{sec:smallvec}
+
+The table-state list that root caching above lives in --- and, as this subsection
+covers, the transaction's write set, the database's own table list, and a
+TPC-C-specific write set --- are all the same container type: a \code{SmallVec},
+which embeds its element buffer directly inside the surrounding struct up to a fixed
+inline capacity, and only falls back to a separate heap allocation if that capacity
+is ever exceeded. Below the inline capacity, correctness is unaffected by any of
+this --- it behaves exactly like an ordinary growable vector, spilling to the heap
+transparently the moment it needs to. What changes is locality: a transaction is
+created, used, and dropped by exactly one worker thread, so keeping its own
+bookkeeping inline means that thread's repeated touches to its own transaction stay
+inside the same handful of cache lines the transaction object itself occupies,
+instead of chasing a pointer out to a second, independently allocated buffer for
+what is, in the overwhelming majority of cases, a small, fixed-shape piece of state.
+This is the same locality principle behind the per-worker slots in
+\S\ref{sec:sharding} and the thread-local caches in \S\ref{sec:snapcache}, applied
+one level down, to a single transaction's own working set rather than to a
+tree-wide array indexed by worker.
+
+\begin{itemize}
+  \item \textbf{The per-table cache} (\S\ref{sec:rootcache}, capacity 8) holds one entry
+        per table the transaction has actually touched --- a tree handle and, once
+        resolved, the cached root above. Eight entries comfortably covers an
+        ordinary multi-table OLTP transaction; an unusually wide one simply spills.
+        Because it is inline, checking ``have I already resolved this table's
+        root'' is a linear scan over a handful of contiguous entries sitting next
+        to the transaction's other fields, not a hash-map lookup and not a chase
+        through a second allocation --- for a list this short, that scan is not an
+        approximation of a smarter data structure, it \emph{is} the fast path.
+  \item \textbf{The write set} (capacity 16) records every key this transaction has
+        actually written, in the true order it wrote them, and is exactly what
+        abort (\S\ref{sec:abort}, below) walks in reverse. An ordinary transaction's
+        writes stay inline for the whole transaction, so both the writes
+        themselves and the eventual abort walk over them touch memory local to the
+        transaction object rather than a second buffer allocated and then
+        immediately torn back down.
+  \item \textbf{The database's own table list} (capacity 256) stores every table's
+        name and tree handle. Tables are created once, rarely, at database
+        setup, so the realistic table count is always far below this capacity in
+        practice. The benefit here is subtly different from the two cases above:
+        the table list is reached through one shared, atomically published handle
+        (\S\ref{sec:sharding}), and a plain growable vector behind that handle
+        would need \emph{two} heap indirections to reach a given table --- one to
+        reach the vector's own header, a second to follow the header's separate
+        buffer pointer to the actual entries. An inline buffer sits inside the
+        same allocation as the header, which is itself already inside the shared
+        handle's own allocation, so resolving a table costs exactly one
+        indirection, not two, for as long as the table count stays under 256.
+  \item \textbf{A TPC-C-specific write set} (capacity 24) exists because TPC-C
+        writes to two structurally independent tree configurations
+        (\S\ref{sec:bigtree}) within one logical transaction, and abort's reverse
+        ordering has to reflect the transaction's true, combined write order
+        across \emph{both} configurations, not two independently-reversed
+        per-configuration lists --- so this write set is deliberately one single
+        inline list spanning both, sized generously above this workload's typical
+        transaction shape rather than reused verbatim from the general-purpose
+        write set above.
+\end{itemize}
+
+None of these capacities are load-bearing for correctness --- they were each chosen
+to comfortably cover the common case for what uses them, with the ordinary,
+non-catastrophic fallback of a real heap allocation on the rare transaction or
+table catalog that actually needs more.
 
 \subsection{Abort: reverse order, batched under one latch}
+\label{sec:abort}
 
 Reverting a transaction's writes is not one atomic step across every key at once ---
 each individual reversal re-exposes that one key to any other concurrent transaction
