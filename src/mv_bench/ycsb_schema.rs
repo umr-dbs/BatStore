@@ -13,7 +13,10 @@ use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::fmt::{Debug, Display, Formatter};
 use std::mem::size_of;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, Ordering::{Relaxed, Release, Acquire}};
+use std::sync::atomic::{
+    AtomicU32,
+    Ordering::{Acquire, Relaxed, Release},
+};
 
 use crate::mv_tree::mvbt::MVBTSt;
 use crate::mv_wal::record::WalPayload;
@@ -26,9 +29,9 @@ pub type YcsbKey = u64;
 /// `Payload` is itself exactly `usize`-sized/aligned, and otherwise
 /// heap-boxes it behind that one word. `YcsbRow` is deliberately shaped to
 /// take the inline path (see its own doc), same as the base tree's `u64`, so
-/// `RecordPoint<YcsbKey, YcsbRow>` is 32B - identical to `RecordPoint<u64,
-/// u64>` - and the base tree's `NUM_RECORDS` (125) already fills the leaf's
-/// 4KB record-array budget exactly. See the same reasoning spelled out in
+/// each SoA leaf slot is 32B - identical to the base `u64` schema - and the
+/// base tree's `NUM_RECORDS` (123) fills the primary 4KB allocation. See the
+/// same reasoning spelled out in
 /// full in `tpcc_schema::TPCC_NUM_RECORDS`'s doc, which reuses this same
 /// value for a related but distinct reason (boxed, not inlined - see there).
 pub const YCSB_FAN_OUT: usize = crate::mv_tree::mvbt::FAN_OUT;
@@ -50,7 +53,11 @@ pub struct YcsbConfig {
 
 impl Default for YcsbConfig {
     fn default() -> Self {
-        Self { record_count: 1_000_000, field_count: 10, field_length: 100 }
+        Self {
+            record_count: 1_000_000,
+            field_count: 10,
+            field_length: 100,
+        }
     }
 }
 
@@ -118,9 +125,13 @@ impl YcsbRow {
                 handle_alloc_error(layout);
             }
             raw.cast::<AtomicU32>().write(AtomicU32::new(1));
-            raw.add(REFCOUNT_LEN).cast::<u32>().write(bytes.len() as u32);
+            raw.add(REFCOUNT_LEN)
+                .cast::<u32>()
+                .write(bytes.len() as u32);
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), raw.add(HEADER_LEN), bytes.len());
-            Self { ptr: NonNull::new_unchecked(raw) }
+            Self {
+                ptr: NonNull::new_unchecked(raw),
+            }
         }
     }
 
@@ -138,14 +149,18 @@ impl YcsbRow {
             raw.add(REFCOUNT_LEN).cast::<u32>().write(data_len as u32);
             let bytes = std::slice::from_raw_parts_mut(raw.add(HEADER_LEN), data_len);
             fill(bytes);
-            Self { ptr: NonNull::new_unchecked(raw) }
+            Self {
+                ptr: NonNull::new_unchecked(raw),
+            }
         }
     }
 
     pub fn copy_with_field(&self, field: usize, field_length: usize, replacement: &[u8]) -> Self {
         assert_eq!(replacement.len(), field_length);
         let data_len = self.len();
-        let start = field.checked_mul(field_length).expect("YCSB field offset overflow");
+        let start = field
+            .checked_mul(field_length)
+            .expect("YCSB field offset overflow");
         assert!(start + field_length <= data_len, "YCSB field outside row");
         Self::from_len_with(data_len, |bytes| {
             bytes.copy_from_slice(self.as_bytes());
@@ -201,7 +216,9 @@ impl Drop for YcsbRow {
             return;
         }
         std::sync::atomic::fence(Acquire);
-        unsafe { dealloc(self.ptr.as_ptr(), Self::layout_for(self.len())); }
+        unsafe {
+            dealloc(self.ptr.as_ptr(), Self::layout_for(self.len()));
+        }
     }
 }
 

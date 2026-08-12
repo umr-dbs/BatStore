@@ -46,8 +46,8 @@ use crate::mv_db::Database;
 use crate::mv_query::interval::Interval;
 use crate::mv_root::index_root::RootIndexType;
 use crate::mv_tree::mvbt::FAN_OUT;
-use crate::mv_wal::record::TableId;
 use crate::mv_wal::backend::WalBackend;
+use crate::mv_wal::record::TableId;
 use std::fmt::{Display, Formatter};
 use triomphe::Arc;
 
@@ -59,21 +59,18 @@ pub type TpccKey = u64;
 /// long as `Key = u64`).
 ///
 /// `NUM_RECORDS` also reuses the base tree's value rather than being
-/// recomputed for `TpccRow`'s size: `RecordPoint::payload` is a
-/// `PayloadSlot<Payload>`, which is always exactly one `usize` (8B) - it
+/// recomputed for `TpccRow`'s size: `PayloadSlot<Payload>` is always exactly
+/// one `usize` (8B) - it
 /// inlines `Payload` bitwise only when `Payload` is itself exactly
 /// `usize`-sized/aligned (true for the base tree's `u64` payload), and
 /// otherwise heap-boxes it behind that one word (true for `TpccRow`, an
-/// enum far bigger than 8B). Either way, `RecordPoint<TpccKey, TpccRow>` is
-/// 32B, same as `RecordPoint<u64, u64>` - so the leaf's 4KB record-array
-/// budget fits exactly `NUM_RECORDS` (125) records regardless of payload
-/// type. (Measured: `size_of::<LeafPage<125, TpccKey, TpccRow>>()` = 4008B,
-/// identical to the base tree's own leaf and to `InternalPage<125, ..>` -
-/// the previous `100` here left ~800B/leaf-page (25 record slots) unused
-/// for free, since the block's total size is already capped by the
-/// internal-page union arm at this `FAN_OUT`.)
-pub const TPCC_FAN_OUT: usize       = FAN_OUT;
-pub const TPCC_NUM_RECORDS: usize   = crate::mv_tree::mvbt::NUM_RECORDS;
+/// enum far bigger than 8B). Either way, one SoA leaf slot is 32B: 8B in
+/// the key region plus 24B in the parallel version/payload region. Thus the
+/// primary 4KB allocation fits `NUM_RECORDS` (123) records regardless of
+/// payload type. Its compact two-word validity bitmap is inline; only the
+/// deliberately oversized experimental leaf variants allocate it separately.
+pub const TPCC_FAN_OUT: usize = FAN_OUT;
+pub const TPCC_NUM_RECORDS: usize = crate::mv_tree::mvbt::NUM_RECORDS;
 
 pub type TpccTree = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 
@@ -227,14 +224,22 @@ pub const TPCC_BIG_KIB512_NUM_RECORDS: usize = 16379;
 /// `KiB1`..`KiB4`, the internal fan-out too — see `BigTreeSize`'s doc), not
 /// the transactional core, so a `TpccTxn` spanning both a standard and a big
 /// table still commits/aborts as one atomic, snapshot-isolated unit.
-pub type TpccBigTreeKiB1 = crate::mv_tree::mvbt::MVBTSt<TPCC_BIG_KIB1_N, TPCC_BIG_KIB1_N, TpccKey, TpccRow>;
-pub type TpccBigTreeKiB2 = crate::mv_tree::mvbt::MVBTSt<TPCC_BIG_KIB2_N, TPCC_BIG_KIB2_N, TpccKey, TpccRow>;
-pub type TpccBigTreeKiB4 = crate::mv_tree::mvbt::MVBTSt<TPCC_BIG_KIB4_N, TPCC_BIG_KIB4_N, TpccKey, TpccRow>;
-pub type TpccBigTreeKiB8 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB8_NUM_RECORDS, TpccKey, TpccRow>;
-pub type TpccBigTreeKiB16 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB16_NUM_RECORDS, TpccKey, TpccRow>;
-pub type TpccBigTreeKiB32 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB32_NUM_RECORDS, TpccKey, TpccRow>;
-pub type TpccBigTreeKiB64 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB64_NUM_RECORDS, TpccKey, TpccRow>;
-pub type TpccBigTreeKiB512 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB512_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB1 =
+    crate::mv_tree::mvbt::MVBTSt<TPCC_BIG_KIB1_N, TPCC_BIG_KIB1_N, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB2 =
+    crate::mv_tree::mvbt::MVBTSt<TPCC_BIG_KIB2_N, TPCC_BIG_KIB2_N, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB4 =
+    crate::mv_tree::mvbt::MVBTSt<TPCC_BIG_KIB4_N, TPCC_BIG_KIB4_N, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB8 =
+    crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB8_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB16 =
+    crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB16_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB32 =
+    crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB32_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB64 =
+    crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB64_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccBigTreeKiB512 =
+    crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG_KIB512_NUM_RECORDS, TpccKey, TpccRow>;
 
 /// The two `TreeClass::Big` trees actually built for one `TpccDatabase`,
 /// at whichever `BigTreeSize` it was constructed with. A closed enum over
@@ -246,14 +251,38 @@ pub type TpccBigTreeKiB512 = crate::mv_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_BIG
 /// operation reaches the right variant's trees without an 8-way match at
 /// every call site.
 pub(crate) enum BigTrees {
-    KiB1 { warehouse: Arc<TpccBigTreeKiB1>, district: Arc<TpccBigTreeKiB1> },
-    KiB2 { warehouse: Arc<TpccBigTreeKiB2>, district: Arc<TpccBigTreeKiB2> },
-    KiB4 { warehouse: Arc<TpccBigTreeKiB4>, district: Arc<TpccBigTreeKiB4> },
-    KiB8 { warehouse: Arc<TpccBigTreeKiB8>, district: Arc<TpccBigTreeKiB8> },
-    KiB16 { warehouse: Arc<TpccBigTreeKiB16>, district: Arc<TpccBigTreeKiB16> },
-    KiB32 { warehouse: Arc<TpccBigTreeKiB32>, district: Arc<TpccBigTreeKiB32> },
-    KiB64 { warehouse: Arc<TpccBigTreeKiB64>, district: Arc<TpccBigTreeKiB64> },
-    KiB512 { warehouse: Arc<TpccBigTreeKiB512>, district: Arc<TpccBigTreeKiB512> },
+    KiB1 {
+        warehouse: Arc<TpccBigTreeKiB1>,
+        district: Arc<TpccBigTreeKiB1>,
+    },
+    KiB2 {
+        warehouse: Arc<TpccBigTreeKiB2>,
+        district: Arc<TpccBigTreeKiB2>,
+    },
+    KiB4 {
+        warehouse: Arc<TpccBigTreeKiB4>,
+        district: Arc<TpccBigTreeKiB4>,
+    },
+    KiB8 {
+        warehouse: Arc<TpccBigTreeKiB8>,
+        district: Arc<TpccBigTreeKiB8>,
+    },
+    KiB16 {
+        warehouse: Arc<TpccBigTreeKiB16>,
+        district: Arc<TpccBigTreeKiB16>,
+    },
+    KiB32 {
+        warehouse: Arc<TpccBigTreeKiB32>,
+        district: Arc<TpccBigTreeKiB32>,
+    },
+    KiB64 {
+        warehouse: Arc<TpccBigTreeKiB64>,
+        district: Arc<TpccBigTreeKiB64>,
+    },
+    KiB512 {
+        warehouse: Arc<TpccBigTreeKiB512>,
+        district: Arc<TpccBigTreeKiB512>,
+    },
 }
 
 /// Picks `warehouse` or `district` out of one `BigTrees` arm — generic over
@@ -336,7 +365,8 @@ pub fn dispatch_crud_big(
 ) -> CRUDOperationResult<'static, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow> {
     struct DispatchCrudOp(crate::mv_crud_model::crud_operation::CRUDOperation<TpccKey, TpccRow>);
     impl BigTreeOp for DispatchCrudOp {
-        type Output = CRUDOperationResult<'static, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
+        type Output =
+            CRUDOperationResult<'static, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
         fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
             self,
             tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
@@ -442,9 +472,19 @@ pub enum Table {
 
 impl Table {
     pub const ALL: [Table; 14] = [
-        Table::Warehouse, Table::District, Table::Customer, Table::CustLastOrder,
-        Table::CustomerNameIdx, Table::History, Table::NewOrder, Table::Orders,
-        Table::OrderLine, Table::Item, Table::Stock, Table::Supplier, Table::Nation,
+        Table::Warehouse,
+        Table::District,
+        Table::Customer,
+        Table::CustLastOrder,
+        Table::CustomerNameIdx,
+        Table::History,
+        Table::NewOrder,
+        Table::Orders,
+        Table::OrderLine,
+        Table::Item,
+        Table::Stock,
+        Table::Supplier,
+        Table::Nation,
         Table::Region,
     ];
 
@@ -495,8 +535,12 @@ pub struct TpccDatabase {
     pub(crate) big_trees: BigTrees,
 }
 
-fn inc_key(k: TpccKey) -> TpccKey { k.checked_add(1).unwrap_or(TpccKey::MAX) }
-fn dec_key(k: TpccKey) -> TpccKey { k.checked_sub(1).unwrap_or(TpccKey::MIN) }
+fn inc_key(k: TpccKey) -> TpccKey {
+    k.checked_add(1).unwrap_or(TpccKey::MAX)
+}
+fn dec_key(k: TpccKey) -> TpccKey {
+    k.checked_sub(1).unwrap_or(TpccKey::MIN)
+}
 
 impl TpccDatabase {
     /// Same as `new_with_big_tree_size`, at `BigTreeSize::default()`
@@ -513,15 +557,23 @@ impl TpccDatabase {
         flush_interval: std::time::Duration,
     ) -> std::io::Result<Self> {
         Self::new_with_big_tree_size_and_max_workers_and_wal(
-            root_index_type, BigTreeSize::default(),
+            root_index_type,
+            BigTreeSize::default(),
             crate::mv_tree::mvbt::default_max_workers(),
-            wal_path, flush_interval, None,
+            wal_path,
+            flush_interval,
+            None,
         )
     }
 
-    pub fn new_with_big_tree_size(root_index_type: RootIndexType, big_tree_size: BigTreeSize) -> Self {
+    pub fn new_with_big_tree_size(
+        root_index_type: RootIndexType,
+        big_tree_size: BigTreeSize,
+    ) -> Self {
         Self::new_with_big_tree_size_and_max_workers(
-            root_index_type, big_tree_size, crate::mv_tree::mvbt::default_max_workers(),
+            root_index_type,
+            big_tree_size,
+            crate::mv_tree::mvbt::default_max_workers(),
         )
     }
 
@@ -531,11 +583,20 @@ impl TpccDatabase {
         max_workers: usize,
     ) -> Self {
         let db = Database::new_with_max_workers(
-            root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX, max_workers,
+            root_index_type,
+            inc_key,
+            dec_key,
+            TpccKey::MIN,
+            TpccKey::MAX,
+            max_workers,
         );
         let table_ids = Self::create_all_tables(&db);
         let big_trees = Self::make_big_trees(root_index_type, &db, big_tree_size, None);
-        Self { db, table_ids, big_trees }
+        Self {
+            db,
+            table_ids,
+            big_trees,
+        }
     }
 
     pub fn new_with_big_tree_size_and_max_workers_and_wal(
@@ -548,17 +609,34 @@ impl TpccDatabase {
     ) -> std::io::Result<Self> {
         let db = match lockfree_batch_size {
             Some(batch_size) => Database::new_with_max_workers_and_wal_lockfree(
-                root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
-                max_workers, wal_path, flush_interval, batch_size,
+                root_index_type,
+                inc_key,
+                dec_key,
+                TpccKey::MIN,
+                TpccKey::MAX,
+                max_workers,
+                wal_path,
+                flush_interval,
+                batch_size,
             )?,
             None => Database::new_with_max_workers_and_wal(
-                root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
-                max_workers, wal_path, flush_interval,
+                root_index_type,
+                inc_key,
+                dec_key,
+                TpccKey::MIN,
+                TpccKey::MAX,
+                max_workers,
+                wal_path,
+                flush_interval,
             )?,
         };
         let table_ids = Self::create_all_tables(&db);
         let big_trees = Self::make_big_trees(root_index_type, &db, big_tree_size, None);
-        Ok(Self { db, table_ids, big_trees })
+        Ok(Self {
+            db,
+            table_ids,
+            big_trees,
+        })
     }
 
     /// Creates every one of the 12 *standard-class* tables (see
@@ -575,11 +653,14 @@ impl TpccDatabase {
     /// `make_big_trees` and never touch `db.create_table` at all, so their
     /// existence can't shift any standard table's `TableId` regardless of
     /// which order this loop visits `Table::ALL` in.
-    fn create_all_tables(db: &Database<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>) -> [TableId; 14] {
+    fn create_all_tables(
+        db: &Database<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>,
+    ) -> [TableId; 14] {
         let mut table_ids = [0 as TableId; 14];
         for t in Table::ALL {
             if t.class() == TreeClass::Standard {
-                table_ids[t as usize] = db.create_table(t.as_str())
+                table_ids[t as usize] = db
+                    .create_table(t.as_str())
                     .table_id()
                     .expect("mv_db::Database::create_table always assigns its new table a TableId");
             }
@@ -607,23 +688,85 @@ impl TpccDatabase {
             ($ty:ty) => {
                 (
                     Arc::new(<$ty>::make_with_shared_ctx(
-                        root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
-                        ctx.clone(), Some(WAREHOUSE_BIG_TABLE_ID), wal.clone())),
+                        root_index_type,
+                        inc_key,
+                        dec_key,
+                        TpccKey::MIN,
+                        TpccKey::MAX,
+                        ctx.clone(),
+                        Some(WAREHOUSE_BIG_TABLE_ID),
+                        wal.clone(),
+                    )),
                     Arc::new(<$ty>::make_with_shared_ctx(
-                        root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
-                        ctx, Some(DISTRICT_BIG_TABLE_ID), wal.clone())),
+                        root_index_type,
+                        inc_key,
+                        dec_key,
+                        TpccKey::MIN,
+                        TpccKey::MAX,
+                        ctx,
+                        Some(DISTRICT_BIG_TABLE_ID),
+                        wal.clone(),
+                    )),
                 )
             };
         }
         match size {
-            BigTreeSize::KiB1 => { let (warehouse, district) = build!(TpccBigTreeKiB1); BigTrees::KiB1 { warehouse, district } }
-            BigTreeSize::KiB2 => { let (warehouse, district) = build!(TpccBigTreeKiB2); BigTrees::KiB2 { warehouse, district } }
-            BigTreeSize::KiB4 => { let (warehouse, district) = build!(TpccBigTreeKiB4); BigTrees::KiB4 { warehouse, district } }
-            BigTreeSize::KiB8 => { let (warehouse, district) = build!(TpccBigTreeKiB8); BigTrees::KiB8 { warehouse, district } }
-            BigTreeSize::KiB16 => { let (warehouse, district) = build!(TpccBigTreeKiB16); BigTrees::KiB16 { warehouse, district } }
-            BigTreeSize::KiB32 => { let (warehouse, district) = build!(TpccBigTreeKiB32); BigTrees::KiB32 { warehouse, district } }
-            BigTreeSize::KiB64 => { let (warehouse, district) = build!(TpccBigTreeKiB64); BigTrees::KiB64 { warehouse, district } }
-            BigTreeSize::KiB512 => { let (warehouse, district) = build!(TpccBigTreeKiB512); BigTrees::KiB512 { warehouse, district } }
+            BigTreeSize::KiB1 => {
+                let (warehouse, district) = build!(TpccBigTreeKiB1);
+                BigTrees::KiB1 {
+                    warehouse,
+                    district,
+                }
+            }
+            BigTreeSize::KiB2 => {
+                let (warehouse, district) = build!(TpccBigTreeKiB2);
+                BigTrees::KiB2 {
+                    warehouse,
+                    district,
+                }
+            }
+            BigTreeSize::KiB4 => {
+                let (warehouse, district) = build!(TpccBigTreeKiB4);
+                BigTrees::KiB4 {
+                    warehouse,
+                    district,
+                }
+            }
+            BigTreeSize::KiB8 => {
+                let (warehouse, district) = build!(TpccBigTreeKiB8);
+                BigTrees::KiB8 {
+                    warehouse,
+                    district,
+                }
+            }
+            BigTreeSize::KiB16 => {
+                let (warehouse, district) = build!(TpccBigTreeKiB16);
+                BigTrees::KiB16 {
+                    warehouse,
+                    district,
+                }
+            }
+            BigTreeSize::KiB32 => {
+                let (warehouse, district) = build!(TpccBigTreeKiB32);
+                BigTrees::KiB32 {
+                    warehouse,
+                    district,
+                }
+            }
+            BigTreeSize::KiB64 => {
+                let (warehouse, district) = build!(TpccBigTreeKiB64);
+                BigTrees::KiB64 {
+                    warehouse,
+                    district,
+                }
+            }
+            BigTreeSize::KiB512 => {
+                let (warehouse, district) = build!(TpccBigTreeKiB512);
+                BigTrees::KiB512 {
+                    warehouse,
+                    district,
+                }
+            }
         }
     }
 
@@ -637,14 +780,38 @@ impl TpccDatabase {
     /// `Table::Warehouse`/`Table::District`.
     pub(crate) fn dispatch_big<Op: BigTreeOp>(&self, table: Table, op: Op) -> Op::Output {
         match &self.big_trees {
-            BigTrees::KiB1 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::KiB2 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::KiB4 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::KiB8 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::KiB16 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::KiB32 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::KiB64 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
-            BigTrees::KiB512 { warehouse, district } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB1 {
+                warehouse,
+                district,
+            } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB2 {
+                warehouse,
+                district,
+            } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB4 {
+                warehouse,
+                district,
+            } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB8 {
+                warehouse,
+                district,
+            } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB16 {
+                warehouse,
+                district,
+            } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB32 {
+                warehouse,
+                district,
+            } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB64 {
+                warehouse,
+                district,
+            } => op.run(pick_big(table, warehouse, district)),
+            BigTrees::KiB512 {
+                warehouse,
+                district,
+            } => op.run(pick_big(table, warehouse, district)),
         }
     }
 
@@ -655,9 +822,13 @@ impl TpccDatabase {
     /// for those instead.
     #[inline(always)]
     pub fn tree_for(&self, table: Table) -> Arc<TpccTree> {
-        assert_eq!(table.class(), TreeClass::Standard,
-            "TpccDatabase::tree_for: {table:?} is a TreeClass::Big table — use dispatch_big instead");
-        self.db.table(self.table_ids[table as usize])
+        assert_eq!(
+            table.class(),
+            TreeClass::Standard,
+            "TpccDatabase::tree_for: {table:?} is a TreeClass::Big table — use dispatch_big instead"
+        );
+        self.db
+            .table(self.table_ids[table as usize])
             .expect("TpccDatabase creates every standard-class Table::ALL entry at construction")
     }
 
@@ -678,42 +849,186 @@ impl TpccDatabase {
     pub fn enable_gc(&self, update_in_place: bool) {
         self.db.enable_gc(update_in_place);
         match &self.big_trees {
-            BigTrees::KiB1 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::KiB2 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::KiB4 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::KiB8 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::KiB16 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::KiB32 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::KiB64 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
-            BigTrees::KiB512 { warehouse, district } => { warehouse.enable_gc(update_in_place); district.enable_gc(update_in_place); }
+            BigTrees::KiB1 {
+                warehouse,
+                district,
+            } => {
+                warehouse.enable_gc(update_in_place);
+                district.enable_gc(update_in_place);
+            }
+            BigTrees::KiB2 {
+                warehouse,
+                district,
+            } => {
+                warehouse.enable_gc(update_in_place);
+                district.enable_gc(update_in_place);
+            }
+            BigTrees::KiB4 {
+                warehouse,
+                district,
+            } => {
+                warehouse.enable_gc(update_in_place);
+                district.enable_gc(update_in_place);
+            }
+            BigTrees::KiB8 {
+                warehouse,
+                district,
+            } => {
+                warehouse.enable_gc(update_in_place);
+                district.enable_gc(update_in_place);
+            }
+            BigTrees::KiB16 {
+                warehouse,
+                district,
+            } => {
+                warehouse.enable_gc(update_in_place);
+                district.enable_gc(update_in_place);
+            }
+            BigTrees::KiB32 {
+                warehouse,
+                district,
+            } => {
+                warehouse.enable_gc(update_in_place);
+                district.enable_gc(update_in_place);
+            }
+            BigTrees::KiB64 {
+                warehouse,
+                district,
+            } => {
+                warehouse.enable_gc(update_in_place);
+                district.enable_gc(update_in_place);
+            }
+            BigTrees::KiB512 {
+                warehouse,
+                district,
+            } => {
+                warehouse.enable_gc(update_in_place);
+                district.enable_gc(update_in_place);
+            }
         }
     }
 
     pub fn disable_gc(&self) {
         self.db.disable_gc();
         match &self.big_trees {
-            BigTrees::KiB1 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::KiB2 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::KiB4 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::KiB8 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::KiB16 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::KiB32 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::KiB64 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
-            BigTrees::KiB512 { warehouse, district } => { warehouse.disable_gc(); district.disable_gc(); }
+            BigTrees::KiB1 {
+                warehouse,
+                district,
+            } => {
+                warehouse.disable_gc();
+                district.disable_gc();
+            }
+            BigTrees::KiB2 {
+                warehouse,
+                district,
+            } => {
+                warehouse.disable_gc();
+                district.disable_gc();
+            }
+            BigTrees::KiB4 {
+                warehouse,
+                district,
+            } => {
+                warehouse.disable_gc();
+                district.disable_gc();
+            }
+            BigTrees::KiB8 {
+                warehouse,
+                district,
+            } => {
+                warehouse.disable_gc();
+                district.disable_gc();
+            }
+            BigTrees::KiB16 {
+                warehouse,
+                district,
+            } => {
+                warehouse.disable_gc();
+                district.disable_gc();
+            }
+            BigTrees::KiB32 {
+                warehouse,
+                district,
+            } => {
+                warehouse.disable_gc();
+                district.disable_gc();
+            }
+            BigTrees::KiB64 {
+                warehouse,
+                district,
+            } => {
+                warehouse.disable_gc();
+                district.disable_gc();
+            }
+            BigTrees::KiB512 {
+                warehouse,
+                district,
+            } => {
+                warehouse.disable_gc();
+                district.disable_gc();
+            }
         }
     }
 
     pub fn truncate_commit_log(&self, enabled: bool) {
         self.db.allow_historic_query(enabled);
         match &self.big_trees {
-            BigTrees::KiB1 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::KiB2 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::KiB4 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::KiB8 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::KiB16 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::KiB32 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::KiB64 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
-            BigTrees::KiB512 { warehouse, district } => { warehouse.allow_historic_query(enabled); district.allow_historic_query(enabled); }
+            BigTrees::KiB1 {
+                warehouse,
+                district,
+            } => {
+                warehouse.allow_historic_query(enabled);
+                district.allow_historic_query(enabled);
+            }
+            BigTrees::KiB2 {
+                warehouse,
+                district,
+            } => {
+                warehouse.allow_historic_query(enabled);
+                district.allow_historic_query(enabled);
+            }
+            BigTrees::KiB4 {
+                warehouse,
+                district,
+            } => {
+                warehouse.allow_historic_query(enabled);
+                district.allow_historic_query(enabled);
+            }
+            BigTrees::KiB8 {
+                warehouse,
+                district,
+            } => {
+                warehouse.allow_historic_query(enabled);
+                district.allow_historic_query(enabled);
+            }
+            BigTrees::KiB16 {
+                warehouse,
+                district,
+            } => {
+                warehouse.allow_historic_query(enabled);
+                district.allow_historic_query(enabled);
+            }
+            BigTrees::KiB32 {
+                warehouse,
+                district,
+            } => {
+                warehouse.allow_historic_query(enabled);
+                district.allow_historic_query(enabled);
+            }
+            BigTrees::KiB64 {
+                warehouse,
+                district,
+            } => {
+                warehouse.allow_historic_query(enabled);
+                district.allow_historic_query(enabled);
+            }
+            BigTrees::KiB512 {
+                warehouse,
+                district,
+            } => {
+                warehouse.allow_historic_query(enabled);
+                district.allow_historic_query(enabled);
+            }
         }
     }
 
@@ -744,7 +1059,12 @@ impl TpccDatabase {
         wal_path: &std::path::Path,
         flush_interval: std::time::Duration,
     ) -> std::io::Result<Self> {
-        Self::open_recovered_with_big_tree_size(root_index_type, wal_path, flush_interval, BigTreeSize::default())
+        Self::open_recovered_with_big_tree_size(
+            root_index_type,
+            wal_path,
+            flush_interval,
+            BigTreeSize::default(),
+        )
     }
 
     pub fn open_recovered_with_big_tree_size(
@@ -754,8 +1074,13 @@ impl TpccDatabase {
         big_tree_size: BigTreeSize,
     ) -> std::io::Result<Self> {
         let db = Database::open_recovered(
-            root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
-            wal_path, flush_interval,
+            root_index_type,
+            inc_key,
+            dec_key,
+            TpccKey::MIN,
+            TpccKey::MAX,
+            wal_path,
+            flush_interval,
         )?;
         let table_ids = Self::create_all_tables(&db);
 
@@ -768,14 +1093,20 @@ impl TpccDatabase {
         // (now-stable) prefix finds the identical valid length — nothing
         // left to truncate again here.
         let mut big_trees = Self::make_big_trees(
-            root_index_type, &db, big_tree_size,
+            root_index_type,
+            &db,
+            big_tree_size,
             Some(Arc::new(WalBackend::Off)),
         );
         let writer = db.wal_writer();
         macro_rules! replay_and_configure {
             ($warehouse:expr, $district:expr) => {{
                 crate::mv_wal::recovery::replay_two_tables(
-                    &$warehouse, WAREHOUSE_BIG_TABLE_ID, &$district, DISTRICT_BIG_TABLE_ID, wal_path,
+                    &$warehouse,
+                    WAREHOUSE_BIG_TABLE_ID,
+                    &$district,
+                    DISTRICT_BIG_TABLE_ID,
+                    wal_path,
                 )?;
                 Arc::get_mut($warehouse)
                     .expect("big tree must be unshared during recovery construction")
@@ -786,19 +1117,46 @@ impl TpccDatabase {
             }};
         }
         match &mut big_trees {
-            BigTrees::KiB1 { warehouse, district } => replay_and_configure!(warehouse, district),
-            BigTrees::KiB2 { warehouse, district } => replay_and_configure!(warehouse, district),
-            BigTrees::KiB4 { warehouse, district } => replay_and_configure!(warehouse, district),
-            BigTrees::KiB8 { warehouse, district } => replay_and_configure!(warehouse, district),
-            BigTrees::KiB16 { warehouse, district } => replay_and_configure!(warehouse, district),
-            BigTrees::KiB32 { warehouse, district } => replay_and_configure!(warehouse, district),
-            BigTrees::KiB64 { warehouse, district } => replay_and_configure!(warehouse, district),
-            BigTrees::KiB512 { warehouse, district } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB1 {
+                warehouse,
+                district,
+            } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB2 {
+                warehouse,
+                district,
+            } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB4 {
+                warehouse,
+                district,
+            } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB8 {
+                warehouse,
+                district,
+            } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB16 {
+                warehouse,
+                district,
+            } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB32 {
+                warehouse,
+                district,
+            } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB64 {
+                warehouse,
+                district,
+            } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB512 {
+                warehouse,
+                district,
+            } => replay_and_configure!(warehouse, district),
         }
 
-        Ok(Self { db, table_ids, big_trees })
+        Ok(Self {
+            db,
+            table_ids,
+            big_trees,
+        })
     }
-
 }
 
 // ---------------------------------------------------------------------
@@ -816,14 +1174,30 @@ fn full_range() -> Interval<TpccKey> {
     Interval::new(TpccKey::MIN, TpccKey::MAX)
 }
 
-pub fn warehouse_table_range() -> Interval<TpccKey> { full_range() }
-pub fn district_table_range() -> Interval<TpccKey> { full_range() }
-pub fn order_line_table_range() -> Interval<TpccKey> { full_range() }
-pub fn stock_table_range() -> Interval<TpccKey> { full_range() }
-pub fn orders_table_range() -> Interval<TpccKey> { full_range() }
-pub fn supplier_table_range() -> Interval<TpccKey> { full_range() }
-pub fn nation_table_range() -> Interval<TpccKey> { full_range() }
-pub fn region_table_range() -> Interval<TpccKey> { full_range() }
+pub fn warehouse_table_range() -> Interval<TpccKey> {
+    full_range()
+}
+pub fn district_table_range() -> Interval<TpccKey> {
+    full_range()
+}
+pub fn order_line_table_range() -> Interval<TpccKey> {
+    full_range()
+}
+pub fn stock_table_range() -> Interval<TpccKey> {
+    full_range()
+}
+pub fn orders_table_range() -> Interval<TpccKey> {
+    full_range()
+}
+pub fn supplier_table_range() -> Interval<TpccKey> {
+    full_range()
+}
+pub fn nation_table_range() -> Interval<TpccKey> {
+    full_range()
+}
+pub fn region_table_range() -> Interval<TpccKey> {
+    full_range()
+}
 
 // ---------------------------------------------------------------------
 // Key builders
@@ -832,11 +1206,11 @@ pub fn region_table_range() -> Interval<TpccKey> { full_range() }
 // Bit widths for primary-key columns, generous but not maximal: sized for
 // benchmark-scale runs (hundreds of warehouses, tens of millions of orders),
 // not the TPC-C spec's audited maximums.
-const D_ID_BITS: u32 = 4;   // districts/warehouse (spec: 10)
-const C_ID_BITS: u32 = 16;  // customers/district (spec: 3,000)
-const O_ID_BITS: u32 = 32;  // orders/district over the whole run (grows unboundedly)
-const OL_NO_BITS: u32 = 4;  // order-lines/order (spec: 5-15)
-const I_ID_BITS: u32 = 24;  // items (spec: 100,000)
+const D_ID_BITS: u32 = 4; // districts/warehouse (spec: 10)
+const C_ID_BITS: u32 = 16; // customers/district (spec: 3,000)
+const O_ID_BITS: u32 = 32; // orders/district over the whole run (grows unboundedly)
+const OL_NO_BITS: u32 = 4; // order-lines/order (spec: 5-15)
+const I_ID_BITS: u32 = 24; // items (spec: 100,000)
 const LAST_CODE_BITS: u32 = 10; // C_LAST syllable code, exactly 0..=999
 const FIRST_CODE_BITS: u32 = 16; // ordinal surrogate for c_first, tie-break only
 
@@ -852,13 +1226,17 @@ pub const fn k_district(w_id: u32, d_id: u8) -> TpccKey {
 
 #[inline(always)]
 pub const fn k_customer(w_id: u32, d_id: u8, c_id: u32) -> TpccKey {
-    ((w_id as u64) << (D_ID_BITS + C_ID_BITS))
-        | ((d_id as u64) << C_ID_BITS)
-        | c_id as u64
+    ((w_id as u64) << (D_ID_BITS + C_ID_BITS)) | ((d_id as u64) << C_ID_BITS) | c_id as u64
 }
 
 #[inline(always)]
-pub const fn k_customer_name_idx(w_id: u32, d_id: u8, last_code: u16, first_code: u16, c_id: u32) -> TpccKey {
+pub const fn k_customer_name_idx(
+    w_id: u32,
+    d_id: u8,
+    last_code: u16,
+    first_code: u16,
+    c_id: u32,
+) -> TpccKey {
     ((w_id as u64) << (D_ID_BITS + LAST_CODE_BITS + FIRST_CODE_BITS + C_ID_BITS))
         | ((d_id as u64) << (LAST_CODE_BITS + FIRST_CODE_BITS + C_ID_BITS))
         | ((last_code as u64) << (FIRST_CODE_BITS + C_ID_BITS))
@@ -869,9 +1247,15 @@ pub const fn k_customer_name_idx(w_id: u32, d_id: u8, last_code: u16, first_code
 /// `[lower, upper]` bounds covering every `(first_code, c_id)` for a fixed
 /// `(w_id, d_id, last_code)` prefix — used by Payment/OrderStatus's "by last
 /// name" lookup.
-pub const fn k_customer_name_idx_prefix_bounds(w_id: u32, d_id: u8, last_code: u16) -> (TpccKey, TpccKey) {
-    (k_customer_name_idx(w_id, d_id, last_code, 0, 0),
-     k_customer_name_idx(w_id, d_id, last_code, u16::MAX, (1 << C_ID_BITS) - 1))
+pub const fn k_customer_name_idx_prefix_bounds(
+    w_id: u32,
+    d_id: u8,
+    last_code: u16,
+) -> (TpccKey, TpccKey) {
+    (
+        k_customer_name_idx(w_id, d_id, last_code, 0, 0),
+        k_customer_name_idx(w_id, d_id, last_code, u16::MAX, (1 << C_ID_BITS) - 1),
+    )
 }
 
 /// Extracts `c_id` back out of a customer-name-index key (the low
@@ -894,9 +1278,7 @@ pub const fn k_stock(w_id: u32, i_id: u32) -> TpccKey {
 
 #[inline(always)]
 pub const fn k_order(w_id: u32, d_id: u8, o_id: u32) -> TpccKey {
-    ((w_id as u64) << (D_ID_BITS + O_ID_BITS))
-        | ((d_id as u64) << O_ID_BITS)
-        | o_id as u64
+    ((w_id as u64) << (D_ID_BITS + O_ID_BITS)) | ((d_id as u64) << O_ID_BITS) | o_id as u64
 }
 
 /// Decodes an ORDERS-table key back into `(w_id, d_id, o_id)` — the inverse
@@ -912,15 +1294,16 @@ pub const fn decode_order_key(key: TpccKey) -> (u32, u8, u32) {
 
 #[inline(always)]
 pub const fn k_new_order(w_id: u32, d_id: u8, o_id: u32) -> TpccKey {
-    ((w_id as u64) << (D_ID_BITS + O_ID_BITS))
-        | ((d_id as u64) << O_ID_BITS)
-        | o_id as u64
+    ((w_id as u64) << (D_ID_BITS + O_ID_BITS)) | ((d_id as u64) << O_ID_BITS) | o_id as u64
 }
 
 /// `[lower, upper]` bounds covering every `o_id` for a fixed `(w_id, d_id)` —
 /// the Delivery transaction's "find the oldest queued new-order" scan.
 pub const fn k_new_order_district_bounds(w_id: u32, d_id: u8) -> (TpccKey, TpccKey) {
-    (k_new_order(w_id, d_id, 0), k_new_order(w_id, d_id, u32::MAX))
+    (
+        k_new_order(w_id, d_id, 0),
+        k_new_order(w_id, d_id, u32::MAX),
+    )
 }
 
 #[inline(always)]
@@ -943,7 +1326,10 @@ pub const fn k_order_line(w_id: u32, d_id: u8, o_id: u32, ol_number: u8) -> Tpcc
 /// subsequent orders' order-lines happen to fall in that widened range.
 pub const fn k_order_line_bounds(w_id: u32, d_id: u8, o_id: u32) -> (TpccKey, TpccKey) {
     const MAX_OL_NUMBER: u8 = (1u8 << OL_NO_BITS) - 1;
-    (k_order_line(w_id, d_id, o_id, 0), k_order_line(w_id, d_id, o_id, MAX_OL_NUMBER))
+    (
+        k_order_line(w_id, d_id, o_id, 0),
+        k_order_line(w_id, d_id, o_id, MAX_OL_NUMBER),
+    )
 }
 
 /// Extracts `ol_number` (the low `OL_NO_BITS` bits) back out of an
@@ -956,9 +1342,7 @@ pub const fn decode_order_line_number(key: TpccKey) -> u8 {
 
 #[inline(always)]
 pub const fn k_cust_last_order(w_id: u32, d_id: u8, c_id: u32) -> TpccKey {
-    ((w_id as u64) << (D_ID_BITS + C_ID_BITS))
-        | ((d_id as u64) << C_ID_BITS)
-        | c_id as u64
+    ((w_id as u64) << (D_ID_BITS + C_ID_BITS)) | ((d_id as u64) << C_ID_BITS) | c_id as u64
 }
 
 #[inline(always)]
@@ -1193,36 +1577,69 @@ impl Display for TpccRow {
 // TpccRow everywhere.
 impl TpccRow {
     pub fn as_warehouse(&self) -> &Warehouse {
-        match self { TpccRow::Warehouse(w) => w, _ => panic!("expected Warehouse row") }
+        match self {
+            TpccRow::Warehouse(w) => w,
+            _ => panic!("expected Warehouse row"),
+        }
     }
     pub fn as_district(&self) -> &District {
-        match self { TpccRow::District(d) => d, _ => panic!("expected District row") }
+        match self {
+            TpccRow::District(d) => d,
+            _ => panic!("expected District row"),
+        }
     }
     pub fn as_customer(&self) -> &Customer {
-        match self { TpccRow::Customer(c) => c, _ => panic!("expected Customer row") }
+        match self {
+            TpccRow::Customer(c) => c,
+            _ => panic!("expected Customer row"),
+        }
     }
     pub fn as_order(&self) -> &Order {
-        match self { TpccRow::Order(o) => o, _ => panic!("expected Order row") }
+        match self {
+            TpccRow::Order(o) => o,
+            _ => panic!("expected Order row"),
+        }
     }
     pub fn as_order_line(&self) -> &OrderLine {
-        match self { TpccRow::OrderLine(ol) => ol, _ => panic!("expected OrderLine row") }
+        match self {
+            TpccRow::OrderLine(ol) => ol,
+            _ => panic!("expected OrderLine row"),
+        }
     }
     pub fn as_item(&self) -> &Item {
-        match self { TpccRow::Item(i) => i, _ => panic!("expected Item row") }
+        match self {
+            TpccRow::Item(i) => i,
+            _ => panic!("expected Item row"),
+        }
     }
     pub fn as_stock(&self) -> &Stock {
-        match self { TpccRow::Stock(s) => s, _ => panic!("expected Stock row") }
+        match self {
+            TpccRow::Stock(s) => s,
+            _ => panic!("expected Stock row"),
+        }
     }
     pub fn as_cust_last_order(&self) -> u32 {
-        match self { TpccRow::CustLastOrder(o_id) => *o_id, _ => panic!("expected CustLastOrder row") }
+        match self {
+            TpccRow::CustLastOrder(o_id) => *o_id,
+            _ => panic!("expected CustLastOrder row"),
+        }
     }
     pub fn as_supplier(&self) -> &Supplier {
-        match self { TpccRow::Supplier(s) => s, _ => panic!("expected Supplier row") }
+        match self {
+            TpccRow::Supplier(s) => s,
+            _ => panic!("expected Supplier row"),
+        }
     }
     pub fn as_nation(&self) -> &Nation {
-        match self { TpccRow::Nation(n) => n, _ => panic!("expected Nation row") }
+        match self {
+            TpccRow::Nation(n) => n,
+            _ => panic!("expected Nation row"),
+        }
     }
     pub fn as_region(&self) -> &Region {
-        match self { TpccRow::Region(r) => r, _ => panic!("expected Region row") }
+        match self {
+            TpccRow::Region(r) => r,
+            _ => panic!("expected Region row"),
+        }
     }
 }

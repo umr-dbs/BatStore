@@ -2,14 +2,278 @@ use crate::mv_page_model::node::{
     Active, Dead, PageLenField, PageLenPrimitive, active_len, dead_len, from_active_dead, from_len,
     from_len_sum,
 };
-use crate::mv_record_model::record_point::RecordPoint;
+use crate::mv_record_model::record_point::{PayloadSlot, RecordPoint};
 use crate::mv_record_model::tx_stamp::TxStamp;
 use crate::mv_record_model::version_info::VersionInfo;
+use std::fmt::{Display, Formatter};
 use std::hash::Hash;
-use std::marker::PhantomData;
-use std::mem::MaybeUninit;
-use std::ptr;
+use std::mem::{ManuallyDrop, MaybeUninit};
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+
+struct LeafData<Payload> {
+    version: VersionInfo,
+    payload: PayloadSlot<Payload>,
+}
+
+const INLINE_VALID_WORDS: usize = 2;
+
+union ValidMaskStorage {
+    inline: ManuallyDrop<[AtomicU64; INLINE_VALID_WORDS]>,
+    heap: ManuallyDrop<Box<[AtomicU64]>>,
+}
+
+/// Keeps the normal 4 KiB leaf's 123 validity bits directly in the page.
+/// The larger experimental TPC-C leaves retain the old out-of-line bitmap,
+/// without making the normal representation larger than two machine words.
+struct ValidMask<const N: usize> {
+    storage: ValidMaskStorage,
+}
+
+impl<const N: usize> ValidMask<N> {
+    const INLINE: bool = N <= INLINE_VALID_WORDS * 64;
+
+    fn new() -> Self {
+        let storage = if Self::INLINE {
+            ValidMaskStorage {
+                inline: ManuallyDrop::new([const { AtomicU64::new(0) }; INLINE_VALID_WORDS]),
+            }
+        } else {
+            ValidMaskStorage {
+                heap: ManuallyDrop::new(
+                    (0..N.div_ceil(64))
+                        .map(|_| AtomicU64::new(0))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+            }
+        };
+        Self { storage }
+    }
+
+    #[inline(always)]
+    fn word(&self, index: usize) -> &AtomicU64 {
+        debug_assert!(index < N.div_ceil(64));
+        unsafe {
+            if Self::INLINE {
+                &self.storage.inline[index]
+            } else {
+                &self.storage.heap[index]
+            }
+        }
+    }
+
+    fn clear(&self) {
+        for index in 0..N.div_ceil(64) {
+            self.word(index).store(0, Release);
+        }
+    }
+}
+
+impl<const N: usize> Drop for ValidMask<N> {
+    fn drop(&mut self) {
+        if !Self::INLINE {
+            unsafe { ManuallyDrop::drop(&mut self.storage.heap) }
+        }
+    }
+}
+
+/// Borrowed, zero-copy view of one structure-of-arrays leaf slot.
+#[derive(Clone, Copy)]
+pub struct LeafRecordRef<'a, Key, Payload> {
+    pub key: Key,
+    pub version: &'a VersionInfo,
+    payload: &'a PayloadSlot<Payload>,
+}
+
+impl<'a, Key: Copy, Payload> LeafRecordRef<'a, Key, Payload> {
+    #[inline(always)]
+    pub const fn key(&self) -> Key {
+        self.key
+    }
+    #[inline(always)]
+    pub const fn version(&self) -> &'a VersionInfo {
+        self.version
+    }
+    #[inline(always)]
+    pub fn payload(&self) -> &'a Payload {
+        self.payload.get()
+    }
+    #[inline(always)]
+    pub(crate) fn payload_slot(&self) -> &'a PayloadSlot<Payload> {
+        self.payload
+    }
+}
+
+impl<Key: Display, Payload> Display for LeafRecordRef<'_, Key, Payload> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RecordPoint(Key: {}, Version: {})",
+            self.key, self.version
+        )
+    }
+}
+
+pub(crate) trait LeafRecordSource<Key, Payload> {
+    fn source_key(&self) -> Key;
+    fn source_version(&self) -> &VersionInfo;
+    fn source_payload_slot(&self) -> &PayloadSlot<Payload>;
+}
+
+impl<Key: Copy, Payload> LeafRecordSource<Key, Payload> for LeafRecordRef<'_, Key, Payload> {
+    #[inline(always)]
+    fn source_key(&self) -> Key {
+        self.key
+    }
+    #[inline(always)]
+    fn source_version(&self) -> &VersionInfo {
+        self.version
+    }
+    #[inline(always)]
+    fn source_payload_slot(&self) -> &PayloadSlot<Payload> {
+        self.payload
+    }
+}
+
+impl<Key: Copy + Ord + Hash + Default, Payload: Clone + Default> LeafRecordSource<Key, Payload>
+    for RecordPoint<Key, Payload>
+{
+    #[inline(always)]
+    fn source_key(&self) -> Key {
+        self.key()
+    }
+    #[inline(always)]
+    fn source_version(&self) -> &VersionInfo {
+        self.version()
+    }
+    #[inline(always)]
+    fn source_payload_slot(&self) -> &PayloadSlot<Payload> {
+        self.payload_slot()
+    }
+}
+
+impl<Key: Copy, Payload, R: LeafRecordSource<Key, Payload>> LeafRecordSource<Key, Payload> for &R {
+    fn source_key(&self) -> Key {
+        (*self).source_key()
+    }
+    fn source_version(&self) -> &VersionInfo {
+        (*self).source_version()
+    }
+    fn source_payload_slot(&self) -> &PayloadSlot<Payload> {
+        (*self).source_payload_slot()
+    }
+}
+
+pub struct LeafRecords<
+    'a,
+    const N: usize,
+    Key: Hash + Ord + Copy + Default,
+    Payload: Clone + Default,
+> {
+    page: &'a LeafPage<N, Key, Payload>,
+}
+impl<'a, const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Copy
+    for LeafRecords<'a, N, Key, Payload>
+{
+}
+impl<'a, const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Clone
+    for LeafRecords<'a, N, Key, Payload>
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, const N: usize, Key, Payload> LeafRecords<'a, N, Key, Payload>
+where
+    Key: Hash + Ord + Copy + Default,
+    Payload: Clone + Default,
+{
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.page.len()
+    }
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    #[inline(always)]
+    pub fn get(&self, index: usize) -> Option<LeafRecordRef<'a, Key, Payload>> {
+        (index < self.len()).then(|| self.page.record(index))
+    }
+    #[inline(always)]
+    pub fn iter(&self) -> LeafRecordIter<'a, N, Key, Payload> {
+        LeafRecordIter {
+            page: self.page,
+            front: 0,
+            back: self.len(),
+        }
+    }
+}
+
+impl<'a, const N: usize, Key, Payload> IntoIterator for LeafRecords<'a, N, Key, Payload>
+where
+    Key: Hash + Ord + Copy + Default,
+    Payload: Clone + Default,
+{
+    type Item = LeafRecordRef<'a, Key, Payload>;
+    type IntoIter = LeafRecordIter<'a, N, Key, Payload>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+pub struct LeafRecordIter<
+    'a,
+    const N: usize,
+    Key: Hash + Ord + Copy + Default,
+    Payload: Clone + Default,
+> {
+    page: &'a LeafPage<N, Key, Payload>,
+    front: usize,
+    back: usize,
+}
+impl<'a, const N: usize, Key, Payload> Iterator for LeafRecordIter<'a, N, Key, Payload>
+where
+    Key: Hash + Ord + Copy + Default,
+    Payload: Clone + Default,
+{
+    type Item = LeafRecordRef<'a, Key, Payload>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.front == self.back {
+            None
+        } else {
+            let i = self.front;
+            self.front += 1;
+            Some(self.page.record(i))
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.back - self.front;
+        (n, Some(n))
+    }
+}
+impl<'a, const N: usize, Key, Payload> DoubleEndedIterator for LeafRecordIter<'a, N, Key, Payload>
+where
+    Key: Hash + Ord + Copy + Default,
+    Payload: Clone + Default,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front == self.back {
+            None
+        } else {
+            self.back -= 1;
+            Some(self.page.record(self.back))
+        }
+    }
+}
+impl<'a, const N: usize, Key, Payload> ExactSizeIterator for LeafRecordIter<'a, N, Key, Payload>
+where
+    Key: Hash + Ord + Copy + Default,
+    Payload: Clone + Default,
+{
+}
 
 pub struct LeafPage<
     const NUM_RECORDS: usize,
@@ -17,581 +281,343 @@ pub struct LeafPage<
     Payload: Clone + Default,
 > {
     pub(crate) len: PageLenField,
-    pub(crate) record_data: [MaybeUninit<RecordPoint<Key, Payload>>; NUM_RECORDS],
-    _marker: PhantomData<[RecordPoint<Key, Payload>]>,
+    key_region: [MaybeUninit<Key>; NUM_RECORDS],
+    data_region: [MaybeUninit<LeafData<Payload>>; NUM_RECORDS],
+    /// One atomic bit per physical slot. Set means the insertion stamp is
+    /// not invalidated. This is deliberately not an MVCC visibility mask.
+    valid_mask: ValidMask<NUM_RECORDS>,
 }
 
-impl<const NUM_RECORDS: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Clone
-    for LeafPage<NUM_RECORDS, Key, Payload>
+impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Default
+    for LeafPage<N, Key, Payload>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Clone
+    for LeafPage<N, Key, Payload>
 {
     fn clone(&self) -> Self {
         Self::from(self)
     }
 }
-
-impl<const NUM_RECORDS: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Default
-    for LeafPage<NUM_RECORDS, Key, Payload>
-{
-    fn default() -> Self {
-        LeafPage::new()
-    }
-}
-
-impl<const NUM_RECORDS: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Drop
-    for LeafPage<NUM_RECORDS, Key, Payload>
+impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Drop
+    for LeafPage<N, Key, Payload>
 {
     fn drop(&mut self) {
-        self.as_records_mut().iter_mut().for_each(|record| unsafe {
-            (record as *mut RecordPoint<Key, Payload>).drop_in_place()
-        })
+        self.drop_records(self.len())
     }
 }
 
-impl<const NUM_RECORDS: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
-    LeafPage<NUM_RECORDS, Key, Payload>
+impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
+    LeafPage<N, Key, Payload>
 {
-    #[inline]
-    pub(crate) fn from(leaf_page: &Self) -> Self {
-        let mut new_page = Self::new();
-
-        unsafe {
-            leaf_page
-                .as_records()
-                .iter()
-                .enumerate()
-                .for_each(|(index, record)| {
-                    new_page
-                    .record_data
-                    .as_mut_ptr()
-                    .add(index)
-                    .write(MaybeUninit::new((*record).clone()))
-                });
-        }
-
-        let (active, dead) = leaf_page.active_dead_count();
-
-        new_page.len.store(from_active_dead(active, dead), Release);
-
-        new_page
+    pub(crate) fn from(other: &Self) -> Self {
+        let mut p = Self::new();
+        let records: Vec<_> = other.as_records().iter().collect();
+        p.bulk_push(records);
+        p
     }
-
-    #[inline(always)]
-    pub const fn new() -> Self {
-        // debug_assert!(mem::size_of::<Len>() +
-        //                   mem::size_of::<[RecordPoint<Key, Payload>; NUM_RECORDS]>()
-        //                   <= 4096, "FAN_OUT Invalid!");
+    #[inline]
+    pub fn new() -> Self {
         Self {
             len: PageLenField::new(0),
-            record_data: unsafe { MaybeUninit::uninit().assume_init() }, // <[MaybeUninit<Entry>; NUM_RECORDS]>::
-            _marker: PhantomData,
+            key_region: unsafe { MaybeUninit::uninit().assume_init() },
+            data_region: unsafe { MaybeUninit::uninit().assume_init() },
+            valid_mask: ValidMask::new(),
         }
     }
-
-    #[inline(always)]
-    pub fn as_records(&self) -> &[RecordPoint<Key, Payload>] {
-        unsafe {
-            std::slice::from_raw_parts(
-                self.record_data.as_ptr() as *const RecordPoint<Key, Payload>,
-                self.len(),
-            )
-        }
-    }
-
-    #[inline(always)]
-    pub fn as_records_mut(&mut self) -> &mut [RecordPoint<Key, Payload>] {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.record_data.as_mut_ptr() as *mut _, self.len())
-        }
-    }
-
-    #[inline(always)]
-    pub fn as_records_uncommitted_mut(&mut self) -> &mut [RecordPoint<Key, Payload>] {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.record_data.as_mut_ptr() as *mut _, self.len() + 1)
-        }
-        }
-
-    /// Position of the physically newest version for `key`. Callers that
-    /// need to ignore aborted versions can request that in the same reverse
-    /// pass, avoiding a second search for update eligibility/mutation.
-    #[inline(always)]
-    pub(crate) fn latest_position(&self, key: Key, skip_invalid: bool) -> Option<usize> {
-        self.as_records().iter().rposition(|record| {
-            record.key() == key && (!skip_invalid || !record.version.insertion_stamp().is_invalid())
-        })
-    }
-
     #[inline(always)]
     pub fn len(&self) -> usize {
-        let len = self.len.load(Acquire) as _;
-        // Pairs with the `fence(Release)` before every `len` store in this
-        // file (`bulk_push`/`bulk_push_from_slice_ref`/`commit_delta`/
-        // `from`) — without it, a reader that observes a bumped `len` isn't
-        // guaranteed to see the record-data writes that preceded it (see
-        // `mv_query::query::traverse_read_key`'s doc for the crash this
-        // gap allowed once page reuse made it frequent enough to hit).
-        // fence(Acquire);
-
-        from_len_sum(len)
+        from_len_sum(self.len.load(Acquire))
     }
-
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
     #[inline(always)]
     pub fn is_full(&self) -> bool {
-        self.len() == NUM_RECORDS
+        self.len() == N
     }
-
     #[inline(always)]
     pub fn active_dead_count(&self) -> (Active, Dead) {
         from_len(self.len.load(Acquire))
     }
-
     #[inline(always)]
-    pub fn active_dead_invalid(&self) -> (PageLenPrimitive, Active, Dead) {
-        self.as_records()
+    pub fn keys(&self) -> &[Key] {
+        unsafe { std::slice::from_raw_parts(self.key_region.as_ptr() as *const Key, self.len()) }
+    }
+    #[inline(always)]
+    fn data(&self) -> &[LeafData<Payload>] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.data_region.as_ptr() as *const LeafData<Payload>,
+                self.len(),
+            )
+        }
+    }
+    #[inline(always)]
+    fn data_mut(&mut self) -> &mut [LeafData<Payload>] {
+        let n = self.len();
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.data_region.as_mut_ptr() as *mut LeafData<Payload>,
+                n,
+            )
+        }
+    }
+    #[inline(always)]
+    pub fn as_records(&self) -> LeafRecords<'_, N, Key, Payload> {
+        LeafRecords { page: self }
+    }
+    #[inline(always)]
+    pub fn record(&self, index: usize) -> LeafRecordRef<'_, Key, Payload> {
+        let d = &self.data()[index];
+        LeafRecordRef {
+            key: self.keys()[index],
+            version: &d.version,
+            payload: &d.payload,
+        }
+    }
+    #[inline(always)]
+    pub fn version_at(&self, index: usize) -> &VersionInfo {
+        &self.data()[index].version
+    }
+    #[inline(always)]
+    pub fn version_mut_at(&mut self, index: usize) -> &mut VersionInfo {
+        &mut self.data_mut()[index].version
+    }
+    #[inline(always)]
+    pub fn payload_at(&self, index: usize) -> &Payload {
+        self.data()[index].payload.get()
+    }
+    #[inline(always)]
+    pub fn set_payload_at(&mut self, index: usize, payload: Payload) {
+        self.data_mut()[index].payload.set(payload)
+    }
+    #[inline(always)]
+    fn bit_is_valid(&self, index: usize) -> bool {
+        self.valid_mask.word(index / 64).load(Acquire) & (1u64 << (index % 64)) != 0
+    }
+    #[inline(always)]
+    fn set_valid(&self, index: usize, valid: bool) {
+        let bit = 1u64 << (index % 64);
+        if valid {
+            self.valid_mask.word(index / 64).fetch_or(bit, Release);
+        } else {
+            self.valid_mask.word(index / 64).fetch_and(!bit, Release);
+        }
+    }
+    #[inline(always)]
+    pub(crate) fn latest_position(&self, key: Key, skip_invalid: bool) -> Option<usize> {
+        self.keys()
             .iter()
-            .fold((0, 0, 0), |(active, dead, invalid), record| {
-            if !record.version.is_deleted() && !record.version.insertion_stamp().is_invalid() {
-                (active + 1, dead, invalid)
-                } else if record.version.is_deleted()
-                    && !record.version.insertion_stamp().is_invalid()
-                {
-                (active, dead + 1, invalid)
+            .enumerate()
+            .rfind(|(i, k)| **k == key && (!skip_invalid || self.bit_is_valid(*i)))
+            .map(|(i, _)| i)
+    }
+    pub fn active_dead_invalid(&self) -> (PageLenPrimitive, Active, Dead) {
+        self.data().iter().fold((0, 0, 0), |(a, d, i), r| {
+            if !r.version.is_deleted() && !r.version.insertion_stamp().is_invalid() {
+                (a + 1, d, i)
+            } else if r.version.is_deleted() && !r.version.insertion_stamp().is_invalid() {
+                (a, d + 1, i)
             } else {
-                (active, dead, invalid + 1)
+                (a, d, i + 1)
             }
         })
     }
-
-    #[inline]
     pub fn push_uncommitted(&mut self, record: RecordPoint<Key, Payload>, index: usize) {
-        // A real `assert!`, not `debug_assert!` (this profile has
-        // `debug-assertions = false`, so that never actually ran) — same
-        // fix `InternalPage::push_uncommitted` already has for the
-        // identical hazard: without it, `index == NUM_RECORDS` writes past
-        // the end of `record_data` via a raw, unchecked pointer store,
-        // landing in whatever's next in `OptCell`'s own layout
-        // (`cell_version`, immediately after this whole block — see
-        // `RETIRED_FLAG_VERSION`'s doc) instead of failing loudly here.
         assert!(
-            index < NUM_RECORDS,
-            "LeafPage::push_uncommitted: index {index} out of bounds for NUM_RECORDS={NUM_RECORDS}"
+            index < N,
+            "LeafPage::push_uncommitted: index {index} out of bounds for NUM_RECORDS={N}"
         );
+        let (key, version, payload) = record.into_parts();
         unsafe {
-            self.record_data
+            self.key_region
                 .as_mut_ptr()
                 .add(index)
-                .write(MaybeUninit::new(record))
+                .write(MaybeUninit::new(key));
+            self.data_region
+                .as_mut_ptr()
+                .add(index)
+                .write(MaybeUninit::new(LeafData { version, payload }));
         }
+        self.set_valid(index, true)
     }
-
     #[inline(always)]
     pub fn commit_delta(&self, active_delta: i32, dead_delta: i32) {
-        let len= self.len.load(Relaxed);
-        let active = active_len(len) as i32 + active_delta;
-        let dead = dead_len(len) as i32 + dead_delta;
-
-        debug_assert!(
-            active >= 0,
-            "LeafPage active count went negative: len={len}, active_delta={active_delta}"
-        );
-        debug_assert!(
-            dead >= 0,
-            "LeafPage dead count went negative: len={len}, dead_delta={dead_delta}"
-        );
-        // let active = active.max(0);
-        // let dead = dead.max(0) as u32;
-
+        let len = self.len.load(Relaxed);
+        let a = active_len(len) as i32 + active_delta;
+        let d = dead_len(len) as i32 + dead_delta;
+        debug_assert!(a >= 0 && d >= 0);
         self.len
-            .store(from_active_dead(active as Active, dead as Dead), Release)
+            .store(from_active_dead(a as Active, d as Dead), Release)
     }
-
-    #[inline]
     pub fn undo_uncommitted(&mut self, index: usize) {
         unsafe {
-            ptr::drop_in_place(
-                self.record_data.as_mut_ptr().add(index) as *mut RecordPoint<Key, Payload>
+            self.data_region
+                .as_mut_ptr()
+                .add(index)
+                .cast::<LeafData<Payload>>()
+                .drop_in_place()
+        };
+        self.set_valid(index, false)
+    }
+    pub fn on_reuse(&mut self) {
+        let n = self.len();
+        self.len.store(0, Release);
+        self.drop_records(n);
+        self.valid_mask.clear();
+    }
+    fn drop_records(&mut self, n: usize) {
+        unsafe {
+            std::ptr::drop_in_place(std::slice::from_raw_parts_mut(
+                self.data_region.as_mut_ptr() as *mut LeafData<Payload>,
+                n,
+            ))
+        }
+    }
+    pub(crate) fn bulk_push<R: LeafRecordSource<Key, Payload>>(&mut self, records: Vec<R>) {
+        self.bulk_push_iter(records)
+    }
+    pub(crate) fn bulk_push_from_slice_ref<R: LeafRecordSource<Key, Payload>>(
+        &mut self,
+        records: &[R],
+    ) {
+        self.bulk_push_iter(records.iter())
+    }
+    fn bulk_push_iter<R: LeafRecordSource<Key, Payload>, I: IntoIterator<Item = R>>(
+        &mut self,
+        records: I,
+    ) {
+        let records: Vec<R> = records.into_iter().collect();
+        let len = self.len();
+        assert!(len + records.len() <= N);
+        let active = records
+            .iter()
+            .filter(|r| r.source_version().is_live())
+            .count();
+        for (index, r) in records.iter().enumerate() {
+            unsafe {
+                self.key_region
+                    .as_mut_ptr()
+                    .add(len + index)
+                    .write(MaybeUninit::new(r.source_key()));
+                self.data_region
+                    .as_mut_ptr()
+                    .add(len + index)
+                    .write(MaybeUninit::new(LeafData {
+                        version: r.source_version().clone(),
+                        payload: r.source_payload_slot().clone(),
+                    }));
+            }
+            self.set_valid(
+                len + index,
+                !r.source_version().insertion_stamp().is_invalid(),
             );
         }
-    }
-
-    #[inline]
-    pub fn on_reuse(&mut self) {
-        let len = self.len();
-        self.len.store(0, Release);
-
-        unsafe {
-            (0..len).for_each(|index| {
-                ptr::drop_in_place(
-                    self.record_data.as_mut_ptr().add(index) as *mut RecordPoint<Key, Payload>
-                );
-            });
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn bulk_push(&mut self, records: Vec<&RecordPoint<Key, Payload>>) {
-        let len = self.len();
-
-        debug_assert_eq!(len, 0);
-        let n_records_len = records.len();
-
-        // A real `assert!`, not `debug_assert!` — see `push_uncommitted`'s
-        // matching one. A split/merge whose "one side" ends up with more
-        // than `NUM_RECORDS` live entries (e.g. heavy duplicate-key
-        // clustering skewing `nearest_key_boundary`'s split point) would
-        // otherwise write past `record_data` here via a raw, unchecked
-        // pointer store, landing in `OptCell`'s own `cell_version` field
-        // right after this whole block instead of failing loudly here.
-        assert!(
-            len + n_records_len <= NUM_RECORDS,
-            "LeafPage::bulk_push: {n_records_len} records pushed at len={len} overflow NUM_RECORDS={NUM_RECORDS}"
-        );
-
-        // Callers filter by `record_survives_gc` before building `records`
-        // (`MVBTSt::split`'s version-split, `MVBTSt::merge`'s single-leaf
-        // `Merged` branch), which keeps *survivors* - every active record
-        // *and* any dead-but-still-protected one (deleted by a still-
-        // in-flight transaction, or still visible to a live reader
-        // snapshot - see that method's doc). Counting every pushed record
-        // as active unconditionally (as this used to) overcounts `active`
-        // and undercounts `dead` whenever any survivor is actually the
-        // latter - silently wrong `unsafe_degree()`/`unsafe_degree_root()`
-        // capacity/underflow accounting for the rest of this page's life.
-        let active_pushed = records.iter().filter(|r| r.version().is_live()).count();
-        let dead_pushed = n_records_len - active_pushed;
-
-        unsafe {
-            records.into_iter().enumerate().for_each(|(index, record)| {
-                self.record_data
-                    .as_mut_ptr()
-                    .add(index + len)
-                    .write(MaybeUninit::new(record.clone()));
-            });
-        }
-
-        // See `len()`'s doc.
-        // fence(Release);
         self.len.store(
             from_active_dead(
-                len as PageLenPrimitive + active_pushed as PageLenPrimitive,
-                dead_pushed as PageLenPrimitive,
+                (len + active) as PageLenPrimitive,
+                (records.len() - active) as PageLenPrimitive,
             ),
             Release,
         )
     }
-
-    #[inline(always)]
-    pub(crate) fn bulk_push_from_slice_ref(&mut self, records: &[&RecordPoint<Key, Payload>]) {
-        let len = self.len();
-
-        debug_assert_eq!(len, 0);
-        // See `bulk_push`'s matching assert.
-        assert!(
-            len + records.len() <= NUM_RECORDS,
-                "LeafPage::bulk_push_from_slice_ref: {} records pushed at len={len} overflow NUM_RECORDS={NUM_RECORDS}",
-            records.len()
-        );
-
-        // See `bulk_push`'s identical fix's doc: callers here also push
-        // `record_survives_gc` survivors (`MVBTSt::merge`'s/`split`'s
-        // KeySplit branches), which can include dead-but-protected entries,
-        // not just active ones.
-        let active_pushed = records.iter().filter(|r| r.version().is_live()).count();
-        let dead_pushed = records.len() - active_pushed;
-
-        unsafe {
-            records.into_iter().enumerate().for_each(|(index, record)| {
-                self.record_data
-                    .as_mut_ptr()
-                    .add(index + len)
-                    .write(MaybeUninit::new((*record).clone()));
-            });
-        }
-
-        // See `len()`'s doc.
-        // fence(Release);
-        self.len.store(
-            from_active_dead(
-                len as PageLenPrimitive + active_pushed as PageLenPrimitive,
-                dead_pushed as PageLenPrimitive,
-            ),
-            Release,
-        )
-    }
-
-    // #[inline(always)]
-    // pub(crate) fn bulk_push_from_slice(&mut self, records: &[RecordPoint<Key, Payload>]) {
-    //     let len
-    //         = self.len();
-    //
-    //     unsafe {
-    //         records.into_iter().enumerate().for_each(|(index, record)| {
-    //             self.record_data
-    //                 .as_mut_ptr()
-    //                 .add(index + len)
-    //                 .write(MaybeUninit::new(record.clone()));
-    //         });
-    //     }
-    //
-    //     fence(Release);
-    //     self.len.store(
-    //         from_active_dead(len as LenP + records.len() as LenP, 0),
-    //         Release)
-    // }
-
-    /// Skips physically-present but invalid entries (a since-aborted
-    /// insert/update — see `TxStamp::is_invalid`'s doc) when hunting for
-    /// "the" entry for `key`: an invalidated write isn't removed from the
-    /// page until the next SMO, so it can sit between the true live/deleted
-    /// lineage and whatever this call is looking for, and must not be
-    /// mistaken for it (see `delete`/`delete_after_update`/`apply_invalidate`'s
-    /// own doc for the concrete bug this closes).
-    #[inline]
-    fn is_live_lineage(record: &RecordPoint<Key, Payload>, key: Key) -> bool {
-        record.key == key && !record.version().insertion_stamp().is_invalid()
-    }
-
-    #[inline]
-    pub(crate) fn delete(&mut self, key: Key, del: TxStamp) -> Result<Option<VersionInfo>, ()>  {
-        match self
-            .as_records_mut()
-            .iter_mut()
-            .rfind(|record| Self::is_live_lineage(record, key))
-        {
-            Some(record) => {
-                let ver_info = record.version_mut();
-
-                if ver_info.delete(del) {
-                    Ok(Some(ver_info.clone()))
-                } else {
-                    Err(())
-                }
-            }
-            _ => Ok(None),
+    pub(crate) fn delete(&mut self, key: Key, del: TxStamp) -> Result<Option<VersionInfo>, ()> {
+        let Some(i) = self.latest_position(key, true) else {
+            return Ok(None);
+        };
+        let v = self.version_mut_at(i);
+        if v.delete(del) {
+            Ok(Some(v.clone()))
+        } else {
+            Err(())
         }
     }
-
-    /// Reads back the newest entry for `key` (invalid or not) to locate the
-    /// just-pushed entry this call supersedes, then walks past it (and past
-    /// any invalid entries beyond it — see `is_live_lineage`) to reach the
-    /// true previous live/deleted entry to mark deleted.
-    #[inline]
     pub(crate) fn delete_after_update(
         &mut self,
         key: Key,
         del: TxStamp,
     ) -> Result<Option<VersionInfo>, ()> {
-        match self
-            .as_records_mut()
-            .iter_mut()
-            .rev()
-            .skip(1)
-            .find(|record| Self::is_live_lineage(record, key))
-        {
-            Some(record) => {
-                let ver_info = record.version_mut();
-
-                if ver_info.delete(del) {
-                    Ok(Some(ver_info.clone()))
-                } else {
-                    Err(())
-                }
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// Live path only: decides which of `apply_invalidate`/`apply_undelete`
-    /// this abort needs, by checking whether the *newest not-yet-invalidated*
-    /// entry for `key` was written by `my_stamp` (an `Insert`/`Update` —
-    /// invalidate it) or not (a plain `Delete` of a pre-existing record —
-    /// just undelete it). `NotFound` if there's no such entry for `key` at
-    /// all (defensive — a transaction only ever calls this for a key it
-    /// itself wrote).
-    ///
-    /// Must skip already-invalidated entries in the lookup (mirrors
-    /// `update`/`delete`'s own `!insertion_stamp().is_invalid()` filter):
-    /// safe to call more than once for the same key — a transaction that
-    /// wrote it more than once (e.g. `mv_bench::tpcc_txn::new_order` pricing
-    /// two order-lines for the same item, both landing on the same Stock
-    /// key) ends up in this same worker's write set once per physical
-    /// version, all stamped identically (one `TxStamp` per transaction, not
-    /// per write). `abort`'s reverse-order walk then calls this once per
-    /// occurrence; without the filter, every call after the first would
-    /// re-find the very same (already-invalidated) newest entry — whose
-    /// stamp still reads as "mine" even once invalid — and re-invalidate an
-    /// already-dead entry as a no-op, leaving every *older* self-written
-    /// version (and, via `apply_invalidate`'s predecessor-undelete, the
-    /// true pre-transaction record) never reverted at all: a stale
-    /// self-write left permanently live and visible to this same worker's
-    /// own future transactions (`visibility::is_visible`'s same-worker fast
-    /// path never re-checks the commit log), corrupting every later read
-    /// through this worker. Skipping already-invalidated entries here
-    /// instead makes each successive call land on the next-older
-    /// still-valid self-written version, so a transaction that wrote a key
-    /// N times gets all N versions unwound one at a time, in order,
-    /// same as a real undo log would.
-    #[inline]
-    pub(crate) fn abort_write(&mut self, key: Key, my_stamp: TxStamp) -> AbortOutcome {
-        let newest_is_mine = self
-            .as_records()
+        let Some(i) = self
+            .keys()
             .iter()
-            .rfind(|r| r.key == key && !r.version().insertion_stamp().is_invalid())
-            .map(|r| r.version().insertion_stamp() == my_stamp);
-
-        match newest_is_mine {
-            // None => AbortOutcome::NotFound,
-            Some(true) => {
-                self.apply_invalidate(key);
-                AbortOutcome::Invalidated
-            }
-            // `apply_undelete` reports back whether it actually found a
-            // deleted entry to undo — needed because "not mine" also
-            // matches the idempotent-recall case (see this method's doc):
-            // a key already fully processed by a prior `abort_write` call
-            // has a newest entry that's now invalid (so no longer "mine"
-            // by raw-stamp equality) but isn't deleted, and reporting that
-            // as `Undeleted` would make the caller WAL-log a spurious op.
-            Some(false) => {
-                if self.apply_undelete(key) {
-                AbortOutcome::Undeleted
-            } else {
-                AbortOutcome::NotFound
-            }
-            }
-            _ => AbortOutcome::NotFound,
-        }
-    }
-
-    /// Unwinds up to `limit` adjacent undo-log occurrences for the same key
-    /// while the caller holds this leaf's write latch. Returns the number of
-    /// physical writes actually reverted. This is exactly repeated
-    /// `abort_write` semantics, but avoids relatching and retraversing the
-    /// tree between versions resident in the same leaf.
-    #[inline]
-    pub(crate) fn abort_writes(&mut self, key: Key, my_stamp: TxStamp, limit: usize) -> usize {
-        let mut reverted = 0;
-        while reverted < limit {
-            if matches!(self.abort_write(key, my_stamp), AbortOutcome::NotFound) {
-                break;
-            }
-            reverted += 1;
-        }
-        reverted
-    }
-
-    /// Marks the newest entry for `key` invalid (see `TxStamp::is_invalid`'s
-    /// doc), then undeletes its predecessor *if and only if that predecessor
-    /// was deleted by this exact same insertion stamp* — reversing an
-    /// `Update`'s `delete_after_update`, which always deletes the
-    /// predecessor under the very same stamp it inserts the new version
-    /// with (see `Transaction::update`/`TpccTxn::update`). This is not the
-    /// same thing as "the predecessor happens to be deleted": a plain
-    /// `Insert`'s invalidation has no predecessor relationship at all, and
-    /// if one of those lands right after some unrelated, already-committed
-    /// transaction's genuine delete of the same key, a blind "is it deleted"
-    /// check would wrongly resurrect that unrelated deletion. The
-    /// predecessor search also skips any invalid entries in between (see
-    /// `is_live_lineage`) — an aborted write isn't removed from the page
-    /// until the next SMO, so one can sit between the entry being
-    /// invalidated and its true predecessor.
-    ///
-    /// Adjusts `commit_delta` to match: the invalidated entry moves from
-    /// active to dead (unless it was already deleted — e.g. a transaction
-    /// that inserted then deleted the same key before aborting — in which
-    /// case it's already counted dead and this is a no-op count-wise), and
-    /// an undeleted predecessor moves back from dead to active. Used by
-    /// `abort_write` above (live path) *and* directly by WAL replay of a
-    /// logged `Invalidate` op — replay doesn't need the original stamp
-    /// passed in either, since it's read back off the entry itself right
-    /// before invalidating it (see `mv_wal::recovery`).
-    #[inline]
-    pub(crate) fn apply_invalidate(&mut self, key: Key) {
-        // Must skip already-invalid entries here too (`is_live_lineage`,
-        // same filter `abort_write`'s own lookup uses): a key written more
-        // than once by the same (now-aborting) transaction has more than
-        // one physical entry that could match `key`, and a raw `r.key ==
-        // key` rfind always lands on the physically newest one regardless
-        // of whether an earlier call already invalidated it - which would
-        // just re-invalidate that same dead entry over and over instead of
-        // reaching the next-older still-valid self-written version each
-        // call is actually meant to unwind (see `abort_write`'s doc).
-        let (stamp, was_live) = match self
-            .as_records_mut()
-            .iter_mut()
-            .rfind(|r| Self::is_live_lineage(r, key))
-        {
-            Some(record) => {
-                let stamp = record.version().insertion_stamp();
-                let was_live = record.version().is_live();
-                record.version_mut().invalidate();
-                (stamp, was_live)
-            }
-            None => return,
-        };
-
-        if was_live {
-            self.commit_delta(-1, 1);
-        }
-
-        if let Some(record) = self
-            .as_records_mut()
-            .iter_mut()
+            .enumerate()
             .rev()
             .skip(1)
-            .find(|r| Self::is_live_lineage(r, key))
+            .find(|(i, k)| **k == key && self.bit_is_valid(*i))
+            .map(|(i, _)| i)
+        else {
+            return Ok(None);
+        };
+        let v = self.version_mut_at(i);
+        if v.delete(del) {
+            Ok(Some(v.clone()))
+        } else {
+            Err(())
+        }
+    }
+    pub(crate) fn abort_write(&mut self, key: Key, my_stamp: TxStamp) -> AbortOutcome {
+        let Some(i) = self.latest_position(key, true) else {
+            return AbortOutcome::NotFound;
+        };
+        if self.version_at(i).insertion_stamp() == my_stamp {
+            self.apply_invalidate(key);
+            AbortOutcome::Invalidated
+        } else if self.apply_undelete(key) {
+            AbortOutcome::Undeleted
+        } else {
+            AbortOutcome::NotFound
+        }
+    }
+    pub(crate) fn abort_writes(&mut self, key: Key, my_stamp: TxStamp, limit: usize) -> usize {
+        let mut n = 0;
+        while n < limit && !matches!(self.abort_write(key, my_stamp), AbortOutcome::NotFound) {
+            n += 1
+        }
+        n
+    }
+    pub(crate) fn apply_invalidate(&mut self, key: Key) {
+        let Some(i) = self.latest_position(key, true) else {
+            return;
+        };
+        let stamp = self.version_at(i).insertion_stamp();
+        let was_live = self.version_at(i).is_live();
+        self.version_mut_at(i).invalidate();
+        self.set_valid(i, false);
+        if was_live {
+            self.commit_delta(-1, 1)
+        }
+        if let Some(j) = (0..i)
+            .rev()
+            .find(|j| self.keys()[*j] == key && self.bit_is_valid(*j))
         {
-            if record.version().deletion_stamp() == Some(stamp) {
-                record.version_mut().undelete();
-                self.commit_delta(1, -1);
+            if self.version_at(j).deletion_stamp() == Some(stamp) {
+                self.version_mut_at(j).undelete();
+                self.commit_delta(1, -1)
             }
         }
     }
-
-    /// Clears the newest entry's delete_stamp for `key`, adjusting
-    /// `commit_delta` back from dead to active, and reports whether there
-    /// was actually a deleted entry to undo. Used by `abort_write` (live
-    /// path, reversing a plain `Delete`) and WAL replay of a logged
-    /// `Undelete` op.
-    ///
-    /// Must search via `is_live_lineage`, not raw key equality: `delete`
-    /// (the op this reverses) only ever marks a *live-lineage* record
-    /// deleted, skipping past any invalid entry that sits physically after
-    /// it (see `is_live_lineage`'s doc). A raw newest-by-key search would
-    /// instead land on that trailing invalid entry — which is never
-    /// deleted — and silently report `false`, leaving the true deleted
-    /// record un-undone.
-    #[inline]
     pub(crate) fn apply_undelete(&mut self, key: Key) -> bool {
-        if let Some(record) = self
-            .as_records_mut()
-            .iter_mut()
-            .rfind(|r| Self::is_live_lineage(r, key))
-        {
-            if record.version().is_deleted() {
-                record.version_mut().undelete();
-                self.commit_delta(1, -1);
-                return true;
-            }
+        let Some(i) = self.latest_position(key, true) else {
+            return false;
+        };
+        if self.version_at(i).is_deleted() {
+            self.version_mut_at(i).undelete();
+            self.commit_delta(1, -1);
+            true
+        } else {
+            false
         }
-        false
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AbortOutcome {
-    /// No entry found for the key at all (defensive; shouldn't happen for a
-    /// key this transaction actually wrote).
-    NotFound,
-    /// The newest entry was created by the aborting transaction (an
-    /// `Insert`/`Update`) and has been marked invalid.
     Invalidated,
-    // /// The newest entry pre-dated the aborting transaction, which only
-    // /// deleted it (a plain `Delete`) — it has been undeleted.
     Undeleted,
+    NotFound,
 }

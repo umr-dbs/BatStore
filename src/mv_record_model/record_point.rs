@@ -1,10 +1,10 @@
-use std::hash::Hash;
-use std::ptr;
-use std::fmt::{Display, Formatter};
-use std::marker::PhantomData;
-use std::mem::{align_of, size_of, ManuallyDrop};
-use triomphe::Arc;
 use crate::mv_record_model::version_info::VersionInfo;
+use std::fmt::{Display, Formatter};
+use std::hash::Hash;
+use std::marker::PhantomData;
+use std::mem::{ManuallyDrop, align_of, size_of};
+use std::ptr;
+use triomphe::Arc;
 
 // pub type Payload = Box<()>;
 
@@ -45,7 +45,7 @@ impl<Payload> PayloadSlot<Payload> {
         size_of::<Payload>() == size_of::<usize>() && align_of::<Payload>() <= align_of::<usize>();
 
     #[inline(always)]
-    fn new(payload: Payload) -> Self {
+    pub(crate) fn new(payload: Payload) -> Self {
         let raw = if Self::INLINE {
             let mut raw: usize = 0;
             unsafe { (&mut raw as *mut usize as *mut Payload).write(payload) };
@@ -54,11 +54,14 @@ impl<Payload> PayloadSlot<Payload> {
             Arc::into_raw(Arc::new(payload)) as usize
         };
 
-        Self { raw, _marker: PhantomData }
+        Self {
+            raw,
+            _marker: PhantomData,
+        }
     }
 
     #[inline(always)]
-    fn get(&self) -> &Payload {
+    pub(crate) fn get(&self) -> &Payload {
         unsafe {
             if Self::INLINE {
                 &*(&self.raw as *const usize as *const Payload)
@@ -80,7 +83,7 @@ impl<Payload> PayloadSlot<Payload> {
     /// value overwrite in the `update_in_place` fast path), so this changes
     /// no observable behavior, just how the replaced value is disposed of.
     #[inline(always)]
-    fn set(&mut self, payload: Payload) {
+    pub(crate) fn set(&mut self, payload: Payload) {
         *self = Self::new(payload);
     }
 }
@@ -123,7 +126,10 @@ impl<Payload: Clone> Clone for PayloadSlot<Payload> {
             Arc::into_raw(Arc::clone(&peek)) as usize
         };
 
-        Self { raw, _marker: PhantomData }
+        Self {
+            raw,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -196,7 +202,7 @@ impl<Key: Ord + Copy + Hash + Default, Payload: Clone + Default> RecordPointResu
     pub fn from(r: &RecordPoint<Key, Payload>) -> Self {
         Self {
             key: r.key(),
-            payload: r.payload.clone()
+            payload: r.payload.clone(),
         }
     }
 
@@ -204,8 +210,23 @@ impl<Key: Ord + Copy + Hash + Default, Payload: Clone + Default> RecordPointResu
     pub fn new(key: Key, payload: Payload) -> Self {
         Self {
             key,
-            payload: PayloadSlot::new(payload)
+            payload: PayloadSlot::new(payload),
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn from_payload_slot(key: Key, payload: &PayloadSlot<Payload>) -> Self {
+        Self {
+            key,
+            payload: payload.clone(),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn from_leaf(
+        record: crate::mv_page_model::leaf_page::LeafRecordRef<'_, Key, Payload>,
+    ) -> Self {
+        Self::from_payload_slot(record.key(), record.payload_slot())
     }
 }
 
@@ -248,19 +269,34 @@ impl<Key: Ord + Copy + Hash + Default, Payload: Clone + Default> RecordPoint<Key
     pub fn version_mut(&mut self) -> &mut VersionInfo {
         &mut self.version
     }
+
+    #[inline(always)]
+    pub(crate) fn into_parts(self) -> (Key, VersionInfo, PayloadSlot<Payload>) {
+        (self.key, self.version, self.payload)
+    }
+
+    #[inline(always)]
+    pub(crate) fn payload_slot(&self) -> &PayloadSlot<Payload> {
+        &self.payload
+    }
 }
 
 impl<Key: Display + Ord + Copy + Hash + Default, Payload: Clone + Default> Display
-for RecordPoint<Key, Payload> {
+    for RecordPoint<Key, Payload>
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RecordPoint(Key: {}, Version: {})",
-               self.key(),
-               self.version())
+        write!(
+            f,
+            "RecordPoint(Key: {}, Version: {})",
+            self.key(),
+            self.version()
+        )
     }
 }
 
 impl<Key: Display + Ord + Copy + Hash + Default, Payload: Clone> Display
-for RecordPointResult<Key, Payload> {
+    for RecordPointResult<Key, Payload>
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "RecordPointResult(Key: {})", self.key)
     }

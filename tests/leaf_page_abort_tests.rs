@@ -6,6 +6,20 @@ use crate::mv_record_model::version_info::VersionInfo;
 const NUM_RECORDS: usize = 8;
 type TestLeaf = LeafPage<NUM_RECORDS, u64, u64>;
 
+#[test]
+fn production_soa_capacity_still_fits_one_4k_cell() {
+    use crate::mv_block::block::Block;
+    use crate::mv_sync::smart_cell::OptCell;
+    use crate::mv_tree::mvbt::{FAN_OUT, NUM_RECORDS};
+
+    type ProductionCell = OptCell<Block<FAN_OUT, NUM_RECORDS, u64, u64>>;
+    type OneMoreCell = OptCell<Block<FAN_OUT, 124, u64, u64>>;
+
+    assert_eq!(NUM_RECORDS, 123);
+    assert_eq!(std::mem::size_of::<ProductionCell>(), 4096);
+    assert!(std::mem::size_of::<OneMoreCell>() > 4096);
+}
+
 fn insert(leaf: &mut TestLeaf, key: u64, stamp: TxStamp, payload: u64) {
     let len = leaf.len();
     leaf.push_uncommitted(RecordPoint::new(key, VersionInfo::new(stamp), payload), len);
@@ -32,6 +46,36 @@ fn abort_write_reverts_a_plain_insert() {
     // double-adjust the counts.
     assert_eq!(leaf.abort_write(1, stamp), AbortOutcome::NotFound);
     assert_eq!(leaf.active_dead_invalid(), (0, 0, 1));
+}
+
+#[test]
+fn soa_layout_keeps_keys_dense_and_validity_mask_skips_aborted_slots() {
+    let mut leaf = TestLeaf::new();
+    let stamp = TxStamp::new(1, 77);
+    insert(&mut leaf, 4, stamp, 40);
+    insert(&mut leaf, 9, stamp, 90);
+    insert(&mut leaf, 4, stamp, 41);
+
+    let keys = leaf.keys();
+    assert_eq!(keys, &[4, 9, 4]);
+    assert_eq!(
+        (unsafe { keys.as_ptr().add(1) } as usize) - (keys.as_ptr() as usize),
+        std::mem::size_of::<u64>(),
+        "keys must occupy one dense, key-only array"
+    );
+
+    assert_eq!(leaf.latest_position(4, true), Some(2));
+    assert_eq!(leaf.abort_write(4, stamp), AbortOutcome::Invalidated);
+    assert_eq!(
+        leaf.latest_position(4, true),
+        Some(0),
+        "the validity mask must skip the invalidated newest slot"
+    );
+    assert_eq!(
+        leaf.latest_position(4, false),
+        Some(2),
+        "physical-order lookup must still be able to inspect invalid history"
+    );
 }
 
 #[test]

@@ -16,41 +16,21 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Optimize snapshot cache, add patch for leanstore usage">
+    <list default="true" id="dafc87fb-cd57-4841-a36e-55a3440db020" name="Changes" comment="Optimize code">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_bench/olap_scan.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/olap_scan.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_txn.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_txn.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpch_queries.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpch_queries.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/leaf_layout_benchmark.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/leaf_layout_benchmark.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/readme.md" beforeDir="false" afterPath="$PROJECT_DIR$/readme.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/tpcc_schema.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/tpcc_schema.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_bench/ycsb_schema.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_bench/ycsb_schema.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_db/transaction.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_db/transaction.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/block_tracer.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_gc/tracker_handle.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/leaf_page.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_page_model/node.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_page_model/node.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/dispatch.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/dispatch.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_query/iter_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/iter_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/olc_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/olc_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_query/rand_query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/rand_query.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/clock.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/clock.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/commit_log.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/commit_log.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/tx_context.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/version_handle.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/version_handle.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_sync/visibility.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_sync/visibility.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_test/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_test/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_query/query.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_query/query.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mv_record_model/record_point.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_record_model/record_point.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/mv_tree/mvbt.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/mvbt.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mv_tree/smo.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mv_tree/smo.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/bench_tpcc_correctness_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/bench_tpcc_correctness_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/bench_tpcc_stress_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/bench_tpcc_stress_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/bench_tpcc_txn_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/bench_tpcc_txn_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/bench_tpch_correctness_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/bench_tpch_correctness_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/bench_wal_recovery_stress_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/bench_wal_recovery_stress_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/db_integration_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/db_integration_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/db_transaction_abort_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/db_transaction_abort_tests.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/leaf_page_abort_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/leaf_page_abort_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/leaf_split_off_by_one_regression_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/leaf_split_off_by_one_regression_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/query_transaction_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/query_transaction_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/tree_wal_consistency_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/tree_wal_consistency_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/tx_context_registration_tests.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/tx_context_registration_tests.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/verify_concurrent_shared_keys.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/verify_concurrent_shared_keys.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/verify_range_scan.rs" beforeDir="false" afterPath="$PROJECT_DIR$/tests/verify_range_scan.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBLoader.java" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBLoader.java" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadRecord.java" beforeDir="false" afterPath="$PROJECT_DIR$/tx_tests/benchbase/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadRecord.java" afterDir="false" />
@@ -116,23 +96,23 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.6029039138453802" />
-      <entry key="MS500" value="1.9037527267510859" />
-      <entry key="S2" value="1.9750174876533335" />
-      <entry key="S5" value="1.9899310855458512" />
-      <entry key="S10" value="1.9949528056877126" />
-      <entry key="S30" value="1.9983148199106777" />
-      <entry key="S60" value="1.9993946007764036" />
-      <entry key="M2" value="2.014991871212215" />
-      <entry key="M5" value="2.1883238738368105" />
-      <entry key="M10" value="2.4812854118176246" />
-      <entry key="M15" value="3.2177531003870374" />
-      <entry key="M30" value="17.58516720883396" />
-      <entry key="H1" value="106.96255244990927" />
-      <entry key="H2" value="318.5188226897829" />
-      <entry key="H4" value="607.0521952998607" />
-      <entry key="D1" value="2614.3410520070292" />
-      <entry key="W1" value="9807.756837669236" />
+      <entry key="MS100" value="1.8544838756991058" />
+      <entry key="MS500" value="2.659929393046525" />
+      <entry key="S2" value="2.9074339818598425" />
+      <entry key="S5" value="2.962321333272839" />
+      <entry key="S10" value="2.981050045624662" />
+      <entry key="S30" value="2.993658586286725" />
+      <entry key="S60" value="2.9968261870277937" />
+      <entry key="M2" value="2.998450102630441" />
+      <entry key="M5" value="3.033783442855402" />
+      <entry key="M10" value="3.3793494301082303" />
+      <entry key="M15" value="3.9516435901258866" />
+      <entry key="M30" value="9.650981882238202" />
+      <entry key="H1" value="63.4314078408532" />
+      <entry key="H2" value="240.7851701212385" />
+      <entry key="H4" value="527.4885796180533" />
+      <entry key="D1" value="2555.1464264385345" />
+      <entry key="W1" value="9778.456526101825" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
@@ -140,37 +120,37 @@
       <entry key="S2" value="0.0" />
       <entry key="S5" value="0.0" />
       <entry key="S10" value="0.0" />
-      <entry key="S30" value="4.591723491273929E-137" />
-      <entry key="S60" value="9.578405914620763E-69" />
-      <entry key="M2" value="1.3839142027313448E-34" />
-      <entry key="M5" value="4.335598708895164E-14" />
-      <entry key="M10" value="2.9450459193715315E-7" />
-      <entry key="M15" value="5.592344915829245E-5" />
-      <entry key="M30" value="0.011242358736536192" />
-      <entry key="H1" value="0.19055484790853908" />
-      <entry key="H2" value="0.9970929440127598" />
-      <entry key="H4" value="5.614434847166861" />
-      <entry key="D1" value="197.18956993006313" />
-      <entry key="W1" value="951.0552826989422" />
+      <entry key="S30" value="1.2548138648880225E-168" />
+      <entry key="S60" value="1.583415997323E-84" />
+      <entry key="M2" value="1.7793445879692188E-42" />
+      <entry key="M5" value="3.024888956926391E-17" />
+      <entry key="M10" value="7.778972743709096E-9" />
+      <entry key="M15" value="4.95998925127094E-6" />
+      <entry key="M30" value="0.0033481185900289295" />
+      <entry key="H1" value="0.10399002884014225" />
+      <entry key="H2" value="0.7365826606141802" />
+      <entry key="H4" value="4.825573896092926" />
+      <entry key="D1" value="192.27571152682413" />
+      <entry key="W1" value="947.6328724652956" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="1.2939232194773878" />
-      <entry key="MS500" value="1.8147179010207015" />
-      <entry key="S2" value="1.9510277136597325" />
-      <entry key="S5" value="1.9801881072071148" />
-      <entry key="S10" value="1.9900564726913326" />
-      <entry key="S30" value="1.9966771567489576" />
-      <entry key="S60" value="1.9985746592765739" />
-      <entry key="M2" value="2.014568495457974" />
-      <entry key="M5" value="2.1880941257460846" />
-      <entry key="M10" value="2.481125978966195" />
-      <entry key="M15" value="3.217656577424086" />
-      <entry key="M30" value="17.59594269161186" />
-      <entry key="H1" value="107.15199206409012" />
-      <entry key="H2" value="319.51452452772753" />
-      <entry key="H4" value="612.6648955580029" />
-      <entry key="D1" value="2811.524789038793" />
-      <entry key="W1" value="10758.808295916435" />
+      <entry key="MS100" value="1.3535777588459308" />
+      <entry key="MS500" value="2.506243981395071" />
+      <entry key="S2" value="2.8649429603753207" />
+      <entry key="S5" value="2.9449635692214278" />
+      <entry key="S10" value="2.9723094904633434" />
+      <entry key="S30" value="2.9907312257725236" />
+      <entry key="S60" value="2.9953607678685787" />
+      <entry key="M2" value="2.997716957087937" />
+      <entry key="M5" value="3.0334897173835467" />
+      <entry key="M10" value="3.3791975525372444" />
+      <entry key="M15" value="3.951535857557862" />
+      <entry key="M30" value="9.654140603760172" />
+      <entry key="H1" value="63.534763752099714" />
+      <entry key="H2" value="241.5207122654427" />
+      <entry key="H4" value="532.3126561813638" />
+      <entry key="D1" value="2747.4164493377143" />
+      <entry key="W1" value="10726.085587723119" />
     </decayedShown>
   </component>
   <component name="ProblemsViewState">
@@ -1474,15 +1454,7 @@
       <workItem from="1786530617804" duration="641000" />
       <workItem from="1786532923325" duration="108000" />
       <workItem from="1786533170877" duration="2663000" />
-      <workItem from="1786541847276" duration="8743000" />
-    </task>
-    <task id="LOCAL-00173" summary="Readme">
-      <option name="closed" value="true" />
-      <created>1779997257938</created>
-      <option name="number" value="00173" />
-      <option name="presentableId" value="LOCAL-00173" />
-      <option name="project" value="LOCAL" />
-      <updated>1779997257939</updated>
+      <workItem from="1786541847276" duration="10953000" />
     </task>
     <task id="LOCAL-00174" summary="Updated overflow count, was set too eager. Its enough to trigger at &lt;= 1 slot left for keys, not &lt;= 3">
       <option name="closed" value="true" />
@@ -1868,7 +1840,15 @@
       <option name="project" value="LOCAL" />
       <updated>1786545029886</updated>
     </task>
-    <option name="localTasksCounter" value="222" />
+    <task id="LOCAL-00222" summary="Optimize code">
+      <option name="closed" value="true" />
+      <created>1786551745156</created>
+      <option name="number" value="00222" />
+      <option name="presentableId" value="LOCAL-00222" />
+      <option name="project" value="LOCAL" />
+      <updated>1786551745156</updated>
+    </task>
+    <option name="localTasksCounter" value="223" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -1889,7 +1869,6 @@
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="Stabilize cells, now indicates via dedicated flag obsolete" />
     <MESSAGE value="Stabilize GC and liveness is nodes, now re-added the obsolete/retired mark explicitly" />
     <MESSAGE value="Added user abort logic for transactions" />
     <MESSAGE value="Remove conservitive child latch. Updated scripts" />
@@ -1914,7 +1893,8 @@
     <MESSAGE value="Make YCSB use uniform record layouts, e.g. with python3 scripts/compare_engines.py --ycsb-payload u64" />
     <MESSAGE value="Correct script" />
     <MESSAGE value="Optimize snapshot cache, add patch for leanstore usage" />
-    <option name="LAST_COMMIT_MESSAGE" value="Optimize snapshot cache, add patch for leanstore usage" />
+    <MESSAGE value="Optimize code" />
+    <option name="LAST_COMMIT_MESSAGE" value="Optimize code" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

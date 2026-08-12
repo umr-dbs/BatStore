@@ -266,7 +266,7 @@ impl<const FAN_OUT: usize,
                     CRUDOperationResult::MatchedRecords(Vec::with_capacity(0))
                 }
                 Some(result) =>
-                    CRUDOperationResult::MatchedRecords(vec![RecordPointResult::from(result)])
+                    CRUDOperationResult::MatchedRecords(vec![RecordPointResult::from_leaf(result)])
             }
         })
     }
@@ -340,7 +340,7 @@ impl<const FAN_OUT: usize,
                         lookup_range.contains(r.key()) &&
                             r.version().matches(is_visible))
                     // .sorted_by_key(|r| r.key())
-                    .map(RecordPointResult::from)
+                    .map(RecordPointResult::from_leaf)
                     .collect::<Vec<_>>()
                 })
                 // .filter(|set| !set.is_empty())

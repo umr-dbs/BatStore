@@ -8,10 +8,12 @@ use std::fmt::Display;
 use std::hash::Hash;
 use triomphe::Arc;
 
-/// `RecordPoint<Key, Payload>` is 32B for `Key = Payload = u64` (`VersionInfo`
-/// packs down to 16B — see `mv_record_model::tx_stamp::TxStamp`'s doc), so
-/// 123 keeps the leaf's record array at the same ~4000B budget `FAN_OUT`'s
-/// internal-node arrays target - and, unlike 125, lands the *actual*
+/// A leaf slot is still 32B for `Key = Payload = u64`: the SoA leaf stores
+/// an 8B key in its dense key region and 24B (`VersionInfo` + `PayloadSlot`)
+/// at the same index in its data region. Its two-word (128-bit) validity
+/// bitmap is stored inline. Thus 123 keeps
+/// the leaf arrays at the same ~4000B budget as the internal-node arrays and
+/// lands the *actual*
 /// heap-allocated unit exactly on a 4096B page.
 ///
 /// The real allocation is `OptCell<Block<..>>` (see `SmartCell`'s pointee),

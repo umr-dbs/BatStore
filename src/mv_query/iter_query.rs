@@ -245,7 +245,7 @@ impl<
                                     self.range.contains(r.key())
                                         && r.version().matches(&mut is_visible)
                                 })
-                                .map(RecordPointResult::from),
+                                .map(RecordPointResult::from_leaf),
                         );
                         crate::mv_test::record_leaf_scan(records.len(), self.buff.len() - before);
 
