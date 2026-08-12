@@ -1,6 +1,6 @@
-use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use crate::mv_record_model::version_info::{AtomicVersion, Version};
 use crate::mv_sync::version_handle;
+use std::sync::atomic::Ordering::Relaxed;
 
 /// The OSIC Global Logical Clock (§3.1): every transaction draws two
 /// timestamps from this single atomic counter — `ts_start` at begin and
@@ -33,6 +33,12 @@ impl GlobalClock {
     /// GLC"), as well as for plain structural version stamps.
     #[inline(always)]
     pub(crate) fn next_timestamp(&self) -> Version {
-        self.0.fetch_add(1, SeqCst)
+        // Atomic modification order alone gives every fetch_add a unique,
+        // globally ordered value. The clock does not publish any page or
+        // transaction data: those happens-before edges are supplied by the
+        // commit-log mutex and the snapshot slots' Release/Acquire pairs.
+        // SeqCst therefore added a global fence/order constraint without
+        // contributing to the OSIC timestamp order.
+        self.0.fetch_add(1, Relaxed)
     }
 }

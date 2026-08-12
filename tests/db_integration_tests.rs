@@ -25,9 +25,15 @@ fn new_db() -> TestDb {
 
 fn new_db_with_wal(path: &std::path::Path) -> TestDb {
     Database::new_with_wal(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        path, Duration::from_millis(2),
-    ).unwrap()
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        path,
+        Duration::from_millis(2),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -47,7 +53,7 @@ fn empty_read_only_commit_does_not_advance_the_global_clock() {
 fn db_transaction_zero_copy_range_terminals_share_its_snapshot() {
     let db = new_db();
     let table = db.create_table("scan").table_id().unwrap();
-    let load = DbTransaction::begin(&db);
+    let mut load = DbTransaction::begin(&db);
     for key in 0..20 {
         assert!(matches!(
             load.insert(table, key, key * 10),
@@ -56,7 +62,7 @@ fn db_transaction_zero_copy_range_terminals_share_its_snapshot() {
     }
     load.commit();
 
-    let tx = DbTransaction::begin(&db);
+    let mut tx = DbTransaction::begin(&db);
     let range = crate::mv_query::interval::Interval::new(5, 14);
     assert_eq!(tx.range_count(table, range), 10);
     assert_eq!(
@@ -85,7 +91,7 @@ fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
     let table = db.create_table("history").table_id().unwrap();
     db.enable_gc(false);
 
-    let setup = DbTransaction::begin(&db);
+    let mut setup = DbTransaction::begin(&db);
     assert!(matches!(
         setup.insert(table, 1, 10),
         CRUDOperationResult::Inserted(_)
@@ -95,10 +101,10 @@ fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
     // This snapshot predates every split and replacement below. It is not
     // pinned to a physical root object; each read must route by ts_start to
     // the retained historical root/child entries.
-    let old = DbTransaction::begin(&db);
+    let mut old = DbTransaction::begin(&db);
     let writer_db = db.clone();
     std::thread::spawn(move || {
-        let update = DbTransaction::begin(&writer_db);
+        let mut update = DbTransaction::begin(&writer_db);
         assert!(matches!(
             update.update(table, 1, 20),
             CRUDOperationResult::Updated(_)
@@ -114,7 +120,7 @@ fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
         // More allocation after retirement gives GC ample opportunity to
         // reuse eligible blocks; blocks needed by `old` must remain exempt.
         for key in 257..=512 {
-            let tx = DbTransaction::begin(&writer_db);
+            let mut tx = DbTransaction::begin(&writer_db);
             assert!(matches!(
                 tx.insert(table, key, key * 10),
                 CRUDOperationResult::Inserted(_)
@@ -138,7 +144,7 @@ fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
     );
     old.commit();
 
-    let current = DbTransaction::begin(&db);
+    let mut current = DbTransaction::begin(&db);
     assert!(
         matches!(current.point(table, 1), CRUDOperationResult::MatchedRecords(r)
         if r.len() == 1 && r[0].payload == 20)
@@ -164,14 +170,14 @@ fn repeated_delete_reinsert_round_trips_through_wal_recovery() {
 
     let db = new_db_with_wal(&path);
     let table = db.create_table("t").table_id().unwrap();
-    let setup = DbTransaction::begin(&db);
+    let mut setup = DbTransaction::begin(&db);
     assert!(matches!(
         setup.insert(table, 1, 10),
         CRUDOperationResult::Inserted(_)
     ));
     setup.commit();
 
-    let tx = DbTransaction::begin(&db);
+    let mut tx = DbTransaction::begin(&db);
     let ts_start = tx.ts_start();
     for value in 11..=100 {
         assert!(matches!(
@@ -197,7 +203,7 @@ fn repeated_delete_reinsert_round_trips_through_wal_recovery() {
         Duration::from_millis(2),
     )
     .unwrap();
-    let check = DbTransaction::begin(&recovered);
+    let mut check = DbTransaction::begin(&recovered);
     assert!(
         matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r)
         if r.len() == 1 && r[0].payload == 100)
@@ -218,7 +224,7 @@ fn db_cross_table_transaction_is_atomic_across_tables() {
     let t_a = db.create_table("a").table_id().unwrap();
     let t_b = db.create_table("b").table_id().unwrap();
 
-    let tx1 = DbTransaction::begin(&db);
+    let mut tx1 = DbTransaction::begin(&db);
     assert!(matches!(
         tx1.insert(t_a, 1, 100),
         CRUDOperationResult::Inserted(_)
@@ -238,7 +244,7 @@ fn db_cross_table_transaction_is_atomic_across_tables() {
     // must see NEITHER table's write.
     std::thread::scope(|scope| {
         scope.spawn(move || {
-            let tx2 = DbTransaction::begin(db_ref);
+            let mut tx2 = DbTransaction::begin(db_ref);
             assert!(matches!(tx2.point(t_a, 1), CRUDOperationResult::MatchedRecords(r) if r.is_empty()));
             assert!(matches!(tx2.point(t_b, 2), CRUDOperationResult::MatchedRecords(r) if r.is_empty()));
             tx2.commit();
@@ -250,7 +256,7 @@ fn db_cross_table_transaction_is_atomic_across_tables() {
     // A transaction snapshotting after tx1's commit must now see both writes.
     std::thread::scope(|scope| {
         scope.spawn(move || {
-            let tx3 = DbTransaction::begin(db_ref);
+            let mut tx3 = DbTransaction::begin(db_ref);
             assert!(matches!(tx3.point(t_a, 1), CRUDOperationResult::MatchedRecords(r) if r.len() == 1));
             assert!(matches!(tx3.point(t_b, 2), CRUDOperationResult::MatchedRecords(r) if r.len() == 1));
             tx3.commit();
@@ -269,7 +275,7 @@ fn db_dropped_transaction_reverts_writes_across_tables_on_conflict() {
     let t_a = db.create_table("a").table_id().unwrap();
     let t_b = db.create_table("b").table_id().unwrap();
 
-    let tx1 = DbTransaction::begin(&db);
+    let mut tx1 = DbTransaction::begin(&db);
     assert!(matches!(
         tx1.insert(t_a, 1, 100),
         CRUDOperationResult::Inserted(_)
@@ -285,7 +291,7 @@ fn db_dropped_transaction_reverts_writes_across_tables_on_conflict() {
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
-                let tx2 = DbTransaction::begin(db_ref);
+                let mut tx2 = DbTransaction::begin(db_ref);
                 assert!(matches!(
                     tx2.insert(t_b, 3, 300),
                     CRUDOperationResult::Inserted(_)
@@ -306,7 +312,7 @@ fn db_dropped_transaction_reverts_writes_across_tables_on_conflict() {
     // tx1 is dropped here without commit — both earlier writes must be reverted.
     drop(tx1);
 
-    let tx3 = DbTransaction::begin(&db);
+    let mut tx3 = DbTransaction::begin(&db);
     assert!(
         matches!(tx3.point(t_a, 1), CRUDOperationResult::MatchedRecords(r) if r.is_empty()),
         "table a's write by since-aborted tx1 must not be visible"
@@ -336,7 +342,7 @@ fn db_crash_recovery_round_trip_across_tables() {
         let t_a = db.table_named("a").unwrap().table_id().unwrap();
         let t_b = db.table_named("b").unwrap().table_id().unwrap();
 
-        let tx = DbTransaction::begin(&db);
+        let mut tx = DbTransaction::begin(&db);
         let ts_start = tx.ts_start();
         assert!(matches!(
             tx.insert(t_a, 1, 100),
@@ -414,7 +420,7 @@ fn db_single_commit_marker_per_cross_table_transaction() {
     let t_b = db.table_named("b").unwrap().table_id().unwrap();
     let t_c = db.table_named("c").unwrap().table_id().unwrap();
 
-    let tx = DbTransaction::begin(&db);
+    let mut tx = DbTransaction::begin(&db);
     let worker_id = tx.worker_id();
     let ts_start = tx.ts_start();
     assert!(matches!(
@@ -496,7 +502,7 @@ fn dynamic_table_created_after_wal_and_gc_enabled_inherits_both() {
 
     // WAL inheritance: a write through "late" must survive crash + recovery.
     let ts_start = {
-        let tx = DbTransaction::begin(&db);
+        let mut tx = DbTransaction::begin(&db);
         let ts_start = tx.ts_start();
         assert!(matches!(
             tx.insert(t_late, 99_999, 12_345),

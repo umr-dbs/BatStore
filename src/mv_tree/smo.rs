@@ -12,7 +12,6 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::Deref;
 
-
 // TEMPORARY diagnostic: traces every leaf-level split/merge's source(s) and
 // result so a lost key's lifecycle across pages can be reconstructed after a
 // repro. Buffered in-memory (not `eprintln!`'d live) so the stderr lock
@@ -120,7 +119,7 @@ fn nearest_key_boundary<T, K: PartialEq>(
 pub enum BlockUnsafeDegree {
     Ok,
     Overflow,
-    ActiveUnderflow
+    ActiveUnderflow,
 }
 
 impl BlockUnsafeDegree {
@@ -130,12 +129,14 @@ impl BlockUnsafeDegree {
     }
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + 'static,
-    Payload: Clone + Default + 'static
+    Payload: Clone + Default + 'static,
 > Block<FAN_OUT, NUM_RECORDS, Key, Payload>
-{ // #[inline(always)]
+{
+    // #[inline(always)]
     // pub const fn block_id(&self) -> BlockID {
     //     0
     // }
@@ -177,24 +178,18 @@ impl<const FAN_OUT: usize,
 
     #[inline(always)]
     pub fn unsafe_degree(&self) -> BlockUnsafeDegree {
-        let (active, dead)
-            = self.active_dead_count();
+        let (active, dead) = self.active_dead_count();
 
-        let (active, dead)
-            = (active as usize,  dead as usize);
+        let (active, dead) = (active as usize, dead as usize);
 
-        let one_d
-            = self.filling_20_percent();
+        let one_d = self.filling_20_percent();
 
         if active <= one_d {
             BlockUnsafeDegree::ActiveUnderflow
-        }
-        else {
-            let overflow_units_count
-                = self.overflow_units_count();
+        } else {
+            let overflow_units_count = self.overflow_units_count();
 
-            let is_overflow
-                = active + dead >= overflow_units_count;
+            let is_overflow = active + dead >= overflow_units_count;
 
             if is_overflow && active <= one_d * 2 {
                 BlockUnsafeDegree::ActiveUnderflow
@@ -208,22 +203,18 @@ impl<const FAN_OUT: usize,
 
     #[inline(always)]
     pub fn unsafe_degree_root(&self) -> BlockUnsafeDegree {
-        let (active, dead)
-            = self.active_dead_count();
+        let (active, dead) = self.active_dead_count();
 
-        let (active, dead)
-            = (active as usize,  dead as usize);
+        let (active, dead) = (active as usize, dead as usize);
 
-        let is_leaf
-            = self.is_leaf();
+        let is_leaf = self.is_leaf();
 
-        if active == 1 && !is_leaf { // single child
+        if active == 1 && !is_leaf {
+            // single child
             BlockUnsafeDegree::ActiveUnderflow
-        }
-        else if active + dead >= self.overflow_units_count() {
+        } else if active + dead >= self.overflow_units_count() {
             BlockUnsafeDegree::Overflow
-        }
-        else {
+        } else {
             BlockUnsafeDegree::Ok
         }
     }
@@ -245,33 +236,40 @@ impl<const FAN_OUT: usize,
     // }
 
     #[inline(always)]
-    pub fn max_units(&self) -> usize { // absolute units
+    pub fn max_units(&self) -> usize {
+        // absolute units
         match self.is_leaf() {
             true => BlockAllocManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::max_records(),
-            false => BlockAllocManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::max_keys()
+            false => BlockAllocManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::max_keys(),
         }
     }
 
     #[inline(always)]
-    pub fn filling_40_percent(&self) -> usize { // 40%
+    pub fn filling_40_percent(&self) -> usize {
+        // 40%
         (2 * self.max_units() + 4) / 5
     }
 
     #[inline(always)]
-    pub fn filling_80_percent(&self) -> usize { // 80%
+    pub fn filling_80_percent(&self) -> usize {
+        // 80%
         (4 * self.max_units() + 4) / 5
     }
 
     #[inline(always)]
-    pub fn filling_20_percent(&self) -> usize { // 20%
+    pub fn filling_20_percent(&self) -> usize {
+        // 20%
         (self.max_units() + 4) / 5
     }
 
     #[inline(always)]
-    pub fn overflow_units_count(&self) -> usize { // trigger for overflow
+    pub fn overflow_units_count(&self) -> usize {
+        // trigger for overflow
         match self.is_leaf() {
-            true => BlockAllocManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::overflow_records_count(),
-            false => BlockAllocManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::overflow_keys_count()
+            true => {
+                BlockAllocManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::overflow_records_count()
+            }
+            false => BlockAllocManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::overflow_keys_count(),
         }
     }
 
@@ -280,7 +278,7 @@ impl<const FAN_OUT: usize,
         match self.as_page_ref() {
             PageType::IndexRef(internal_page) => internal_page.active_dead_count(),
             PageType::LeafRef(leaf_page) => leaf_page.active_dead_count(),
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 
@@ -299,53 +297,63 @@ pub(crate) enum BlockSplit<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
+    Payload: Clone + Default,
 > {
-    ByKey(Interval<Key>,
+    ByKey(
+        Interval<Key>,
           BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
           Interval<Key>,
-          BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>),
-    ByVersion(BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)
+        BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    ),
+    ByVersion(BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>),
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default> BlockSplit<FAN_OUT, NUM_RECORDS, Key, Payload
-> { }
+    Payload: Clone + Default,
+> BlockSplit<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+}
 
 pub(crate) enum MergeResult<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display,
-    Payload: Clone + Default
+    Payload: Clone + Default,
 > {
-    Merged(usize,
+    Merged(
+        usize,
            Interval<Key>,
            BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
            // Already retired (`SmartGuard::try_retire`) by the time
            // `merge()` builds this — see that call site's doc — so this is
            // a bare cell, not a guard: there's no lock left to hold or
            // later release.
-           BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>),
-    KeySplit(usize,
+        BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    ),
+    KeySplit(
+        usize,
              BlockSplit<FAN_OUT, NUM_RECORDS, Key, Payload>,
-             BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>),
+        BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    ),
     Error,
 }
 
-impl<const FAN_OUT: usize,
+impl<
+    const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Sync + 'static + Display,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     pub(crate) fn on_overflow_node<'a>(
         &self,
         mufasa: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         simba: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
-        child_index: usize) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
-    {
+        child_index: usize,
+    ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
         // `mufasa` may already be a `Writer` carried over from a *different*
         // child's overflow/underflow round earlier in this same traversal —
         // `SmartGuard::upgrade_write_lock` is a no-op once a guard is
@@ -406,22 +414,23 @@ impl<const FAN_OUT: usize,
             return Err(());
         }
 
-        let mufasa_deref_mut
-            = mufasa.deref_mut();
+        let mufasa_deref_mut = mufasa.deref_mut();
 
-        let internal_page
-            = mufasa_deref_mut.as_internal_page();
+        let internal_page = mufasa_deref_mut.as_internal_page();
 
-        let fence = internal_page
-            .get_key(child_index)
-            .clone();
+        let fence = internal_page.get_key(child_index).clone();
 
-        let current_len
-            = internal_page.sum_len();
+        let current_len = internal_page.sum_len();
 
         if DIAG && format!("{}", fence.upper) == "18446744073709551615" {
-            eprintln!("DIAG on_overflow_node ENTER thread={:#x} page={:p} child_index={child_index} current_len={current_len} fence=[{},{}] sum_len_before={}",
-                diag_thread_hash(), internal_page as *const _, fence.lower, fence.upper, internal_page.sum_len());
+            eprintln!(
+                "DIAG on_overflow_node ENTER thread={:#x} page={:p} child_index={child_index} current_len={current_len} fence=[{},{}] sum_len_before={}",
+                diag_thread_hash(),
+                internal_page as *const _,
+                fence.lower,
+                fence.upper,
+                internal_page.sum_len()
+            );
         }
 
         // `simba`'s content is fully consumed here (copied into `left`/
@@ -454,47 +463,42 @@ impl<const FAN_OUT: usize,
         };
 
         let version = match self.split(simba_cell.deref(), &fence) {
-            BlockSplit::ByKey(left_fence,
-                              left,
-                              right_fence,
-                              right
-            ) => {
-                let version
-                    = self.start_tx_commit();
+            BlockSplit::ByKey(left_fence, left, right_fence, right) => {
+                let version = self.start_tx_commit();
 
-                internal_page.push_uncommitted(
-                    left_fence,
-                    version,
-                    left,
-                    current_len);
+                internal_page.push_uncommitted(left_fence, version, left, current_len);
 
-                internal_page.push_uncommitted(
-                    right_fence,
-                    version,
-                    right,
-                    current_len + 1);
+                internal_page.push_uncommitted(right_fence, version, right, current_len + 1);
 
                 internal_page.commit_delta(1, 1);
                 if DIAG && format!("{}", right_fence.upper) == "18446744073709551615" {
-                    eprintln!("DIAG on_overflow_node ByKey thread={:#x} page={:p} child_index={child_index} superseded, pushed left=[{},{}]@{current_len} right=[{},{}]@{}",
-                        diag_thread_hash(), internal_page as *const _, left_fence.lower, left_fence.upper, right_fence.lower, right_fence.upper, current_len + 1);
+                    eprintln!(
+                        "DIAG on_overflow_node ByKey thread={:#x} page={:p} child_index={child_index} superseded, pushed left=[{},{}]@{current_len} right=[{},{}]@{}",
+                        diag_thread_hash(),
+                        internal_page as *const _,
+                        left_fence.lower,
+                        left_fence.upper,
+                        right_fence.lower,
+                        right_fence.upper,
+                        current_len + 1
+                    );
                 }
                 version
             }
             BlockSplit::ByVersion(fresh) => {
-                let version
-                    = self.start_tx_commit();
+                let version = self.start_tx_commit();
 
-                internal_page.push_uncommitted(
-                    fence,
-                    version,
-                    fresh,
-                    current_len);
+                internal_page.push_uncommitted(fence, version, fresh, current_len);
 
                 internal_page.commit_delta(0, 1);
                 if DIAG && format!("{}", fence.upper) == "18446744073709551615" {
-                    eprintln!("DIAG on_overflow_node ByVersion thread={:#x} page={:p} child_index={child_index} superseded, pushed fence=[{},{}]@{current_len}",
-                        diag_thread_hash(), internal_page as *const _, fence.lower, fence.upper);
+                    eprintln!(
+                        "DIAG on_overflow_node ByVersion thread={:#x} page={:p} child_index={child_index} superseded, pushed fence=[{},{}]@{current_len}",
+                        diag_thread_hash(),
+                        internal_page as *const _,
+                        fence.lower,
+                        fence.upper
+                    );
                 }
                 version
             }
@@ -514,10 +518,8 @@ impl<const FAN_OUT: usize,
         //
         // `simba_cell` is already retired (via `try_retire()` above) by the
         // time we get here — nothing left to do but hand it to the tracker.
-        self.block_manager.register_dead(
-            self.worker_id(),
-            version,
-            simba_cell);
+        self.block_manager
+            .register_dead(self.worker_id(), version, simba_cell);
         Ok(mufasa)
     }
 
@@ -525,8 +527,8 @@ impl<const FAN_OUT: usize,
         &self,
         mufasa: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         simba: BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>,
-        index_simba: usize) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
-    {
+        index_simba: usize,
+    ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
         if VERBOSE {
             println!("on_underflow_node");
         }
@@ -546,8 +548,7 @@ impl<const FAN_OUT: usize,
             return Err(());
         }
 
-        let mufasa_deref_mut
-            = mufasa.deref_mut();
+        let mufasa_deref_mut = mufasa.deref_mut();
 
         // `simba` arrives here as a plain `Reader`, same as `merge()`'s own
         // `candidate` — but unlike `candidate`, this call *can* still fail
@@ -569,48 +570,45 @@ impl<const FAN_OUT: usize,
         // guard's `Drop` would.
         let simba_cell = match simba.try_retire() {
             Ok(cell) => cell,
-            Err(..) => return Err(())
+            Err(..) => return Err(()),
         };
 
         match self.merge(mufasa_deref_mut, simba_cell.deref(), index_simba) {
-            MergeResult::Merged(
-                index_sibling,
-                fence_sibling,
-                merged_block,
-                candidate_cell
-            ) => {
+            MergeResult::Merged(index_sibling, fence_sibling, merged_block, candidate_cell) => {
                 if VERBOSE {
-                    println!("MergeResult::Merged: Simba-fence: {} - Sibling-fence: {}",
+                    println!(
+                        "MergeResult::Merged: Simba-fence: {} - Sibling-fence: {}",
                              mufasa_deref_mut.as_internal_page_ref().get_key(index_simba),
-                             fence_sibling);
+                        fence_sibling
+                    );
                 }
-                let mufasa_internal_page = mufasa_deref_mut
-                    .as_internal_page();
+                let mufasa_internal_page = mufasa_deref_mut.as_internal_page();
 
-                let mufasa_len
-                    = mufasa_internal_page.sum_len();
+                let mufasa_len = mufasa_internal_page.sum_len();
 
-                let mut merged_fence = mufasa_internal_page
-                    .get_key(index_simba)
-                    .clone();
+                let mut merged_fence = mufasa_internal_page.get_key(index_simba).clone();
 
                 merged_fence.merged(&fence_sibling);
 
-                let version
-                    = self.start_tx_commit();
+                let version = self.start_tx_commit();
 
                 mufasa_internal_page.push_uncommitted(
                     merged_fence,
                     version,
                     merged_block,
-                    mufasa_len);
+                    mufasa_len,
+                );
 
-                mufasa_internal_page
-                    .commit_delta(-1, 2);
+                mufasa_internal_page.commit_delta(-1, 2);
 
                 if DIAG && format!("{}", merged_fence.upper) == "18446744073709551615" {
-                    eprintln!("DIAG on_underflow_node Merged thread={:#x} page={:p} index_simba={index_simba} index_sibling={index_sibling} superseded, pushed merged=[{},{}]@{mufasa_len}",
-                        diag_thread_hash(), mufasa_internal_page as *const _, merged_fence.lower, merged_fence.upper);
+                    eprintln!(
+                        "DIAG on_underflow_node Merged thread={:#x} page={:p} index_simba={index_simba} index_sibling={index_sibling} superseded, pushed merged=[{},{}]@{mufasa_len}",
+                        diag_thread_hash(),
+                        mufasa_internal_page as *const _,
+                        merged_fence.lower,
+                        merged_fence.upper
+                    );
                 }
 
                 // See `on_overflow_node`'s matching comment: the new
@@ -622,22 +620,18 @@ impl<const FAN_OUT: usize,
                 // so they're used as-is.
                 self.block_manager.register_dead_col(
                     self.worker_id(),
-                    [
-                        (version, simba_cell),
-                        (version, candidate_cell)
-                    ])
+                    [(version, simba_cell), (version, candidate_cell)],
+                )
             }
             MergeResult::KeySplit(
                 index_sibling,
-                BlockSplit::ByKey(left_interval,
-                                  left,
-                                  right_interval,
-                                  right),
-                candidate_cell
+                BlockSplit::ByKey(left_interval, left, right_interval, right),
+                candidate_cell,
             ) => {
                 if VERBOSE {
                     unsafe {
-                        println!("MergeResult::KeySplit: \
+                        println!(
+                            "MergeResult::KeySplit: \
                        \tleft-fence: {}, \
                        \tright-fence: {}.\
                         \n\tSimba-fence: {} - Sibling-fence: {}\n\
@@ -650,42 +644,41 @@ impl<const FAN_OUT: usize,
                         );
                     }
                 }
-                let mufasa_internal_page = mufasa_deref_mut
-                    .as_internal_page();
+                let mufasa_internal_page = mufasa_deref_mut.as_internal_page();
 
-                let mufasa_len
-                    = mufasa_internal_page.sum_len();
+                let mufasa_len = mufasa_internal_page.sum_len();
 
-                let version
-                    = self.start_tx_commit();
+                let version = self.start_tx_commit();
 
-                mufasa_internal_page.push_uncommitted(
-                    left_interval,
-                    version,
-                    left,
-                    mufasa_len);
+                mufasa_internal_page.push_uncommitted(left_interval, version, left, mufasa_len);
 
                 mufasa_internal_page.push_uncommitted(
                     right_interval,
                     version,
                     right,
-                    mufasa_len + 1);
+                    mufasa_len + 1,
+                );
 
-                mufasa_internal_page
-                    .commit_delta(0, 2);
+                mufasa_internal_page.commit_delta(0, 2);
 
                 if DIAG && format!("{}", right_interval.upper) == "18446744073709551615" {
-                    eprintln!("DIAG on_underflow_node KeySplit thread={:#x} page={:p} index_simba={index_simba} index_sibling={index_sibling} superseded, pushed left=[{},{}]@{mufasa_len} right=[{},{}]@{}",
-                        diag_thread_hash(), mufasa_internal_page as *const _, left_interval.lower, left_interval.upper, right_interval.lower, right_interval.upper, mufasa_len + 1);
+                    eprintln!(
+                        "DIAG on_underflow_node KeySplit thread={:#x} page={:p} index_simba={index_simba} index_sibling={index_sibling} superseded, pushed left=[{},{}]@{mufasa_len} right=[{},{}]@{}",
+                        diag_thread_hash(),
+                        mufasa_internal_page as *const _,
+                        left_interval.lower,
+                        left_interval.upper,
+                        right_interval.lower,
+                        right_interval.upper,
+                        mufasa_len + 1
+                    );
                 }
 
                 // See the `Merged` arm's matching comment.
                 self.block_manager.register_dead_col(
                     self.worker_id(),
-                    [
-                        (version, simba_cell),
-                        (version, candidate_cell)
-                    ])
+                    [(version, simba_cell), (version, candidate_cell)],
+                )
             }
             // `merge()` failed (`compute_candidate` found no sibling) —
             // `simba_cell` was already retired above in anticipation of
@@ -742,13 +735,17 @@ impl<const FAN_OUT: usize,
     /// predecessor for abort safety and for readers born against that new
     /// structural version. Once deletion commits, future readers see it.
     #[inline]
-    pub(crate) fn record_survives_gc(&self, version: &crate::mv_record_model::version_info::VersionInfo) -> bool {
+    pub(crate) fn record_survives_gc(
+        &self,
+        version: &crate::mv_record_model::version_info::VersionInfo,
+    ) -> bool {
         if version.is_live() {
             return true;
         }
 
         !version.insertion_stamp().is_invalid()
-            && version.deletion_stamp()
+            && version
+                .deletion_stamp()
                 .is_some_and(|del| self.ctx.is_snapshot_live(del.ts_start()))
     }
 
@@ -757,43 +754,33 @@ impl<const FAN_OUT: usize,
         mufasa: &'a Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
         simba: &Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
         simba_index: usize,
-    ) -> MergeResult<FAN_OUT, NUM_RECORDS, Key, Payload>
-    {
-        let mufasa_internal_page
-            = mufasa.as_internal_page_ref();
+    ) -> MergeResult<FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let mufasa_internal_page = mufasa.as_internal_page_ref();
 
-        let is_simba_leaf
-            = simba.is_leaf();
+        let is_simba_leaf = simba.is_leaf();
 
-        let simba_fence
-            = mufasa_internal_page.get_key(simba_index);
+        let simba_fence = mufasa_internal_page.get_key(simba_index);
 
-        let simba_max_units
-            = simba.max_units();
+        let simba_max_units = simba.max_units();
 
-        let (simba_active_count, _simba_dead_count)
-            = simba.active_dead_count();
+        let (simba_active_count, _simba_dead_count) = simba.active_dead_count();
 
-        let (simba_active_count, _simba_dead_count)
-            = (simba_active_count as usize, _simba_dead_count as usize);
+        let (simba_active_count, _simba_dead_count) =
+            (simba_active_count as usize, _simba_dead_count as usize);
 
-        let mufasa_children
-            = mufasa_internal_page.children();
+        let mufasa_children = mufasa_internal_page.children();
 
-        let live
-            = mufasa_internal_page.live_mask();
+        let live = mufasa_internal_page.live_mask();
 
         let mut all_candidates = mufasa_children
             .iter()
             .enumerate()
             .zip(mufasa_internal_page.versions())
             .zip(mufasa_internal_page.keys())
-            .filter(|(((index, ..), ..), ..)|
-                *index != simba_index)
+            .filter(|(((index, ..), ..), ..)| *index != simba_index)
             .filter(|(((index, ..), ..), ..)| live[*index])
             .sorted_by_key(|(.., fence)| fence.lower())
-            .map(|(((index, bro), ..), fence)|
-                (index, bro, fence))
+            .map(|(((index, bro), ..), fence)| (index, bro, fence))
             .collect_vec();
 
         // Picking blindly between two adjacent siblings (the old
@@ -815,7 +802,8 @@ impl<const FAN_OUT: usize,
         // decision below re-reads whichever one is chosen fresh, once
         // retired, exactly as before.
         let mut compute_candidate = || {
-            let insertion_point = match all_candidates.binary_search_by_key(&simba_fence.lower, |(.., f)| f.lower) {
+            let insertion_point =
+                match all_candidates.binary_search_by_key(&simba_fence.lower, |(.., f)| f.lower) {
                 Ok(index) => return Ok(all_candidates.remove(index)),
                 Err(index) => index,
             };
@@ -827,7 +815,11 @@ impl<const FAN_OUT: usize,
                 (Some(l), Some(r)) => {
                     let (l_active, l_dead) = all_candidates[l].1.active_dead_count();
                     let (r_active, r_dead) = all_candidates[r].1.active_dead_count();
-                    if l_active as usize + l_dead as usize <= r_active as usize + r_dead as usize { l } else { r }
+                    if l_active as usize + l_dead as usize <= r_active as usize + r_dead as usize {
+                        l
+                    } else {
+                        r
+                    }
                 }
                 (Some(l), None) => l,
                 (None, Some(r)) => r,
@@ -873,12 +865,10 @@ impl<const FAN_OUT: usize,
 
         all_candidates.clear();
 
-        let (candidate_active_count, _candidate_dead_count) = candidate_cell
-            .deref()
-            .active_dead_count();
+        let (candidate_active_count, _candidate_dead_count) =
+            candidate_cell.deref().active_dead_count();
 
-        let candidate_active_count
-            = candidate_active_count as usize;
+        let candidate_active_count = candidate_active_count as usize;
 
         // Leaf-only: the records a "merge into one combined leaf" below
         // actually pushes are everything `record_survives_gc` keeps —
@@ -901,7 +891,8 @@ impl<const FAN_OUT: usize,
         // in the common case (this closure only runs when `is_simba_leaf`)
         // and cannot itself overflow.
         let leaf_merge_would_overflow = is_simba_leaf && {
-            let simba_survivors = simba.as_records()
+            let simba_survivors = simba
+                .as_records()
                 .iter()
                 .filter(|r| self.record_survives_gc(r.version()))
                 .count();
@@ -916,27 +907,25 @@ impl<const FAN_OUT: usize,
             simba_survivors + candidate_survivors > simba_max_units
         };
 
-        if !leaf_merge_would_overflow && candidate_active_count + simba_active_count <= ((4 * simba_max_units) / 5) { // <= 80% ok merge
+        if !leaf_merge_would_overflow
+            && candidate_active_count + simba_active_count <= ((4 * simba_max_units) / 5)
+        {
+            // <= 80% ok merge
             let combined_block = match is_simba_leaf {
                 false => {
-                    let combined_block = self.block_manager
-                        .new_empty_index_block(&self.ctx);
+                    let combined_block = self.block_manager.new_empty_index_block(&self.ctx);
 
-                    let (keys, versions, pointers)
-                        = simba.as_internal_page_ref().keys_versions_pointers();
+                    let (keys, versions, pointers) =
+                        simba.as_internal_page_ref().keys_versions_pointers();
 
-                    let simba_live
-                        = simba.as_internal_page_ref().live_mask();
+                    let simba_live = simba.as_internal_page_ref().live_mask();
 
                     let (c_keys, c_versions, c_pointers) = candidate_cell
                         .deref()
                         .as_internal_page_ref()
                         .keys_versions_pointers();
 
-                    let candidate_live = candidate_cell
-                        .deref()
-                        .as_internal_page_ref()
-                        .live_mask();
+                    let candidate_live = candidate_cell.deref().as_internal_page_ref().live_mask();
 
                     let shadow_copy = keys
                         .iter()
@@ -945,13 +934,16 @@ impl<const FAN_OUT: usize,
                         .enumerate()
                         .filter(|(index, ..)| simba_live[*index])
                         .map(|(_, rest)| rest)
-                        .merge_by(c_keys.iter()
+                        .merge_by(
+                            c_keys
+                                .iter()
                                       .zip(c_versions.iter().copied())
                                       .zip(c_pointers.iter())
                                       .enumerate()
                                       .filter(|(index, ..)| candidate_live[*index])
                                       .map(|(_, rest)| rest),
-                                  |((.., v0), ..), ((.., v1), ..)| v0 <= v1)
+                            |((.., v0), ..), ((.., v1), ..)| v0 <= v1,
+                        )
                         .collect_vec();
 
                     combined_block
@@ -962,8 +954,7 @@ impl<const FAN_OUT: usize,
                     combined_block
                 }
                 true => {
-                    let combined_block = self.block_manager
-                        .new_empty_leaf(&self.ctx);
+                    let combined_block = self.block_manager.new_empty_leaf(&self.ctx);
 
                     // Plain concatenation, not a `ts_start`-ordered
                     // `merge_by`: `simba` and `candidate` are distinct
@@ -981,37 +972,68 @@ impl<const FAN_OUT: usize,
                     // (see those for the actual hazard), there's no live-
                     // ahead-of-dead reordering risk to avoid in the first
                     // place — nothing here spans more than one key's chain.
-                    combined_block
-                        .unsafe_borrow_mut()
-                        .as_leaf_page()
-                        .bulk_push(simba
+                    combined_block.unsafe_borrow_mut().as_leaf_page().bulk_push(
+                        simba
                             .as_records()
                             .iter()
                             .filter(|r| self.record_survives_gc(r.version()))
-                            .chain(candidate_cell
+                            .chain(
+                                candidate_cell
                                        .deref()
                                        .as_records()
                                        .iter()
-                                       .filter(|r| self.record_survives_gc(r.version())))
-                            .collect_vec());
+                                    .filter(|r| self.record_survives_gc(r.version())),
+                            )
+                            .collect_vec(),
+                    );
 
                     if TRACE_KEY_DEBUG {
-                        push_trace(format!("TRACE merge::Merged(leaf) thread={:#x} simba={:p} simba_fence={} simba_live={} candidate={:p} candidate_fence={} candidate_live={} -> combined={:p} combined_live={}",
+                        push_trace(format!(
+                            "TRACE merge::Merged(leaf) thread={:#x} simba={:p} simba_fence={} simba_live={} candidate={:p} candidate_fence={} candidate_live={} -> combined={:p} combined_live={}",
                             diag_thread_hash(),
-                            simba, simba_fence,
-                            simba.as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
-                            candidate_cell.deref(), candidate_fence,
-                            candidate_cell.deref().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            simba,
+                            simba_fence,
+                            simba
+                                .as_records()
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(","),
+                            candidate_cell.deref(),
+                            candidate_fence,
+                            candidate_cell
+                                .deref()
+                                .as_records()
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(","),
                             combined_block.unsafe_borrow(),
-                            combined_block.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(",")));
+                            combined_block
+                                .unsafe_borrow()
+                                .as_records()
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(",")
+                        ));
                     }
 
                     combined_block
                 }
             };
 
-            MergeResult::Merged(candidate_index, candidate_fence.clone(), combined_block, candidate_cell)
-        } else { // Keysplit when merged: > 80% active entries ---> redistribute the keys
+            MergeResult::Merged(
+                candidate_index,
+                candidate_fence.clone(),
+                combined_block,
+                candidate_cell,
+            )
+        } else {
+            // Keysplit when merged: > 80% active entries ---> redistribute the keys
             match is_simba_leaf {
                 true => unsafe {
                     let candidate_records = candidate_cell.deref().as_records();
@@ -1021,26 +1043,29 @@ impl<const FAN_OUT: usize,
                         .iter()
                         .filter(|r| self.record_survives_gc(r.version()))
                         .sorted_by_key(|r| r.key)
-                        .merge_by(simba_records
+                        .merge_by(
+                            simba_records
                                       .iter()
                                       .filter(|r| self.record_survives_gc(r.version()))
                                       .sorted_by_key(|r| r.key),
-                                  |f, s|
-                                      f.key() <= s.key())
+                            |f, s| f.key() <= s.key(),
+                        )
                         .collect_vec();
 
                     let joined_len = joined.len();
-                    let middle = nearest_key_boundary(&joined, joined_len / 2, simba_max_units, |r| r.key());
-                    let (first, second)
-                        = joined.split_at_mut(middle);
+                    let middle =
+                        nearest_key_boundary(&joined, joined_len / 2, simba_max_units, |r| r.key());
+                    let (first, second) = joined.split_at_mut(middle);
 
                     let left_interval = Interval::new(
                         candidate_fence.lower.min(simba_fence.lower),
-                        (self.dec_key)(second.get_unchecked(0).key()));
+                        (self.cold.dec_key)(second.get_unchecked(0).key()),
+                    );
 
                     let right_interval = Interval::new(
                         second.get_unchecked(0).key(),
-                        candidate_fence.upper.max(simba_fence.upper));
+                        candidate_fence.upper.max(simba_fence.upper),
+                    );
 
                     // No re-sort by `insertion_stamp().ts_start()` here (there
                     // used to be one for each half): `joined` is already in
@@ -1066,11 +1091,9 @@ impl<const FAN_OUT: usize,
                     // newer entry already marked dead by a still-later
                     // write).
 
-                    let combined_block_0 = self.block_manager
-                        .new_empty_leaf(&self.ctx);
+                    let combined_block_0 = self.block_manager.new_empty_leaf(&self.ctx);
 
-                    let combined_block_1 = self.block_manager
-                        .new_empty_leaf(&self.ctx);
+                    let combined_block_1 = self.block_manager.new_empty_leaf(&self.ctx);
 
                     combined_block_0
                         .unsafe_borrow_mut()
@@ -1083,16 +1106,46 @@ impl<const FAN_OUT: usize,
                         .bulk_push_from_slice_ref(second);
 
                     if TRACE_KEY_DEBUG {
-                        push_trace(format!("TRACE merge::KeySplit(leaf) thread={:#x} simba={:p} simba_fence={} simba_live={} candidate={:p} candidate_fence={} candidate_live={} -> left={:p} left_fence={} left_live={} right={:p} right_fence={} right_live={}",
+                        push_trace(format!(
+                            "TRACE merge::KeySplit(leaf) thread={:#x} simba={:p} simba_fence={} simba_live={} candidate={:p} candidate_fence={} candidate_live={} -> left={:p} left_fence={} left_live={} right={:p} right_fence={} right_live={}",
                             diag_thread_hash(),
-                            simba, simba_fence,
-                            simba_records.iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
-                            candidate_cell.deref(), candidate_fence,
-                            candidate_records.iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
-                            combined_block_0.unsafe_borrow(), left_interval,
-                            combined_block_0.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
-                            combined_block_1.unsafe_borrow(), right_interval,
-                            combined_block_1.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(",")));
+                            simba,
+                            simba_fence,
+                            simba_records
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(","),
+                            candidate_cell.deref(),
+                            candidate_fence,
+                            candidate_records
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(","),
+                            combined_block_0.unsafe_borrow(),
+                            left_interval,
+                            combined_block_0
+                                .unsafe_borrow()
+                                .as_records()
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(","),
+                            combined_block_1.unsafe_borrow(),
+                            right_interval,
+                            combined_block_1
+                                .unsafe_borrow()
+                                .as_records()
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(",")
+                        ));
                     }
 
                     MergeResult::KeySplit(
@@ -1101,25 +1154,22 @@ impl<const FAN_OUT: usize,
                             left_interval,
                             combined_block_0,
                             right_interval,
-                            combined_block_1),
-                        candidate_cell)
-                }
+                            combined_block_1,
+                        ),
+                        candidate_cell,
+                    )
+                },
                 false => unsafe {
-                    let candidate_internal_page = candidate_cell
-                        .deref()
-                        .as_internal_page_ref();
+                    let candidate_internal_page = candidate_cell.deref().as_internal_page_ref();
 
-                    let (c_keys, c_versions, c_children)
-                        = candidate_internal_page.keys_versions_pointers();
+                    let (c_keys, c_versions, c_children) =
+                        candidate_internal_page.keys_versions_pointers();
 
-                    let candidate_live
-                        = candidate_internal_page.live_mask();
+                    let candidate_live = candidate_internal_page.live_mask();
 
-                    let (s_keys, s_version, s_children)
-                        = simba.keys_versions_pointers();
+                    let (s_keys, s_version, s_children) = simba.keys_versions_pointers();
 
-                    let simba_live
-                        = simba.as_internal_page_ref().live_mask();
+                    let simba_live = simba.as_internal_page_ref().live_mask();
 
                     let mut joined = c_keys
                         .iter()
@@ -1129,37 +1179,38 @@ impl<const FAN_OUT: usize,
                         .filter(|(index, ..)| candidate_live[*index])
                         .map(|(_, rest)| rest)
                         .sorted_by_key(|((k, ..), ..)| k.lower)
-                        .merge_by(s_keys.iter()
+                        .merge_by(
+                            s_keys
+                                .iter()
                                       .zip(s_version.iter().copied())
                                       .zip(s_children.iter())
                                       .enumerate()
                                       .filter(|(index, ..)| simba_live[*index])
                                       .map(|(_, rest)| rest)
                                       .sorted_by_key(|((k, ..), ..)| k.lower),
-                                  |((f, ..), ..), ((s, ..), ..)|
-                                      f.lower < s.lower)
+                            |((f, ..), ..), ((s, ..), ..)| f.lower < s.lower,
+                        )
                         .collect_vec();
 
                     let joined_len = joined.len();
-                    let (first, second)
-                        = joined.split_at_mut(joined_len / 2);
+                    let (first, second) = joined.split_at_mut(joined_len / 2);
 
                     let left_fence = Interval::new(
                         candidate_fence.lower.min(simba_fence.lower),
-                        (self.dec_key)(second.get_unchecked(0).0.0.lower));
+                        (self.cold.dec_key)(second.get_unchecked(0).0.0.lower),
+                    );
 
                     let right_fence = Interval::new(
                         second.get_unchecked(0).0.0.lower,
-                        candidate_fence.upper.max(simba_fence.upper));
+                        candidate_fence.upper.max(simba_fence.upper),
+                    );
 
                     first.sort_by_key(|((.., v), ..)| *v);
                     second.sort_by_key(|((.., v), ..)| *v);
 
-                    let combined_block_0 = self.block_manager
-                        .new_empty_index_block(&self.ctx);
+                    let combined_block_0 = self.block_manager.new_empty_index_block(&self.ctx);
 
-                    let combined_block_1 = self.block_manager
-                        .new_empty_index_block(&self.ctx);
+                    let combined_block_1 = self.block_manager.new_empty_index_block(&self.ctx);
 
                     combined_block_0
                         .unsafe_borrow_mut()
@@ -1177,9 +1228,11 @@ impl<const FAN_OUT: usize,
                             left_fence,
                             combined_block_0,
                             right_fence,
-                            combined_block_1),
-                        candidate_cell)
-                }
+                            combined_block_1,
+                        ),
+                        candidate_cell,
+                    )
+                },
             }
         }
     }
@@ -1188,13 +1241,10 @@ impl<const FAN_OUT: usize,
         &self,
         block: &Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
         fence: &Interval<Key>,
-    ) -> BlockSplit<FAN_OUT, NUM_RECORDS, Key, Payload>
-    {
-        let is_leaf
-            = block.is_leaf();
+    ) -> BlockSplit<FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let is_leaf = block.is_leaf();
 
-        let (active_block, _dead_block)
-            = block.active_dead_count();
+        let (active_block, _dead_block) = block.active_dead_count();
 
         // What a VERSION_SPLIT (the `else` branch below) would actually have
         // to push into its one single new page: every *survivor*, not just
@@ -1214,11 +1264,13 @@ impl<const FAN_OUT: usize,
         // like `merge()`'s equivalent check, so this size is never chosen
         // when it can't actually fit in one page.
         let survivor_count = match is_leaf {
-            true => block.as_records()
+            true => block
+                .as_records()
                 .iter()
                 .filter(|r| self.record_survives_gc(r.version()))
                 .count(),
-            false => block.as_internal_page_ref()
+            false => block
+                .as_internal_page_ref()
                 .live_mask()
                 .iter()
                 .filter(|live| **live)
@@ -1256,16 +1308,18 @@ impl<const FAN_OUT: usize,
         if active_block as usize >= block.filling_80_percent() || survivor_count >= capacity {
             // KEY_SPLIT
             match is_leaf {
-                true => unsafe { // LeafPage
+                true => unsafe {
+                    // LeafPage
                     if VERBOSE {
-                        println!("Key Split: Leaf\n{}", block.as_records().iter().join("\n\t"));
-
+                        println!(
+                            "Key Split: Leaf\n{}",
+                            block.as_records().iter().join("\n\t")
+                        );
                     }
-                    let (left, right) =
-                        (self.block_manager
-                             .new_empty_leaf(&self.ctx),
-                         self.block_manager
-                             .new_empty_leaf(&self.ctx));
+                    let (left, right) = (
+                        self.block_manager.new_empty_leaf(&self.ctx),
+                        self.block_manager.new_empty_leaf(&self.ctx),
+                    );
 
                     let block_records = block.as_records();
 
@@ -1275,13 +1329,18 @@ impl<const FAN_OUT: usize,
                         .sorted_by_key(|r| r.key())
                         .collect_vec();
 
-                    let middle = nearest_key_boundary(&sorted_block, sorted_block.len() / 2, capacity, |r| r.key());
-                    let (first, second) = sorted_block
-                        .split_at_mut(middle);
+                    let middle = nearest_key_boundary(
+                        &sorted_block,
+                        sorted_block.len() / 2,
+                        capacity,
+                        |r| r.key(),
+                    );
+                    let (first, second) = sorted_block.split_at_mut(middle);
 
                     let fence_left = Interval::new(
                         fence.lower,
-                        (self.dec_key)(second.get_unchecked(0).key));
+                        (self.cold.dec_key)(second.get_unchecked(0).key),
+                    );
 
                     // No re-sort by `insertion_stamp().ts_start()` here (there
                     // used to be one for each half) — see `merge`'s identical
@@ -1298,42 +1357,61 @@ impl<const FAN_OUT: usize,
                         leaf_page.bulk_push_from_slice_ref(first);
                     }
 
-                    let fence_right = Interval::new(
-                        second.get_unchecked(0).key,
-                        fence.upper);
+                    let fence_right = Interval::new(second.get_unchecked(0).key, fence.upper);
 
                     if let PageType::LeafMut(leaf_page) = right.unsafe_borrow_mut().as_page_mut() {
                         leaf_page.bulk_push_from_slice_ref(second)
                     }
 
                     if TRACE_KEY_DEBUG {
-                        push_trace(format!("TRACE split::ByKey(leaf) thread={:#x} old={:p} old_fence={} old_live={} -> left={:p} left_fence={} left_live={} right={:p} right_fence={} right_live={}",
+                        push_trace(format!(
+                            "TRACE split::ByKey(leaf) thread={:#x} old={:p} old_fence={} old_live={} -> left={:p} left_fence={} left_live={} right={:p} right_fence={} right_live={}",
                             diag_thread_hash(),
-                            block, fence,
-                            block_records.iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
-                            left.unsafe_borrow(), fence_left,
-                            left.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
-                            right.unsafe_borrow(), fence_right,
-                            right.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(",")));
+                            block,
+                            fence,
+                            block_records
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(","),
+                            left.unsafe_borrow(),
+                            fence_left,
+                            left.unsafe_borrow()
+                                .as_records()
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(","),
+                            right.unsafe_borrow(),
+                            fence_right,
+                            right
+                                .unsafe_borrow()
+                                .as_records()
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(",")
+                        ));
                     }
 
                     BlockSplit::ByKey(fence_left, left, fence_right, right)
-                }
-                false => unsafe { // KEY_SPLIT InternalPage
+                },
+                false => unsafe {
+                    // KEY_SPLIT InternalPage
                     if VERBOSE {
                         println!("Key Split: Internal");
                     }
-                    let (left, right) =
-                        (self.block_manager
-                             .new_empty_index_block(&self.ctx),
-                         self.block_manager
-                             .new_empty_index_block(&self.ctx));
+                    let (left, right) = (
+                        self.block_manager.new_empty_index_block(&self.ctx),
+                        self.block_manager.new_empty_index_block(&self.ctx),
+                    );
 
-                    let (key_intervals, versions, pointers) = block
-                        .keys_versions_pointers();
+                    let (key_intervals, versions, pointers) = block.keys_versions_pointers();
 
-                    let live
-                        = block.as_internal_page_ref().live_mask();
+                    let live = block.as_internal_page_ref().live_mask();
 
                     let mut filtered = key_intervals
                         .iter()
@@ -1346,41 +1424,44 @@ impl<const FAN_OUT: usize,
                         .collect_vec();
 
                     let middle = filtered.len() / 2;
-                    let (first, second)
-                        = filtered.split_at_mut(middle);
+                    let (first, second) = filtered.split_at_mut(middle);
 
                     debug_assert!(!first.is_empty() && !second.is_empty());
 
                     let fence_left = Interval::new(
                         fence.lower,
-                        (self.dec_key)(second.get_unchecked(0).0.0.lower));
+                        (self.cold.dec_key)(second.get_unchecked(0).0.0.lower),
+                    );
 
-                    if let PageType::IndexMut(internal_page) = left.unsafe_borrow_mut().as_page_mut() {
+                    if let PageType::IndexMut(internal_page) =
+                        left.unsafe_borrow_mut().as_page_mut()
+                    {
                         first.sort_by_key(|((.., v), ..)| *v);
                         internal_page.bulk_push_from_slice(first)
                     }
 
-                    let fence_right = Interval::new(
-                        second.get_unchecked(0).0.0.lower,
-                        fence.upper);
+                    let fence_right = Interval::new(second.get_unchecked(0).0.0.lower, fence.upper);
 
-                    if let PageType::IndexMut(internal_page) = right.unsafe_borrow_mut().as_page_mut() {
+                    if let PageType::IndexMut(internal_page) =
+                        right.unsafe_borrow_mut().as_page_mut()
+                    {
                         second.sort_by_key(|((.., v), ..)| *v);
                         internal_page.bulk_push_from_slice(second)
                     }
 
                     BlockSplit::ByKey(fence_left, left, fence_right, right)
+                },
                 }
-            }
-        } else { // < max_units_safe. meaning: active >= 40% and active < 80%
+        } else {
+            // < max_units_safe. meaning: active >= 40% and active < 80%
             // VERSION SPLIT
             match is_leaf {
-                true => { // LeafPage
+                true => {
+                    // LeafPage
                     if VERBOSE {
                         println!("Version Split: Leaf");
                     }
-                    let new_leaf = self.block_manager
-                        .new_empty_leaf(&self.ctx);
+                    let new_leaf = self.block_manager.new_empty_leaf(&self.ctx);
 
                     let block_records = block.as_records();
 
@@ -1403,33 +1484,47 @@ impl<const FAN_OUT: usize,
                     // debug_assert!(active_records.len() <=
                     //     BlockManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::min_active_records());
 
-                    if let PageType::LeafMut(leaf_page) = new_leaf.unsafe_borrow_mut().as_page_mut() {
+                    if let PageType::LeafMut(leaf_page) = new_leaf.unsafe_borrow_mut().as_page_mut()
+                    {
                         leaf_page.bulk_push(active_records);
                     }
 
                     if TRACE_KEY_DEBUG {
-                        push_trace(format!("TRACE split::ByVersion(leaf) thread={:#x} old={:p} fence={} old_live={} -> new={:p} new_live={}",
+                        push_trace(format!(
+                            "TRACE split::ByVersion(leaf) thread={:#x} old={:p} fence={} old_live={} -> new={:p} new_live={}",
                             diag_thread_hash(),
-                            block, fence,
-                            block_records.iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(","),
+                            block,
+                            fence,
+                            block_records
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(","),
                             new_leaf.unsafe_borrow(),
-                            new_leaf.unsafe_borrow().as_records().iter().filter(|r| r.version().is_live()).map(|r| r.key.to_string()).collect_vec().join(",")));
+                            new_leaf
+                                .unsafe_borrow()
+                                .as_records()
+                                .iter()
+                                .filter(|r| r.version().is_live())
+                                .map(|r| r.key.to_string())
+                                .collect_vec()
+                                .join(",")
+                        ));
                     }
 
                     BlockSplit::ByVersion(new_leaf)
                 }
-                false => { // VERSION SPLIT InternalPage
+                false => {
+                    // VERSION SPLIT InternalPage
                     if VERBOSE {
                         println!("Version Split: Internal");
                     }
-                    let new_internal_page = self.block_manager
-                        .new_empty_index_block(&self.ctx);
+                    let new_internal_page = self.block_manager.new_empty_index_block(&self.ctx);
 
-                    let (key_intervals, versions, pointers) = block
-                        .keys_versions_pointers();
+                    let (key_intervals, versions, pointers) = block.keys_versions_pointers();
 
-                    let live
-                        = block.as_internal_page_ref().live_mask();
+                    let live = block.as_internal_page_ref().live_mask();
 
                     let active_entries = key_intervals
                         .iter()
@@ -1447,9 +1542,11 @@ impl<const FAN_OUT: usize,
                             .sorted_by_key(|i| i.0)
                             .collect_vec();
 
-                        if !key_intervals.iter().zip(key_intervals.iter().skip(1))
-                            .all(|((k0, k1), (k2, k3))|
-                                (self.dec_key)(*k2) == *k1) {
+                        if !key_intervals
+                            .iter()
+                            .zip(key_intervals.iter().skip(1))
+                            .all(|((k0, k1), (k2, k3))| (self.cold.dec_key)(*k2) == *k1)
+                        {
                             let s = "sdasdasdasdasln".to_string();
                         }
                     }
@@ -1457,7 +1554,9 @@ impl<const FAN_OUT: usize,
                     // RootSplit calls this too! Root may run under conditioned 2d
                     // debug_assert!(active_entries.len() >= block.two_d_filling(),
                     //               "Active entries = {}, required >= {}", active_entries.len(), block.two_d_filling());
-                    if let PageType::IndexMut(internal_page) = new_internal_page.unsafe_borrow_mut().as_page_mut() {
+                    if let PageType::IndexMut(internal_page) =
+                        new_internal_page.unsafe_borrow_mut().as_page_mut()
+                    {
                         internal_page.bulk_push(active_entries)
                     }
 
@@ -1492,12 +1591,9 @@ impl<const FAN_OUT: usize,
         // This is the only caller `root_guard` has, so no repeat upgrade is
         // needed in this function.
 
-        let child_ref = root_guard
-            .as_internal_page_ref()
-            .last_child();
+        let child_ref = root_guard.as_internal_page_ref().last_child();
 
-        let child_guard = child_ref
-            .borrow_read();
+        let child_guard = child_ref.borrow_read();
 
         if VERBOSE {
             println!("Old root height = {}, new height = {}", height, height - 1);
@@ -1506,11 +1602,9 @@ impl<const FAN_OUT: usize,
         let guard = self.split_root(master_guard, child_guard, height - 1)?;
 
         if VERBOSE {
-            let guard_deref
-                = guard.deref_mut();
+            let guard_deref = guard.deref_mut();
 
-            let (active, dead)
-                = guard_deref.active_dead_count();
+            let (active, dead) = guard_deref.active_dead_count();
 
             println!("active dead count: ({} / {})", active, dead);
         }
@@ -1523,8 +1617,8 @@ impl<const FAN_OUT: usize,
         &self,
         _master_guard: RootIndexGuard<FAN_OUT, NUM_RECORDS, Key, Payload>,
         root_guard: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
-        height: Height) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()>
-    {
+        height: Height,
+    ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
         // `try_retire()`, not `upgrade_write_lock()`: `root_guard` is only
         // ever read below (`split()` takes `&Block`, never mutates it in
         // place), and `split()` has no failure path — once this call is
@@ -1543,37 +1637,30 @@ impl<const FAN_OUT: usize,
             }
         };
 
-        match self.split(root_cell.deref(), &Interval::new(self.min_key, self.max_key)) {
-            BlockSplit::ByKey(left_fence,
-                              left,
-                              right_fence,
-                              right
-            ) => {
-                let new_root_block = self
-                    .block_manager
-                    .new_empty_index_block(&self.ctx);
+        match self.split(
+            root_cell.deref(),
+            &Interval::new(self.cold.min_key, self.cold.max_key),
+        ) {
+            BlockSplit::ByKey(left_fence, left, right_fence, right) => {
+                let new_root_block = self.block_manager.new_empty_index_block(&self.ctx);
 
                 let root_internal_page = new_root_block
                     .unsafe_borrow_mut()
                     .as_mut()
                     .as_internal_page();
 
-                let version
-                    = self.start_tx_commit();
+                let version = self.start_tx_commit();
 
-                root_internal_page
-                    .push_uncommitted(left_fence, version, left, 0);
+                root_internal_page.push_uncommitted(left_fence, version, left, 0);
 
-                root_internal_page
-                    .push_uncommitted(right_fence, version, right, 1);
+                root_internal_page.push_uncommitted(right_fence, version, right, 1);
 
                 root_internal_page.commit_delta(2, 0);
 
-                let new_root_latch
-                    = new_root_block.borrow_read();
+                let new_root_latch = new_root_block.borrow_read();
 
-                self.root.append_root(
-                    Root::new(new_root_block, version, height + 1));
+                self.root
+                    .append_root(Root::new(new_root_block, version, height + 1));
 
                 // Registers the *new* root's birth version (`version`) as
                 // the old root's death, not `_master_guard.version()` (the
@@ -1583,23 +1670,21 @@ impl<const FAN_OUT: usize,
                 // reader whose snapshot predates `version` still needs to
                 // resolve through this now-superseded root. `root_cell` is
                 // already retired (`try_retire()` above) — used as-is.
-                self.block_manager.register_dead(
-                    self.worker_id(), version, root_cell);
+                self.block_manager
+                    .register_dead(self.worker_id(), version, root_cell);
 
                 Ok(new_root_latch)
             }
             BlockSplit::ByVersion(new_root_block) => {
-                let version
-                    = self.start_tx_commit();
+                let version = self.start_tx_commit();
 
-                let new_root_latch
-                    = new_root_block.borrow_read();
+                let new_root_latch = new_root_block.borrow_read();
 
-                self.root.append_root(
-                    Root::new(new_root_block, version, height));
+                self.root
+                    .append_root(Root::new(new_root_block, version, height));
 
-                self.block_manager.register_dead(
-                    self.worker_id(), version, root_cell);
+                self.block_manager
+                    .register_dead(self.worker_id(), version, root_cell);
 
                 Ok(new_root_latch)
             }

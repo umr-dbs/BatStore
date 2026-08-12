@@ -17,8 +17,8 @@
 //! up here as one of these aggregate invariants going out of balance, even
 //! though no individual call ever panicked.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
@@ -26,7 +26,7 @@ use rand::prelude::*;
 
 use crate::mv_bench::tpcc_load::{populate_items, populate_warehouse};
 use crate::mv_bench::tpcc_schema::{Table, TpccConfig, TpccDatabase, TpccKey, TpccRow};
-use crate::mv_bench::tpcc_txn::{self, many, TpccTxn, TxnOutcome};
+use crate::mv_bench::tpcc_txn::{self, TpccTxn, TxnOutcome, many};
 use crate::mv_query::interval::Interval;
 use crate::mv_record_model::record_point::RecordPointResult;
 use crate::mv_root::index_root::RootIndexType;
@@ -57,7 +57,7 @@ fn full_range() -> Interval<TpccKey> {
 }
 
 fn scan_all(db: &TpccDatabase, table: Table) -> Vec<RecordPointResult<TpccKey, TpccRow>> {
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
     let rows = many(tx.range(table, full_range(), true));
     tx.commit();
     rows
@@ -88,7 +88,8 @@ fn stress_worker(
                 }
             }
             46..=88 => {
-                if tpcc_txn::payment(&db, &cfg, home_w, true, &history_seq) == TxnOutcome::Committed {
+                if tpcc_txn::payment(&db, &cfg, home_w, true, &history_seq) == TxnOutcome::Committed
+                {
                     committed_payment.fetch_add(1, Relaxed);
                 }
             }
@@ -136,19 +137,41 @@ fn snapshot(db: &TpccDatabase) -> BeforeSnapshot {
     let customers = scan_all(db, Table::Customer);
 
     BeforeSnapshot {
-        d_next_o_id_sum: scan_all(db, Table::District).iter().map(|r| r.payload.as_district().d_next_o_id as u64).sum(),
+        d_next_o_id_sum: scan_all(db, Table::District)
+            .iter()
+            .map(|r| r.payload.as_district().d_next_o_id as u64)
+            .sum(),
         orders_count: scan_all(db, Table::Orders).len(),
         new_order_count: scan_all(db, Table::NewOrder).len(),
         ol_count: order_lines.len(),
-        ol_qty_sum: order_lines.iter().map(|r| r.payload.as_order_line().ol_quantity as u64).sum(),
-        s_order_cnt_sum: stock.iter().map(|r| r.payload.as_stock().s_order_cnt as u64).sum(),
+        ol_qty_sum: order_lines
+            .iter()
+            .map(|r| r.payload.as_order_line().ol_quantity as u64)
+            .sum(),
+        s_order_cnt_sum: stock
+            .iter()
+            .map(|r| r.payload.as_stock().s_order_cnt as u64)
+            .sum(),
         s_ytd_sum: stock.iter().map(|r| r.payload.as_stock().s_ytd).sum(),
-        w_ytd_sum: scan_all(db, Table::Warehouse).iter().map(|r| r.payload.as_warehouse().w_ytd).sum(),
-        d_ytd_sum: scan_all(db, Table::District).iter().map(|r| r.payload.as_district().d_ytd).sum(),
-        c_ytd_sum: customers.iter().map(|r| r.payload.as_customer().c_ytd_payment).sum(),
-        c_balance_sum: customers.iter().map(|r| r.payload.as_customer().c_balance).sum(),
+        w_ytd_sum: scan_all(db, Table::Warehouse)
+            .iter()
+            .map(|r| r.payload.as_warehouse().w_ytd)
+            .sum(),
+        d_ytd_sum: scan_all(db, Table::District)
+            .iter()
+            .map(|r| r.payload.as_district().d_ytd)
+            .sum(),
+        c_ytd_sum: customers
+            .iter()
+            .map(|r| r.payload.as_customer().c_ytd_payment)
+            .sum(),
+        c_balance_sum: customers
+            .iter()
+            .map(|r| r.payload.as_customer().c_balance)
+            .sum(),
         history_count: scan_all(db, Table::History).len(),
-        delivered_ol_amount_sum: order_lines.iter()
+        delivered_ol_amount_sum: order_lines
+            .iter()
             .filter(|r| r.payload.as_order_line().ol_delivery_d.is_some())
             .map(|r| r.payload.as_order_line().ol_amount)
             .sum(),
@@ -168,7 +191,11 @@ fn snapshot(db: &TpccDatabase) -> BeforeSnapshot {
 ///   growth — the same amount flows through all four every committed
 ///   Payment, home-or-remote;
 /// - exactly one History row per committed Payment.
-fn run_stress_and_check_invariants(gc_update_in_place: bool, num_threads: usize, duration: Duration) {
+fn run_stress_and_check_invariants(
+    gc_update_in_place: bool,
+    num_threads: usize,
+    duration: Duration,
+) {
     let cfg = stress_cfg();
     let db = Arc::new(TpccDatabase::new(RootIndexType::default()));
     db.enable_gc(gc_update_in_place);
@@ -186,15 +213,27 @@ fn run_stress_and_check_invariants(gc_update_in_place: bool, num_threads: usize,
     let committed_payment = Arc::new(AtomicU64::new(0));
     let delivered_districts = Arc::new(AtomicU64::new(0));
 
-    let handles: Vec<_> = (0..num_threads).map(|_| {
+    let handles: Vec<_> = (0..num_threads)
+        .map(|_| {
         let db = db.clone();
         let stop = stop.clone();
         let history_seq = history_seq.clone();
         let committed_new_order = committed_new_order.clone();
         let committed_payment = committed_payment.clone();
         let delivered_districts = delivered_districts.clone();
-        thread::spawn(move || stress_worker(db, cfg, stop, history_seq, committed_new_order, committed_payment, delivered_districts))
-    }).collect();
+            thread::spawn(move || {
+                stress_worker(
+                    db,
+                    cfg,
+                    stop,
+                    history_seq,
+                    committed_new_order,
+                    committed_payment,
+                    delivered_districts,
+                )
+            })
+        })
+        .collect();
 
     thread::sleep(duration);
     stop.store(true, Relaxed);
@@ -208,16 +247,21 @@ fn run_stress_and_check_invariants(gc_update_in_place: bool, num_threads: usize,
     // Sanity floor: 2s across several threads should easily clear this even
     // under heavy contention — a suspiciously low count would itself point
     // at a stall/deadlock bug rather than the invariants below.
-    assert!(committed_no + committed_pay > 50, "too few committed transactions ({committed_no} NO + {committed_pay} Pay) - possible stall");
+    assert!(
+        committed_no + committed_pay > 50,
+        "too few committed transactions ({committed_no} NO + {committed_pay} Pay) - possible stall"
+    );
 
     let after = snapshot(&db);
 
     assert_eq!(
-        after.d_next_o_id_sum - before.d_next_o_id_sum, committed_no,
+        after.d_next_o_id_sum - before.d_next_o_id_sum,
+        committed_no,
         "total district d_next_o_id growth must equal committed New-Order count"
     );
     assert_eq!(
-        (after.orders_count - before.orders_count) as u64, committed_no,
+        (after.orders_count - before.orders_count) as u64,
+        committed_no,
         "total new Orders rows must equal committed New-Order count"
     );
     assert_eq!(
@@ -234,8 +278,10 @@ fn run_stress_and_check_invariants(gc_update_in_place: bool, num_threads: usize,
     let ol_growth = (after.ol_count - before.ol_count) as u64;
     let s_order_cnt_growth = after.s_order_cnt_sum - before.s_order_cnt_sum;
     let order_cnt_tolerance = (ol_growth / 200).max(5); // 0.5%, floor of 5
-    assert!(s_order_cnt_growth.abs_diff(ol_growth) <= order_cnt_tolerance,
-        "total stock s_order_cnt growth ({s_order_cnt_growth}) must be within {order_cnt_tolerance} of total new order-line count ({ol_growth})");
+    assert!(
+        s_order_cnt_growth.abs_diff(ol_growth) <= order_cnt_tolerance,
+        "total stock s_order_cnt growth ({s_order_cnt_growth}) must be within {order_cnt_tolerance} of total new order-line count ({ol_growth})"
+    );
     let ol_qty_growth = (after.ol_qty_sum - before.ol_qty_sum) as f64;
     let s_ytd_growth = after.s_ytd_sum - before.s_ytd_sum;
     let ytd_tolerance = (ol_qty_growth * 0.005).max(50.0); // same 0.5% bound
@@ -252,8 +298,14 @@ fn run_stress_and_check_invariants(gc_update_in_place: bool, num_threads: usize,
     // Float sums over many small additions accumulate a little rounding
     // error; scale the tolerance with how many payments/deliveries actually ran.
     let eps = 1e-6 * (committed_pay.max(1) as f64 + delivered.max(1) as f64);
-    assert!((w_delta - d_delta).abs() < eps, "warehouse ytd growth ({w_delta}) must match district ytd growth ({d_delta})");
-    assert!((w_delta - c_ytd_delta).abs() < eps, "warehouse ytd growth ({w_delta}) must match total customer c_ytd_payment growth ({c_ytd_delta})");
+    assert!(
+        (w_delta - d_delta).abs() < eps,
+        "warehouse ytd growth ({w_delta}) must match district ytd growth ({d_delta})"
+    );
+    assert!(
+        (w_delta - c_ytd_delta).abs() < eps,
+        "warehouse ytd growth ({w_delta}) must match total customer c_ytd_payment growth ({c_ytd_delta})"
+    );
     // Customer balance moves by -1x every committed Payment's amount *and*
     // +1x every committed Delivery's credited total (see
     // `BeforeSnapshot::delivered_ol_amount_sum`'s doc) - both run
@@ -264,7 +316,11 @@ fn run_stress_and_check_invariants(gc_update_in_place: bool, num_threads: usize,
         "customer balance growth ({c_balance_delta}) must equal -1x warehouse ytd growth ({w_delta}) plus total delivery credit ({delivered_credit})"
     );
 
-    assert_eq!((after.history_count - before.history_count) as u64, committed_pay, "one History row per committed Payment");
+    assert_eq!(
+        (after.history_count - before.history_count) as u64,
+        committed_pay,
+        "one History row per committed Payment"
+    );
 }
 
 #[test]

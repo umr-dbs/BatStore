@@ -1,33 +1,33 @@
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_tree::mvbt::{MVBTSt, MVBT, Payload, Key};
-use crossbeam_channel::{unbounded, Receiver, TryRecvError};
-use itertools::{Either, Itertools};
-use rand::RngExt;
-use std::fs::OpenOptions;
-use std::sync::atomic::{ AtomicU64, AtomicUsize, Ordering};
-use std::sync::atomic::Ordering::{Relaxed, SeqCst};
-use std::{fs, mem, thread};
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::convert::TryInto;
-use std::fmt::Display;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::Path;
-use std::thread::{spawn, ThreadId};
-use std::time::{Duration, Instant, SystemTime};
-use parking_lot::Mutex;
-use rand::distr::{Alphanumeric, Distribution};
-use rand::prelude::SliceRandom;
-use rand_distr::Zipf;
-use triomphe::Arc;
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
+use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_query::dispatch::RANGE_DISPATCH_LAZY;
 use crate::mv_query::SnapShot;
+use crate::mv_query::dispatch::RANGE_DISPATCH_LAZY;
 use crate::mv_root::index_root::RootIndexType;
 use crate::mv_sync::version_handle;
 use crate::mv_tree::mvbt::FAN_OUT;
 use crate::mv_tree::mvbt::NUM_RECORDS;
+use crate::mv_tree::mvbt::{Key, MVBT, MVBTSt, Payload};
+use crossbeam_channel::{Receiver, TryRecvError, unbounded};
+use itertools::{Either, Itertools};
+use parking_lot::Mutex;
+use rand::RngExt;
+use rand::distr::{Alphanumeric, Distribution};
+use rand::prelude::SliceRandom;
+use rand_distr::Zipf;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::convert::TryInto;
+use std::fmt::Display;
+use std::fs::OpenOptions;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::Path;
+use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::thread::{ThreadId, spawn};
+use std::time::{Duration, Instant, SystemTime};
+use std::{fs, mem, thread};
+use triomphe::Arc;
 
 pub const VERBOSE: bool = false;
 pub const LOG_REORG: bool = false;
@@ -138,7 +138,10 @@ pub fn record_write_attempts(attempts: usize) {
 /// (`attempts,count`, last row is `{CAP-1}+`), and prints p50/p90/p99/max
 /// bucket to stdout for a quick look without opening the file.
 pub fn dump_attempt_histogram(path: &str) {
-    let counts: Vec<u64> = WRITE_ATTEMPTS_HISTOGRAM.iter().map(|a| a.load(Relaxed)).collect();
+    let counts: Vec<u64> = WRITE_ATTEMPTS_HISTOGRAM
+        .iter()
+        .map(|a| a.load(Relaxed))
+        .collect();
     let total: u64 = counts.iter().sum();
 
     let mut f = BufWriter::new(
@@ -167,7 +170,9 @@ pub fn dump_attempt_histogram(path: &str) {
 
     println!(
         "dump_attempt_histogram: wrote {path} ({total} completed writes; p50={:?} p90={:?} p99={:?} p100_bucket={:?})",
-        percentile(0.50), percentile(0.90), percentile(0.99),
+        percentile(0.50),
+        percentile(0.90),
+        percentile(0.99),
         counts.iter().rposition(|&c| c > 0),
     );
 }
@@ -226,7 +231,11 @@ pub fn dump_scan_trace() {
     let leaves = SCAN_LEAVES_VISITED.load(Relaxed);
     let visited = SCAN_RECORDS_VISITED.load(Relaxed);
     let matched = SCAN_RECORDS_MATCHED.load(Relaxed);
-    let ratio = if matched == 0 { f64::NAN } else { visited as f64 / matched as f64 };
+    let ratio = if matched == 0 {
+        f64::NAN
+    } else {
+        visited as f64 / matched as f64
+    };
     println!(
         "dump_scan_trace: {leaves} leaves visited, {visited} records visited, \
         {matched} records matched (visited/matched = {ratio:.2}x)"
@@ -306,7 +315,10 @@ pub fn dump_root_restarts_by_table(path: &str, table_names: &[(usize, String)]) 
         writeln!(f, "{name},0x{addr:x},{count}").unwrap();
     }
 
-    println!("dump_root_restarts_by_table: wrote {path} ({} tables)", global.len());
+    println!(
+        "dump_root_restarts_by_table: wrote {path} ({} tables)",
+        global.len()
+    );
 }
 
 struct RestartPageStats {
@@ -360,7 +372,10 @@ pub fn record_restart(page_addr: usize, key: &impl Display, site: &'static str) 
     let key = key.to_string();
     RESTART_LOCAL.with(|local| {
         let mut local = local.borrow_mut();
-        let entry = local.0.entry(page_addr).or_insert_with(|| RestartPageStats {
+        let entry = local
+            .0
+            .entry(page_addr)
+            .or_insert_with(|| RestartPageStats {
             total: 0,
             by_site_key: HashMap::new(),
         });
@@ -374,7 +389,11 @@ pub fn record_restart(page_addr: usize, key: &impl Display, site: &'static str) 
 /// diagnostic's own memory footprint, for tests that want to check it
 /// without dumping a CSV. Only ever non-zero when `RESTART_TRACE` is `true`.
 pub fn restart_trace_footprint() -> usize {
-    RESTART_GLOBAL.lock().values().map(|s| s.by_site_key.len()).sum()
+    RESTART_GLOBAL
+        .lock()
+        .values()
+        .map(|s| s.by_site_key.len())
+        .sum()
 }
 
 /// Clears every accumulator `record_restart`/`record_root_restart_for_table`/
@@ -413,7 +432,11 @@ pub fn dump_restart_trace(path: &str) {
     let mut f = BufWriter::new(
         fs::File::create(path).expect("dump_restart_trace: failed to create output file"),
     );
-    writeln!(f, "page_addr,page_total_restarts,page_distinct_site_keys,site,key,count").unwrap();
+    writeln!(
+        f,
+        "page_addr,page_total_restarts,page_distinct_site_keys,site,key,count"
+    )
+    .unwrap();
     for (addr, stats) in pages {
         let mut entries: Vec<(&(&'static str, String), &u64)> = stats.by_site_key.iter().collect();
         entries.sort_by(|a, b| b.1.cmp(a.1));
@@ -421,8 +444,14 @@ pub fn dump_restart_trace(path: &str) {
             writeln!(
                 f,
                 "0x{:x},{},{},{},{},{}",
-                addr, stats.total, stats.by_site_key.len(), site, key, count
-            ).unwrap();
+                addr,
+                stats.total,
+                stats.by_site_key.len(),
+                site,
+                key,
+                count
+            )
+            .unwrap();
         }
     }
 
@@ -439,26 +468,34 @@ pub struct ThreadWorkerInfo {
     pub fps: usize,
     pub load: f64,
     pub tick_ops: usize,
-    pub total_ops: usize
+    pub total_ops: usize,
 }
-fn olap_tests(index: Arc<MVBT>,
+fn olap_tests(
+    index: Arc<MVBT>,
               num_olaps: usize,
               tx_per_thread: usize,
               skew: f32,
               range: Either<Key, Arc<AtomicU64>>,
               fixed_si: bool,
-              control_signal: Option<Receiver<ThreadWorkerInfo>>) -> (usize, u128)
-{
+    control_signal: Option<Receiver<ThreadWorkerInfo>>,
+) -> (usize, u128) {
     if control_signal.is_none() {
-        println!("> Starting OLAPs...{num_olaps} threads, \
-        {tx_per_thread} scans per thread.");
+        println!(
+            "> Starting OLAPs...{num_olaps} threads, \
+        {tx_per_thread} scans per thread."
+        );
     } else {
-        println!("> Starting OLAPs...{num_olaps} threads, \
-         with control signal for continuous scans per thread");
+        println!(
+            "> Starting OLAPs...{num_olaps} threads, \
+         with control signal for continuous scans per thread"
+        );
     }
 
     if range.is_left() {
-        println!("> Scan key-range is fixed to 0..={}", range.as_ref().left().unwrap())
+        println!(
+            "> Scan key-range is fixed to 0..={}",
+            range.as_ref().left().unwrap()
+        )
     } else {
         println!("> Scan key-range is dynamic to 0..=LastKey")
     }
@@ -467,17 +504,17 @@ fn olap_tests(index: Arc<MVBT>,
         return (0, 0);
     }
 
-    let v_index = format!("mv_{}",
+    let v_index = format!(
+        "mv_{}",
                           match index.root_star_index() {
                               RootIndexType::FrugalList => "fg",
                               RootIndexType::SkipList => "sk",
                               RootIndexType::BTree => "bt",
-                              RootIndexType::LinkedList => "ll"
-                          });
+            RootIndexType::LinkedList => "ll",
+        }
+    );
 
-    let lazy = if RANGE_DISPATCH_LAZY {
-        "_lazy"
-    } else { "" };
+    let lazy = if RANGE_DISPATCH_LAZY { "_lazy" } else { "" };
 
     let mut olaps = vec![];
 
@@ -508,17 +545,13 @@ fn olap_tests(index: Arc<MVBT>,
 
     let start_olap_time = Instant::now();
     for _ in 0..num_olaps {
-        let index
-            = index.clone();
+        let index = index.clone();
 
-        let signal
-            = control_signal.clone();
+        let signal = control_signal.clone();
 
-        let range
-            = range.clone();
+        let range = range.clone();
 
-        let count_olaps
-            = g_counter.clone();
+        let count_olaps = g_counter.clone();
 
         olaps.push(spawn(move || {
             let mut results = vec![];
@@ -535,37 +568,44 @@ fn olap_tests(index: Arc<MVBT>,
                     rand::random_range(version_handle::START_VERSION..=current_si)
                 };
 
-                let (current_root_position, roots_count)
-                = (0,0);
+                let (current_root_position, roots_count) = (0, 0);
                     // = index.retrieve_root_number_for(si);
                 // println!("Min = {key_min}, max = {key_max}");
 
                 let op = CRUDOperation::Range((key_min..key_max).into(), si);
                 // let op = CRUDOperation::Point(key_min, si);
-                let time_start
-                    = SystemTime::now();
+                let time_start = SystemTime::now();
 
-                let crud =
-                    index.dispatch_crud(op);
+                let crud = index.dispatch_crud(op);
 
-                let time_spent
-                    = SystemTime::now().duration_since(time_start).unwrap().as_nanos();
+                let time_spent = SystemTime::now()
+                    .duration_since(time_start)
+                    .unwrap()
+                    .as_nanos();
 
                 let count_results = match crud {
                     CRUDOperationResult::MatchedRecords(data) => data.len(),
-                    _ => panic!()
+                    _ => panic!(),
                 };
 
                 let _ = count_olaps.fetch_add(1, Relaxed);
 
-                results.push(
-                    (si, current_si, 0u128, key_min, key_min, count_results, time_spent,
-                    current_root_position, roots_count));
+                results.push((
+                    si,
+                    current_si,
+                    0u128,
+                    key_min,
+                    key_min,
+                    count_results,
+                    time_spent,
+                    current_root_position,
+                    roots_count,
+                ));
 
                 if let Some(signal) = signal.as_ref() {
                     match signal.try_recv() {
                         Err(TryRecvError::Disconnected) => break,
-                        _ => continue
+                        _ => continue,
                     }
                 }
 
@@ -576,15 +616,18 @@ fn olap_tests(index: Arc<MVBT>,
         }))
     }
 
-    let olaps = olaps.into_iter().map(|j| j.join().unwrap())
+    let olaps = olaps
+        .into_iter()
+        .map(|j| j.join().unwrap())
         .flatten()
         .collect::<Vec<_>>();
 
     let time_olap = start_olap_time.elapsed().as_nanos();
     // mem::drop(updaters);
 
-    olaps.into_iter()
-        .for_each(|(target_si,
+    olaps.into_iter().for_each(
+        |(
+            target_si,
                        current_si,
                        sleep_time,
                        key_min,
@@ -592,9 +635,12 @@ fn olap_tests(index: Arc<MVBT>,
                        count_results,
                        time_spent,
                        current_root_psotion,
-                       c_roots_count)|
-            {
-                olap_file.write_all(format!("\
+            c_roots_count,
+        )| {
+            olap_file
+                .write_all(
+                    format!(
+                        "\
                             {target_si},\
                             {current_si},\
                             {current_root_psotion},\
@@ -603,8 +649,13 @@ fn olap_tests(index: Arc<MVBT>,
                             {key_min},\
                             {key_max},\
                             {count_results},\
-                            {time_spent}\n").as_bytes()).unwrap();
-            });
+                            {time_spent}\n"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        },
+    );
 
     (g_counter.load(SeqCst), time_olap)
 }
@@ -689,19 +740,17 @@ pub(crate) fn main_test(parms: Vec<String>) {
         "ll" => RootIndexType::LinkedList,
         "fg" => RootIndexType::FrugalList,
         "bt" => RootIndexType::BTree,
-        _ => RootIndexType::default()
+        _ => RootIndexType::default(),
     };
     println!("RootStar = {}", root_star_index);
 
-    let tree
-        = Arc::new(MVBT::make_standard(root_star_index));
+    let tree = Arc::new(MVBT::make_standard(root_star_index));
     let mut check = HashMap::new();
     let mut errors = 0;
 
     let p = AtomicU64::new(0);
     while check.len() < n {
-        let key
-            = rand::random_range(0..100_000_000);
+        let key = rand::random_range(0..100_000_000);
 
         if !check.contains_key(&key) {
             match tree.dispatch_crud(CRUDOperation::Insert(key, p.fetch_add(1, SeqCst))) {
@@ -719,23 +768,27 @@ pub(crate) fn main_test(parms: Vec<String>) {
         (0..1_00).for_each(|_| {
             match tree.dispatch_crud(CRUDOperation::Update(*k, p.fetch_add(1, SeqCst))) {
                 CRUDOperationResult::Updated(_) => {}
-                _ => panic!()
+                _ => panic!(),
             }
         });
     }
 
     for (k, v) in check.iter() {
-        (0..1_00).for_each(|o| {
-            match tree.dispatch_crud(CRUDOperation::Point(*k, *v + o)) {
-                CRUDOperationResult::MatchedRecords(r) =>
-                    if r.len() == 1 && *r[0].payload <= *v + o {} else {
-                        println!("Found Version = {}\nQuery Version = {}",
+        (0..1_00).for_each(
+            |o| match tree.dispatch_crud(CRUDOperation::Point(*k, *v + o)) {
+                CRUDOperationResult::MatchedRecords(r) => {
+                    if r.len() == 1 && *r[0].payload <= *v + o {
+                    } else {
+                        println!(
+                            "Found Version = {}\nQuery Version = {}",
                                  *r[0].payload,
-                                 *v + o);
+                            *v + o
+                        );
                     }
-                _ => panic!()
             }
-        });
+                _ => panic!(),
+            },
+        );
     }
 
     // test root retrival time.
@@ -760,12 +813,11 @@ pub(crate) fn main_test(parms: Vec<String>) {
     );
     return;
     let start_time_iter = SystemTime::now();
-    let iter_range = tree
-        .dispatch_crud(CRUDOperation::RangeIter((0..=Key::MAX).into(), 10));
+    let iter_range = tree.dispatch_crud(CRUDOperation::RangeIter((0..=Key::MAX).into(), 10));
 
     let iter_res = match iter_range {
         CRUDOperationResult::MatchedRecordIter(iter) => iter,
-        _ => panic!()
+        _ => panic!(),
     };
 
     let mut data_from_iter = iter_res.collect_vec();
@@ -775,12 +827,11 @@ pub(crate) fn main_test(parms: Vec<String>) {
     data_from_iter.sort_by_key(|r| r.key);
 
     let start_time_range = SystemTime::now();
-    let res_all = tree
-        .dispatch_crud(CRUDOperation::Range((0..=Key::MAX).into(), 10));
+    let res_all = tree.dispatch_crud(CRUDOperation::Range((0..=Key::MAX).into(), 10));
 
     let all_res = match res_all {
         CRUDOperationResult::MatchedRecords(vec) => vec,
-        _ => panic!()
+        _ => panic!(),
     };
 
     let end_time_range = SystemTime::now().duration_since(start_time_range).unwrap();
@@ -788,8 +839,11 @@ pub(crate) fn main_test(parms: Vec<String>) {
     let mut data_from_all = all_res;
     data_from_all.sort_by_key(|r| r.key);
 
-    println!("Results Iter = {}, Results All = {}",
-             data_from_iter.len(), data_from_all.len());
+    println!(
+        "Results Iter = {}, Results All = {}",
+        data_from_iter.len(),
+        data_from_all.len()
+    );
 
     for (k1, k2) in data_from_iter.iter().zip(data_from_all.iter()) {
         if k1.key != k2.key {
@@ -803,11 +857,13 @@ pub(crate) fn main_sorted_insert(parms: Vec<String>) {
     let n: usize = parms[3].parse().unwrap();
     let _nc = fs::remove_file(query_file_name.as_str());
 
-    let mut query_file = BufWriter::new(OpenOptions::new()
+    let mut query_file = BufWriter::new(
+        OpenOptions::new()
         .create(true)
         .append(true)
         .open(format!("{query_file_name}"))
-        .unwrap());
+            .unwrap(),
+    );
 
     let mut querys = 0_usize;
 
@@ -841,16 +897,19 @@ pub fn main_load_ycsb(parms: Vec<String>) {
         "ll" => RootIndexType::LinkedList,
         "fg" => RootIndexType::FrugalList,
         "bt" => RootIndexType::BTree,
-        _ => RootIndexType::default()
+        _ => RootIndexType::default(),
     };
 
     let gc = parms[9].parse::<bool>().unwrap_or(false);
     let update_in_place = if gc {
         parms[10].parse::<bool>().unwrap_or(false)
-    } else { false };
+    } else {
+        false
+    };
 
-    let index
-        = Arc::new(MVBTSt::<FAN_OUT, NUM_RECORDS, Key, Payload>::make_standard(root_star_index));
+    let index = Arc::new(MVBTSt::<FAN_OUT, NUM_RECORDS, Key, Payload>::make_standard(
+        root_star_index,
+    ));
 
     let mut gc_str = "Off".to_string();
     if gc {
@@ -858,13 +917,9 @@ pub fn main_load_ycsb(parms: Vec<String>) {
         gc_str = format!("On (UIP = {})", update_in_place);
     }
 
-    let oltp_threads = if concurrent {
-        scans_per_thread
-    }
-    else {
-        1
-    };
-    println!("- QueryFile = {query_file_name}\n\
+    let oltp_threads = if concurrent { scans_per_thread } else { 1 };
+    println!(
+        "- QueryFile = {query_file_name}\n\
                 - Concurrent = {concurrent}\n\
                 - OLTP Threads = {oltp_threads}\n\
                 - OLAP Threads = {num_olaps} (Cores = {}, Threads = {})\n\
@@ -875,7 +930,12 @@ pub fn main_load_ycsb(parms: Vec<String>) {
                 - GC = {gc_str}",
              num_cpus::get_physical(),
              num_cpus::get(),
-             if concurrent { format!("Continuous\n- OLTP Threads = {scans_per_thread}") } else { format!("{scans_per_thread}") });
+        if concurrent {
+            format!("Continuous\n- OLTP Threads = {scans_per_thread}")
+        } else {
+            format!("{scans_per_thread}")
+        }
+    );
 
     let oltp_there = fs::exists("oltp.csv").unwrap();
     let mut oltp_file = OpenOptions::new()
@@ -886,7 +946,9 @@ pub fn main_load_ycsb(parms: Vec<String>) {
         .unwrap();
 
     if !oltp_there {
-        oltp_file.write_all(b"\
+        oltp_file
+            .write_all(
+                b"\
             is_concurrent,\
             oltp_threads,\
             olap_threads,\
@@ -901,22 +963,27 @@ pub fn main_load_ycsb(parms: Vec<String>) {
             total_num_scan_tx,\
             total_num_oltp_tx,\
             total_oltp_time,\
-            total_olap_time\n"
-        ).unwrap();
+            total_olap_time\n",
+            )
+            .unwrap();
     }
     if concurrent {
         (0..15_000_000).for_each(|i| {
-            let _ = index.dispatch_crud(
-                CRUDOperation::Insert(rand::random_range(0..Key::MAX), Payload::default()));
+            let _ = index.dispatch_crud(CRUDOperation::Insert(
+                rand::random_range(0..Key::MAX),
+                Payload::default(),
+            ));
         });
         // index.block_manager.alloc_count.store(0, Ordering::SeqCst);
         // index.block_manager.reuse_count.store(0, Ordering::SeqCst);
 
         // TODO: End experimental setting
-        let counter_inserts
-            = Arc::new(AtomicU64::new(0));
+        let counter_inserts = Arc::new(AtomicU64::new(0));
 
-        oltp_file.write_all(format!("\
+        oltp_file
+            .write_all(
+                format!(
+                    "\
             true,\
             {oltp_threads},\
             {num_olaps},\
@@ -925,7 +992,11 @@ pub fn main_load_ycsb(parms: Vec<String>) {
             {gc},\
             {update_in_place},\
             dynamic,\
-            0").as_bytes()).unwrap();
+            0"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
 
         let start_time_oltp = Instant::now();
         let oltp_joins = (0..oltp_threads)
@@ -936,16 +1007,18 @@ pub fn main_load_ycsb(parms: Vec<String>) {
                 spawn(move || {
                     let mut count_crud = 0;
                     while counter_inserts.fetch_add(1, Relaxed) < 10_000_000 {
-                        let _ = index.dispatch_crud(
-                            CRUDOperation::Insert(
-                                rand::random_range(0..Key::MAX), Payload::default()));
+                        let _ = index.dispatch_crud(CRUDOperation::Insert(
+                            rand::random_range(0..Key::MAX),
+                            Payload::default(),
+                        ));
 
                         count_crud += 1;
                     }
 
                     count_crud
                 })
-            }).collect_vec();
+            })
+            .collect_vec();
 
         let oltp_executed = oltp_joins
             .into_iter()
@@ -961,25 +1034,36 @@ pub fn main_load_ycsb(parms: Vec<String>) {
         // let alloc_blocks
         //     = index.block_manager.alloc_count.load(SeqCst);
 
-        let reuse_blocks
-            = 0;
-        let alloc_blocks
-            = 0;
+        let reuse_blocks = 0;
+        let alloc_blocks = 0;
 
         let oltp_executed = counter_inserts.load(SeqCst) as _;
-        oltp_file.write_all(format!(",\
+        oltp_file
+            .write_all(
+                format!(
+                    ",\
         {alloc_blocks},\
         {reuse_blocks},\
         {num_scans_executed},\
         {oltp_executed},\
         {oltp_total_time},\
-        {olap_total_time}\n").as_bytes()).unwrap();
+        {olap_total_time}\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
 
-        println!("- Executed {} OLTPs from {query_file_name}\n\
-        - Executed = {} OLAPs", format_insertions(oltp_executed),
-                 format_insertions(num_scans_executed));
+        println!(
+            "- Executed {} OLTPs from {query_file_name}\n\
+        - Executed = {} OLAPs",
+            format_insertions(oltp_executed),
+            format_insertions(num_scans_executed)
+        );
 
-        println!("###### End Command: {} ######", parms.iter().skip(1).join(" "));
+        println!(
+            "###### End Command: {} ######",
+            parms.iter().skip(1).join(" ")
+        );
     }
 
     oltp_file.flush().unwrap();
@@ -1002,32 +1086,33 @@ pub(crate) fn main_load(parms: Vec<String>) {
         "ll" => RootIndexType::LinkedList,
         "fg" => RootIndexType::FrugalList,
         "bt" => RootIndexType::BTree,
-        _ => RootIndexType::default()
+        _ => RootIndexType::default(),
     };
 
     let gc = parms[9].parse::<bool>().unwrap_or(false);
     let update_in_place = if gc {
         parms[10].parse::<bool>().unwrap_or(false)
-    } else { false };
+    } else {
+        false
+    };
 
     let init_keys = parms[11].parse::<usize>().unwrap_or(100_000);
 
-    let wal
-        = parms[12].parse::<bool>().unwrap_or(false);
+    let wal = parms[12].parse::<bool>().unwrap_or(false);
 
-    let wal_dir
-        = parms[13].parse::<String>().unwrap_or("wal".to_string());
+    let wal_dir = parms[13].parse::<String>().unwrap_or("wal".to_string());
 
     let _ = fs::remove_file(wal_dir.as_str());
 
-    let wal_epoch
-        = parms[14].parse::<u64>().unwrap_or(1000);
+    let wal_epoch = parms[14].parse::<u64>().unwrap_or(1000);
 
     let index = Arc::new(if wal {
-        MVBTSt::make_standard(root_star_index).with_wal(
+        MVBTSt::make_standard(root_star_index)
+            .with_wal(
             Path::new(wal_dir.as_str()),
-            Duration::from_millis(wal_epoch)
-        ).expect("Error creating WAL")
+                Duration::from_millis(wal_epoch),
+            )
+            .expect("Error creating WAL")
     } else {
         MVBTSt::make_standard(root_star_index)
     });
@@ -1038,13 +1123,9 @@ pub(crate) fn main_load(parms: Vec<String>) {
         gc_str = format!("On (UIP = {})", update_in_place);
     }
 
-    let oltp_threads = if concurrent {
-        scans_per_thread
-    }
-    else {
-        1
-    };
-    println!("- QueryFile = {query_file_name}\n\
+    let oltp_threads = if concurrent { scans_per_thread } else { 1 };
+    println!(
+        "- QueryFile = {query_file_name}\n\
                 - Concurrent = {concurrent}\n\
                 - OLTP Threads = {oltp_threads}\n\
                 - OLAP Threads = {num_olaps} (Cores = {}, Threads = {})\n\
@@ -1055,7 +1136,12 @@ pub(crate) fn main_load(parms: Vec<String>) {
                 - GC = {gc_str}",
              num_cpus::get_physical(),
              num_cpus::get(),
-             if concurrent { format!("Continuous\n- OLTP Threads = {scans_per_thread}") } else { format!("{scans_per_thread}") });
+        if concurrent {
+            format!("Continuous\n- OLTP Threads = {scans_per_thread}")
+        } else {
+            format!("{scans_per_thread}")
+        }
+    );
 
     let oltp_there = fs::exists("oltp.csv").unwrap();
     let mut oltp_file = OpenOptions::new()
@@ -1066,7 +1152,9 @@ pub(crate) fn main_load(parms: Vec<String>) {
         .unwrap();
 
     if !oltp_there {
-        oltp_file.write_all(b"\
+        oltp_file
+            .write_all(
+                b"\
             is_concurrent,\
             oltp_threads,\
             olap_threads,\
@@ -1081,14 +1169,14 @@ pub(crate) fn main_load(parms: Vec<String>) {
             total_num_scan_tx,\
             total_num_oltp_tx,\
             total_oltp_time,\
-            total_olap_time\n"
-        ).unwrap();
+            total_olap_time\n",
+            )
+            .unwrap();
     }
 
     if concurrent {
         let query_file_name_clone = query_file_name.clone();
-        let mut oltp = load_query_into_memory(
-            query_file_name_clone.as_str());
+        let mut oltp = load_query_into_memory(query_file_name_clone.as_str());
 
         oltp.drain(0..init_keys).for_each(|i| {
             let _ = index.dispatch_atomic_transaction(i);
@@ -1106,7 +1194,10 @@ pub(crate) fn main_load(parms: Vec<String>) {
 
         let rest_slice = oltp.len();
         work_oltp.first_mut().unwrap().extend(oltp);
-        oltp_file.write_all(format!("\
+        oltp_file
+            .write_all(
+                format!(
+                    "\
             true,\
             {oltp_threads},\
             {num_olaps},\
@@ -1115,7 +1206,11 @@ pub(crate) fn main_load(parms: Vec<String>) {
             {gc},\
             {update_in_place},\
             {slice},\
-            {rest_slice}").as_bytes()).unwrap();
+            {rest_slice}"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
 
         let start_time_oltp = Instant::now();
         let oltp_joins = work_oltp
@@ -1130,20 +1225,23 @@ pub(crate) fn main_load(parms: Vec<String>) {
                     });
                     count_crud
                 })
-            }).collect_vec();
+            })
+            .collect_vec();
 
-        let (olap_signal, olap_sink)
-            = unbounded();
+        let (olap_signal, olap_sink) = unbounded();
 
         let index_olaps = index.clone();
-        let olaps = spawn(move || olap_tests(
+        let olaps = spawn(move || {
+            olap_tests(
             index_olaps,
             num_olaps,
             1,
             skew,
             Either::Left(range),
             false,
-            Some(olap_sink)));
+                Some(olap_sink),
+            )
+        });
 
         let oltp_executed = oltp_joins
             .into_iter()
@@ -1159,27 +1257,37 @@ pub(crate) fn main_load(parms: Vec<String>) {
         // let alloc_blocks
         //     = index.block_manager.alloc_count.load(SeqCst);
 
-        let reuse_blocks
-            = 0;
-        let alloc_blocks
-            = 0;
+        let reuse_blocks = 0;
+        let alloc_blocks = 0;
 
-        oltp_file.write_all(format!(",\
+        oltp_file
+            .write_all(
+                format!(
+                    ",\
         {alloc_blocks},\
         {reuse_blocks},\
         {num_scans_executed},\
         {oltp_executed},\
         {oltp_total_time},\
-        {olap_total_time}\n").as_bytes()).unwrap();
+        {olap_total_time}\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
 
-        println!("- Executed {} OLTPs from {query_file_name}\n\
-        - Executed = {} OLAPs", format_insertions(oltp_executed),
-                 format_insertions(num_scans_executed));
+        println!(
+            "- Executed {} OLTPs from {query_file_name}\n\
+        - Executed = {} OLAPs",
+            format_insertions(oltp_executed),
+            format_insertions(num_scans_executed)
+        );
 
-        println!("###### End Command: {} ######", parms.iter().skip(1).join(" "));
+        println!(
+            "###### End Command: {} ######",
+            parms.iter().skip(1).join(" ")
+        );
     } else {
-        let mut oltp_tx_buff = load_query_into_memory(
-            query_file_name.as_str());
+        let mut oltp_tx_buff = load_query_into_memory(query_file_name.as_str());
 
         // TODO: Explicit for Experiment
         oltp_tx_buff.drain(0..init_keys).for_each(|i| {
@@ -1195,8 +1303,11 @@ pub(crate) fn main_load(parms: Vec<String>) {
 
         let oltp_total_time = start_oltp_time.elapsed().as_nanos();
 
-        println!("- Executed {} CRUD operations from {query_file_name}, \
-                 starting OLAPs...", format_insertions(num));
+        println!(
+            "- Executed {} CRUD operations from {query_file_name}, \
+                 starting OLAPs...",
+            format_insertions(num)
+        );
 
         let (num_scans_executed, olap_total_time) = olap_tests(
             index.clone(),
@@ -1205,19 +1316,21 @@ pub(crate) fn main_load(parms: Vec<String>) {
             skew,
             Either::Left(range),
             false,
-            None);
+            None,
+        );
 
         // let reuse_blocks
         //     = index.block_manager.reuse_count.load(SeqCst);
         // let alloc_blocks
         //     = index.block_manager.alloc_count.load(SeqCst);
 
-        let reuse_blocks
-            = 0;
-        let alloc_blocks
-            = 0;
+        let reuse_blocks = 0;
+        let alloc_blocks = 0;
 
-        oltp_file.write_all(format!("\
+        oltp_file
+            .write_all(
+                format!(
+                    "\
             false,\
             1,\
             {num_olaps},\
@@ -1232,10 +1345,20 @@ pub(crate) fn main_load(parms: Vec<String>) {
             {num_scans_executed},\
             {num},\
             {oltp_total_time},\
-            {olap_total_time}\n").as_bytes()).unwrap();
+            {olap_total_time}\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
 
-        println!("- Executed = {} OLAPs", format_insertions(num_scans_executed));
-        println!("###### End Command: {} ######", parms.iter().skip(1).join(" "));
+        println!(
+            "- Executed = {} OLAPs",
+            format_insertions(num_scans_executed)
+        );
+        println!(
+            "###### End Command: {} ######",
+            parms.iter().skip(1).join(" ")
+        );
     }
 
     oltp_file.flush().unwrap();
@@ -1252,40 +1375,48 @@ pub(crate) fn main_load_cc_new(parms: Vec<String>) {
         "ll" => RootIndexType::LinkedList,
         "fg" => RootIndexType::FrugalList,
         "bt" => RootIndexType::BTree,
-        _ => RootIndexType::default()
+        _ => RootIndexType::default(),
     };
-    let index
-        = Arc::new(MVBTSt::make_standard(root_star_index));
+    let index = Arc::new(MVBTSt::make_standard(root_star_index));
 
     println!("root_start_index = {}", root_star_index);
 
-    let atomic_key
-        = Arc::new(AtomicU64::new(0));
+    let atomic_key = Arc::new(AtomicU64::new(0));
 
     let index_c = index.clone();
-    let (olap_signal, olap_sink)
-        = unbounded();
+    let (olap_signal, olap_sink) = unbounded();
 
     let atomic_key_clone = atomic_key.clone();
     let query_file_name_clone = query_file_name.clone();
-    let num = spawn(move ||
-        load_query(query_file_name_clone.as_str(), index_c, Some(atomic_key_clone)));
+    let num = spawn(move || {
+        load_query(
+            query_file_name_clone.as_str(),
+            index_c,
+            Some(atomic_key_clone),
+        )
+    });
 
-    let olaps = spawn(move || olap_tests(
+    let olaps = spawn(move || {
+        olap_tests(
         index,
         num_olaps,
         workers_per_thread,
         skew,
         Either::Right(atomic_key),
         true,
-        Some(olap_sink)));
+            Some(olap_sink),
+        )
+    });
 
     let num = num.join().unwrap();
     mem::drop(olap_signal);
 
     olaps.join().unwrap();
 
-    println!("Finished executing {} CRUD operations from {query_file_name}", format_insertions(num));
+    println!(
+        "Finished executing {} CRUD operations from {query_file_name}",
+        format_insertions(num)
+    );
 }
 pub(crate) fn main_generate(parms: Vec<String>) {
     let query_file_name = parms[2].as_str();
@@ -1297,12 +1428,14 @@ pub(crate) fn main_generate(parms: Vec<String>) {
 
     let skew = parms[8].parse::<f64>().unwrap();
 
-    println!("Generating init_pop = {init_population}\n\
+    println!(
+        "Generating init_pop = {init_population}\n\
                 total_blocks = {total_blocks}\n\
                 block_inserts = {block_inserts}\n\
                 block_updates = {block_updates}\n\
                 block_deletes = {block_deletes}\n\
-                skew = {skew}\n");
+                skew = {skew}\n"
+    );
     generate_query(
         query_file_name,
         init_population,
@@ -1310,7 +1443,7 @@ pub(crate) fn main_generate(parms: Vec<String>) {
         block_inserts,
         block_updates,
         block_deletes,
-        skew
+        skew,
     );
     println!("Finished generate.")
 }
@@ -1321,11 +1454,13 @@ pub(crate) fn main_append(parms: Vec<String>) {
     let block_updates: usize = parms[6].parse().unwrap();
     let block_deletes: usize = parms[7].parse().unwrap();
 
-    println!("Appending-Mode\n\
+    println!(
+        "Appending-Mode\n\
                 total_blocks = {total_blocks}\n\
                 block_inserts = {block_inserts}\n\
                 block_updates = {block_updates}\n\
-                block_deletes = {block_deletes}");
+                block_deletes = {block_deletes}"
+    );
     generate_query(
         query_file_name,
         0,
@@ -1333,11 +1468,10 @@ pub(crate) fn main_append(parms: Vec<String>) {
         block_inserts,
         block_updates,
         block_deletes,
-        0f64
+        0f64,
     );
     println!("Finished generate.")
 }
-
 
 fn generate_query(
     query_file_name: &str,
@@ -1346,16 +1480,13 @@ fn generate_query(
     block_inserts: usize,
     block_updates: usize,
     block_deletes: usize,
-    skew: f64)
-{
-    let mv_tree
-        = Arc::new(MVBT::default());
+    skew: f64,
+) {
+    let mv_tree = Arc::new(MVBT::default());
 
-    let mut map
-        = HashSet::with_capacity(init_population);
+    let mut map = HashSet::with_capacity(init_population);
 
-    let mut init_pop_order =
-        Vec::with_capacity(init_population);
+    let mut init_pop_order = Vec::with_capacity(init_population);
 
     for _ in 0..init_population {
         'l: loop {
@@ -1378,11 +1509,13 @@ fn generate_query(
     }
 
     println!("Finished generating {} init keys", init_population);
-    let mut query_file = BufWriter::new(OpenOptions::new()
+    let mut query_file = BufWriter::new(
+        OpenOptions::new()
         .create(true)
         .append(true)
         .open(format!("{query_file_name}"))
-        .unwrap());
+            .unwrap(),
+    );
 
     let mut querys = 0_usize;
 
@@ -1414,8 +1547,7 @@ fn generate_query(
     });
 
     let block = {
-        let mut crud
-            = Vec::with_capacity(block_inserts + block_updates + block_deletes);
+        let mut crud = Vec::with_capacity(block_inserts + block_updates + block_deletes);
 
         crud.extend((0..block_inserts).map(|_| CRUDOperation::<Key, Payload>::InsertRand));
         crud.extend((0..block_updates).map(|_| CRUDOperation::<Key, Payload>::UpdateRand));
@@ -1432,19 +1564,13 @@ fn generate_query(
 
         if skew == 0_f64 {
             crud
-        }
-        else {
+        } else {
             let key = zipf.as_ref().unwrap().sample(&mut rand::rng()) as Key;
-            crud.iter_mut().for_each(|c| {
-                match c {
-                    CRUDOperation::UpdateRand =>
-                        *c = CRUDOperation::Update(key, payload),
-                    CRUDOperation::DeleteRand =>
-                        *c = CRUDOperation::Delete(key),
-                    CRUDOperation::InsertRand =>
-                        *c = CRUDOperation::Insert(key, payload),
+            crud.iter_mut().for_each(|c| match c {
+                CRUDOperation::UpdateRand => *c = CRUDOperation::Update(key, payload),
+                CRUDOperation::DeleteRand => *c = CRUDOperation::Delete(key),
+                CRUDOperation::InsertRand => *c = CRUDOperation::Insert(key, payload),
                     _ => panic!("Unknown CRUD Operation for blocks"),
-                }
             });
             crud
         }
@@ -1453,14 +1579,18 @@ fn generate_query(
     for _ in 0..total_blocks {
         for op in gen_block() {
             match mv_tree.dispatch_crud(op.clone()) {
-                CRUDOperationResult::InsertedRand(key, _) => io_handle(
-                    CRUDOperation::Insert(key, 0)),
-                CRUDOperationResult::UpdatedRand(key, _) => io_handle(
-                    CRUDOperation::Update(key, 0)),
-                CRUDOperationResult::DeletedRand(key, _) => io_handle(
-                    CRUDOperation::Delete::<_, Payload>(key)),
-                CRUDOperationResult::Error =>
-                    panic!("Error on rand query; generate_query(): CRUD({op}) ---> Result(Error)"),
+                CRUDOperationResult::InsertedRand(key, _) => {
+                    io_handle(CRUDOperation::Insert(key, 0))
+                }
+                CRUDOperationResult::UpdatedRand(key, _) => {
+                    io_handle(CRUDOperation::Update(key, 0))
+                }
+                CRUDOperationResult::DeletedRand(key, _) => {
+                    io_handle(CRUDOperation::Delete::<_, Payload>(key))
+                }
+                CRUDOperationResult::Error => {
+                    panic!("Error on rand query; generate_query(): CRUD({op}) ---> Result(Error)")
+                }
                 _ => io_handle(op),
             }
         }
@@ -1471,15 +1601,21 @@ fn generate_query(
         println!("Generated: {} CRUD Ops", format_insertions(querys))
     } else {
         let total_crud = query_file.into_inner().unwrap().metadata().unwrap().len() / 9;
-        println!("Appended: {} CRUD Ops. Total: {} CRUD Ops", format_insertions(querys), format_insertions(total_crud as _))
+        println!(
+            "Appended: {} CRUD Ops. Total: {} CRUD Ops",
+            format_insertions(querys),
+            format_insertions(total_crud as _)
+        )
     }
 }
 
 fn load_query_into_memory(query_file: &str) -> Vec<CRUDOperation<Key, Payload>> {
-    let mut query_file = BufReader::new(OpenOptions::new()
+    let mut query_file = BufReader::new(
+        OpenOptions::new()
         .read(true)
         .open(format!("{query_file}"))
-        .unwrap());
+            .unwrap(),
+    );
 
     let payload = Payload::default();
     let mut loaded = vec![];
@@ -1495,19 +1631,21 @@ fn load_query_into_memory(query_file: &str) -> Vec<CRUDOperation<Key, Payload>> 
                 }
                 UPDATE => {
                     let crud = CRUDOperation::Update(
-                        Key::from_le_bytes(buff[1..].try_into().unwrap()), payload);
+                        Key::from_le_bytes(buff[1..].try_into().unwrap()),
+                        payload,
+                    );
 
                     loaded.push(crud);
                 }
                 DELETE => {
-                    let crud = CRUDOperation::Delete(
-                        Key::from_le_bytes(buff[1..].try_into().unwrap()));
+                    let crud =
+                        CRUDOperation::Delete(Key::from_le_bytes(buff[1..].try_into().unwrap()));
 
                     loaded.push(crud);
                 }
                 _ => panic!("Unknown CRUD Operation for blocks in load query into memory!"),
-            }
-            Err(..) => break
+            },
+            Err(..) => break,
         }
     }
 
@@ -1515,13 +1653,13 @@ fn load_query_into_memory(query_file: &str) -> Vec<CRUDOperation<Key, Payload>> 
 
     loaded
 }
-fn load_query(query_file: &str, index: Arc<MVBT>,
-              report_signal: Option<Arc<AtomicU64>>) -> usize
-{
-    let mut query_file = BufReader::new(OpenOptions::new()
+fn load_query(query_file: &str, index: Arc<MVBT>, report_signal: Option<Arc<AtomicU64>>) -> usize {
+    let mut query_file = BufReader::new(
+        OpenOptions::new()
         .read(true)
         .open(format!("{query_file}"))
-        .unwrap());
+            .unwrap(),
+    );
 
     let mut query_count = 0;
     let payload = Payload::default();
@@ -1532,10 +1670,7 @@ fn load_query(query_file: &str, index: Arc<MVBT>,
             Ok(..) => match buff[0] {
                 INSERT => {
                     let key = Key::from_le_bytes((&buff[1..]).try_into().unwrap());
-                    let crud = CRUDOperation::Insert(
-                        key,
-                        payload,
-                    );
+                    let crud = CRUDOperation::Insert(key, payload);
 
                     let r = index.dispatch_crud(crud);
                     if let CRUDOperationResult::Inserted(..) = r {
@@ -1553,22 +1688,24 @@ fn load_query(query_file: &str, index: Arc<MVBT>,
                     );
 
                     let r = index.dispatch_crud(crud);
-                    if let CRUDOperationResult::Updated(..) = r {} else {
+                    if let CRUDOperationResult::Updated(..) = r {
+                    } else {
                         panic!("Error loading query update number = {}: {r}", query_count)
                     }
                 }
                 DELETE => {
-                    let crud = CRUDOperation::Delete(
-                        Key::from_le_bytes(buff[1..].try_into().unwrap()));
+                    let crud =
+                        CRUDOperation::Delete(Key::from_le_bytes(buff[1..].try_into().unwrap()));
 
                     let r = index.dispatch_crud(crud);
-                    if let CRUDOperationResult::Deleted(..) = r {} else {
+                    if let CRUDOperationResult::Deleted(..) = r {
+                    } else {
                         panic!("Error loading query delete number = {}: {r}", query_count)
                     }
                 }
                 _ => panic!("Unknown CRUD Operation for blocks in load query!"),
-            }
-            Err(..) => break
+            },
+            Err(..) => break,
         }
 
         query_count += 1
@@ -1577,10 +1714,6 @@ fn load_query(query_file: &str, index: Arc<MVBT>,
     assert!(query_file.read_exact([0].as_mut_slice()).is_err());
     query_count
 }
-
-
-
-
 
 pub const PAYLOAD_STR_LEN_MIN: usize = 704;
 pub const PAYLOAD_STR_LEN_MAX: usize = 7078;
@@ -1620,7 +1753,8 @@ impl Default for PayloadIndirection {
             attributes: rnd_str_vec(
                 PAYLOAD_ATTR_STR_COUNT,
                 PAYLOAD_STR_LEN_MIN,
-                PAYLOAD_STR_LEN_MAX),
+                PAYLOAD_STR_LEN_MAX,
+            ),
         }))
     }
 }
@@ -1633,16 +1767,10 @@ pub fn dec_key(k: Key) -> Key {
     k.checked_sub(1).unwrap_or(Key::MIN)
 }
 
-
-
 pub fn format_insertions(mut i: usize) -> String {
     let mut parts = Vec::new();
 
-    let units = [
-        (1_000_000_000, "B"),
-        (1_000_000, "Mio"),
-        (1_000, "K"),
-    ];
+    let units = [(1_000_000_000, "B"), (1_000_000, "Mio"), (1_000, "K")];
 
     for &(value, suffix) in &units {
         if i >= value {
@@ -1716,47 +1844,11 @@ pub(crate) fn main_viz_demo(parms: Vec<String>) {
 // enforced via `autotests = false` in `Cargo.toml`, so cargo doesn't also try
 // to build these as their own standalone integration-test crates.
 #[cfg(test)]
-#[path = "../../tests/wal_record_tests.rs"]
-mod wal_record_tests;
+#[path = "../../tests/bench_tpcc_correctness_tests.rs"]
+mod bench_tpcc_correctness_tests;
 #[cfg(test)]
-#[path = "../../tests/wal_writer_tests.rs"]
-mod wal_writer_tests;
-#[cfg(test)]
-#[path = "../../tests/wal_lockfree_writer_tests.rs"]
-mod wal_lockfree_writer_tests;
-#[cfg(test)]
-#[path = "../../tests/wal_writer_throughput_bench.rs"]
-mod wal_writer_throughput_bench;
-#[cfg(test)]
-#[path = "../../tests/tpcc_wal_backend_bench.rs"]
-mod tpcc_wal_backend_bench;
-#[cfg(test)]
-#[path = "../../tests/ycsb_wal_backend_bench.rs"]
-mod ycsb_wal_backend_bench;
-#[cfg(test)]
-#[path = "../../tests/wal_recovery_tests.rs"]
-mod wal_recovery_tests;
-#[cfg(test)]
-#[path = "../../tests/wal_integration_tests.rs"]
-mod wal_integration_tests;
-#[cfg(test)]
-#[path = "../../tests/db_integration_tests.rs"]
-mod db_integration_tests;
-#[cfg(test)]
-#[path = "../../tests/query_dispatch_tests.rs"]
-mod query_dispatch_tests;
-#[cfg(test)]
-#[path = "../../tests/query_transaction_tests.rs"]
-mod query_transaction_tests;
-#[cfg(test)]
-#[path = "../../tests/iter_query_tests.rs"]
-mod iter_query_tests;
-#[cfg(test)]
-#[path = "../../tests/leaf_page_abort_tests.rs"]
-mod leaf_page_abort_tests;
-#[cfg(test)]
-#[path = "../../tests/sync_commit_log_tests.rs"]
-mod sync_commit_log_tests;
+#[path = "../../tests/bench_tpcc_stress_tests.rs"]
+mod bench_tpcc_stress_tests;
 #[cfg(test)]
 #[path = "../../tests/bench_tpcc_txn_tests.rs"]
 mod bench_tpcc_txn_tests;
@@ -1764,29 +1856,8 @@ mod bench_tpcc_txn_tests;
 #[path = "../../tests/bench_tpcc_wal_codec_tests.rs"]
 mod bench_tpcc_wal_codec_tests;
 #[cfg(test)]
-#[path = "../../tests/tree_wal_consistency_tests.rs"]
-mod tree_wal_consistency_tests;
-#[cfg(test)]
-#[path = "../../tests/smo_race_investigation_tests.rs"]
-mod smo_race_investigation_tests;
-#[cfg(test)]
-#[path = "../../tests/db_transaction_abort_tests.rs"]
-mod db_transaction_abort_tests;
-#[cfg(test)]
-#[path = "../../tests/bench_tpcc_correctness_tests.rs"]
-mod bench_tpcc_correctness_tests;
-#[cfg(test)]
 #[path = "../../tests/bench_tpch_correctness_tests.rs"]
 mod bench_tpch_correctness_tests;
-#[cfg(test)]
-#[path = "../../tests/bench_ycsb_correctness_tests.rs"]
-mod bench_ycsb_correctness_tests;
-#[cfg(test)]
-#[path = "../../tests/bench_tpcc_stress_tests.rs"]
-mod bench_tpcc_stress_tests;
-#[cfg(test)]
-#[path = "../../tests/bench_ycsb_stress_tests.rs"]
-mod bench_ycsb_stress_tests;
 #[cfg(test)]
 #[path = "../../tests/bench_tpch_stress_tests.rs"]
 mod bench_tpch_stress_tests;
@@ -1794,20 +1865,80 @@ mod bench_tpch_stress_tests;
 #[path = "../../tests/bench_wal_recovery_stress_tests.rs"]
 mod bench_wal_recovery_stress_tests;
 #[cfg(test)]
+#[path = "../../tests/bench_ycsb_correctness_tests.rs"]
+mod bench_ycsb_correctness_tests;
+#[cfg(test)]
+#[path = "../../tests/bench_ycsb_stress_tests.rs"]
+mod bench_ycsb_stress_tests;
+#[cfg(test)]
+#[path = "../../tests/db_integration_tests.rs"]
+mod db_integration_tests;
+#[cfg(test)]
+#[path = "../../tests/db_transaction_abort_tests.rs"]
+mod db_transaction_abort_tests;
+#[cfg(test)]
+#[path = "../../tests/iter_query_tests.rs"]
+mod iter_query_tests;
+#[cfg(test)]
+#[path = "../../tests/leaf_page_abort_tests.rs"]
+mod leaf_page_abort_tests;
+#[cfg(test)]
 #[path = "../../tests/leaf_split_off_by_one_regression_tests.rs"]
 mod leaf_split_off_by_one_regression_tests;
 #[cfg(test)]
-#[path = "../../tests/verify_range_scan.rs"]
-mod verify_range_scan;
+#[path = "../../tests/query_dispatch_tests.rs"]
+mod query_dispatch_tests;
 #[cfg(test)]
-#[path = "../../tests/verify_concurrent_shared_keys.rs"]
-mod verify_concurrent_shared_keys;
+#[path = "../../tests/query_transaction_tests.rs"]
+mod query_transaction_tests;
 #[cfg(test)]
 #[path = "../../tests/restart_trace_leak_repro.rs"]
 mod restart_trace_leak_repro;
 #[cfg(test)]
+#[path = "../../tests/smo_race_investigation_tests.rs"]
+mod smo_race_investigation_tests;
+#[cfg(test)]
+#[path = "../../tests/sync_commit_log_tests.rs"]
+mod sync_commit_log_tests;
+#[cfg(test)]
+#[path = "../../tests/todays_optimization_regression_tests.rs"]
+mod todays_optimization_regression_tests;
+#[cfg(test)]
+#[path = "../../tests/tpcc_wal_backend_bench.rs"]
+mod tpcc_wal_backend_bench;
+#[cfg(test)]
 #[path = "../../tests/tpcc_wal_perf_tests.rs"]
 mod tpcc_wal_perf_tests;
+#[cfg(test)]
+#[path = "../../tests/tree_wal_consistency_tests.rs"]
+mod tree_wal_consistency_tests;
+#[cfg(test)]
+#[path = "../../tests/verify_concurrent_shared_keys.rs"]
+mod verify_concurrent_shared_keys;
+#[cfg(test)]
+#[path = "../../tests/verify_range_scan.rs"]
+mod verify_range_scan;
+#[cfg(test)]
+#[path = "../../tests/wal_integration_tests.rs"]
+mod wal_integration_tests;
+#[cfg(test)]
+#[path = "../../tests/wal_lockfree_writer_tests.rs"]
+mod wal_lockfree_writer_tests;
+#[cfg(test)]
+#[path = "../../tests/wal_record_tests.rs"]
+mod wal_record_tests;
+#[cfg(test)]
+#[path = "../../tests/wal_recovery_tests.rs"]
+mod wal_recovery_tests;
+#[cfg(test)]
+#[path = "../../tests/wal_writer_tests.rs"]
+mod wal_writer_tests;
+#[cfg(test)]
+#[path = "../../tests/wal_writer_throughput_bench.rs"]
+mod wal_writer_throughput_bench;
+#[cfg(test)]
+#[path = "../../tests/ycsb_wal_backend_bench.rs"]
+mod ycsb_wal_backend_bench;
 #[cfg(test)]
 #[path = "../../tests/ycsb_wal_perf_tests.rs"]
 mod ycsb_wal_perf_tests;

@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::{AtomicBool, AtomicU32};
 
 use crossbeam_utils::CachePadded;
 
@@ -10,6 +10,24 @@ use crate::mv_sync::clock::GlobalClock;
 use crate::mv_sync::commit_log::CommitLog;
 use crate::mv_sync::visibility;
 use crate::mv_sync::worker::WorkerRegistry;
+
+/// A short-lived page-reclamation guard for a traversal which needs current
+/// tree pointers to remain allocated, but does not need an MVCC timestamp.
+/// The slot is cleared on unwind as well as on the ordinary return path.
+struct ReclamationPin<'a> {
+    ctx: &'a TxContext,
+    worker_id: WorkerId,
+    published: bool,
+}
+
+impl Drop for ReclamationPin<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        if self.published {
+            self.ctx.in_flight_bound[self.worker_id as usize].store(NOT_IN_FLIGHT, Release);
+        }
+    }
+}
 
 /// Sentinel for "this worker isn't mid-registration right now" in
 /// `TxContext::in_flight_bound` — real `ts_start`s are drawn from a counter
@@ -168,9 +186,15 @@ impl TxContext {
             global_clock: GlobalClock::new(),
             commit_logs: (0..max_workers).map(|_| CommitLog::new()).collect(),
             worker_registry: WorkerRegistry::new(max_workers),
-            live_tx: (0..max_workers).map(|_| CachePadded::new(AtomicVersion::new(NOT_IN_FLIGHT))).collect(),
-            live_tx_depth: (0..max_workers).map(|_| CachePadded::new(AtomicU32::new(0))).collect(),
-            in_flight_bound: (0..max_workers).map(|_| CachePadded::new(AtomicVersion::new(NOT_IN_FLIGHT))).collect(),
+            live_tx: (0..max_workers)
+                .map(|_| CachePadded::new(AtomicVersion::new(NOT_IN_FLIGHT)))
+                .collect(),
+            live_tx_depth: (0..max_workers)
+                .map(|_| CachePadded::new(AtomicU32::new(0)))
+                .collect(),
+            in_flight_bound: (0..max_workers)
+                .map(|_| CachePadded::new(AtomicVersion::new(NOT_IN_FLIGHT)))
+                .collect(),
             block_reclaim_enabled: AtomicBool::new(false),
             freshest_si_truncate_commit_log: AtomicBool::new(true),
         }
@@ -234,6 +258,29 @@ impl TxContext {
     #[inline]
     fn end_snapshot_registration(&self, worker_id: WorkerId) {
         self.in_flight_bound[worker_id as usize].store(NOT_IN_FLIGHT, Release);
+    }
+
+    /// Runs `f` while page reclaim is conservatively pinned at the clock's
+    /// current position, without drawing a timestamp or registering a real
+    /// OSIC snapshot. An already-live transaction is itself an older (and
+    /// therefore sufficient) pin, so the nested case performs no stores.
+    #[inline(always)]
+    pub(crate) fn with_reclamation_pin<R>(&self, f: impl FnOnce() -> R) -> R {
+        if !self.block_reclaim_enabled.load(Relaxed) {
+            return f();
+        }
+        let worker_id = self.worker_id();
+        let published = self.live_tx_depth[worker_id as usize].load(Relaxed) == 0;
+        if published {
+            let bound = self.global_clock.current_version();
+            self.in_flight_bound[worker_id as usize].store(bound, Release);
+        }
+        let _pin = ReclamationPin {
+            ctx: self,
+            worker_id,
+            published,
+        };
+        f()
     }
 
     /// Draws a fresh `ts_start` and hands it to `register` before releasing
@@ -344,7 +391,13 @@ impl TxContext {
         stamp: TxStamp,
     ) -> bool {
         crate::mv_sync::worker::with_snapshot_cache(&self.worker_registry, |cache| {
-            visibility::is_visible(&self.commit_logs, cache, reader_worker, reader_ts_start, stamp)
+            visibility::is_visible(
+                &self.commit_logs,
+                cache,
+                reader_worker,
+                reader_ts_start,
+                stamp,
+            )
         })
     }
 
@@ -356,7 +409,15 @@ impl TxContext {
         f: impl FnOnce(&mut dyn FnMut(TxStamp) -> bool) -> R,
     ) -> R {
         crate::mv_sync::worker::with_snapshot_cache(&self.worker_registry, |cache| {
-            f(&mut |stamp| visibility::is_visible(&self.commit_logs, cache, reader_worker, reader_ts_start, stamp))
+            f(&mut |stamp| {
+                visibility::is_visible(
+                    &self.commit_logs,
+                    cache,
+                    reader_worker,
+                    reader_ts_start,
+                    stamp,
+                )
+            })
         })
     }
 
@@ -381,7 +442,9 @@ impl TxContext {
         &self,
         f: impl FnOnce(&mut visibility::SnapshotCache, &[CommitLog]) -> R,
     ) -> R {
-        crate::mv_sync::worker::with_snapshot_cache(&self.worker_registry, |cache| f(cache, &self.commit_logs))
+        crate::mv_sync::worker::with_snapshot_cache(&self.worker_registry, |cache| {
+            f(cache, &self.commit_logs)
+        })
     }
 
     /// Every worker's currently-published (i.e. outermost, see `live_tx`'s
@@ -396,15 +459,28 @@ impl TxContext {
         })
     }
 
+    /// Snapshots whose LCB commit-log entries must survive pruning. Besides
+    /// fully-published transactions, include workers currently between
+    /// drawing and publishing a snapshot; otherwise a concurrent commit can
+    /// prune the boundary that the just-starting transaction will need.
+    #[inline]
+    fn pruning_snapshots(&self) -> impl Iterator<Item = SnapShot> + '_ {
+        self.live_snapshots()
+            .chain(self.in_flight_bound.iter().filter_map(|slot| {
+                let v = slot.load(Acquire);
+                (v != NOT_IN_FLIGHT).then_some(v)
+            }))
+    }
+
     #[inline(always)]
     pub(crate) fn commit_tx(&self, worker_id: WorkerId) -> Version {
-        if self.block_reclaim_enabled.load(Relaxed) ||
-           self.freshest_si_truncate_commit_log.load(Relaxed)
+        if self.block_reclaim_enabled.load(Relaxed)
+            || self.freshest_si_truncate_commit_log.load(Relaxed)
         {
             self.commit_logs[worker_id as usize].commit_pruned(
                 &self.global_clock,
                 self.commit_logs.len(),
-                self.live_snapshots(),
+                self.pruning_snapshots(),
             )
         } else {
             self.commit_logs[worker_id as usize].commit(&self.global_clock)
@@ -426,7 +502,9 @@ impl TxContext {
     /// this being gated on the GC flag used to cause.
     #[inline]
     pub(crate) fn is_snapshot_live(&self, ts_start: Version) -> bool {
-        self.live_tx.iter().any(|slot| slot.load(Acquire) == ts_start)
+        self.live_tx
+            .iter()
+            .any(|slot| slot.load(Acquire) == ts_start)
     }
 
     /// The oldest currently-active-or-in-flight snapshot across every table

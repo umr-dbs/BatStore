@@ -20,7 +20,7 @@ pub struct RangeQueryIter<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static,
 > {
     pub(crate) isolated_snapshot: ReaderIsolatedSnapShot<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
     pub(crate) range: Interval<Key>,
@@ -28,16 +28,19 @@ pub struct RangeQueryIter<
     buff: VecDeque<RecordPointResult<Key, Payload>>,
     is_completed: bool,
     register_reader_si: bool,
-    worker_id: WorkerId
+    worker_id: WorkerId,
 }
 
-impl<'a,
+impl<
+    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
-> Drop for RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
-    fn drop(&mut self) { // ensure snapshot is released even if user didn't consume all data
+    Payload: Display + Clone + Default + Sync + 'static,
+> Drop for RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+    fn drop(&mut self) {
+        // ensure snapshot is released even if user didn't consume all data
         if !self.is_completed && self.register_reader_si {
             self.mv_tree()
                 .on_release_reader_snapshot(self.snapshot().into())
@@ -45,19 +48,38 @@ impl<'a,
     }
 }
 
-impl<'a,
+impl<
+    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
-> RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Display + Clone + Default + Sync + 'static,
+> RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     #[inline(always)]
-    pub fn new(tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    pub fn new(
+        tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
                version: Version,
                range: Interval<Key>,
                register_reader_si: bool,
-               worker_id: WorkerId) -> Self
-    {
+        worker_id: WorkerId,
+    ) -> Self {
+        let root = tree.retrieve_root_for(version);
+        Self::new_with_root(tree, version, range, register_reader_si, worker_id, root)
+    }
+
+    /// Builds a range iterator from a root already resolved for `version`.
+    /// A fixed-snapshot transaction can therefore resolve each table's root
+    /// once and reuse it for all later point/range reads.
+    #[inline(always)]
+    pub(crate) fn new_with_root(
+        tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        version: Version,
+        range: Interval<Key>,
+        register_reader_si: bool,
+        worker_id: WorkerId,
+        root: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    ) -> Self {
         if register_reader_si {
             tree.on_acquire_reader_snapshot(version);
         }
@@ -65,12 +87,11 @@ impl<'a,
         Self {
             isolated_snapshot: ReaderIsolatedSnapShot(version, tree),
             range,
-            path: vec![(Interval::new(tree.min_key, tree.max_key),
-                        tree.retrieve_root_for(version))],
+            path: vec![(Interval::new(tree.cold.min_key, tree.cold.max_key), root)],
             buff: VecDeque::new(),
             is_completed: false,
             register_reader_si,
-            worker_id
+            worker_id,
         }
     }
 
@@ -90,12 +111,14 @@ impl<'a,
     }
 }
 
-impl<'a,
+impl<
+    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
-> Iterator for RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Display + Clone + Default + Sync + 'static,
+> Iterator for RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     type Item = RecordPointResult<Key, Payload>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -104,12 +127,14 @@ impl<'a,
     }
 }
 
-impl<'a,
+impl<
+    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
-> RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Display + Clone + Default + Sync + 'static,
+> RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     /// Advances the scan until `self.buff` holds at least one more match —
     /// always a whole leaf's worth at once, since a leaf's live/visible
     /// records are filtered into `buff` together in one `extend` call
@@ -123,8 +148,7 @@ impl<'a,
             return;
         }
 
-        let si
-            = self.snapshot();
+        let si = self.snapshot();
 
         // A direct copy of the stored `&'a MVBTSt` (references are `Copy`),
         // not a call through `self.mv_tree()` — the latter's elided return
@@ -132,14 +156,11 @@ impl<'a,
         // long as `tree` (or anything capturing it, like `is_visible` below)
         // is alive, conflicting with the `&mut self.buff`/`self.path` calls
         // later in this same loop.
-        let tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
-            = self.isolated_snapshot.1;
+        let tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload> = self.isolated_snapshot.1;
 
-        let inc
-            = tree.inc_key;
+        let inc = tree.cold.inc_key;
 
-        let worker_id
-            = self.worker_id;
+        let worker_id = self.worker_id;
 
         // `with_snapshot_cache_and_logs`, not `with_visibility_checker`:
         // builds `is_visible` as a concrete, `Sized` closure right here
@@ -155,8 +176,9 @@ impl<'a,
         // cache lookup on the (common, see `SCAN_TRACE`'s findings)
         // multi-leaf-per-call path.
         tree.with_snapshot_cache_and_logs(|cache, commit_logs| {
-            let mut is_visible = |stamp| crate::mv_sync::visibility::is_visible(
-                commit_logs, cache, worker_id, si, stamp);
+            let mut is_visible = |stamp| {
+                crate::mv_sync::visibility::is_visible(commit_logs, cache, worker_id, si, stamp)
+            };
 
             loop {
                 if self.path.is_empty() || self.range.lower > self.range.upper {
@@ -178,7 +200,7 @@ impl<'a,
                     }
 
                     self.is_completed = true;
-                    return
+                    return;
                 }
 
                 let (curr_fence, curr_block) = self.path.last().unwrap().clone();
@@ -186,9 +208,12 @@ impl<'a,
                 match curr_block.as_page_ref() {
                     PageType::IndexRef(internal_page) => {
                         let (keys, versions) = internal_page.keys_versions();
-                        if let Some((pos, (_, fence))) = versions.iter().zip(keys).enumerate().rev()
-                            .find(|(_, (version, fence))|
-                                version.matched(si) && fence.contains(self.range.lower))
+                        if let Some((pos, (_, fence))) =
+                            versions.iter().zip(keys).enumerate().rev().find(
+                                |(_, (version, fence))| {
+                                    version.matched(si) && fence.contains(self.range.lower)
+                                },
+                            )
                         {
                             self.path.push((*fence, internal_page.get_pointer(pos)));
                         } else {
@@ -197,11 +222,11 @@ impl<'a,
                         }
                     }
                     PageType::LeafRef(leaf_page) => {
-                        let records = leaf_page
-                            .as_records();
+                        let records = leaf_page.as_records();
 
                         let before = self.buff.len();
-                        self.buff.extend(records
+                        self.buff.extend(
+                            records
                             .iter()
                             // Cheap key-range comparison first, so it can
                             // short-circuit `&&` before the costlier
@@ -216,24 +241,27 @@ impl<'a,
                             // full-table OLAP scan's range always contains
                             // every key in a leaf visited at all, so this is
                             // a no-op there either way.
-                            .filter(|r|
-                                self.range.contains(r.key()) && r.version().matches(&mut is_visible))
-                            .map(RecordPointResult::from));
+                                .filter(|r| {
+                                    self.range.contains(r.key())
+                                        && r.version().matches(&mut is_visible)
+                                })
+                                .map(RecordPointResult::from),
+                        );
                         crate::mv_test::record_leaf_scan(records.len(), self.buff.len() - before);
 
                         self.path.pop();
                         let reached_end = curr_fence.upper >= self.range.upper
-                            || curr_fence.upper == tree.max_key;
+                            || curr_fence.upper == tree.cold.max_key;
                         if reached_end {
                             self.path.clear();
                         } else {
                             self.range.lower = inc(curr_fence.upper);
                         }
                         if !self.buff.is_empty() || reached_end {
-                            return
+                            return;
                         }
                     }
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 }
             }
         })
@@ -241,28 +269,34 @@ impl<'a,
 
     /// Fallible zero-copy streaming scan. Returning `Err` stops immediately;
     /// `Drop` still releases snapshots owned by this iterator.
-    pub fn try_for_each_ref<E>(mut self, mut visit: impl FnMut(Key, &Payload) -> Result<(), E>)
-        -> Result<(), E>
-    {
+    pub fn try_for_each_ref<E>(
+        mut self,
+        mut visit: impl FnMut(Key, &Payload) -> Result<(), E>,
+    ) -> Result<(), E> {
         let si = self.snapshot();
         let tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload> = self.isolated_snapshot.1;
-        let inc = tree.inc_key;
+        let inc = tree.cold.inc_key;
         let worker_id = self.worker_id;
         let mut visit_error = None;
-        let full_key_range = self.range.lower == tree.min_key && self.range.upper == tree.max_key;
+        let full_key_range =
+            self.range.lower == tree.cold.min_key && self.range.upper == tree.cold.max_key;
 
         tree.with_snapshot_cache_and_logs(|cache, commit_logs| {
-            let mut is_visible = |stamp| crate::mv_sync::visibility::is_visible(
-                commit_logs, cache, worker_id, si, stamp);
+            let mut is_visible = |stamp| {
+                crate::mv_sync::visibility::is_visible(commit_logs, cache, worker_id, si, stamp)
+            };
 
             while !self.path.is_empty() && self.range.lower <= self.range.upper {
                 let (curr_fence, curr_block) = self.path.last().unwrap().clone();
                 match curr_block.as_page_ref() {
                     PageType::IndexRef(internal_page) => {
                         let (keys, versions) = internal_page.keys_versions();
-                        if let Some((pos, (_, fence))) = versions.iter().zip(keys).enumerate().rev()
-                            .find(|(_, (version, fence))|
-                                version.matched(si) && fence.contains(self.range.lower))
+                        if let Some((pos, (_, fence))) =
+                            versions.iter().zip(keys).enumerate().rev().find(
+                                |(_, (version, fence))| {
+                                    version.matched(si) && fence.contains(self.range.lower)
+                                },
+                            )
                         {
                             self.path.push((*fence, internal_page.get_pointer(pos)));
                         } else {
@@ -285,7 +319,9 @@ impl<'a,
                             }
                         } else {
                             for record in records {
-                                if self.range.contains(record.key()) && record.version().matches(&mut is_visible) {
+                                if self.range.contains(record.key())
+                                    && record.version().matches(&mut is_visible)
+                                {
                                     matched += 1;
                                     if let Err(error) = visit(record.key(), record.payload()) {
                                         visit_error = Some(error);
@@ -297,7 +333,7 @@ impl<'a,
                         crate::mv_test::record_leaf_scan(records.len(), matched);
                         self.path.pop();
                         if curr_fence.upper >= self.range.upper
-                            || curr_fence.upper == tree.max_key
+                            || curr_fence.upper == tree.cold.max_key
                         {
                             self.path.clear();
                         } else {
@@ -334,7 +370,11 @@ impl<'a,
     }
 
     /// Zero-copy left fold over the visible records.
-    pub fn fold_ref<Acc>(self, initial: Acc, mut fold: impl FnMut(Acc, Key, &Payload) -> Acc) -> Acc {
+    pub fn fold_ref<Acc>(
+        self,
+        initial: Acc,
+        mut fold: impl FnMut(Acc, Key, &Payload) -> Acc,
+    ) -> Acc {
         let mut acc = Some(initial);
         self.for_each_ref(|key, payload| {
             acc = Some(fold(acc.take().unwrap(), key, payload));
@@ -369,7 +409,10 @@ impl<'a,
     /// use plain `next()`/`Iterator` methods instead.
     pub fn min_by_key(mut self) -> Option<RecordPointResult<Key, Payload>> {
         self.refill();
-        let min_index = self.buff.iter().enumerate()
+        let min_index = self
+            .buff
+            .iter()
+            .enumerate()
             .min_by_key(|(_, r)| r.key)
             .map(|(index, _)| index)?;
         self.buff.remove(min_index)

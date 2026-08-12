@@ -52,8 +52,11 @@
 //!   table's tree — they all share the same underlying `Arc<WalWriter>`),
 //!   not a loop over every touched table.
 use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationInnerReason::{KeyAlreadyDeleted, KeyAlreadyExists, KeyDoesNotExist};
+use crate::mv_crud_model::crud_operation_result::CRUDOperationInnerReason::{
+    KeyAlreadyDeleted, KeyAlreadyExists, KeyDoesNotExist,
+};
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::leaf_page::LeafPage;
 use crate::mv_query::interval::Interval;
 use crate::mv_query::iter_query::RangeQueryIter;
@@ -62,7 +65,7 @@ use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::{Version, VersionInfo};
 use crate::mv_tree::mvbt::MVBTSt;
 use crate::mv_wal::record::{TableId, WalPayload};
-use std::cell::RefCell;
+use smallvec::SmallVec;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::DerefMut;
@@ -73,7 +76,7 @@ use super::database::Database;
 pub enum TransactionState {
     InFlight,
     Committed,
-    Aborted
+    Aborted,
 }
 
 /// Shared by `DbTransaction::insert` and any other per-table-tree write path
@@ -97,8 +100,11 @@ pub(crate) fn insert_on_tree<
     ts_start: Version,
     key: Key,
     payload: Payload,
-) -> (CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>, bool) {
-    let leaf_guard = tree.traversal_write_olc(key);
+) -> (
+    CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>,
+    bool,
+) {
+    let leaf_guard = tree.traversal_write_olc_registered(key);
     let leaf_deref_mut = leaf_guard.deref_mut();
     let leaf_page = leaf_deref_mut.as_leaf_page();
     let stamp = TxStamp::new(worker_id, ts_start);
@@ -114,7 +120,7 @@ pub(crate) fn insert_on_tree<
             } else {
                 CRUDOperationResult::ZeroAffected(KeyAlreadyExists)
             };
-            return (crud_error, false)
+            return (crud_error, false);
         }
 
         // A delete followed by an insert in this same transaction creates
@@ -130,7 +136,7 @@ pub(crate) fn insert_on_tree<
             record.version.undelete();
             record.set_payload(payload);
             leaf_page.commit_delta(1, -1);
-            return (CRUDOperationResult::Inserted(stamp.ts_start()), false)
+            return (CRUDOperationResult::Inserted(stamp.ts_start()), false);
         }
     }
 
@@ -140,7 +146,8 @@ pub(crate) fn insert_on_tree<
 
     leaf_page.push_uncommitted(
         RecordPoint::new(key, VersionInfo::new(stamp), payload),
-        current_len);
+        current_len,
+    );
 
     leaf_page.commit_delta(1, 0);
 
@@ -164,8 +171,11 @@ pub(crate) fn update_on_tree<
     ts_start: Version,
     key: Key,
     payload: Payload,
-) -> (CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>, bool) {
-    let leaf_guard = tree.traversal_write_olc(key);
+) -> (
+    CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>,
+    bool,
+) {
+    let leaf_guard = tree.traversal_write_olc_registered(key);
     let leaf_deref_mut = leaf_guard.deref_mut();
     let leaf_page = leaf_deref_mut.as_leaf_page();
 
@@ -179,7 +189,7 @@ pub(crate) fn update_on_tree<
         .iter_mut()
         .rfind(|r| r.key() == key && !r.version.insertion_stamp().is_invalid())
     {
-        Some(record) =>
+        Some(record) => {
             if tree.is_visible_stamp(worker_id, ts_start, record.version.insertion_stamp()) {
                 let stamp = TxStamp::new(worker_id, ts_start);
 
@@ -192,22 +202,23 @@ pub(crate) fn update_on_tree<
                 }
 
                 if !record.version.delete(stamp) {
-                    return (CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted), false)
+                    return (CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted), false);
                 }
 
                 let current_len = leaf_page.len();
 
                 leaf_page.push_uncommitted(
                     RecordPoint::new(key, VersionInfo::new(stamp), payload),
-                    current_len);
+                    current_len,
+                );
 
                 leaf_page.commit_delta(0, 1);
 
                 (CRUDOperationResult::Updated(stamp.ts_start()), true)
-            }
-            else {
+            } else {
                 (CRUDOperationResult::Conflict, false)
-            },
+            }
+        }
         None => (CRUDOperationResult::ZeroAffected(KeyDoesNotExist), false),
     }
 }
@@ -223,8 +234,11 @@ pub(crate) fn delete_on_tree<
     worker_id: WorkerId,
     ts_start: Version,
     key: Key,
-) -> (CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>, bool) {
-    let leaf_guard = tree.traversal_write_olc(key);
+) -> (
+    CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>,
+    bool,
+) {
+    let leaf_guard = tree.traversal_write_olc_registered(key);
     let leaf_deref_mut = leaf_guard.deref_mut();
     let leaf_page = leaf_deref_mut.as_leaf_page();
 
@@ -233,25 +247,21 @@ pub(crate) fn delete_on_tree<
         .iter_mut()
         .rfind(|r| r.key == key && !r.version.insertion_stamp().is_invalid())
     {
-        Some(record) => if tree.is_visible_stamp(
-            worker_id,
-            ts_start,
-            record.version.insertion_stamp())
-        {
-            let stamp = TxStamp::new(worker_id, ts_start);
-            tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));
+        Some(record) => {
+            if tree.is_visible_stamp(worker_id, ts_start, record.version.insertion_stamp()) {
+                let stamp = TxStamp::new(worker_id, ts_start);
+                tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));
 
-            if record.version.delete(stamp) {
-                leaf_page.commit_delta(-1, 1);
-                (CRUDOperationResult::Deleted(stamp.ts_start()), true)
-            }
-            else {
-                (CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted), false)
+                if record.version.delete(stamp) {
+                    leaf_page.commit_delta(-1, 1);
+                    (CRUDOperationResult::Deleted(stamp.ts_start()), true)
+                } else {
+                    (CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted), false)
+                }
+            } else {
+                (CRUDOperationResult::Conflict, false)
             }
         }
-        else {
-            (CRUDOperationResult::Conflict, false)
-        },
         None => (CRUDOperationResult::ZeroAffected(KeyDoesNotExist), false),
     }
 }
@@ -269,7 +279,8 @@ pub(crate) fn point_on_tree<
     ts_start: Version,
     key: Key,
 ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
-    match tree.key_point_read_from_root(tree.retrieve_root_for(ts_start), key, worker_id, ts_start) {
+    match tree.key_point_read_from_root(tree.retrieve_root_for(ts_start), key, worker_id, ts_start)
+    {
         CRUDOperationResult::MatchedRecords(v) => CRUDOperationResult::MatchedRecords(v),
         other => panic!("mv_db::point_on_tree: expected MatchedRecords, got {other}"),
     }
@@ -307,6 +318,17 @@ pub(crate) fn range_min_on_tree<
     RangeQueryIter::new(tree, ts_start, range, false, worker_id).min_by_key()
 }
 
+struct TxTableState<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static,
+> {
+    table: TableId,
+    tree: Arc<MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>>,
+    read_root: Option<BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>>,
+}
+
 pub struct DbTransaction<
     'a,
     const FAN_OUT: usize,
@@ -318,12 +340,18 @@ pub struct DbTransaction<
     worker_id: WorkerId,
     ts_start: Version,
     committed: TransactionState,
-    /// `(table, key)` pairs this transaction has actually written (on a
+    /// `(table-cache slot, key)` pairs this transaction has actually written (on a
     /// successful `Inserted`/`Updated`/`Deleted` outcome only — never on
     /// `Conflict`/`ZeroAffected`, since nothing was written there to
     /// revert). Walked by `Drop` to abort every one of them if `commit()`
     /// was never called.
-    written: RefCell<Vec<(TableId, Key)>>,
+    written: SmallVec<[(usize, Key); 16]>,
+    /// Trees touched by this transaction and roots resolved for its immutable snapshot. Root
+    /// histories are append-only, so once `root_for(ts_start)` selects a
+    /// table root, newer publications cannot change that answer. Eight
+    /// inline entries cover the common multi-table OLTP transaction without
+    /// allocating; unusually wide transactions spill to the heap.
+    tables: SmallVec<[TxTableState<FAN_OUT, NUM_RECORDS, Key, Payload>; 8]>,
 }
 
 impl<
@@ -342,7 +370,14 @@ impl<
         let worker_id = db.worker_id();
         let ts_start = db.begin_snapshot();
 
-        Self { db, worker_id, ts_start, committed: TransactionState::InFlight, written: RefCell::new(Vec::new()) }
+        Self {
+            db,
+            worker_id,
+            ts_start,
+            committed: TransactionState::InFlight,
+            written: SmallVec::new(),
+            tables: SmallVec::new(),
+        }
     }
 
     #[inline(always)]
@@ -355,9 +390,47 @@ impl<
         self.worker_id
     }
 
-    fn tree(&self, table: TableId) -> Arc<MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>> {
-        self.db.table(table)
-            .unwrap_or_else(|| panic!("mv_db::DbTransaction: unknown TableId {table} (did you forget Database::create_table?)"))
+    fn table_slot(&mut self, table: TableId) -> usize {
+        if let Some(slot) = self.tables.iter().position(|state| state.table == table) {
+            return slot;
+        }
+
+        let tree = self.db.table(table)
+            .unwrap_or_else(|| panic!("mv_db::DbTransaction: unknown TableId {table} (did you forget Database::create_table?)"));
+        let slot = self.tables.len();
+        self.tables.push(TxTableState {
+            table,
+            tree,
+            read_root: None,
+        });
+        slot
+    }
+
+    #[inline]
+    fn read_tree_and_root(
+        &mut self,
+        table: TableId,
+    ) -> (
+        Arc<MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>>,
+        BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    ) {
+        let slot = self.table_slot(table);
+        if let Some(root) = &self.tables[slot].read_root {
+            return (self.tables[slot].tree.clone(), root.clone());
+        }
+
+        let tree = self.tables[slot].tree.clone();
+        let root = tree.retrieve_root_for(self.ts_start);
+        self.tables[slot].read_root = Some(root.clone());
+        (tree, root)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_read_root_count(&self) -> usize {
+        self.tables
+            .iter()
+            .filter(|state| state.read_root.is_some())
+            .count()
     }
 
     /// Point read against this transaction's fixed snapshot, on `table`.
@@ -366,14 +439,27 @@ impl<
     /// (rather than elided to `&self`) since the underlying tree is a
     /// function-local `Arc`, not a field borrowed for `'a` — see the module
     /// doc.
-    pub fn point(&self, table: TableId, key: Key) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        point_on_tree(&self.tree(table), self.worker_id, self.ts_start, key)
+    pub fn point(
+        &mut self,
+        table: TableId,
+        key: Key,
+    ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let (tree, root) = self.read_tree_and_root(table);
+        tree.key_point_read_from_root(root, key, self.worker_id, self.ts_start)
     }
 
     /// Range read against this transaction's fixed snapshot, on `table` —
     /// always eager, see the module doc for why.
-    pub fn range(&self, table: TableId, range: Interval<Key>) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        range_on_tree(&self.tree(table), self.worker_id, self.ts_start, range)
+    pub fn range(
+        &mut self,
+        table: TableId,
+        range: Interval<Key>,
+    ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let (tree, root) = self.read_tree_and_root(table);
+        CRUDOperationResult::MatchedRecords(
+            RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
+                .collect(),
+        )
     }
 
     /// Like `range`, but only ever finds the record with the smallest key
@@ -386,52 +472,59 @@ impl<
     /// produces does. Callers that only want the minimum (e.g.
     /// `mv_bench::tpcc_txn::deliver_one_district`'s "find the oldest queued
     /// new-order") no longer have to collect the entire range to get it.
-    pub fn range_min(&self, table: TableId, range: Interval<Key>) -> Option<RecordPointResult<Key, Payload>> {
-        range_min_on_tree(&self.tree(table), self.worker_id, self.ts_start, range)
+    pub fn range_min(
+        &mut self,
+        table: TableId,
+        range: Interval<Key>,
+    ) -> Option<RecordPointResult<Key, Payload>> {
+        let (tree, root) = self.read_tree_and_root(table);
+        RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
+            .min_by_key()
     }
 
     /// Fallible zero-copy range visitor against this transaction's fixed
     /// snapshot. An error stops the scan immediately.
     pub fn try_range_for_each<E>(
-        &self,
+        &mut self,
         table: TableId,
         range: Interval<Key>,
         visit: impl FnMut(Key, &Payload) -> Result<(), E>,
     ) -> Result<(), E> {
-        let tree = self.tree(table);
-        RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id)
+        let (tree, root) = self.read_tree_and_root(table);
+        RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
             .try_for_each_ref(visit)
     }
 
     /// Infallible zero-copy range visitor.
     pub fn range_for_each(
-        &self,
+        &mut self,
         table: TableId,
         range: Interval<Key>,
         visit: impl FnMut(Key, &Payload),
     ) {
-        let tree = self.tree(table);
-        RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id)
+        let (tree, root) = self.read_tree_and_root(table);
+        RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
             .for_each_ref(visit)
     }
 
     /// Zero-copy left fold over a range.
     pub fn range_fold<Acc>(
-        &self,
+        &mut self,
         table: TableId,
         range: Interval<Key>,
         initial: Acc,
         fold: impl FnMut(Acc, Key, &Payload) -> Acc,
     ) -> Acc {
-        let tree = self.tree(table);
-        RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id)
+        let (tree, root) = self.read_tree_and_root(table);
+        RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
             .fold_ref(initial, fold)
     }
 
     /// Counts visible range records without constructing result objects.
-    pub fn range_count(&self, table: TableId, range: Interval<Key>) -> usize {
-        let tree = self.tree(table);
-        RangeQueryIter::new(&tree, self.ts_start, range, false, self.worker_id).count_ref()
+    pub fn range_count(&mut self, table: TableId, range: Interval<Key>) -> usize {
+        let (tree, root) = self.read_tree_and_root(table);
+        RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
+            .count_ref()
     }
 
     // /// First-writer-wins check, on `table`: the physically newest version at
@@ -453,29 +546,46 @@ impl<
     //         .unwrap_or(true)
     // }
 
-    pub fn insert(&self, table: TableId, key: Key, payload: Payload) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let tree = self.tree(table);
+    pub fn insert(
+        &mut self,
+        table: TableId,
+        key: Key,
+        payload: Payload,
+    ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let slot = self.table_slot(table);
+        let tree = self.tables[slot].tree.clone();
         let (result, track) = insert_on_tree(&tree, self.worker_id, self.ts_start, key, payload);
         if track {
-            self.written.borrow_mut().push((table, key));
+            self.written.push((slot, key));
         }
         result
     }
 
-    pub fn update(&self, table: TableId, key: Key, payload: Payload) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let tree = self.tree(table);
+    pub fn update(
+        &mut self,
+        table: TableId,
+        key: Key,
+        payload: Payload,
+    ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let slot = self.table_slot(table);
+        let tree = self.tables[slot].tree.clone();
         let (result, track) = update_on_tree(&tree, self.worker_id, self.ts_start, key, payload);
         if track {
-            self.written.borrow_mut().push((table, key));
+            self.written.push((slot, key));
         }
         result
     }
 
-    pub fn delete(&self, table: TableId, key: Key) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let tree = self.tree(table);
+    pub fn delete(
+        &mut self,
+        table: TableId,
+        key: Key,
+    ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let slot = self.table_slot(table);
+        let tree = self.tables[slot].tree.clone();
         let (result, track) = delete_on_tree(&tree, self.worker_id, self.ts_start, key);
         if track {
-            self.written.borrow_mut().push((table, key));
+            self.written.push((slot, key));
         }
         result
     }
@@ -501,22 +611,21 @@ impl<
         if let TransactionState::InFlight = self.committed {
             self.committed = TransactionState::Committed;
 
-            if self.written.borrow().is_empty() {
+            if self.written.is_empty() {
                 self.db.end_snapshot(self.ts_start);
                 return None;
             }
 
-            let ts_commit = self.db.ctx.commit_tx( self.worker_id);
+            let ts_commit = self.db.ctx.commit_tx(self.worker_id);
 
-            if let Some( & (table, _)) = self.written.borrow().first() {
-            let stamp = TxStamp::new( self.worker_id, self.ts_start);
-            self.tree(table).wal_log_commit(stamp, ts_commit);
+            if let Some(&(slot, _)) = self.written.first() {
+                let stamp = TxStamp::new(self.worker_id, self.ts_start);
+                self.tables[slot].tree.wal_log_commit(stamp, ts_commit);
             }
 
             self.db.end_snapshot(self.ts_start);
             Some(ts_commit)
-        }
-        else {
+        } else {
             None
         }
     }
@@ -546,14 +655,20 @@ impl<
             // makes the entry visible to anyone else again — the same
             // ordering a plain undo-log/rollback would use.
             let stamp = TxStamp::new(self.worker_id, self.ts_start);
-            for &(table, key) in self.written.borrow().iter().rev() {
-                self.tree(table).abort_write(key, stamp);
+            let mut end = self.written.len();
+            while end != 0 {
+                let (slot, key) = self.written[end - 1];
+                let mut start = end - 1;
+                while start != 0 && self.written[start - 1] == (slot, key) {
+                    start -= 1;
+                }
+                self.tables[slot].tree.abort_writes(key, stamp, end - start);
+                end = start;
             }
 
             self.db.end_snapshot(self.ts_start);
             true
-        }
-        else {
+        } else {
             false
         }
     }
@@ -581,8 +696,15 @@ impl<
             // why forward order can expose a partially-unwound transaction
             // to a concurrent one mid-abort.
             let stamp = TxStamp::new(self.worker_id, self.ts_start);
-            for &(table, key) in self.written.borrow().iter().rev() {
-                self.tree(table).abort_write(key, stamp);
+            let mut end = self.written.len();
+            while end != 0 {
+                let (slot, key) = self.written[end - 1];
+                let mut start = end - 1;
+                while start != 0 && self.written[start - 1] == (slot, key) {
+                    start -= 1;
+                }
+                self.tables[slot].tree.abort_writes(key, stamp, end - start);
+                end = start;
             }
             self.db.end_snapshot(self.ts_start);
         }
@@ -603,15 +725,21 @@ impl<
     /// no-op) — for callers who don't need an explicit multi-op
     /// transaction. Mirrors how `MVBTSt::dispatch_crud`'s single-op
     /// auto-commit path is itself just a trivial one-operation transaction.
-    pub fn dispatch_crud(&self, table: TableId, op: CRUDOperation<Key, Payload>) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let tx = DbTransaction::begin(self);
+    pub fn dispatch_crud(
+        &self,
+        table: TableId,
+        op: CRUDOperation<Key, Payload>,
+    ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let mut tx = DbTransaction::begin(self);
 
         let result = match op {
             CRUDOperation::Insert(key, payload) => tx.insert(table, key, payload),
             CRUDOperation::Update(key, payload) => tx.update(table, key, payload),
             CRUDOperation::Delete(key) => tx.delete(table, key),
             CRUDOperation::Point(key, _) | CRUDOperation::PointSi(key) => tx.point(table, key),
-            CRUDOperation::Range(range, _) | CRUDOperation::RangeSi(range) => tx.range(table, range),
+            CRUDOperation::Range(range, _) | CRUDOperation::RangeSi(range) => {
+                tx.range(table, range)
+            }
             other => panic!("mv_db::Database::dispatch_crud: unsupported op {other}"),
         };
 

@@ -1,20 +1,18 @@
-use std::fmt::Display;
-use std::hash::Hash;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::Relaxed;
-use triomphe::Arc;
-use crate::mv_gc::block_tracer::{DeadPageValue, BlockTrace};
+use crate::mv_gc::block_tracer::{BlockTrace, DeadPageValue};
 use crate::mv_page_model::BlockRef;
 use crate::mv_page_model::time_matcher::TimeMatcher;
 use crate::mv_record_model::tx_stamp::WorkerId;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::tx_context::TxContext;
+use parking_lot::Mutex;
+use std::fmt::Display;
+use std::hash::Hash;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
+use triomphe::Arc;
 
-pub type TrackerHandle<
-    const P_F: usize,
-    const P_N: usize,
-    Key,
-    Payload> = Arc<TrackerHandleSt<P_F, P_N, Key, Payload>>;
+pub type TrackerHandle<const P_F: usize, const P_N: usize, Key, Payload> =
+    Arc<TrackerHandleSt<P_F, P_N, Key, Payload>>;
 
 /// Always present on every tree, one per `BlockAllocManager` — page/block
 /// reclaim (`dead_blocks`/`register_died_page*`/`free_block`), gated by its
@@ -34,9 +32,12 @@ pub struct TrackerHandleSt<
     const P_F: usize,
     const P_N: usize,
     Key: Copy + Default + Hash + Ord + Display + 'static,
-    Payload: Clone + Default + 'static>
-{
+    Payload: Clone + Default + 'static,
+> {
     dead_blocks: BlockTrace<P_F, P_N, Key, Payload>,
+    /// Pages already proven reclaimable, filled in batches so the expensive
+    /// all-worker liveness scan is amortized across several allocations.
+    reusable: Vec<Mutex<Vec<BlockRef<P_F, P_N, Key, Payload>>>>,
     /// Explicit opt-in for block reclaim (`MVBTSt::enable_gc`/`disable_gc`).
     /// `false` by default: a fresh tree never reuses blocks until this is
     /// turned on, matching the pre-existing behavior from when the whole
@@ -44,14 +45,19 @@ pub struct TrackerHandleSt<
     block_reclaim_enabled: AtomicBool,
 }
 
-impl<const P_F: usize,
+impl<
+    const P_F: usize,
     const P_N: usize,
     Key: Copy + Default + Hash + Ord + Display,
-    Payload: Clone + Default> TrackerHandleSt<P_F, P_N, Key, Payload>
+    Payload: Clone + Default,
+> TrackerHandleSt<P_F, P_N, Key, Payload>
 {
     pub fn new() -> Self {
         Self {
             dead_blocks: BlockTrace::new(),
+            reusable: (0..num_cpus::get().max(1))
+                .map(|_| Mutex::new(Vec::new()))
+                .collect(),
             block_reclaim_enabled: AtomicBool::new(false),
         }
     }
@@ -74,20 +80,31 @@ impl<const P_F: usize,
     /// behind `block_reclaim_enabled` as before — otherwise it would just
     /// grow forever recording pages nothing will ever come collect.
     #[inline]
-    pub fn register_died_page(&self, worker_id: WorkerId, page_version: Version, page: DeadPageValue<P_F, P_N, Key, Payload>) {
+    pub fn register_died_page(
+        &self,
+        worker_id: WorkerId,
+        page_version: Version,
+        page: DeadPageValue<P_F, P_N, Key, Payload>,
+    ) {
         page.mark_retired();
 
         if self.block_reclaim_enabled.load(Relaxed) {
-            self.dead_blocks.register_died_page(worker_id, page_version, page)
+            self.dead_blocks
+                .register_died_page(worker_id, page_version, page)
         }
     }
 
     #[inline]
-    pub fn register_died_page_col(&self, worker_id: WorkerId, dead_pages: [(Version, BlockRef<P_F, P_N, Key, Payload>); 2]) {
+    pub fn register_died_page_col(
+        &self,
+        worker_id: WorkerId,
+        dead_pages: [(Version, BlockRef<P_F, P_N, Key, Payload>); 2],
+    ) {
         dead_pages.iter().for_each(|(_, page)| page.mark_retired());
 
         if self.block_reclaim_enabled.load(Relaxed) {
-            self.dead_blocks.register_died_page_col(worker_id, dead_pages)
+            self.dead_blocks
+                .register_died_page_col(worker_id, dead_pages)
         }
     }
 
@@ -105,6 +122,12 @@ impl<const P_F: usize,
             return None;
         }
 
+        let worker_id = ctx.worker_id();
+        let cache_index = worker_id as usize % self.reusable.len();
+        if let Some(page) = self.reusable[cache_index].lock().pop() {
+            return Some(page);
+        }
+
         // `live_min_snapshot` already folds in any worker mid-registration
         // (drawn a ts_start, not yet recorded in `live_tx` — might need
         // exactly the block we're about to hand out) alongside fully-active
@@ -112,11 +135,21 @@ impl<const P_F: usize,
         // "wait until nothing anywhere is mid-registration" check needed.
         let live_min_snapshot = ctx.live_min_snapshot();
 
-        // Prefer this worker's own dead pages before stealing another
-        // worker's — see `BlockTrace::try_reclaim`'s doc.
-        self.dead_blocks.try_reclaim(ctx.worker_id(), |(dead_v, _)| match live_min_snapshot {
+        const RECLAIM_BATCH: usize = 16;
+        let mut reclaimed =
+            self.dead_blocks
+                .reclaim_batch(
+                    worker_id,
+                    RECLAIM_BATCH,
+                    |(dead_v, _)| match live_min_snapshot {
             None => true,
             Some(live_min_snapshot) => dead_v.lt_self_any(live_min_snapshot),
-        })
+                    },
+                );
+        let result = reclaimed.pop();
+        if !reclaimed.is_empty() {
+            self.reusable[cache_index].lock().extend(reclaimed);
+        }
+        result
     }
 }

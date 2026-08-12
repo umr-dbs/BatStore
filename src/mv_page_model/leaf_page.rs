@@ -1,4 +1,7 @@
-use crate::mv_page_model::node::{Active, Dead, PageLenField, PageLenPrimitive, active_len, dead_len, from_active_dead, from_len, from_len_sum};
+use crate::mv_page_model::node::{
+    Active, Dead, PageLenField, PageLenPrimitive, active_len, dead_len, from_active_dead, from_len,
+    from_len_sum,
+};
 use crate::mv_record_model::record_point::RecordPoint;
 use crate::mv_record_model::tx_stamp::TxStamp;
 use crate::mv_record_model::version_info::VersionInfo;
@@ -6,72 +9,66 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr;
-use std::sync::atomic::{Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 pub struct LeafPage<
     const NUM_RECORDS: usize,
     Key: Hash + Ord + Copy + Default,
-    Payload: Clone + Default
+    Payload: Clone + Default,
 > {
     pub(crate) len: PageLenField,
     pub(crate) record_data: [MaybeUninit<RecordPoint<Key, Payload>>; NUM_RECORDS],
     _marker: PhantomData<[RecordPoint<Key, Payload>]>,
 }
 
-impl<const NUM_RECORDS: usize,
-    Key: Hash + Ord + Copy + Default,
-    Payload: Clone + Default
-> Clone for LeafPage<NUM_RECORDS, Key, Payload> {
+impl<const NUM_RECORDS: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Clone
+    for LeafPage<NUM_RECORDS, Key, Payload>
+{
     fn clone(&self) -> Self {
         Self::from(self)
     }
 }
 
-impl<const NUM_RECORDS: usize,
-    Key: Hash + Ord + Copy + Default,
-    Payload: Clone + Default
-> Default for LeafPage<NUM_RECORDS, Key, Payload> {
+impl<const NUM_RECORDS: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Default
+    for LeafPage<NUM_RECORDS, Key, Payload>
+{
     fn default() -> Self {
         LeafPage::new()
     }
 }
 
-impl<const NUM_RECORDS: usize,
-    Key: Hash + Ord + Copy + Default,
-    Payload: Clone + Default
-> Drop for LeafPage<NUM_RECORDS, Key, Payload> {
+impl<const NUM_RECORDS: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Drop
+    for LeafPage<NUM_RECORDS, Key, Payload>
+{
     fn drop(&mut self) {
         self.as_records_mut().iter_mut().for_each(|record| unsafe {
-            (record as *mut RecordPoint<Key, Payload>)
-                .drop_in_place()
+            (record as *mut RecordPoint<Key, Payload>).drop_in_place()
         })
     }
 }
 
-impl<const NUM_RECORDS: usize,
-    Key: Hash + Ord + Copy + Default,
-    Payload: Clone + Default
-> LeafPage<NUM_RECORDS, Key, Payload> {
+impl<const NUM_RECORDS: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
+    LeafPage<NUM_RECORDS, Key, Payload>
+{
     #[inline]
     pub(crate) fn from(leaf_page: &Self) -> Self {
-        let mut new_page
-            = Self::new();
+        let mut new_page = Self::new();
 
         unsafe {
             leaf_page
                 .as_records()
                 .iter()
                 .enumerate()
-                .for_each(|(index, record)| new_page
+                .for_each(|(index, record)| {
+                    new_page
                     .record_data
                     .as_mut_ptr()
                     .add(index)
                     .write(MaybeUninit::new((*record).clone()))
-                );
+                });
         }
 
-        let (active, dead)
-            = leaf_page.active_dead_count();
+        let (active, dead) = leaf_page.active_dead_count();
 
         new_page.len.store(from_active_dead(active, dead), Release);
 
@@ -95,26 +92,33 @@ impl<const NUM_RECORDS: usize,
         unsafe {
             std::slice::from_raw_parts(
                 self.record_data.as_ptr() as *const RecordPoint<Key, Payload>,
-                self.len())
+                self.len(),
+            )
         }
     }
 
     #[inline(always)]
     pub fn as_records_mut(&mut self) -> &mut [RecordPoint<Key, Payload>] {
         unsafe {
-            std::slice::from_raw_parts_mut(
-                self.record_data.as_mut_ptr() as *mut _,
-                self.len())
+            std::slice::from_raw_parts_mut(self.record_data.as_mut_ptr() as *mut _, self.len())
         }
     }
 
     #[inline(always)]
     pub fn as_records_uncommitted_mut(&mut self) -> &mut [RecordPoint<Key, Payload>] {
         unsafe {
-            std::slice::from_raw_parts_mut(
-                self.record_data.as_mut_ptr() as *mut _,
-                self.len() + 1)
+            std::slice::from_raw_parts_mut(self.record_data.as_mut_ptr() as *mut _, self.len() + 1)
         }
+        }
+
+    /// Position of the physically newest version for `key`. Callers that
+    /// need to ignore aborted versions can request that in the same reverse
+    /// pass, avoiding a second search for update eligibility/mutation.
+    #[inline(always)]
+    pub(crate) fn latest_position(&self, key: Key, skip_invalid: bool) -> Option<usize> {
+        self.as_records().iter().rposition(|record| {
+            record.key() == key && (!skip_invalid || !record.version.insertion_stamp().is_invalid())
+        })
     }
 
     #[inline(always)]
@@ -148,11 +152,14 @@ impl<const NUM_RECORDS: usize,
 
     #[inline(always)]
     pub fn active_dead_invalid(&self) -> (PageLenPrimitive, Active, Dead) {
-        self.as_records().iter().fold((0,0,0),
-        |(active, dead, invalid), record| {
+        self.as_records()
+            .iter()
+            .fold((0, 0, 0), |(active, dead, invalid), record| {
             if !record.version.is_deleted() && !record.version.insertion_stamp().is_invalid() {
                 (active + 1, dead, invalid)
-            } else if record.version.is_deleted() && !record.version.insertion_stamp().is_invalid() {
+                } else if record.version.is_deleted()
+                    && !record.version.insertion_stamp().is_invalid()
+                {
                 (active, dead + 1, invalid)
             } else {
                 (active, dead, invalid + 1)
@@ -170,7 +177,10 @@ impl<const NUM_RECORDS: usize,
         // landing in whatever's next in `OptCell`'s own layout
         // (`cell_version`, immediately after this whole block — see
         // `RETIRED_FLAG_VERSION`'s doc) instead of failing loudly here.
-        assert!(index < NUM_RECORDS, "LeafPage::push_uncommitted: index {index} out of bounds for NUM_RECORDS={NUM_RECORDS}");
+        assert!(
+            index < NUM_RECORDS,
+            "LeafPage::push_uncommitted: index {index} out of bounds for NUM_RECORDS={NUM_RECORDS}"
+        );
         unsafe {
             self.record_data
                 .as_mut_ptr()
@@ -185,22 +195,27 @@ impl<const NUM_RECORDS: usize,
         let active = active_len(len) as i32 + active_delta;
         let dead = dead_len(len) as i32 + dead_delta;
 
-        debug_assert!(active >= 0,
-                      "LeafPage active count went negative: len={len}, active_delta={active_delta}");
-        debug_assert!(dead >= 0,
-                      "LeafPage dead count went negative: len={len}, dead_delta={dead_delta}");
+        debug_assert!(
+            active >= 0,
+            "LeafPage active count went negative: len={len}, active_delta={active_delta}"
+        );
+        debug_assert!(
+            dead >= 0,
+            "LeafPage dead count went negative: len={len}, dead_delta={dead_delta}"
+        );
         // let active = active.max(0);
         // let dead = dead.max(0) as u32;
 
-        self.len.store(from_active_dead(active as Active, dead as Dead), Release)
+        self.len
+            .store(from_active_dead(active as Active, dead as Dead), Release)
     }
 
     #[inline]
     pub fn undo_uncommitted(&mut self, index: usize) {
         unsafe {
-            ptr::drop_in_place(self.record_data
-                .as_mut_ptr()
-                .add(index) as *mut RecordPoint<Key, Payload>);
+            ptr::drop_in_place(
+                self.record_data.as_mut_ptr().add(index) as *mut RecordPoint<Key, Payload>
+            );
         }
     }
 
@@ -211,21 +226,19 @@ impl<const NUM_RECORDS: usize,
 
         unsafe {
             (0..len).for_each(|index| {
-                ptr::drop_in_place(self.record_data
-                    .as_mut_ptr()
-                    .add(index) as *mut RecordPoint<Key, Payload>);
+                ptr::drop_in_place(
+                    self.record_data.as_mut_ptr().add(index) as *mut RecordPoint<Key, Payload>
+                );
             });
         }
     }
 
     #[inline(always)]
     pub(crate) fn bulk_push(&mut self, records: Vec<&RecordPoint<Key, Payload>>) {
-        let len
-            = self.len();
+        let len = self.len();
 
         debug_assert_eq!(len, 0);
-        let n_records_len
-            = records.len();
+        let n_records_len = records.len();
 
         // A real `assert!`, not `debug_assert!` — see `push_uncommitted`'s
         // matching one. A split/merge whose "one side" ends up with more
@@ -234,8 +247,10 @@ impl<const NUM_RECORDS: usize,
         // otherwise write past `record_data` here via a raw, unchecked
         // pointer store, landing in `OptCell`'s own `cell_version` field
         // right after this whole block instead of failing loudly here.
-        assert!(len + n_records_len <= NUM_RECORDS,
-                "LeafPage::bulk_push: {n_records_len} records pushed at len={len} overflow NUM_RECORDS={NUM_RECORDS}");
+        assert!(
+            len + n_records_len <= NUM_RECORDS,
+            "LeafPage::bulk_push: {n_records_len} records pushed at len={len} overflow NUM_RECORDS={NUM_RECORDS}"
+        );
 
         // Callers filter by `record_survives_gc` before building `records`
         // (`MVBTSt::split`'s version-split, `MVBTSt::merge`'s single-leaf
@@ -264,20 +279,23 @@ impl<const NUM_RECORDS: usize,
         self.len.store(
             from_active_dead(
                 len as PageLenPrimitive + active_pushed as PageLenPrimitive,
-                dead_pushed as PageLenPrimitive),
-            Release)
+                dead_pushed as PageLenPrimitive,
+            ),
+            Release,
+        )
     }
 
     #[inline(always)]
     pub(crate) fn bulk_push_from_slice_ref(&mut self, records: &[&RecordPoint<Key, Payload>]) {
-        let len
-            = self.len();
+        let len = self.len();
 
         debug_assert_eq!(len, 0);
         // See `bulk_push`'s matching assert.
-        assert!(len + records.len() <= NUM_RECORDS,
+        assert!(
+            len + records.len() <= NUM_RECORDS,
                 "LeafPage::bulk_push_from_slice_ref: {} records pushed at len={len} overflow NUM_RECORDS={NUM_RECORDS}",
-                records.len());
+            records.len()
+        );
 
         // See `bulk_push`'s identical fix's doc: callers here also push
         // `record_survives_gc` survivors (`MVBTSt::merge`'s/`split`'s
@@ -300,8 +318,10 @@ impl<const NUM_RECORDS: usize,
         self.len.store(
             from_active_dead(
                 len as PageLenPrimitive + active_pushed as PageLenPrimitive,
-                dead_pushed as PageLenPrimitive),
-            Release)
+                dead_pushed as PageLenPrimitive,
+            ),
+            Release,
+        )
     }
 
     // #[inline(always)]
@@ -338,13 +358,13 @@ impl<const NUM_RECORDS: usize,
 
     #[inline]
     pub(crate) fn delete(&mut self, key: Key, del: TxStamp) -> Result<Option<VersionInfo>, ()>  {
-        match self.as_records_mut()
+        match self
+            .as_records_mut()
             .iter_mut()
             .rfind(|record| Self::is_live_lineage(record, key))
         {
             Some(record) => {
-                let ver_info = record
-                    .version_mut();
+                let ver_info = record.version_mut();
 
                 if ver_info.delete(del) {
                     Ok(Some(ver_info.clone()))
@@ -352,7 +372,7 @@ impl<const NUM_RECORDS: usize,
                     Err(())
                 }
             }
-            _ => Ok(None)
+            _ => Ok(None),
         }
     }
 
@@ -361,16 +381,20 @@ impl<const NUM_RECORDS: usize,
     /// any invalid entries beyond it — see `is_live_lineage`) to reach the
     /// true previous live/deleted entry to mark deleted.
     #[inline]
-    pub(crate) fn delete_after_update(&mut self, key: Key, del: TxStamp) -> Result<Option<VersionInfo>, ()>  {
-        match self.as_records_mut()
+    pub(crate) fn delete_after_update(
+        &mut self,
+        key: Key,
+        del: TxStamp,
+    ) -> Result<Option<VersionInfo>, ()> {
+        match self
+            .as_records_mut()
             .iter_mut()
             .rev()
             .skip(1)
             .find(|record| Self::is_live_lineage(record, key))
         {
             Some(record) => {
-                let ver_info = record
-                    .version_mut();
+                let ver_info = record.version_mut();
 
                 if ver_info.delete(del) {
                     Ok(Some(ver_info.clone()))
@@ -378,7 +402,7 @@ impl<const NUM_RECORDS: usize,
                     Err(())
                 }
             }
-            _ => Ok(None)
+            _ => Ok(None),
         }
     }
 
@@ -414,7 +438,8 @@ impl<const NUM_RECORDS: usize,
     /// same as a real undo log would.
     #[inline]
     pub(crate) fn abort_write(&mut self, key: Key, my_stamp: TxStamp) -> AbortOutcome {
-        let newest_is_mine = self.as_records()
+        let newest_is_mine = self
+            .as_records()
             .iter()
             .rfind(|r| r.key == key && !r.version().insertion_stamp().is_invalid())
             .map(|r| r.version().insertion_stamp() == my_stamp);
@@ -432,15 +457,32 @@ impl<const NUM_RECORDS: usize,
             // has a newest entry that's now invalid (so no longer "mine"
             // by raw-stamp equality) but isn't deleted, and reporting that
             // as `Undeleted` would make the caller WAL-log a spurious op.
-            Some(false) => if self.apply_undelete(key) {
+            Some(false) => {
+                if self.apply_undelete(key) {
                 AbortOutcome::Undeleted
             } else {
                 AbortOutcome::NotFound
             }
-            _ => {
-                AbortOutcome::NotFound
             }
+            _ => AbortOutcome::NotFound,
         }
+    }
+
+    /// Unwinds up to `limit` adjacent undo-log occurrences for the same key
+    /// while the caller holds this leaf's write latch. Returns the number of
+    /// physical writes actually reverted. This is exactly repeated
+    /// `abort_write` semantics, but avoids relatching and retraversing the
+    /// tree between versions resident in the same leaf.
+    #[inline]
+    pub(crate) fn abort_writes(&mut self, key: Key, my_stamp: TxStamp, limit: usize) -> usize {
+        let mut reverted = 0;
+        while reverted < limit {
+            if matches!(self.abort_write(key, my_stamp), AbortOutcome::NotFound) {
+                break;
+            }
+            reverted += 1;
+        }
+        reverted
     }
 
     /// Marks the newest entry for `key` invalid (see `TxStamp::is_invalid`'s
@@ -553,4 +595,3 @@ pub(crate) enum AbortOutcome {
     // /// deleted it (a plain `Delete`) — it has been undeleted.
     Undeleted,
 }
-

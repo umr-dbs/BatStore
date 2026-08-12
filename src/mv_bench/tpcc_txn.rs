@@ -11,7 +11,7 @@
 //! distributions (% remote, % rollback, % by-name), and atomicity are
 //! faithful to the spec.
 
-use std::cell::RefCell;
+use smallvec::SmallVec;
 use std::fmt::Display;
 
 use crate::mv_bench::tpcc_random::*;
@@ -63,7 +63,7 @@ pub struct TpccTxn<'a> {
     worker_id: WorkerId,
     ts_start: Version,
     committed: TransactionState,
-    written: RefCell<Vec<(Table, TpccKey)>>,
+    written: SmallVec<[(Table, TpccKey); 24]>,
 }
 
 /// `BigTreeOp` implementors for each `TpccTxn` operation — see
@@ -74,26 +74,52 @@ pub struct TpccTxn<'a> {
 /// `TreeClass::Standard` arm already calls, so `Big`-class tables get
 /// identical semantics, normalized back to `Res`/`Option<RecordPointResult>`
 /// (see `normalize`'s doc).
-struct PointOp { worker_id: WorkerId, ts_start: Version, key: TpccKey }
+struct PointOp {
+    worker_id: WorkerId,
+    ts_start: Version,
+    key: TpccKey,
+}
 impl BigTreeOp for PointOp {
     type Output = Res<'static>;
-    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Res<'static> {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) -> Res<'static> {
         normalize(point_on_tree(tree, self.worker_id, self.ts_start, self.key))
     }
 }
 
-struct RangeOp { worker_id: WorkerId, ts_start: Version, range: Interval<TpccKey> }
+struct RangeOp {
+    worker_id: WorkerId,
+    ts_start: Version,
+    range: Interval<TpccKey>,
+}
 impl BigTreeOp for RangeOp {
     type Output = Res<'static>;
-    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Res<'static> {
-        normalize(range_on_tree(tree, self.worker_id, self.ts_start, self.range))
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) -> Res<'static> {
+        normalize(range_on_tree(
+            tree,
+            self.worker_id,
+            self.ts_start,
+            self.range,
+        ))
     }
 }
 
-struct RangeMinOp { worker_id: WorkerId, ts_start: Version, range: Interval<TpccKey> }
+struct RangeMinOp {
+    worker_id: WorkerId,
+    ts_start: Version,
+    range: Interval<TpccKey>,
+}
 impl BigTreeOp for RangeMinOp {
     type Output = Option<RecordPointResult<TpccKey, TpccRow>>;
-    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) -> Self::Output {
         range_min_on_tree(tree, self.worker_id, self.ts_start, self.range)
     }
 }
@@ -115,46 +141,84 @@ impl BigTreeOp for RangeVisitOp<'_> {
     }
 }
 
-struct InsertOp { worker_id: WorkerId, ts_start: Version, key: TpccKey, payload: TpccRow }
+struct InsertOp {
+    worker_id: WorkerId,
+    ts_start: Version,
+    key: TpccKey,
+    payload: TpccRow,
+}
 impl BigTreeOp for InsertOp {
     type Output = (Res<'static>, bool);
-    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
-        let (r, track) = insert_on_tree(tree, self.worker_id, self.ts_start, self.key, self.payload);
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) -> Self::Output {
+        let (r, track) =
+            insert_on_tree(tree, self.worker_id, self.ts_start, self.key, self.payload);
         (normalize(r), track)
     }
 }
 
-struct UpdateOp { worker_id: WorkerId, ts_start: Version, key: TpccKey, payload: TpccRow }
+struct UpdateOp {
+    worker_id: WorkerId,
+    ts_start: Version,
+    key: TpccKey,
+    payload: TpccRow,
+}
 impl BigTreeOp for UpdateOp {
     type Output = (Res<'static>, bool);
-    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
-        let (r, track) = update_on_tree(tree, self.worker_id, self.ts_start, self.key, self.payload);
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) -> Self::Output {
+        let (r, track) =
+            update_on_tree(tree, self.worker_id, self.ts_start, self.key, self.payload);
         (normalize(r), track)
     }
 }
 
-struct DeleteOp { worker_id: WorkerId, ts_start: Version, key: TpccKey }
+struct DeleteOp {
+    worker_id: WorkerId,
+    ts_start: Version,
+    key: TpccKey,
+}
 impl BigTreeOp for DeleteOp {
     type Output = (Res<'static>, bool);
-    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) -> Self::Output {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) -> Self::Output {
         let (r, track) = delete_on_tree(tree, self.worker_id, self.ts_start, self.key);
         (normalize(r), track)
     }
 }
 
-struct WalCommitOp { stamp: TxStamp, ts_commit: Version }
+struct WalCommitOp {
+    stamp: TxStamp,
+    ts_commit: Version,
+}
 impl BigTreeOp for WalCommitOp {
     type Output = ();
-    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) {
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) {
         tree.wal_log_commit(self.stamp, self.ts_commit)
     }
 }
 
-struct AbortWriteOp { key: TpccKey, stamp: TxStamp }
+struct AbortWriteOp {
+    key: TpccKey,
+    stamp: TxStamp,
+    count: usize,
+}
 impl BigTreeOp for AbortWriteOp {
     type Output = ();
-    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(self, tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>) {
-        tree.abort_write(self.key, self.stamp)
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::mv_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) {
+        tree.abort_writes(self.key, self.stamp, self.count)
     }
 }
 
@@ -166,7 +230,13 @@ impl<'a> TpccTxn<'a> {
     pub fn begin(db: &'a TpccDatabase) -> Self {
         let worker_id = db.db.worker_id();
         let ts_start = db.db.begin_snapshot();
-        Self { db, worker_id, ts_start, committed: TransactionState::InFlight, written: RefCell::new(Vec::new()) }
+        Self {
+            db,
+            worker_id,
+            ts_start,
+            committed: TransactionState::InFlight,
+            written: SmallVec::new(),
+        }
     }
 
     #[inline(always)]
@@ -180,10 +250,19 @@ impl<'a> TpccTxn<'a> {
     }
 
     /// Point read against this transaction's fixed snapshot, on `table`.
-    pub fn point(&self, table: Table, key: TpccKey) -> Res<'_> {
+    pub fn point(&mut self, table: Table, key: TpccKey) -> Res<'static> {
         match table.class() {
-            TreeClass::Standard => point_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key),
-            TreeClass::Big => self.db.dispatch_big(table, PointOp { worker_id: self.worker_id, ts_start: self.ts_start, key }),
+            TreeClass::Standard => {
+                point_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key)
+            }
+            TreeClass::Big => self.db.dispatch_big(
+                table,
+                PointOp {
+                    worker_id: self.worker_id,
+                    ts_start: self.ts_start,
+                    key,
+                },
+            ),
         }
     }
 
@@ -191,10 +270,27 @@ impl<'a> TpccTxn<'a> {
     /// `force_read_all` is kept only for call-site compatibility — the
     /// underlying `range_on_tree` is always eager; every real call site in
     /// this crate already passes `true`.
-    pub fn range(&self, table: Table, range: Interval<TpccKey>, _force_read_all: bool) -> Res<'_> {
+    pub fn range(
+        &mut self,
+        table: Table,
+        range: Interval<TpccKey>,
+        _force_read_all: bool,
+    ) -> Res<'static> {
         match table.class() {
-            TreeClass::Standard => range_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, range),
-            TreeClass::Big => self.db.dispatch_big(table, RangeOp { worker_id: self.worker_id, ts_start: self.ts_start, range }),
+            TreeClass::Standard => range_on_tree(
+                &self.db.tree_for(table),
+                self.worker_id,
+                self.ts_start,
+                range,
+            ),
+            TreeClass::Big => self.db.dispatch_big(
+                table,
+                RangeOp {
+                    worker_id: self.worker_id,
+                    ts_start: self.ts_start,
+                    range,
+                },
+            ),
         }
     }
 
@@ -202,37 +298,61 @@ impl<'a> TpccTxn<'a> {
     /// `mv_db::transaction::range_min_on_tree`'s doc. No normalization
     /// needed: unlike `Res`, `Option<RecordPointResult<..>>` carries no
     /// `NUM_RECORDS`/`FAN_OUT` at all.
-    pub fn range_min(&self, table: Table, range: Interval<TpccKey>) -> Option<RecordPointResult<TpccKey, TpccRow>> {
+    pub fn range_min(
+        &mut self,
+        table: Table,
+        range: Interval<TpccKey>,
+    ) -> Option<RecordPointResult<TpccKey, TpccRow>> {
         match table.class() {
-            TreeClass::Standard => range_min_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, range),
-            TreeClass::Big => self.db.dispatch_big(table, RangeMinOp { worker_id: self.worker_id, ts_start: self.ts_start, range }),
+            TreeClass::Standard => range_min_on_tree(
+                &self.db.tree_for(table),
+                self.worker_id,
+                self.ts_start,
+                range,
+            ),
+            TreeClass::Big => self.db.dispatch_big(
+                table,
+                RangeMinOp {
+                    worker_id: self.worker_id,
+                    ts_start: self.ts_start,
+                    range,
+                },
+            ),
         }
     }
 
     /// Streams a snapshot-consistent range directly into `visit`, avoiding
     /// one `RecordPointResult` and one retained payload handle per row.
     pub fn range_for_each(
-        &self,
+        &mut self,
         table: Table,
         range: Interval<TpccKey>,
         mut visit: impl FnMut(TpccKey, &TpccRow),
     ) {
         match table.class() {
             TreeClass::Standard => RangeQueryIter::new(
-                &self.db.tree_for(table), self.ts_start, range, false, self.worker_id)
+                &self.db.tree_for(table),
+                self.ts_start,
+                range,
+                false,
+                self.worker_id,
+            )
                 .for_each_ref(&mut visit),
-            TreeClass::Big => self.db.dispatch_big(table, RangeVisitOp {
+            TreeClass::Big => self.db.dispatch_big(
+                table,
+                RangeVisitOp {
                 worker_id: self.worker_id,
                 ts_start: self.ts_start,
                 range,
                 visit: &mut visit,
-            }),
+                },
+            ),
         }
     }
 
     /// Zero-copy left fold over a snapshot-consistent table range.
     pub fn range_fold<Acc>(
-        &self,
+        &mut self,
         table: Table,
         range: Interval<TpccKey>,
         initial: Acc,
@@ -246,39 +366,76 @@ impl<'a> TpccTxn<'a> {
     }
 
     /// Counts visible rows without constructing result objects.
-    pub fn range_count(&self, table: Table, range: Interval<TpccKey>) -> usize {
+    pub fn range_count(&mut self, table: Table, range: Interval<TpccKey>) -> usize {
         self.range_fold(table, range, 0usize, |count, _, _| count + 1)
     }
 
-    pub fn insert(&self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'_> {
+    pub fn insert(&mut self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'static> {
         let (result, track) = match table.class() {
-            TreeClass::Standard => insert_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key, payload),
-            TreeClass::Big => self.db.dispatch_big(table, InsertOp { worker_id: self.worker_id, ts_start: self.ts_start, key, payload }),
+            TreeClass::Standard => insert_on_tree(
+                &self.db.tree_for(table),
+                self.worker_id,
+                self.ts_start,
+                key,
+                payload,
+            ),
+            TreeClass::Big => self.db.dispatch_big(
+                table,
+                InsertOp {
+                    worker_id: self.worker_id,
+                    ts_start: self.ts_start,
+                    key,
+                    payload,
+                },
+            ),
         };
         if track {
-            self.written.borrow_mut().push((table, key));
+            self.written.push((table, key));
         }
         result
     }
 
-    pub fn update(&self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'_> {
+    pub fn update(&mut self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'static> {
         let (result, track) = match table.class() {
-            TreeClass::Standard => update_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key, payload),
-            TreeClass::Big => self.db.dispatch_big(table, UpdateOp { worker_id: self.worker_id, ts_start: self.ts_start, key, payload }),
+            TreeClass::Standard => update_on_tree(
+                &self.db.tree_for(table),
+                self.worker_id,
+                self.ts_start,
+                key,
+                payload,
+            ),
+            TreeClass::Big => self.db.dispatch_big(
+                table,
+                UpdateOp {
+                    worker_id: self.worker_id,
+                    ts_start: self.ts_start,
+                    key,
+                    payload,
+                },
+            ),
         };
         if track {
-            self.written.borrow_mut().push((table, key));
+            self.written.push((table, key));
         }
         result
     }
 
-    pub fn delete(&self, table: Table, key: TpccKey) -> Res<'_> {
+    pub fn delete(&mut self, table: Table, key: TpccKey) -> Res<'static> {
         let (result, track) = match table.class() {
-            TreeClass::Standard => delete_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key),
-            TreeClass::Big => self.db.dispatch_big(table, DeleteOp { worker_id: self.worker_id, ts_start: self.ts_start, key }),
+            TreeClass::Standard => {
+                delete_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key)
+            }
+            TreeClass::Big => self.db.dispatch_big(
+                table,
+                DeleteOp {
+                    worker_id: self.worker_id,
+                    ts_start: self.ts_start,
+                    key,
+                },
+            ),
         };
         if track {
-            self.written.borrow_mut().push((table, key));
+            self.written.push((table, key));
         }
         result
     }
@@ -295,18 +452,20 @@ impl<'a> TpccTxn<'a> {
         if let TransactionState::InFlight = self.committed {
             self.committed = TransactionState::Committed;
 
-            if self.written.borrow().is_empty() {
+            if self.written.is_empty() {
                 self.db.db.end_snapshot(self.ts_start);
                 return None;
             }
 
             let ts_commit = self.db.db.ctx.commit_tx(self.worker_id);
 
-            if let Some(&(table, _)) = self.written.borrow().first() {
+            if let Some(&(table, _)) = self.written.first() {
                 let stamp = TxStamp::new(self.worker_id, self.ts_start);
                 match table.class() {
                     TreeClass::Standard => self.db.tree_for(table).wal_log_commit(stamp, ts_commit),
-                    TreeClass::Big => self.db.dispatch_big(table, WalCommitOp { stamp, ts_commit }),
+                    TreeClass::Big => self
+                        .db
+                        .dispatch_big(table, WalCommitOp { stamp, ts_commit }),
                 }
             }
 
@@ -325,13 +484,23 @@ impl<'a> TpccTxn<'a> {
     /// nothing else today, since `TpccTxn` — like the pre-size-class-dispatch
     /// design — exposes no separate public `abort()`; every real call site
     /// just lets an unwanted transaction fall out of scope.
-    fn revert_all(&self) {
+    fn revert_all(&mut self) {
         let stamp = TxStamp::new(self.worker_id, self.ts_start);
-        for &(table, key) in self.written.borrow().iter().rev() {
-            match table.class() {
-                TreeClass::Standard => self.db.tree_for(table).abort_write(key, stamp),
-                TreeClass::Big => self.db.dispatch_big(table, AbortWriteOp { key, stamp }),
+        let mut end = self.written.len();
+        while end != 0 {
+            let (table, key) = self.written[end - 1];
+            let mut start = end - 1;
+            while start != 0 && self.written[start - 1] == (table, key) {
+                start -= 1;
             }
+            let count = end - start;
+            match table.class() {
+                TreeClass::Standard => self.db.tree_for(table).abort_writes(key, stamp, count),
+                TreeClass::Big => self
+                    .db
+                    .dispatch_big(table, AbortWriteOp { key, stamp, count }),
+            }
+            end = start;
         }
     }
 }
@@ -351,7 +520,12 @@ impl<'a> Drop for TpccTxn<'a> {
 
 impl Display for TpccTxn<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TpccTxn(worker={}, ts_start={})", self.worker_id(), self.ts_start())
+        write!(
+            f,
+            "TpccTxn(worker={}, ts_start={})",
+            self.worker_id(),
+            self.ts_start()
+        )
     }
 }
 
@@ -419,7 +593,12 @@ fn pick_middle_by_name(matches: &[RecordPointResult<TpccKey, TpccRow>]) -> u32 {
 // New-Order (spec §2.4): ~45% of the mix.
 // ---------------------------------------------------------------------
 
-pub fn new_order(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remote: bool) -> TxnOutcome {
+pub fn new_order(
+    db: &TpccDatabase,
+    cfg: &TpccConfig,
+    home_w_id: u32,
+    allow_remote: bool,
+) -> TxnOutcome {
     let d_id = with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse));
     let c_id = nu_rand_customer_id(cfg.customers_per_district);
     let ol_cnt = with_fast_rng(|rng| rng.u8(5..=15));
@@ -431,32 +610,55 @@ pub fn new_order(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remo
         None
     };
 
-    struct Line { i_id: u32, supply_w_id: u32, qty: u8 }
-    let lines: Vec<Line> = (0..ol_cnt).map(|i| {
-        let i_id = if Some(i) == invalid_line { cfg.num_items + 1 } else { nu_rand_item_id(cfg.num_items) };
-        let remote = allow_remote && cfg.num_warehouses > 1 && with_fast_rng(|rng| rng.u32(1..=100)) == 1;
-        let supply_w_id = if remote { pick_remote_warehouse(cfg, home_w_id) } else { home_w_id };
+    struct Line {
+        i_id: u32,
+        supply_w_id: u32,
+        qty: u8,
+    }
+    let lines: Vec<Line> = (0..ol_cnt)
+        .map(|i| {
+            let i_id = if Some(i) == invalid_line {
+                cfg.num_items + 1
+            } else {
+                nu_rand_item_id(cfg.num_items)
+            };
+            let remote = allow_remote
+                && cfg.num_warehouses > 1
+                && with_fast_rng(|rng| rng.u32(1..=100)) == 1;
+            let supply_w_id = if remote {
+                pick_remote_warehouse(cfg, home_w_id)
+            } else {
+                home_w_id
+            };
         let qty = with_fast_rng(|rng| rng.u8(1..=10));
-        Line { i_id, supply_w_id, qty }
-    }).collect();
+            Line {
+                i_id,
+                supply_w_id,
+                qty,
+            }
+        })
+        .collect();
     let all_local = lines.iter().all(|l| l.supply_w_id == home_w_id);
 
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
 
     let Some(warehouse) = one(tx.point(Table::Warehouse, k_warehouse(home_w_id))) else {
-        drop(tx); return TxnOutcome::Conflict; // tree not populated for this key: treat defensively
+        drop(tx);
+        return TxnOutcome::Conflict; // tree not populated for this key: treat defensively
     };
     let w_tax = warehouse.payload.as_warehouse().w_tax;
 
     let Some(district) = one(tx.point(Table::District, k_district(home_w_id, d_id))) else {
-        drop(tx); return TxnOutcome::Conflict;
+        drop(tx);
+        return TxnOutcome::Conflict;
     };
     let mut d_row = district.payload.as_district().clone();
     let o_id = d_row.d_next_o_id;
     let d_tax = d_row.d_tax;
 
     let Some(customer) = one(tx.point(Table::Customer, k_customer(home_w_id, d_id, c_id))) else {
-        drop(tx); return TxnOutcome::Conflict;
+        drop(tx);
+        return TxnOutcome::Conflict;
     };
     let c_discount = customer.payload.as_customer().c_discount;
 
@@ -466,12 +668,19 @@ pub fn new_order(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remo
     for line in &lines {
         match one(tx.point(Table::Item, k_item(line.i_id))) {
             Some(item) => priced.push((line, item.payload.as_item().i_price)),
-            None => { drop(tx); return TxnOutcome::UserAbort; }
+            None => {
+                drop(tx);
+                return TxnOutcome::UserAbort;
+            }
         }
     }
 
     d_row.d_next_o_id = o_id + 1;
-    wtry!(tx.update(Table::District, k_district(home_w_id, d_id), TpccRow::District(Box::new(d_row))));
+    wtry!(tx.update(
+        Table::District,
+        k_district(home_w_id, d_id),
+        TpccRow::District(Box::new(d_row))
+    ));
 
     for (ol_number, (line, i_price)) in priced.into_iter().enumerate() {
         let ol_number = (ol_number + 1) as u8;
@@ -490,29 +699,49 @@ pub fn new_order(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remo
         if line.supply_w_id != home_w_id {
             s_row.s_remote_cnt += 1;
         }
-        wtry!(tx.update(Table::Stock, k_stock(line.supply_w_id, line.i_id), TpccRow::Stock(Box::new(s_row))));
+        wtry!(tx.update(
+            Table::Stock,
+            k_stock(line.supply_w_id, line.i_id),
+            TpccRow::Stock(Box::new(s_row))
+        ));
 
         let ol_amount = line.qty as f64 * i_price * (1.0 - c_discount) * (1.0 + w_tax + d_tax);
-        wtry!(tx.insert(Table::OrderLine, k_order_line(home_w_id, d_id, o_id, ol_number), TpccRow::OrderLine(Box::new(OrderLine {
+        wtry!(tx.insert(
+            Table::OrderLine,
+            k_order_line(home_w_id, d_id, o_id, ol_number),
+            TpccRow::OrderLine(Box::new(OrderLine {
             ol_i_id: line.i_id,
             ol_supply_w_id: line.supply_w_id,
             ol_delivery_d: None,
             ol_quantity: line.qty,
             ol_amount,
             ol_dist_info: rnd_astring(24, 24),
-        }))));
+            }))
+        ));
     }
 
-    wtry!(tx.insert(Table::Orders, k_order(home_w_id, d_id, o_id), TpccRow::Order(Box::new(Order {
+    wtry!(tx.insert(
+        Table::Orders,
+        k_order(home_w_id, d_id, o_id),
+        TpccRow::Order(Box::new(Order {
         o_c_id: c_id,
         o_entry_d: now_millis(),
         o_carrier_id: None,
         o_ol_cnt: ol_cnt,
         o_all_local: all_local,
-    }))));
-    wtry!(tx.insert(Table::NewOrder, k_new_order(home_w_id, d_id, o_id), TpccRow::NewOrder(NewOrderMarker { no_o_id: o_id })));
+        }))
+    ));
+    wtry!(tx.insert(
+        Table::NewOrder,
+        k_new_order(home_w_id, d_id, o_id),
+        TpccRow::NewOrder(NewOrderMarker { no_o_id: o_id })
+    ));
 
-    match tx.update(Table::CustLastOrder, k_cust_last_order(home_w_id, d_id, c_id), TpccRow::CustLastOrder(o_id)) {
+    match tx.update(
+        Table::CustLastOrder,
+        k_cust_last_order(home_w_id, d_id, c_id),
+        TpccRow::CustLastOrder(o_id),
+    ) {
         CRUDOperationResult::Updated(_) => {}
         CRUDOperationResult::Conflict => return TxnOutcome::Conflict,
         // This customer has never had an order before: whenever
@@ -521,7 +750,11 @@ pub fn new_order(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remo
         // customers who received one of the initial orders — everyone else
         // gets their row created here, on their actual first order.
         CRUDOperationResult::ZeroAffected(_) => {
-            wtry!(tx.insert(Table::CustLastOrder, k_cust_last_order(home_w_id, d_id, c_id), TpccRow::CustLastOrder(o_id)));
+            wtry!(tx.insert(
+                Table::CustLastOrder,
+                k_cust_last_order(home_w_id, d_id, c_id),
+                TpccRow::CustLastOrder(o_id)
+            ));
         }
         other => panic!("tpcc: unexpected cust_last_order write result: {other}"),
     }
@@ -534,27 +767,42 @@ pub fn new_order(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remo
 // Payment (spec §2.5): ~43% of the mix.
 // ---------------------------------------------------------------------
 
-pub fn payment(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remote: bool, history_seq: &std::sync::atomic::AtomicU64) -> TxnOutcome {
+pub fn payment(
+    db: &TpccDatabase,
+    cfg: &TpccConfig,
+    home_w_id: u32,
+    allow_remote: bool,
+    history_seq: &std::sync::atomic::AtomicU64,
+) -> TxnOutcome {
     let d_id = with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse));
     let amount = with_fast_rng(|rng| rng.u32(100..=500_000)) as f64 / 100.0;
 
-    let remote = allow_remote && cfg.num_warehouses > 1 && with_fast_rng(|rng| rng.u32(1..=100)) <= 15;
+    let remote =
+        allow_remote && cfg.num_warehouses > 1 && with_fast_rng(|rng| rng.u32(1..=100)) <= 15;
     let (c_w_id, c_d_id) = if remote {
-        (pick_remote_warehouse(cfg, home_w_id), with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse)))
+        (
+            pick_remote_warehouse(cfg, home_w_id),
+            with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse)),
+        )
     } else {
         (home_w_id, d_id)
     };
     let by_last_name = with_fast_rng(|rng| rng.u32(1..=100)) <= 60;
 
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
 
     let Some(warehouse) = one(tx.point(Table::Warehouse, k_warehouse(home_w_id))) else {
-        drop(tx); return TxnOutcome::Conflict;
+        drop(tx);
+        return TxnOutcome::Conflict;
     };
     let mut w_row = warehouse.payload.as_warehouse().clone();
     w_row.w_ytd += amount;
     let w_name = w_row.w_name.clone();
-    wtry!(tx.update(Table::Warehouse, k_warehouse(home_w_id), TpccRow::Warehouse(Box::new(w_row))));
+    wtry!(tx.update(
+        Table::Warehouse,
+        k_warehouse(home_w_id),
+        TpccRow::Warehouse(Box::new(w_row))
+    ));
 
     let Some(district) = one(tx.point(Table::District, k_district(home_w_id, d_id))) else {
         return TxnOutcome::Conflict;
@@ -562,7 +810,11 @@ pub fn payment(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remote
     let mut d_row = district.payload.as_district().clone();
     d_row.d_ytd += amount;
     let d_name = d_row.d_name.clone();
-    wtry!(tx.update(Table::District, k_district(home_w_id, d_id), TpccRow::District(Box::new(d_row))));
+    wtry!(tx.update(
+        Table::District,
+        k_district(home_w_id, d_id),
+        TpccRow::District(Box::new(d_row))
+    ));
 
     let c_id = if by_last_name {
         let last_code = c_last_code_for_run();
@@ -585,14 +837,24 @@ pub fn payment(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remote
     c_row.c_ytd_payment += amount;
     c_row.c_payment_cnt += 1;
     if c_row.c_credit_bad {
-        let note = format!("{c_id} {c_d_id} {c_w_id} {d_id} {home_w_id} {amount:.2} | {}", c_row.c_data);
+        let note = format!(
+            "{c_id} {c_d_id} {c_w_id} {d_id} {home_w_id} {amount:.2} | {}",
+            c_row.c_data
+        );
         c_row.c_data = note.chars().take(500).collect();
     }
-    wtry!(tx.update(Table::Customer, k_customer(c_w_id, c_d_id, c_id), TpccRow::Customer(Box::new(c_row))));
+    wtry!(tx.update(
+        Table::Customer,
+        k_customer(c_w_id, c_d_id, c_id),
+        TpccRow::Customer(Box::new(c_row))
+    ));
 
     let h_data = format!("{w_name}    {d_name}");
     let h_key = k_history(history_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    wtry!(tx.insert(Table::History, h_key, TpccRow::History(Box::new(History {
+    wtry!(tx.insert(
+        Table::History,
+        h_key,
+        TpccRow::History(Box::new(History {
         h_c_id: c_id,
         h_c_d_id: c_d_id,
         h_c_w_id: c_w_id,
@@ -601,7 +863,8 @@ pub fn payment(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, allow_remote
         h_date: now_millis(),
         h_amount: amount,
         h_data,
-    }))));
+        }))
+    ));
 
     tx.commit();
     TxnOutcome::Committed
@@ -615,7 +878,7 @@ pub fn order_status(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32) -> TxnO
     let d_id = with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse));
     let by_last_name = with_fast_rng(|rng| rng.u32(1..=100)) <= 60;
 
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
 
     let c_id = if by_last_name {
         let last_code = c_last_code_for_run();
@@ -634,7 +897,10 @@ pub fn order_status(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32) -> TxnO
         return TxnOutcome::Conflict;
     }
 
-    let Some(last_order) = one(tx.point(Table::CustLastOrder, k_cust_last_order(home_w_id, d_id, c_id))) else {
+    let Some(last_order) = one(tx.point(
+        Table::CustLastOrder,
+        k_cust_last_order(home_w_id, d_id, c_id),
+    )) else {
         tx.commit();
         return TxnOutcome::Committed; // no order yet for this customer
     };
@@ -661,11 +927,15 @@ pub struct DeliveryOutcome {
 
 pub fn delivery(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32) -> DeliveryOutcome {
     let carrier_id = with_fast_rng(|rng| rng.u32(1..=10));
-    let mut out = DeliveryOutcome { delivered_districts: 0, empty_districts: 0, conflicts: 0 };
-    let tx = TpccTxn::begin(db);
+    let mut out = DeliveryOutcome {
+        delivered_districts: 0,
+        empty_districts: 0,
+        conflicts: 0,
+    };
+    let mut tx = TpccTxn::begin(db);
 
     for d_id in 1..=cfg.districts_per_warehouse {
-        match deliver_one_district(&tx, home_w_id, d_id, carrier_id) {
+        match deliver_one_district(&mut tx, home_w_id, d_id, carrier_id) {
             TxnOutcome::Committed => out.delivered_districts += 1,
             TxnOutcome::Conflict => {
                 // Dropping the shared transaction rolls back every district already
@@ -681,7 +951,7 @@ pub fn delivery(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32) -> Delivery
     out
 }
 
-fn deliver_one_district(tx: &TpccTxn<'_>, w_id: u32, d_id: u8, carrier_id: u32) -> TxnOutcome {
+fn deliver_one_district(tx: &mut TpccTxn<'_>, w_id: u32, d_id: u8, carrier_id: u32) -> TxnOutcome {
     let (lo, hi) = k_new_order_district_bounds(w_id, d_id);
     // `range_min`, not `range` + sort + take the smallest: ascending o_id
     // within a fixed (w_id,d_id) prefix means the *oldest* queued new-order
@@ -706,7 +976,9 @@ fn deliver_one_district(tx: &TpccTxn<'_>, w_id: u32, d_id: u8, carrier_id: u32) 
     // a bug — so it's treated the same as losing an OSIC conflict.
     match tx.delete(Table::NewOrder, oldest.key) {
         CRUDOperationResult::Deleted(_) => {}
-        CRUDOperationResult::Conflict | CRUDOperationResult::ZeroAffected(_) => return TxnOutcome::Conflict,
+        CRUDOperationResult::Conflict | CRUDOperationResult::ZeroAffected(_) => {
+            return TxnOutcome::Conflict;
+        }
         other => panic!("tpcc: unexpected delete result: {other}"),
     }
 
@@ -717,7 +989,11 @@ fn deliver_one_district(tx: &TpccTxn<'_>, w_id: u32, d_id: u8, carrier_id: u32) 
     let mut order_row = order_rec.payload.as_order().clone();
     let c_id = order_row.o_c_id;
     order_row.o_carrier_id = Some(carrier_id);
-    wtry!(tx.update(Table::Orders, order_key, TpccRow::Order(Box::new(order_row))));
+    wtry!(tx.update(
+        Table::Orders,
+        order_key,
+        TpccRow::Order(Box::new(order_row))
+    ));
 
     let (ol_lo, ol_hi) = k_order_line_bounds(w_id, d_id, o_id);
     let lines = many(tx.range(Table::OrderLine, Interval::new(ol_lo, ol_hi), true));
@@ -737,7 +1013,11 @@ fn deliver_one_district(tx: &TpccTxn<'_>, w_id: u32, d_id: u8, carrier_id: u32) 
     let mut c_row = cust_rec.payload.as_customer().clone();
     c_row.c_balance += total;
     c_row.c_delivery_cnt += 1;
-    wtry!(tx.update(Table::Customer, cust_key, TpccRow::Customer(Box::new(c_row))));
+    wtry!(tx.update(
+        Table::Customer,
+        cust_key,
+        TpccRow::Customer(Box::new(c_row))
+    ));
 
     TxnOutcome::Committed
 }
@@ -746,9 +1026,14 @@ fn deliver_one_district(tx: &TpccTxn<'_>, w_id: u32, d_id: u8, carrier_id: u32) 
 // Stock-Level (spec §2.8): ~4% of the mix. Read-only.
 // ---------------------------------------------------------------------
 
-pub fn stock_level(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32, threshold: i32) -> TxnOutcome {
+pub fn stock_level(
+    db: &TpccDatabase,
+    cfg: &TpccConfig,
+    home_w_id: u32,
+    threshold: i32,
+) -> TxnOutcome {
     let d_id = with_fast_rng(|rng| rng.u8(1..=cfg.districts_per_warehouse));
-    let tx = TpccTxn::begin(db);
+    let mut tx = TpccTxn::begin(db);
 
     let Some(district) = one(tx.point(Table::District, k_district(home_w_id, d_id))) else {
         return TxnOutcome::Conflict;
