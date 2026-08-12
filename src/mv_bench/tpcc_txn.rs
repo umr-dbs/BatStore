@@ -649,9 +649,8 @@ pub fn order_status(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32) -> TxnO
 }
 
 // ---------------------------------------------------------------------
-// Delivery (spec §2.7): ~4% of the mix. One sub-transaction per district —
-// exactly the "find and delete oldest new-order" queue pattern that stresses
-// tombstone/version-chain accumulation in the referenced benchmarks.
+// Delivery (spec §2.7): ~4% of the mix. All districts are processed by one
+// transaction and commit atomically, as required by TPC-C.
 // ---------------------------------------------------------------------
 
 pub struct DeliveryOutcome {
@@ -663,27 +662,32 @@ pub struct DeliveryOutcome {
 pub fn delivery(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32) -> DeliveryOutcome {
     let carrier_id = with_fast_rng(|rng| rng.u32(1..=10));
     let mut out = DeliveryOutcome { delivered_districts: 0, empty_districts: 0, conflicts: 0 };
+    let tx = TpccTxn::begin(db);
 
     for d_id in 1..=cfg.districts_per_warehouse {
-        match deliver_one_district(db, home_w_id, d_id, carrier_id) {
+        match deliver_one_district(&tx, home_w_id, d_id, carrier_id) {
             TxnOutcome::Committed => out.delivered_districts += 1,
-            TxnOutcome::Conflict => out.conflicts += 1,
+            TxnOutcome::Conflict => {
+                // Dropping the shared transaction rolls back every district already
+                // processed by this logical Delivery; none of them committed.
+                out.delivered_districts = 0;
+                out.conflicts = 1;
+                return out;
+            }
             TxnOutcome::UserAbort => out.empty_districts += 1,
         }
     }
+    tx.commit();
     out
 }
 
-fn deliver_one_district(db: &TpccDatabase, w_id: u32, d_id: u8, carrier_id: u32) -> TxnOutcome {
-    let tx = TpccTxn::begin(db);
-
+fn deliver_one_district(tx: &TpccTxn<'_>, w_id: u32, d_id: u8, carrier_id: u32) -> TxnOutcome {
     let (lo, hi) = k_new_order_district_bounds(w_id, d_id);
     // `range_min`, not `range` + sort + take the smallest: ascending o_id
     // within a fixed (w_id,d_id) prefix means the *oldest* queued new-order
     // is exactly the smallest key in this range, so there's no need to
     // collect every currently-queued row just to read off its minimum.
     let Some(oldest) = tx.range_min(Table::NewOrder, Interval::new(lo, hi)) else {
-        drop(tx);
         return TxnOutcome::UserAbort;
     };
     let o_id = match &*oldest.payload {
@@ -735,7 +739,6 @@ fn deliver_one_district(db: &TpccDatabase, w_id: u32, d_id: u8, carrier_id: u32)
     c_row.c_delivery_cnt += 1;
     wtry!(tx.update(Table::Customer, cust_key, TpccRow::Customer(Box::new(c_row))));
 
-    tx.commit();
     TxnOutcome::Committed
 }
 

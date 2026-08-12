@@ -59,6 +59,7 @@ LEANSTORE_URL = "https://github.com/leanstore/leanstore.git"
 LEANSTORE_PATCH_COMMIT = "90fcf185c1c8506344a7aa779928787d494348f4"
 LEANSTORE_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "leanstore.patch"
 LEANSTORE_YCSB_PAYLOAD_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_payload_leanstore.patch"
+LEANSTORE_TPCC_SEMANTICS_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "tpcc_semantics_leanstore.patch"
 WIREDTIGER_URL = "https://github.com/wiredtiger/wiredtiger.git"
 BENCHBASE_URL = "https://github.com/cmu-db/benchbase.git"
 BENCHBASE_PATCH_COMMIT = "33c00473807ebd49304d114a6d769d2d2b2bbb34"
@@ -222,6 +223,10 @@ def step_leanstore() -> None:
                       cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
         log(f"Applying {LEANSTORE_YCSB_PAYLOAD_PATCH_PATH.name} (canonical/u64 YCSB payloads and explicit payload reads)")
         run(["git", "apply", str(LEANSTORE_YCSB_PAYLOAD_PATCH_PATH)], cwd=LEANSTORE_REPO)
+    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_TPCC_SEMANTICS_PATCH_PATH)],
+                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        log(f"Applying {LEANSTORE_TPCC_SEMANTICS_PATCH_PATH.name} (TPC-C 1% New-Order rollback)")
+        run(["git", "apply", str(LEANSTORE_TPCC_SEMANTICS_PATCH_PATH)], cwd=LEANSTORE_REPO)
 
     LEANSTORE_BUILD_DIR.mkdir(parents=True, exist_ok=True)
     common.check_release_build(LEANSTORE_BUILD_DIR, "LeanStore")

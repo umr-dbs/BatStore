@@ -1023,15 +1023,14 @@ pub(crate) fn main_load(parms: Vec<String>) {
     let wal_epoch
         = parms[14].parse::<u64>().unwrap_or(1000);
 
-    let index
-        = Arc::new(MVBTSt::make_standard(root_star_index));
-
-    if wal {
-        index.enable_wal(
+    let index = Arc::new(if wal {
+        MVBTSt::make_standard(root_star_index).with_wal(
             Path::new(wal_dir.as_str()),
             Duration::from_millis(wal_epoch)
-        ).expect("Error creating WAL");
-    }
+        ).expect("Error creating WAL")
+    } else {
+        MVBTSt::make_standard(root_star_index)
+    });
 
     let mut gc_str = "Off".to_string();
     if gc {

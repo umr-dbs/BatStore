@@ -104,11 +104,11 @@ pub struct Database<
     /// The one writer shared by every table on this database — the *same*
     /// `Arc` cloned into each table's own `MVBTSt::wal` field (see
     /// `MVBTSt::attach_wal`) — or empty if WAL is off.
-    wal: ArcSwapOption<WalBackend<Key, Payload>>,
+    wal: Arc<WalBackend<Key, Payload>>,
     /// This database's table-catalog path (see `catalog_path`) once WAL has
     /// been enabled at least once — there is nothing to persist a catalog
     /// *for* before then. `None` for a purely in-memory database.
-    meta_path: ArcSwapOption<PathBuf>,
+    meta_path: Option<PathBuf>,
     /// `Some(update_in_place)` once `enable_gc` was called (applied to any
     /// table created afterwards); `None` (GC off) otherwise.
     gc: ArcSwapOption<bool>,
@@ -132,7 +132,40 @@ impl<
         min_key: Key,
         max_key: Key,
     ) -> Self {
-        let max_workers = default_max_workers().max(1);
+        Self::new_with_max_workers(
+            root_index_type, inc_key, dec_key, min_key, max_key,
+            default_max_workers(),
+        )
+    }
+
+    /// `new` with an explicit worker-registry capacity. Benchmark drivers know
+    /// their exact loader/worker/OLAP thread budget and use this to avoid sizing
+    /// every per-worker structure to the whole machine.
+    pub fn new_with_max_workers(
+        root_index_type: RootIndexType,
+        inc_key: fn(Key) -> Key,
+        dec_key: fn(Key) -> Key,
+        min_key: Key,
+        max_key: Key,
+        max_workers: usize,
+    ) -> Self {
+        let max_workers = max_workers.max(1);
+        Self::new_with_max_workers_and_backend(
+            root_index_type, inc_key, dec_key, min_key, max_key, max_workers,
+            Arc::new(WalBackend::Off), None,
+        )
+    }
+
+    pub(crate) fn new_with_max_workers_and_backend(
+        root_index_type: RootIndexType,
+        inc_key: fn(Key) -> Key,
+        dec_key: fn(Key) -> Key,
+        min_key: Key,
+        max_key: Key,
+        max_workers: usize,
+        wal: Arc<WalBackend<Key, Payload>>,
+        meta_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             ctx: Arc::new(TxContext::new(max_workers)),
             root_index_type,
@@ -141,10 +174,64 @@ impl<
             min_key,
             max_key,
             tables: ArcSwap::from_pointee(TableList::new()),
-            wal: ArcSwapOption::empty(),
-            meta_path: ArcSwapOption::empty(),
+            wal,
+            meta_path,
             gc: ArcSwapOption::empty(),
         }
+    }
+
+    pub fn new_with_wal(
+        root_index_type: RootIndexType,
+        inc_key: fn(Key) -> Key,
+        dec_key: fn(Key) -> Key,
+        min_key: Key,
+        max_key: Key,
+        wal_path: &Path,
+        flush_interval: Duration,
+    ) -> io::Result<Self> {
+        Self::new_with_max_workers_and_wal(
+            root_index_type, inc_key, dec_key, min_key, max_key,
+            default_max_workers(), wal_path, flush_interval,
+        )
+    }
+
+    pub fn new_with_max_workers_and_wal(
+        root_index_type: RootIndexType,
+        inc_key: fn(Key) -> Key,
+        dec_key: fn(Key) -> Key,
+        min_key: Key,
+        max_key: Key,
+        max_workers: usize,
+        wal_path: &Path,
+        flush_interval: Duration,
+    ) -> io::Result<Self> {
+        let meta_path = catalog_path(wal_path);
+        write_catalog(&meta_path, std::iter::empty::<&str>())?;
+        Ok(Self::new_with_max_workers_and_backend(
+            root_index_type, inc_key, dec_key, min_key, max_key, max_workers,
+            Arc::new(WalBackend::open_batched(wal_path, flush_interval)?), Some(meta_path),
+        ))
+    }
+
+    pub fn new_with_max_workers_and_wal_lockfree(
+        root_index_type: RootIndexType,
+        inc_key: fn(Key) -> Key,
+        dec_key: fn(Key) -> Key,
+        min_key: Key,
+        max_key: Key,
+        max_workers: usize,
+        wal_path: &Path,
+        flush_interval: Duration,
+        batch_size: usize,
+    ) -> io::Result<Self> {
+        let meta_path = catalog_path(wal_path);
+        write_catalog(&meta_path, std::iter::empty::<&str>())?;
+        Ok(Self::new_with_max_workers_and_backend(
+            root_index_type, inc_key, dec_key, min_key, max_key, max_workers,
+            Arc::new(WalBackend::open_lockfree(
+                wal_path, flush_interval, batch_size, max_workers.max(1),
+            )?), Some(meta_path),
+        ))
     }
 
     /// Creates (or returns the existing) table named `name`, assigning it
@@ -170,7 +257,7 @@ impl<
             return existing;
         }
 
-        if let Some(path) = self.meta_path.load().as_ref() {
+        if let Some(path) = self.meta_path.as_ref() {
             append_catalog_entry(path, name)
                 .expect("mv_db::Database::create_table: failed to append to the table catalog");
         }
@@ -191,7 +278,6 @@ impl<
     /// first) and `open_recovered` (which recreates tables from an
     /// *already-persisted* catalog, so must not re-append them).
     fn create_table_unpublished(&self, name: &str) -> Arc<MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>> {
-        let wal = self.wal.load();
         let gc = self.gc.load();
         let mut built: Option<Arc<MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>>> = None;
 
@@ -206,10 +292,8 @@ impl<
                 self.max_key,
                 self.ctx.clone(),
                 Some(id),
+                self.wal.clone(),
             ));
-            if let Some(writer) = wal.as_ref() {
-                tree.attach_wal(writer.clone());
-            }
             if let Some(update_in_place) = gc.as_ref() {
                 tree.enable_gc(**update_in_place);
             }
@@ -252,62 +336,8 @@ impl<
             .collect()
     }
 
-    /// Opens one shared writer and attaches it to every table that exists
-    /// right now — any table created *after* this call is caught up
-    /// automatically by `create_table` (see its doc). Also establishes this
-    /// database's catalog file (see `catalog_path`) if one doesn't already
-    /// exist at the derived path, seeded with every table that already
-    /// exists — so a `Database` built purely in-memory (tables created
-    /// before the first `enable_wal` call) still ends up with a catalog
-    /// that accounts for all of them, not just ones created afterwards.
-    pub fn enable_wal(&self, path: &Path, flush_interval: Duration) -> io::Result<()> {
-        self.enable_wal_with(sync::Arc::new(WalBackend::open_batched(path, flush_interval)?), path)
-    }
-
-    /// Same as `enable_wal`, but backed by `LockFreeWalWriter` (via
-    /// `WalBackend::LockFree`) instead — see `MVBTSt::enable_wal_lockfree`'s
-    /// doc for what that trades off.
-    pub fn enable_wal_lockfree(&self, path: &Path, flush_interval: Duration, batch_size: usize) -> io::Result<()> {
-        let writer = WalBackend::open_lockfree(path, flush_interval, batch_size, default_max_workers())?;
-        self.enable_wal_with(sync::Arc::new(writer), path)
-    }
-
-    /// Shared plumbing behind `enable_wal`/`enable_wal_lockfree`: attach
-    /// `writer` to every existing table and establish the catalog file,
-    /// exactly the same regardless of which backend `writer` actually is.
-    fn enable_wal_with(&self, writer: sync::Arc<WalBackend<Key, Payload>>, path: &Path) -> io::Result<()> {
-        let snapshot = self.tables.load();
-        for entry in snapshot.iter() {
-            entry.tree.attach_wal(writer.clone());
-        }
-
-        let meta_path = catalog_path(path);
-        if !meta_path.exists() {
-            write_catalog(&meta_path, snapshot.iter().map(|entry| entry.name.as_str()))?;
-        }
-        self.meta_path.store(Some(sync::Arc::new(meta_path)));
-
-        self.wal.store(Some(writer));
-        Ok(())
-    }
-
-    /// The live shared writer, if WAL is currently attached — lets a
-    /// wrapper like `mv_bench::tpcc_schema::TpccDatabase` attach the *same*
-    /// writer to trees it manages outside this `Database`'s own table list
-    /// (see that module's `TreeClass` doc), instead of each opening its own
-    /// file. `None` if WAL was never enabled (or was `disable_wal`'d).
-    pub(crate) fn wal_writer(&self) -> Option<sync::Arc<WalBackend<Key, Payload>>> {
-        self.wal.load_full()
-    }
-
-    pub fn disable_wal(&self) {
-        for entry in self.tables.load().iter() {
-            entry.tree.disable_wal();
-        }
-        self.wal.store(None);
-        // `meta_path` deliberately stays set: the catalog already reflects
-        // every table that exists, and a later `create_table`/`enable_wal`
-        // should keep treating it as already-initialized.
+    pub(crate) fn wal_writer(&self) -> Arc<WalBackend<Key, Payload>> {
+        self.wal.clone()
     }
 
     /// Toggles block reclaim uniformly across every table on this database
@@ -432,7 +462,12 @@ impl<
         wal_path: &Path,
         flush_interval: Duration,
     ) -> io::Result<Self> {
-        let db = Self::new(root_index_type, inc_key, dec_key, min_key, max_key);
+        let db = Self::new_with_max_workers_and_backend(
+            root_index_type, inc_key, dec_key, min_key, max_key,
+            default_max_workers(),
+            Arc::new(WalBackend::open_batched(wal_path, flush_interval)?),
+            Some(catalog_path(wal_path)),
+        );
 
         for name in read_catalog(&catalog_path(wal_path))? {
             db.create_table_unpublished(&name);
@@ -448,8 +483,6 @@ impl<
                 file.set_len(valid_len)?;
             }
         }
-
-        db.enable_wal(wal_path, flush_interval)?;
 
         Ok(db)
     }

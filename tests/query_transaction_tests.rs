@@ -18,6 +18,13 @@ fn new_db() -> TestDb {
     Database::new(RootIndexType::default(), inc, dec, u64::MIN, u64::MAX)
 }
 
+fn new_db_with_wal(path: &std::path::Path) -> TestDb {
+    Database::new_with_wal(
+        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
+        path, std::time::Duration::from_millis(2),
+    ).unwrap()
+}
+
 /// Mirrors the paper's Figure 3 worked example: worker W1 commits two
 /// transactions ("a" then "e"), worker W2 starts a transaction ("d")
 /// that never commits, and a transaction "f" on a third worker takes
@@ -137,9 +144,8 @@ fn multi_op_transaction_writes_are_durable_across_recovery() {
     let _ = std::fs::remove_file(&meta_path);
 
     {
-        let db = new_db();
+        let db = new_db_with_wal(&path);
         db.create_table("t");
-        db.enable_wal(&path, std::time::Duration::from_millis(2)).unwrap();
         let t = db.table_named("t").unwrap().table_id().unwrap();
 
         let tx = DbTransaction::begin(&db);
@@ -234,9 +240,8 @@ fn aborted_transaction_write_does_not_resurface_after_recovery() {
     let _ = std::fs::remove_file(&meta_path);
 
     {
-        let db = new_db();
+        let db = new_db_with_wal(&path);
         db.create_table("t");
-        db.enable_wal(&path, std::time::Duration::from_millis(2)).unwrap();
         let t = db.table_named("t").unwrap().table_id().unwrap();
 
         // Pre-existing, committed key that the aborting transaction

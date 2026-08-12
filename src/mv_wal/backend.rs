@@ -57,7 +57,7 @@ impl<Key: Ord + Copy + Hash + Display + 'static, Payload: Clone + WalPayload + '
     /// many records (bounds how large one flush's `pwrite` gets and how much
     /// memory an unusually bursty worker can pile up between sweeps).
     /// `max_workers`: sizes the per-worker slot array — callers pass
-    /// `mv_tree::mvbt::default_max_workers()`, same cap every other
+    /// `mv_tree::mvbt::default_max_workers()`, the same runtime worker count every other
     /// worker-indexed structure in this codebase (`SnapshotCache`,
     /// `BlockTracer`) uses.
     pub fn open(path: &Path, flush_interval: Duration, batch_size: usize, max_workers: usize) -> io::Result<Self> {
@@ -192,6 +192,7 @@ impl<Key, Payload> Drop for LockFreeWalBackend<Key, Payload> {
 /// a given file, and a database can even be recovered by one kind and then
 /// reattached with the other.
 pub enum WalBackend<Key, Payload> {
+    Off,
     Batched(WalWriter<Key, Payload>),
     LockFree(LockFreeWalBackend<Key, Payload>),
 }
@@ -202,6 +203,7 @@ pub enum WalBackend<Key, Payload> {
 impl<Key: Ord + Copy + Hash + Display + 'static, Payload: Clone + 'static> WalBackend<Key, Payload> {
     pub fn hardened_version(&self) -> Version {
         match self {
+            Self::Off => 0,
             Self::Batched(w) => w.hardened_version(),
             Self::LockFree(w) => w.hardened_version(),
         }
@@ -227,6 +229,7 @@ impl<
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) -> TxStamp {
         match self {
+            Self::Off => TxStamp::new(worker_id, clock.next_timestamp()),
             Self::Batched(w) => w.start_commit_logged(clock, worker_id, build),
             Self::LockFree(w) => w.start_commit_logged(clock, worker_id, build),
         }
@@ -234,6 +237,7 @@ impl<
 
     pub fn log_with_stamp(&self, stamp: TxStamp, build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>) {
         match self {
+            Self::Off => {}
             Self::Batched(w) => { w.log_with_stamp(stamp, build); }
             Self::LockFree(w) => w.log_with_stamp(stamp, build),
         }
@@ -241,6 +245,7 @@ impl<
 
     pub fn log_commit(&self, stamp: TxStamp, ts_commit: Version) {
         match self {
+            Self::Off => {}
             Self::Batched(w) => { w.log_commit(stamp, ts_commit); }
             Self::LockFree(w) => w.log_commit(stamp, ts_commit),
         }
@@ -254,6 +259,7 @@ impl<
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) -> TxStamp {
         match self {
+            Self::Off => TxStamp::new(worker_id, clock.next_timestamp()),
             Self::Batched(w) => w.start_commit_logged_for_table(table_id, clock, worker_id, build),
             Self::LockFree(w) => w.start_commit_logged_for_table(table_id, clock, worker_id, build),
         }
@@ -266,6 +272,7 @@ impl<
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) {
         match self {
+            Self::Off => {}
             Self::Batched(w) => { w.log_with_stamp_for_table(table_id, stamp, build); }
             Self::LockFree(w) => w.log_with_stamp_for_table(table_id, stamp, build),
         }
@@ -273,6 +280,7 @@ impl<
 
     pub fn log_commit_for_table(&self, stamp: TxStamp, ts_commit: Version) {
         match self {
+            Self::Off => {}
             Self::Batched(w) => { w.log_commit_for_table(stamp, ts_commit); }
             Self::LockFree(w) => w.log_commit_for_table(stamp, ts_commit),
         }

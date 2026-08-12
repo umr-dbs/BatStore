@@ -304,9 +304,10 @@ impl<const FAN_OUT: usize,
             &lookup_range,
             reader_ts_start);
 
-        CRUDOperationResult::MatchedRecords(blocks
-            .into_iter()
-            .map(|leaf| {
+        self.with_visibility_checker(reader_worker, reader_ts_start, |is_visible| {
+            CRUDOperationResult::MatchedRecords(blocks
+                .into_iter()
+                .map(|leaf| {
                 let records = leaf
                     .deref()
                     .as_records();
@@ -329,26 +330,25 @@ impl<const FAN_OUT: usize,
                 // exact assumption caused. Scanning the whole leaf (same
                 // cost `RangeQueryIter::refill`/`iter_query.rs` already
                 // always pays) is the honest fix.
-               self.with_visibility_checker(reader_worker, reader_ts_start, |is_visible| {
-                   records
-                       .iter()
-                       .rev()
-                       // Cheap range check before the indirect (`&mut dyn
-                       // FnMut`, not inlinable) `matches` call — see
-                       // `iter_query.rs::refill`'s identical reorder for why.
-                       .filter(|r|
-                           lookup_range.contains(r.key()) &&
-                               r.version().matches(is_visible))
-                       // .sorted_by_key(|r| r.key())
-                       .map(RecordPointResult::from)
-                       .collect::<Vec<_>>()
-               })
-            })
-            // .filter(|set| !set.is_empty())
-            // .sorted_by_key(|set|
-            //     unsafe { set.get_unchecked(0).key })
-            .flatten()
-            .collect())
+                records
+                    .iter()
+                    .rev()
+                    // Cheap range check before the indirect (`&mut dyn
+                    // FnMut`, not inlinable) `matches` call — see
+                    // `iter_query.rs::refill`'s identical reorder for why.
+                    .filter(|r|
+                        lookup_range.contains(r.key()) &&
+                            r.version().matches(is_visible))
+                    // .sorted_by_key(|r| r.key())
+                    .map(RecordPointResult::from)
+                    .collect::<Vec<_>>()
+                })
+                // .filter(|set| !set.is_empty())
+                // .sorted_by_key(|set|
+                //     unsafe { set.get_unchecked(0).key })
+                .flatten()
+                .collect())
+        })
     }
 
     // #[inline]

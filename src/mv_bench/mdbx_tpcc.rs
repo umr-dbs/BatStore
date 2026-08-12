@@ -605,20 +605,25 @@ struct DeliveryOutcome {
 fn delivery(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> DeliveryOutcome {
     let carrier_id = rand::rng().random_range(1..=10u32);
     let mut out = DeliveryOutcome { delivered_districts: 0, conflicts: 0 };
+    let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (delivery)");
 
     for d_id in 1..=cfg.districts_per_warehouse {
-        match deliver_one_district(db, home_w_id, d_id, carrier_id) {
+        match deliver_one_district(&txn, home_w_id, d_id, carrier_id) {
             TxnOutcome::Committed => out.delivered_districts += 1,
-            TxnOutcome::Conflict => out.conflicts += 1,
+            TxnOutcome::Conflict => {
+                // Dropping the one shared transaction rolls back every district.
+                out.delivered_districts = 0;
+                out.conflicts = 1;
+                return out;
+            }
             TxnOutcome::UserAbort => {}
         }
     }
+    txn.commit().expect("mdbx_tpcc: commit (delivery)");
     out
 }
 
-fn deliver_one_district(db: &Database<WriteMap>, w_id: u32, d_id: u8, carrier_id: u32) -> TxnOutcome {
-    let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (delivery)");
-
+fn deliver_one_district(txn: &Transaction<RW, WriteMap>, w_id: u32, d_id: u8, carrier_id: u32) -> TxnOutcome {
     let (lo, hi) = k_new_order_district_bounds(w_id, d_id);
     let mut queued = range_rows(&txn, Table::NewOrder, lo, hi);
     if queued.is_empty() {
@@ -664,7 +669,6 @@ fn deliver_one_district(db: &Database<WriteMap>, w_id: u32, d_id: u8, carrier_id
     c_row.c_delivery_cnt += 1;
     put_row(&txn, Table::Customer, cust_key, &TpccRow::Customer(Box::new(c_row)));
 
-    txn.commit().expect("mdbx_tpcc: commit (delivery)");
     TxnOutcome::Committed
 }
 

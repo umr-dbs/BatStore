@@ -125,9 +125,10 @@ fn wal_logged_concurrent_workload_recovers_to_a_consistent_snapshot() {
 
     let cfg = stress_cfg();
     let before = {
-        let db = Arc::new(TpccDatabase::new(RootIndexType::default()));
+        let db = Arc::new(TpccDatabase::new_with_wal(
+            RootIndexType::default(), &wal_path, flush_interval,
+        ).expect("WAL construction must succeed on a fresh path"));
         db.enable_gc(false);
-        db.enable_wal(&wal_path, flush_interval).expect("enable_wal must succeed on a fresh path");
 
         // Population itself goes through the WAL too, matching
         // `tpcc_driver::run_tpcc`'s ordering (WAL attached before load).

@@ -47,6 +47,7 @@ use crate::mv_query::interval::Interval;
 use crate::mv_root::index_root::RootIndexType;
 use crate::mv_tree::mvbt::FAN_OUT;
 use crate::mv_wal::record::TableId;
+use crate::mv_wal::backend::WalBackend;
 use std::fmt::{Display, Formatter};
 use triomphe::Arc;
 
@@ -506,11 +507,58 @@ impl TpccDatabase {
         Self::new_with_big_tree_size(root_index_type, BigTreeSize::default())
     }
 
+    pub fn new_with_wal(
+        root_index_type: RootIndexType,
+        wal_path: &std::path::Path,
+        flush_interval: std::time::Duration,
+    ) -> std::io::Result<Self> {
+        Self::new_with_big_tree_size_and_max_workers_and_wal(
+            root_index_type, BigTreeSize::default(),
+            crate::mv_tree::mvbt::default_max_workers(),
+            wal_path, flush_interval, None,
+        )
+    }
+
     pub fn new_with_big_tree_size(root_index_type: RootIndexType, big_tree_size: BigTreeSize) -> Self {
-        let db = Database::new(root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX);
+        Self::new_with_big_tree_size_and_max_workers(
+            root_index_type, big_tree_size, crate::mv_tree::mvbt::default_max_workers(),
+        )
+    }
+
+    pub fn new_with_big_tree_size_and_max_workers(
+        root_index_type: RootIndexType,
+        big_tree_size: BigTreeSize,
+        max_workers: usize,
+    ) -> Self {
+        let db = Database::new_with_max_workers(
+            root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX, max_workers,
+        );
         let table_ids = Self::create_all_tables(&db);
-        let big_trees = Self::make_big_trees(root_index_type, &db, big_tree_size);
+        let big_trees = Self::make_big_trees(root_index_type, &db, big_tree_size, None);
         Self { db, table_ids, big_trees }
+    }
+
+    pub fn new_with_big_tree_size_and_max_workers_and_wal(
+        root_index_type: RootIndexType,
+        big_tree_size: BigTreeSize,
+        max_workers: usize,
+        wal_path: &std::path::Path,
+        flush_interval: std::time::Duration,
+        lockfree_batch_size: Option<usize>,
+    ) -> std::io::Result<Self> {
+        let db = match lockfree_batch_size {
+            Some(batch_size) => Database::new_with_max_workers_and_wal_lockfree(
+                root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
+                max_workers, wal_path, flush_interval, batch_size,
+            )?,
+            None => Database::new_with_max_workers_and_wal(
+                root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
+                max_workers, wal_path, flush_interval,
+            )?,
+        };
+        let table_ids = Self::create_all_tables(&db);
+        let big_trees = Self::make_big_trees(root_index_type, &db, big_tree_size, None);
+        Ok(Self { db, table_ids, big_trees })
     }
 
     /// Creates every one of the 12 *standard-class* tables (see
@@ -551,17 +599,19 @@ impl TpccDatabase {
         root_index_type: RootIndexType,
         db: &Database<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>,
         size: BigTreeSize,
+        wal_override: Option<Arc<WalBackend<TpccKey, TpccRow>>>,
     ) -> BigTrees {
         let ctx = db.ctx.clone();
+        let wal = wal_override.unwrap_or_else(|| db.wal_writer());
         macro_rules! build {
             ($ty:ty) => {
                 (
                     Arc::new(<$ty>::make_with_shared_ctx(
                         root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
-                        ctx.clone(), Some(WAREHOUSE_BIG_TABLE_ID))),
+                        ctx.clone(), Some(WAREHOUSE_BIG_TABLE_ID), wal.clone())),
                     Arc::new(<$ty>::make_with_shared_ctx(
                         root_index_type, inc_key, dec_key, TpccKey::MIN, TpccKey::MAX,
-                        ctx, Some(DISTRICT_BIG_TABLE_ID))),
+                        ctx, Some(DISTRICT_BIG_TABLE_ID), wal.clone())),
                 )
             };
         }
@@ -717,72 +767,38 @@ impl TpccDatabase {
         // to its valid prefix, so this second, independent scan of that same
         // (now-stable) prefix finds the identical valid length — nothing
         // left to truncate again here.
-        let big_trees = Self::make_big_trees(root_index_type, &db, big_tree_size);
-        macro_rules! replay_and_attach {
+        let mut big_trees = Self::make_big_trees(
+            root_index_type, &db, big_tree_size,
+            Some(Arc::new(WalBackend::Off)),
+        );
+        let writer = db.wal_writer();
+        macro_rules! replay_and_configure {
             ($warehouse:expr, $district:expr) => {{
                 crate::mv_wal::recovery::replay_two_tables(
-                    $warehouse, WAREHOUSE_BIG_TABLE_ID, $district, DISTRICT_BIG_TABLE_ID, wal_path,
+                    &$warehouse, WAREHOUSE_BIG_TABLE_ID, &$district, DISTRICT_BIG_TABLE_ID, wal_path,
                 )?;
-                if let Some(writer) = db.wal_writer() {
-                    $warehouse.attach_wal(writer.clone());
-                    $district.attach_wal(writer);
-                }
+                Arc::get_mut($warehouse)
+                    .expect("big tree must be unshared during recovery construction")
+                    .set_wal_before_share(writer.clone());
+                Arc::get_mut($district)
+                    .expect("big tree must be unshared during recovery construction")
+                    .set_wal_before_share(writer.clone());
             }};
         }
-        match &big_trees {
-            BigTrees::KiB1 { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::KiB2 { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::KiB4 { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::KiB8 { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::KiB16 { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::KiB32 { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::KiB64 { warehouse, district } => replay_and_attach!(warehouse, district),
-            BigTrees::KiB512 { warehouse, district } => replay_and_attach!(warehouse, district),
+        match &mut big_trees {
+            BigTrees::KiB1 { warehouse, district } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB2 { warehouse, district } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB4 { warehouse, district } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB8 { warehouse, district } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB16 { warehouse, district } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB32 { warehouse, district } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB64 { warehouse, district } => replay_and_configure!(warehouse, district),
+            BigTrees::KiB512 { warehouse, district } => replay_and_configure!(warehouse, district),
         }
 
         Ok(Self { db, table_ids, big_trees })
     }
 
-    /// Attaches one shared live WAL at `wal_path` — for a fresh (not
-    /// recovered) database; use `open_recovered` instead when the log might
-    /// already contain data from a prior run. Attaches the *same* shared
-    /// writer to the two `TreeClass::Big` trees too, tagged with their own
-    /// reserved `TableId`s, so their writes land in the one shared file
-    /// right alongside every standard table's.
-    pub fn enable_wal(&self, wal_path: &std::path::Path, flush_interval: std::time::Duration) -> std::io::Result<()> {
-        self.db.enable_wal(wal_path, flush_interval)?;
-        self.attach_wal_to_big_trees();
-        Ok(())
-    }
-
-    /// Same as `enable_wal`, but backed by `LockFreeWalWriter` (via
-    /// `mv_wal::backend::WalBackend::LockFree`) instead — see
-    /// `MVBTSt::enable_wal_lockfree`'s doc for what that trades off.
-    pub fn enable_wal_lockfree(&self, wal_path: &std::path::Path, flush_interval: std::time::Duration, batch_size: usize) -> std::io::Result<()> {
-        self.db.enable_wal_lockfree(wal_path, flush_interval, batch_size)?;
-        self.attach_wal_to_big_trees();
-        Ok(())
-    }
-
-    /// Shared tail of `enable_wal`/`enable_wal_lockfree`: attach whatever
-    /// writer `self.db.enable_wal*` just installed to the two
-    /// `TreeClass::Big` trees too, tagged with their own reserved
-    /// `TableId`s, so their writes land in the one shared file right
-    /// alongside every standard table's.
-    fn attach_wal_to_big_trees(&self) {
-        if let Some(writer) = self.db.wal_writer() {
-            match &self.big_trees {
-                BigTrees::KiB1 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::KiB2 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::KiB4 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::KiB8 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::KiB16 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::KiB32 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::KiB64 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-                BigTrees::KiB512 { warehouse, district } => { warehouse.attach_wal(writer.clone()); district.attach_wal(writer); }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------

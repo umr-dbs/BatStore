@@ -23,6 +23,13 @@ fn new_db() -> TestDb {
     Database::new(RootIndexType::default(), inc, dec, u64::MIN, u64::MAX)
 }
 
+fn new_db_with_wal(path: &std::path::Path) -> TestDb {
+    Database::new_with_wal(
+        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
+        path, Duration::from_millis(2),
+    ).unwrap()
+}
+
 #[test]
 fn empty_read_only_commit_does_not_advance_the_global_clock() {
     let db = new_db();
@@ -155,9 +162,8 @@ fn repeated_delete_reinsert_round_trips_through_wal_recovery() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(format!("{}.meta", path.display()));
 
-    let db = new_db();
+    let db = new_db_with_wal(&path);
     let table = db.create_table("t").table_id().unwrap();
-    db.enable_wal(&path, Duration::from_millis(2)).unwrap();
     let setup = DbTransaction::begin(&db);
     assert!(matches!(
         setup.insert(table, 1, 10),
@@ -323,10 +329,9 @@ fn db_crash_recovery_round_trip_across_tables() {
     let _ = std::fs::remove_file(&path);
 
     {
-        let db = new_db();
+        let db = new_db_with_wal(&path);
         db.create_table("a");
         db.create_table("b");
-        db.enable_wal(&path, Duration::from_millis(2)).unwrap();
 
         let t_a = db.table_named("a").unwrap().table_id().unwrap();
         let t_b = db.table_named("b").unwrap().table_id().unwrap();
@@ -400,11 +405,10 @@ fn db_single_commit_marker_per_cross_table_transaction() {
     ));
     let _ = std::fs::remove_file(&path);
 
-    let db = new_db();
+    let db = new_db_with_wal(&path);
     db.create_table("a");
     db.create_table("b");
     db.create_table("c");
-    db.enable_wal(&path, Duration::from_millis(2)).unwrap();
 
     let t_a = db.table_named("a").unwrap().table_id().unwrap();
     let t_b = db.table_named("b").unwrap().table_id().unwrap();
@@ -464,9 +468,8 @@ fn dynamic_table_created_after_wal_and_gc_enabled_inherits_both() {
     ));
     let _ = std::fs::remove_file(&path);
 
-    let db = new_db();
+    let db = new_db_with_wal(&path);
     db.create_table("existing");
-    db.enable_wal(&path, Duration::from_millis(2)).unwrap();
     db.enable_gc(false);
 
     // Created strictly after WAL/GC were turned on.
@@ -567,9 +570,8 @@ fn catalog_file_records_tables_in_creation_order_and_survives_recovery() {
     let _ = std::fs::remove_file(&meta_path);
 
     {
-        let db = new_db();
-        db.create_table("first"); // created before WAL is on
-        db.enable_wal(&path, Duration::from_millis(2)).unwrap();
+        let db = new_db_with_wal(&path);
+        db.create_table("first");
         db.create_table("second"); // created after — must be appended
         db.create_table("third");
     }

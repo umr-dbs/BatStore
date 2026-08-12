@@ -161,9 +161,9 @@ fn update_in_place_disabled_while_wal_attached() {
     let path = std::env::temp_dir().join(format!("cmvbt_dispatch_wal_test_{}.log", std::process::id()));
     let _ = std::fs::remove_file(&path);
 
-    let tree = TestTree::make_standard(RootIndexType::default());
+    let tree = TestTree::make_standard(RootIndexType::default())
+        .with_wal(&path, std::time::Duration::from_millis(2)).unwrap();
     tree.enable_gc(true);
-    tree.enable_wal(&path, std::time::Duration::from_millis(2)).unwrap();
 
     let CRUDOperationResult::Inserted(insert_version) = tree.dispatch_crud(CRUDOperation::Insert(1, 100)) else {
         panic!("expected Inserted");

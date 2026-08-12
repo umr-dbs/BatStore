@@ -1,6 +1,5 @@
 use std::fmt::Display;
 use std::hash::Hash;
-use std::sync::atomic::Ordering::Relaxed;
 use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_query::SnapShot;
 use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
@@ -134,10 +133,7 @@ impl<'a,
     /// value.
     #[inline(always)]
     pub fn wal_hardened_version(&self) -> Version {
-        match self.wal.load().as_ref() {
-            Some(writer) => writer.hardened_version(),
-            None => 0,
-        }
+        self.wal.hardened_version()
     }
 
     /// Blocks until `wal_hardened_version()` reaches `target` — i.e. until
@@ -189,14 +185,7 @@ impl<'a,
     ) -> TxStamp {
         let worker_id = self.worker_id();
 
-        // `wal_ever_enabled` lets a tree that has never had a WAL skip
-        // `ArcSwapOption::load` entirely instead of paying its guard
-        // mechanism on every write just to find `None` — see the field doc.
-        if !self.wal_ever_enabled.load(Relaxed) {
-            return TxStamp::new(worker_id, self.ctx.start_tx_commit());
-        }
-
-        match self.wal.load().as_ref() {
+        match self.wal.as_ref() {
             // `self.table_id` is `Some` only for a `mv_db::Database` table
             // (see `MVBTSt::table_id`'s doc) — its writer is shared with
             // every other table on that database, so every entry must carry
@@ -204,11 +193,10 @@ impl<'a,
             // demultiplex the interleaved file. `None` (every other caller,
             // including `TpccDatabase`'s own per-table files) keeps today's
             // plain, untagged encoding, byte-for-byte unchanged.
-            Some(writer) => match self.table_id {
+            writer => match self.table_id {
                 Some(table_id) => writer.start_commit_logged_for_table(table_id, self.ctx.global_clock(), worker_id, build),
                 None => writer.start_commit_logged(self.ctx.global_clock(), worker_id, build),
             },
-            None => TxStamp::new(worker_id, self.ctx.start_tx_commit()),
         }
     }
 
@@ -225,15 +213,9 @@ impl<'a,
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) {
-        if !self.wal_ever_enabled.load(Relaxed) {
-            return;
-        }
-
-        if let Some(writer) = self.wal.load().as_ref() {
-            match self.table_id {
-                Some(table_id) => { writer.log_with_stamp_for_table(table_id, stamp, build); }
-                None => { writer.log_with_stamp(stamp, build); }
-            }
+        match self.table_id {
+            Some(table_id) => { self.wal.log_with_stamp_for_table(table_id, stamp, build); }
+            None => { self.wal.log_with_stamp(stamp, build); }
         }
     }
 
@@ -246,15 +228,9 @@ impl<'a,
     /// otherwise, same model as every other WAL call here.
     #[inline(always)]
     pub(crate) fn wal_log_commit(&self, stamp: TxStamp, ts_commit: Version) {
-        if !self.wal_ever_enabled.load(Relaxed) {
-            return;
-        }
-
-        if let Some(writer) = self.wal.load().as_ref() {
-            match self.table_id {
-                Some(_) => { writer.log_commit_for_table(stamp, ts_commit); }
-                None => { writer.log_commit(stamp, ts_commit); }
-            }
+        match self.table_id {
+            Some(_) => { self.wal.log_commit_for_table(stamp, ts_commit); }
+            None => { self.wal.log_commit(stamp, ts_commit); }
         }
     }
 

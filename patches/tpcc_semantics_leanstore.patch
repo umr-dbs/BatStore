@@ -1,0 +1,11 @@
+diff --git a/frontend/tpc-c/TPCCWorkload.hpp b/frontend/tpc-c/TPCCWorkload.hpp
+--- a/frontend/tpc-c/TPCCWorkload.hpp
++++ b/frontend/tpc-c/TPCCWorkload.hpp
+@@ -275,6 +275,6 @@ class TPCCWorkload
+             supware = urandexcept(1, warehouseCount, w_id);
+          Integer itemid = getItemID();
+-         if (false && (i == ol_cnt) && (urand(1, 100) == 1))  // invalid item => random
++         if ((i == ol_cnt) && (urand(1, 100) == 1))  // TPC-C: 1% expected rollback
+             itemid = 0;
+          lineNumbers.push_back(i);
+          supwares.push_back(supware);
