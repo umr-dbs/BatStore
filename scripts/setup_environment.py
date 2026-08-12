@@ -494,18 +494,18 @@ def step_postgres_tmpfs() -> None:
     # scratch root as root. Restore the actual invoking user's ownership so subsequent
     # engines can create sibling directories such as libmdbx_data. PostgreSQL's child
     # directory remains separately owned by postgres.
-    SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
+    common.SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
     if "SUDO_UID" in os.environ and "SUDO_GID" in os.environ:
         invoking_uid = int(os.environ["SUDO_UID"])
         invoking_gid = int(os.environ["SUDO_GID"])
-        os.chown(SCRATCH_ROOT, invoking_uid, invoking_gid)
+        os.chown(common.SCRATCH_ROOT, invoking_uid, invoking_gid)
         # Repair engine scratch directories left by an earlier root-run too. Do not touch
         # postgresql_data: the server correctly requires that tree to remain postgres-owned.
         for name in (
             "cmvbt_data", "leanstore_data", "wiredtiger_data", "libmdbx_data",
             "vweaver_ermia_log", "vweaver_ermia_frugal_log",
         ):
-            engine_dir = SCRATCH_ROOT / name
+            engine_dir = common.SCRATCH_ROOT / name
             if engine_dir.exists():
                 run(["chown", "-R", f"{invoking_uid}:{invoking_gid}", str(engine_dir)])
 
