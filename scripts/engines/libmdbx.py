@@ -50,6 +50,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     unused - see SUPPORTS_GC_TOGGLE above, and every run here is a fresh db_path."""
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
+    field_count, field_length = ((1, 8) if ycsb_payload == "u64" else (10, 100))
 
     # Fixed, wiped-before-every-run path - matches leanstore.py/wiredtiger.py's ssd_path
     # treatment, and your explicit ask for libmdbx specifically.
@@ -60,7 +61,6 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         threads = scale.tpcc_terminals
         # Run only the query named by this workload, matching every other wrapper.
         htap_mode = workload.replace("htap_", "ch_") if workload in common.HTAP_WORKLOADS else "none"
-        field_count, field_length = ((1, 8) if ycsb_payload == "u64" else (10, 100))
         args = [
             str(BINARY), "mdbx_tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
             "100000", "3000", "3000", str(db_path), htap_mode,
