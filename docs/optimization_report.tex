@@ -14,7 +14,7 @@
 \usepackage{microtype}
 \usepackage{enumitem}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta,positioning,calc,fit,backgrounds}
+\usetikzlibrary{arrows.meta,positioning,calc,fit,backgrounds,decorations.pathreplacing}
 
 \hypersetup{
   colorlinks=true,
@@ -312,6 +312,36 @@ snapshot, so historical reads keep selecting via each entry's own immutable vers
 independent of this mask entirely. The mask is a current-state acceleration
 structure layered on top of the version metadata, not a replacement for it.
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[bar/.style={line width=6pt, line cap=round}]
+  \draw[-{Latex}] (0,-0.6) -- (10.4,-0.6) node[right, font=\scriptsize] {key};
+  \foreach \x/\lbl in {0/0,5/50,10/100} {
+    \draw (\x,-0.65) -- (\x,-0.55);
+    \node[font=\tiny, below] at (\x,-0.65) {\lbl};
+  }
+  \draw[bar, gray!55] (0,0) -- (10,0);
+  \node[font=\scriptsize, gray!45!black, anchor=west] at (10.5,0) {slot 0: [0,100] --- dead};
+  \draw[bar, gray!55] (0,1) -- (4.9,1);
+  \node[font=\scriptsize, gray!45!black, anchor=west] at (10.5,1) {slot 1: [0,49] --- dead};
+  \draw[bar, green!45!black] (5.1,2) -- (10,2);
+  \node[font=\scriptsize, green!45!black, anchor=west] at (10.5,2) {slot 2: [50,100] --- live};
+  \draw[bar, green!45!black] (0,3) -- (2.4,3);
+  \node[font=\scriptsize, green!45!black, anchor=west] at (10.5,3) {slot 3: [0,24] --- live};
+  \draw[bar, green!45!black] (2.6,4) -- (4.9,4);
+  \node[font=\scriptsize, green!45!black, anchor=west] at (10.5,4) {slot 4: [25,49] --- live};
+  \node[font=\scriptsize\itshape, anchor=west, align=left] at (10.5,-1.35)
+    {append order: slot 0 (oldest)\\bottom, slot 4 (newest) top};
+\end{tikzpicture}
+\caption{Five entries appended over two splits of the same page. Slot 0's interval
+  is entirely covered by the newer slots 1--2, so it is dead; slot 1's interval is
+  entirely covered by the still-newer slots 3--4, so it too is dead, even though it
+  is younger than slot 2. The live mask marks exactly \{2, 3, 4\}: the newest layer
+  of pairwise-disjoint intervals that together cover the whole key range, derived
+  once when slots 3--4 are appended, not recomputed by whoever asks later.}
+\label{fig:internal-live-mask}
+\end{figure}
+
 \subsection{Exact page-sized allocation, payload indirection, and the hot/cold split}
 
 The 4\,KiB target applies to the full allocated cell, including the concurrency
@@ -469,6 +499,48 @@ described in \S\ref{sec:physical} depends on physical append order tracking
 recency, and re-sorting by an unrelated key would silently break that invariant for
 every future lookup on the combined page.
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  slot/.style={draw, minimum width=0.4cm, minimum height=0.4cm},
+  page/.style={draw, thick, rounded corners},
+]
+  \begin{scope}[shift={(0,0)}]
+    \node[page, minimum width=3.6cm, minimum height=0.75cm] (leftbox) at (1.8,0.3) {};
+    \foreach \i/\f in {0/gray!45,1/gray!45,2/gray!45,3/gray!45,4/gray!45,5/gray!45,6/gray!45,7/white} {
+      \node[slot, fill=\f] at ({0.2+\i*0.42},0.3) {};
+    }
+    \node[font=\scriptsize\bfseries] at (1.8,0.85) {Left sibling: 7/8 full};
+  \end{scope}
+
+  \begin{scope}[shift={(4.6,0)}]
+    \node[page, minimum width=1.9cm, minimum height=0.75cm] (midbox) at (0.95,0.3) {};
+    \foreach \i/\f in {0/gray!45,1/gray!45,2/white,3/white} {
+      \node[slot, fill=\f] at ({0.2+\i*0.42},0.3) {};
+    }
+    \node[font=\scriptsize\bfseries] at (0.95,0.85) {Underflowing: 2/8 full};
+  \end{scope}
+
+  \begin{scope}[shift={(7.5,0)}]
+    \node[page, minimum width=3.6cm, minimum height=0.75cm] (rightbox) at (1.8,0.3) {};
+    \foreach \i/\f in {0/gray!45,1/white,2/white,3/white,4/white,5/white,6/white,7/white} {
+      \node[slot, fill=\f] at ({0.2+\i*0.42},0.3) {};
+    }
+    \node[font=\scriptsize\bfseries] at (1.8,0.85) {Right sibling: 1/8 full};
+  \end{scope}
+
+  \draw[-{Latex}, thick, red!70!black, dashed] (midbox.west) to[out=200,in=-20]
+    node[below, font=\scriptsize, midway, align=center] {rejected:\\nearly full} (leftbox.east);
+  \draw[-{Latex}, thick, green!45!black] (midbox.east) to[out=-20,in=200]
+    node[below, font=\scriptsize, midway, align=center] {chosen:\\more room} (rightbox.west);
+\end{tikzpicture}
+\caption{The underflowing center page considers both adjacent siblings rather than
+  defaulting to one side. The left sibling is nearly full and is rejected; the right
+  sibling has more room and is chosen --- the merge that actually has a chance of
+  succeeding, decided before either candidate is latched for the real copy.}
+\label{fig:merge-sibling}
+\end{figure}
+
 \section{Root indexing strategies}
 \label{sec:root}
 
@@ -524,6 +596,37 @@ a page dominated by one key's own version chain has no key boundary to cut at al
 concrete, realistic trigger for this: a single order transaction that touches the
 same inventory row twice (two order lines for the same item) writes that row twice
 within one transaction.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  slot/.style={draw, minimum width=0.6cm, minimum height=0.6cm, font=\scriptsize},
+  page/.style={draw, thick, rounded corners},
+]
+  \node[page, minimum width=5.1cm, minimum height=1.0cm] at (2.4,2.2) {};
+  \foreach \i/\txt/\f in {0/K/red!25,1/K/red!25,2/K/red!25,3/K/red!25,4/K/red!25,5/K/red!25,6/{}/white,7/{}/white} {
+    \node[slot, fill=\f] at ({0.3+\i*0.6},2.2) {\txt};
+  }
+  \node[font=\scriptsize\bfseries] at (2.4,2.85) {Without a bound: 6 writes to key K, one open transaction};
+  \node[font=\scriptsize, red!60!black, align=center] at (2.4,1.55)
+    {no other key left in the page --- no valid split boundary};
+
+  \node[page, minimum width=5.1cm, minimum height=1.0cm] at (2.4,0) {};
+  \foreach \i/\txt/\f in {0/K/green!25,1/A/blue!10,2/B/blue!10,3/C/blue!10,4/D/blue!10,5/E/blue!10,6/F/blue!10,7/G/blue!10} {
+    \node[slot, fill=\f] at ({0.3+\i*0.6},0) {\txt};
+  }
+  \node[font=\scriptsize\bfseries] at (2.4,0.65) {With self-overwrite: the same 6 writes, the same transaction};
+  \node[font=\scriptsize, green!35!black, align=center] at (2.4,-0.65)
+    {page still holds 7 other live keys --- freely splittable};
+\end{tikzpicture}
+\caption{The same transaction writing key K six times before committing. Without a
+  bound (top), every write appends another uncommitted tuple for K, crowding out
+  every other key the page might otherwise hold and leaving the split-boundary
+  search in \S\ref{sec:smo} with nothing to cut at. With self-overwrite (bottom),
+  those same six writes mutate one tuple in place, so the page's remaining capacity
+  is exactly what it would have been if K had been written once.}
+\label{fig:selfoverwrite}
+\end{figure}
 
 The fix is a single equality check performed before falling through to the normal
 versioned path:
@@ -782,6 +885,43 @@ row, and never risks losing a concurrent updater's change to a different field o
 the same row, because both are serialized by the one latch the whole operation runs
 under.
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  stepbox/.style={draw, rounded corners, minimum width=4.5cm, minimum height=0.65cm, font=\scriptsize, align=center},
+  hdr/.style={font=\scriptsize\bfseries},
+]
+  \node[hdr] at (0,4.1) {Full transaction, several keys/tables};
+  \node[stepbox, fill=blue!8] (t1) at (0,3.4) {begin(): draw ts\_start,\\register a snapshot};
+  \node[stepbox, fill=blue!8] (t2) at (0,2.55) {op 1 (root cached, \S\ref{sec:rootcache})};
+  \node[stepbox, fill=blue!8] (t3) at (0,1.7) {op 2 $\ldots$ op $N$};
+  \node[stepbox, fill=blue!8] (t4) at (0,0.85) {commit(): draw ts\_commit,\\append to commit log};
+  \node[stepbox, fill=blue!8] (t5) at (0,0) {end\_snapshot(): release};
+  \foreach \a/\b in {t1/t2,t2/t3,t3/t4,t4/t5} { \draw[-{Latex}] (\a.south) -- (\b.north); }
+  \node[font=\scriptsize\itshape, align=center, blue!40!black] at (0,-0.75)
+    {one registered snapshot spans every step};
+
+  \node[hdr] at (6.3,4.1) {Auto-commit, one key};
+  \node[stepbox, fill=orange!10] (a1) at (6.3,3.4) {short reclamation pin\\(no snapshot registered)};
+  \node[stepbox, fill=orange!10] (a2) at (6.3,2.55) {find newest version,\\check visibility};
+  \node[stepbox, fill=orange!10] (a3) at (6.3,1.7) {mutate leaf\\(still write-locked)};
+  \node[stepbox, fill=orange!10] (a4) at (6.3,0.85) {commit\_tx(): append\\to commit log};
+  \node[stepbox, fill=orange!10] (a5) at (6.3,0) {drop leaf guard ---\\now visible to readers};
+  \foreach \a/\b in {a1/a2,a2/a3,a3/a4,a4/a5} { \draw[-{Latex}] (\a.south) -- (\b.north); }
+  \node[font=\scriptsize\itshape, align=center, orange!55!black] at (6.3,-0.75)
+    {no snapshot registered --- guard release is the visibility point};
+\end{tikzpicture}
+\caption{A full transaction (left) pays for a registered snapshot once, up front,
+  and amortizes it across however many operations it goes on to perform --- exactly
+  what makes root caching (\S\ref{sec:rootcache}) and batched abort
+  (\S\ref{sec:abort}) worthwhile. A single auto-committed operation (right) never
+  needs that amortization, so it skips snapshot registration entirely: a short
+  reclamation pin protects the traversal instead, and the leaf guard's own release
+  --- after the commit-log append, not before --- is the operation's entire
+  visibility and durability handoff.}
+\label{fig:autocommit}
+\end{figure}
+
 \section{Garbage collection: sharded, lock-free reclamation}
 \label{sec:gc}
 
@@ -810,27 +950,28 @@ offer.
 \begin{figure}[h]
 \centering
 \begin{tikzpicture}[
-  shard/.style={draw, rounded corners, minimum width=2.1cm, minimum height=2.5cm},
-  block/.style={draw, fill=gray!35, minimum width=1.7cm, minimum height=0.4cm, font=\scriptsize},
-  worker/.style={draw, rounded corners, fill=blue!12, font=\scriptsize, align=center},
+  shard/.style={draw, rounded corners, minimum width=2.3cm, minimum height=2.8cm},
+  pageblock/.style={draw, fill=gray!45, minimum width=1.5cm, minimum height=0.32cm},
+  worker/.style={draw, rounded corners, fill=blue!10, font=\scriptsize, align=center, inner sep=5pt},
 ]
-  % four shards, each with a stack of retired-block markers rising from the bottom
+  % four shards, each with a stack of plain retired-page markers rising from the bottom
   \foreach \s/\n in {0/3,1/1,2/0,3/2} {
-    \node[shard] (shard\s) at ({\s*2.7},0) {};
-    \node[font=\scriptsize\bfseries, align=center] at ({\s*2.7},1.5) {Shard \s\\(Worker \s)};
+    \node[shard] (shard\s) at ({\s*3.0},0) {};
+    \node[font=\scriptsize\bfseries, align=center] at ({\s*3.0},1.7) {Shard \s\\\footnotesize(Worker \s)};
     \foreach \k in {1,...,\n} {
-      \node[block] at ({\s*2.7},{-1.05+\k*0.42}) {block};
+      \node[pageblock] at ({\s*3.0},{-1.2+\k*0.42}) {};
     }
   }
-  \node[font=\scriptsize, align=center, red!70!black] at ({2*2.7},-0.7) {(empty)};
+  % shard 2 is genuinely empty -- say so once, centered in the shard, touching no block
+  \node[font=\scriptsize\itshape, gray!65!black] at (shard2) {empty};
 
   % worker 2 trying to reclaim a page
-  \node[worker] (w2) at ({2*2.7},-2.6) {Worker 2\\reclaiming};
+  \node[worker] (w2) at ({2*3.0},-2.9) {Worker 2\\reclaiming};
   \draw[-{Latex}, dashed, thick, red!70!black]
-    (w2) -- node[right, font=\scriptsize] {\textcircled{1} own shard first: empty} (shard2.south);
+    (w2.north) -- node[right, font=\scriptsize, align=left] {\textcircled{1} own shard\\first --- empty} (shard2.south);
   \draw[-{Latex}, thick, blue!60!black]
     (w2.east) to[out=0,in=-90] node[below right, font=\scriptsize, align=left]
-      {\textcircled{2} steal: round-robin\\cursor moves to Shard 3} (shard3.south);
+      {\textcircled{2} steal: cursor\\advances to Shard 3} (shard3.south);
 \end{tikzpicture}
 \caption{Reclaiming worker 2 checks its own shard first (Shard 2, empty here) before
   falling back to a shared round-robin cursor that advances to the next shard
@@ -1032,6 +1173,7 @@ convention that every call site happens to follow.
 \label{sec:osic}
 
 \subsection{Instant commit, lazily hardened}
+\label{sec:instantcommit}
 
 Every transaction draws its start and commit timestamps from one global,
 monotonically increasing counter. Each worker keeps its own append-only commit log;
@@ -1100,36 +1242,60 @@ Lock-free, batched locally per thread & 2,549,030 ops/s & \textbf{5,089,502 ops/
 \begin{figure}[h]
 \centering
 \begin{tikzpicture}[
-  rec/.style={draw, minimum width=0.55cm, minimum height=0.5cm, font=\tiny},
-  batch/.style={draw, rounded corners, minimum width=2.15cm, minimum height=1cm},
+  rec/.style={draw, minimum width=0.5cm, minimum height=0.45cm, font=\tiny},
+  batch/.style={draw, rounded corners, minimum width=2.0cm, minimum height=0.9cm},
   seg/.style={draw, minimum height=0.75cm, font=\scriptsize, align=center},
 ]
+  % three workers, each with its own thread-local batch -- no shared state
   \foreach \t/\strokecol/\fillcol in {0/red!70!black/red!15,1/green!55!black/green!15,2/blue!60!black/blue!15} {
-    \node[batch] (batch\t) at ({\t*3.5},2.15) {};
-    \node[font=\scriptsize\bfseries, \strokecol] at ({\t*3.5},2.85) {Thread \t: LocalBatch};
+    \node[batch] (batch\t) at ({\t*3.3},2.1) {};
+    \node[font=\scriptsize\bfseries, \strokecol] at ({\t*3.3},2.7) {Worker \t: LocalBatch};
     \foreach \r in {0,1,2} {
-      \node[rec, fill=\fillcol] at ({\t*3.5-0.6+\r*0.6},2.15) {r\r};
+      \node[rec, fill=\fillcol] at ({\t*3.3-0.55+\r*0.55},2.1) {r\r};
     }
   }
 
-  \node[seg, minimum width=3cm, fill=red!12] (seg0) at (0,0) {Thread 0's\\reserved region};
-  \node[seg, minimum width=3cm, fill=green!12, right=0pt of seg0] (seg1) {Thread 1's\\reserved region};
-  \node[seg, minimum width=3cm, fill=blue!12, right=0pt of seg1] (seg2) {Thread 2's\\reserved region};
-  \node[seg, minimum width=1.6cm, dashed, right=0pt of seg2] (segnext) {next};
-  \node[font=\scriptsize, below=3pt of seg1.south] {shared, append-only log file};
-  \draw[-{Latex}, thick] ($(segnext.north)+(0,0.05)$) -- ++(0,0.45)
-    node[above, font=\scriptsize, align=center] {\code{tail.fetch\_add(len)}\\reserves the next region};
+  % the shared file's reservations, in the order they actually arrived --
+  % NOT sorted by worker id, and worker 0 reserves twice, once early and
+  % once late, interleaved with the other two: this is the actual point of
+  % `tail.fetch_add` needing no cross-thread coordination or turn-taking.
+  \node[seg, minimum width=2.5cm, fill=green!12] (seg0) at (0,0) {Worker 1};
+  \node[seg, minimum width=2.5cm, fill=red!12, right=0pt of seg0] (seg1) {Worker 0};
+  \node[seg, minimum width=2.5cm, fill=blue!12, right=0pt of seg1] (seg2) {Worker 2};
+  \node[seg, minimum width=2.5cm, fill=red!12, right=0pt of seg2] (seg3) {Worker 0};
+  \node[seg, minimum width=1.5cm, dashed, right=0pt of seg3] (segnext) {next};
+  \node[font=\scriptsize, below=3pt of seg1.south] {shared, append-only log file --- arrival order, not worker order};
+  \draw[-{Latex}, thick] ($(segnext.north)+(0,0.05)$) -- ++(0,0.4)
+    node[above, font=\scriptsize, align=center] {\code{tail.fetch\_add(len)}\\reserves whichever region is next};
 
-  \draw[-{Latex}, thick, red!70!black] (batch0.south) -- node[left, font=\tiny] {one \code{pwrite}} (seg0.north);
-  \draw[-{Latex}, thick, green!55!black] (batch1.south) -- (seg1.north);
+  \draw[-{Latex}, thick, green!55!black] (batch1.south) -- (seg0.north);
+  \draw[-{Latex}, thick, red!70!black] (batch0.south) -- node[left, font=\tiny, align=right] {1st flush} (seg1.north);
   \draw[-{Latex}, thick, blue!60!black] (batch2.south) -- (seg2.north);
+  \draw[-{Latex}, thick, red!70!black, dashed]
+    (batch0.east) to[out=-20,in=160] node[below, font=\tiny] {2nd flush, after refilling} (seg3.north west);
+
+  % contrast inset: the other backend's time-based (not count-based) trigger
+  \begin{scope}[shift={(9.6,1.55)}]
+    \draw[dashed, rounded corners, thick, gray!60!black] (-0.15,-1.55) rectangle (5.6,1.15);
+    \draw[thick] (0.35,0.3) circle (0.32cm);
+    \draw[thick] (0.35,0.3) -- ++(0,0.2);
+    \draw[thick] (0.35,0.3) -- ++(0.16,0);
+    \node[font=\scriptsize\bfseries, anchor=west, align=left] at (0.85,0.3)
+      {Contrast: the sharded-channel\\backend (\S\ref{sec:instantcommit})};
+    \node[font=\scriptsize, anchor=north west, align=left] at (-0.15,-0.35)
+      {Its flush thread instead waits up to a\\fixed $\sim$200\,$\mu$s linger before flushing\\
+       whatever arrived --- a \emph{time} threshold,\\not a record-count one like the batch\\
+       above, which \code{LocalBatch} never has.};
+  \end{scope}
 \end{tikzpicture}
-\caption{Each thread accumulates its own records in a thread-local batch, with no
+\caption{Each worker accumulates its own records in a thread-local batch, with no
   lock and no shared channel; only the flush at the end of a batch touches the
-  shared file, as one \code{pwrite} into a byte range that thread alone reserved via
-  one atomic \code{fetch\_add} on the file's tail. No two threads' reserved regions
-  ever overlap, so the flushes themselves need no coordination beyond that one
-  atomic counter.}
+  shared file, as one \code{pwrite} into a byte range that worker alone reserved via
+  one atomic \code{fetch\_add} on the file's tail. Reservations land in whatever
+  order workers actually flush in --- here, Worker 1, then Worker 0, then Worker 2,
+  then Worker 0 again --- never sorted or grouped by worker id, and never waiting
+  for a turn: that is the actual benefit of a shared atomic counter over a shared
+  lock or a round-robin protocol.}
 \label{fig:wal-lockfree}
 \end{figure}
 
@@ -1196,6 +1362,50 @@ An exact full-domain scan is detected once, before the leaf loop begins, and use
 loop that skips the two range-bound comparisons every bounded scan still needs per
 record, since a full-domain scan's range trivially contains every key it could ever
 see.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[bar/.style={line width=6pt, line cap=round}]
+  \draw[-{Latex}] (0,-0.6) -- (10.4,-0.6) node[right, font=\scriptsize] {key};
+  \foreach \x/\lbl in {0/0,2.5/25,5/50,10/100} {
+    \draw (\x,-0.65) -- (\x,-0.55);
+    \node[font=\tiny, below] at (\x,-0.65) {\lbl};
+  }
+  \draw[bar, gray!55] (0,0) -- (10,0);
+  \node[font=\scriptsize, gray!45!black, anchor=west] at (10.5,0) {slot 0: [0,100]};
+  \draw[bar, gray!55] (0,1) -- (4.9,1);
+  \node[font=\scriptsize, gray!45!black, anchor=west] at (10.5,1) {slot 1: [0,49]};
+  \draw[bar, green!45!black] (5.1,2) -- (10,2);
+  \node[font=\scriptsize, green!45!black, anchor=west] at (10.5,2) {slot 2: [50,100]};
+  \draw[bar, green!45!black] (0,3) -- (2.4,3);
+  \node[font=\scriptsize, green!45!black, anchor=west] at (10.5,3) {slot 3: [0,24]};
+  \draw[bar, green!45!black] (2.6,4) -- (4.9,4);
+  \node[font=\scriptsize, green!45!black, anchor=west] at (10.5,4) {slot 4: [25,49]};
+
+  % same partition as Figure~\ref{fig:internal-live-mask}, now viewed as a
+  % scanning reader's cursor walking left to right across it
+  \draw[dotted, thick, red!70!black] (0,-0.5) -- (0,4.5);
+  \node[red!70!black, font=\tiny, align=center] at (0,-1.1) {\textcircled{1}\\cursor=0};
+  \node[red!70!black, font=\tiny] at (0.9,4.75) {selects slot 3};
+
+  \draw[dotted, thick, blue!60!black] (2.5,-0.5) -- (2.5,4.5);
+  \node[blue!60!black, font=\tiny, align=center] at (2.5,-1.1) {\textcircled{2}\\cursor=25};
+  \node[blue!60!black, font=\tiny] at (3.4,4.75) {selects slot 4};
+
+  \draw[dotted, thick, purple!60!black] (5,-0.5) -- (5,4.5);
+  \node[purple!60!black, font=\tiny, align=center] at (5,-1.1) {\textcircled{3}\\cursor=50};
+  \node[purple!60!black, font=\tiny] at (5.9,4.75) {selects slot 2};
+\end{tikzpicture}
+\caption{The same append-ordered partition as
+  Figure~\ref{fig:internal-live-mask}, now followed by a scanning reader. At
+  cursor 0, the newest entry whose interval contains it is slot 3 (slot 1 also
+  contains key 0, but slot 3 is newer). After consuming slot 3's leaf, the cursor
+  advances to one past its fence (25) and re-selects at the same parent, landing on
+  slot 4; advancing past slot 4's fence (49) lands on slot 2. No child list is ever
+  built --- each step is one reverse scan of the parent's entries, the same
+  selection rule a point lookup already uses.}
+\label{fig:cursor-routing}
+\end{figure}
 
 \subsection{Zero-copy streaming terminals}
 
