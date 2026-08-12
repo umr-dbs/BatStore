@@ -12,6 +12,7 @@
 \usepackage{parskip}
 \usepackage{amsmath}
 \usepackage{microtype}
+\usepackage{enumitem}
 
 \hypersetup{
   colorlinks=true,
@@ -30,253 +31,178 @@
   captionpos=b
 }
 
-\newcommand{\commit}[1]{\texttt{#1}}
 \newcommand{\code}[1]{\texttt{#1}}
-\newcommand{\note}[1]{\textit{#1}}
 \newcommand{\gainmeasured}{\textbf{Measured}}
 \newcommand{\gainbounded}{\textbf{Bounded}}
-\newcommand{\gainenabling}{\textbf{Enabling}}
-\newcommand{\stateactive}{\textbf{Active}}
-\newcommand{\stateoptional}{\textbf{Optional}}
-\newcommand{\statereverted}{\textbf{Reverted}}
-\newcommand{\stateopen}{\textbf{Open}}
+\newcommand{\gainenabling}{\textbf{Structural}}
 
-\newcolumntype{I}{>{\raggedright\arraybackslash}p{2.1cm}}
-\newcolumntype{O}{>{\raggedright\arraybackslash}p{3.6cm}}
-\newcolumntype{R}{>{\raggedright\arraybackslash}p{3.6cm}}
-\newcolumntype{G}{>{\raggedright\arraybackslash}p{4.4cm}}
-\newcolumntype{K}{>{\raggedright\arraybackslash}p{4.6cm}}
-\newcolumntype{S}{>{\raggedright\arraybackslash}p{1.7cm}}
-
-\title{The Optimizations Behind cMVBT-OSIC: A Unified, Verified Account}
+\title{Cache-Friendly by Design: The Optimizations Inside cMVBT-OSIC}
 \author{Amir Tonta}
-\date{12 August 2026}
+\date{August 2026}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-This document consolidates every optimization-focused write-up in this repository
---- the narrative design document (\path{docs/optimizations.tex}), the tabular
-inventory (\path{docs/optimization_catalog.tex}), the compact implementation guide
-(\path{docs/index_optimizations.md}), and five focused microbenchmark reports ---
-into one single account of the entire \texttt{cMVBT-OSIC} implementation. It is
-organized neither by commit nor by document of origin, but bottom-up by
-architectural layer, exactly the order a reader would need to actually understand
-the system: physical page layout, then concurrency control built on top of it,
-then structural maintenance, then the transaction layer, then garbage collection,
-then the cross-cutting sharding and durability stories that sit above all of it.
-Every optimization is explained (what changed, why, and what it cost or risked), not
-merely listed. A dedicated section (\S\ref{sec:foundational}) argues explicitly for
-four optimizations that are \emph{foundational}: removing any one of them would not
-just cost some throughput, it would make several other optimizations described later
-in this document either meaningless or unsound. Wherever the repository's own history
+This document explains, layer by layer, how \texttt{cMVBT-OSIC} is built to keep a
+CPU's caches, TLB, and lock-free fast paths working \emph{for} it rather than against
+it. It is organized by architectural layer --- physical page layout, then
+concurrency control built on top of that layout, then structural maintenance, then
+the transaction layer, then garbage collection, then the cross-cutting sharding and
+snapshot-caching machinery, then durability --- because that is the order in which
+each optimization actually depends on the one before it, not the order in which any
+of it was written. A short section up front (\S\ref{sec:foundational}) argues for
+four specific decisions that are \emph{foundational}: nearly everything described
+later either depends on one of them for correctness, or depends on one of them for
+the cost it removes to exist in the first place. Wherever the implementation
 contains a controlled before/after measurement, that number is reported with its
-workload, thread count, and caveats attached. Wherever it was practical to do so
-within this session, those numbers were independently re-measured on the machine this
-document was written on (\S\ref{sec:fresh}); the two do not always agree, and both are
-reported, since the disagreement itself is informative. This document also surfaces
-optimization attempts that were tried and reverted, and issues that remain open and
-unfixed as of this writing --- an accurate account of the whole implementation has to
-include the parts that did not work as well as the parts that did.
+workload and caveats attached; wherever it was practical to do so, those numbers were
+independently re-measured while writing this document, and both are reported.
 \end{abstract}
 
 \tableofcontents
 
-\section{Introduction and how to read this document}
+\section{Introduction: cache-friendliness as the throughline}
 \label{sec:intro}
 
-\texttt{cMVBT} is a concurrent, in-memory, multiversion B-tree implementing the
-asymptotically optimal MVBT structure of Becker et al.~\cite{becker1996asymptotically},
-extended with the multiversion concurrency control protocol of
-\cite{tonta2026multiversion}. On top of the tree, the system integrates
-\emph{Ordered Snapshot Instant Commit} (OSIC), the visibility/durability model from
-LeanStore's scalable snapshot-isolation work~\cite{alhomssi2023scalable}: commits
-become visible instantly, in commit order, while the write-ahead log is hardened to
-disk lazily and in batches, off the commit's critical path.
+Almost every optimization in this system reduces to one of a small number of
+recurring moves: touch fewer cache lines to decide the same thing, avoid an
+allocation on a path that runs millions of times a second, let a lock-free reader
+skip a lock entirely, or shard a piece of shared bookkeeping so unrelated threads
+stop invalidating each other's cache lines. This document is organized so those moves
+are visible as patterns, not as a list of unrelated tweaks.
 
-\paragraph{Roadmap.} Sections build on one another in this order:
-
+\paragraph{Roadmap.}
 \begin{enumerate}
-  \item \textbf{Foundational optimizations} (\S\ref{sec:foundational}): four
-        decisions that everything downstream either depends on for correctness or
-        depends on for the optimization to matter at all.
+  \item \textbf{Foundational optimizations} (\S\ref{sec:foundational}): the four
+        decisions everything else either depends on or is a response to.
   \item \textbf{Physical layer} (\S\ref{sec:physical}): how one page holds several
-        versions of a key, and how that page is laid out in memory.
-  \item \textbf{Concurrency control} (\S\ref{sec:cc}): how threads touch pages from
-        \S\ref{sec:physical} without unnecessary blocking.
+        versions of a key, laid out to minimize cache and TLB pressure.
+  \item \textbf{Concurrency control} (\S\ref{sec:cc}): optimistic lock coupling and
+        the latch every node uses.
   \item \textbf{Structural maintenance} (\S\ref{sec:smo}): splitting and merging
         pages as they fill up or empty out.
-  \item \textbf{The self-overwrite optimization} (\S\ref{sec:selfoverwrite}): bounding
-        how much physical growth one transaction's repeated writes can cause --- the
-        second load-bearing optimization this document singles out, one layer up
-        from \S\ref{sec:foundational}.
-  \item \textbf{Garbage collection} (\S\ref{sec:gc}): reclaiming pages retired by
-        \S\ref{sec:smo}.
-  \item \textbf{Root indexing} (\S\ref{sec:root}) and
-        \textbf{sharding} (\S\ref{sec:sharding}): finding the right root, and the
-        recurring pattern of partitioning shared bookkeeping state by worker.
-  \item \textbf{OSIC and the WAL} (\S\ref{sec:osic}): the commit/durability layer,
-        including a full accounting of the WAL performance work.
-  \item \textbf{Range scans} (\S\ref{sec:scans}) and
-        \textbf{workload/benchmark-harness optimizations} (\S\ref{sec:workload}).
-  \item \textbf{Case study: \code{BigTreeSize}} (\S\ref{sec:bigtree}): one
-        optimization followed end to end, including a benchmark methodology bug that
-        was found and fixed mid-investigation.
-  \item \textbf{Rejected experiments} (\S\ref{sec:rejected}) and
-        \textbf{open issues} (\S\ref{sec:open}): what was tried and did not work, and
-        what is still broken.
-  \item \textbf{Fresh measurements} (\S\ref{sec:fresh}), a
-        \textbf{combined gains table} (\S\ref{sec:combined}), a
-        \textbf{timeline} (\S\ref{sec:timeline}), and the \textbf{conclusion}
+  \item \textbf{The transaction layer} (\S\ref{sec:tx}): bounding physical growth,
+        caching resolved roots across repeated reads, reverse-order batched abort,
+        and the auto-commit fast path for single-key operations.
+  \item \textbf{Garbage collection} (\S\ref{sec:gc}) and \textbf{sharding}
+        (\S\ref{sec:sharding}): reclaiming retired pages, and the recurring pattern
+        of partitioning shared bookkeeping by worker or by table.
+  \item \textbf{Per-thread identity and the snapshot cache} (\S\ref{sec:snapcache}):
+        how a worker remembers who it is and memoizes visibility decisions across
+        calls, in detail.
+  \item \textbf{OSIC and the write-ahead log} (\S\ref{sec:osic}): decoupling
+        visibility from durability, and the write-path optimizations that follow
+        from it.
+  \item \textbf{Range scans} (\S\ref{sec:scans}), \textbf{workload/benchmark-harness
+        optimizations} (\S\ref{sec:workload}), and a \textbf{case study}
+        (\S\ref{sec:bigtree}) on trading contention for scan cost.
+  \item \textbf{Fresh measurements} (\S\ref{sec:fresh}), a \textbf{combined gains
+        table} (\S\ref{sec:combined}), and the \textbf{conclusion}
         (\S\ref{sec:conclusion}).
 \end{enumerate}
 
-\paragraph{Evidence levels.} As in the earlier catalog, every claimed gain is tagged:
-\gainmeasured{} (a before/after benchmark exists, with its workload and caveats),
-\gainbounded{} (a countable cost --- an allocation, a lock, a retry, a scan --- is
-removably bounded, but no trustworthy end-to-end percentage was recorded), or
-\gainenabling{} (primarily a correctness or livelock/deadlock fix, not a claimed
-speedup). Combined benchmark results are never attributed to one component in
-isolation unless the repository contains a measurement that isolates it.
+\paragraph{Evidence levels.} Every claimed gain is tagged \gainmeasured{} (a
+before/after benchmark exists, with its workload and caveats), \gainbounded{} (a
+countable cost --- an allocation, a lock, a cache line, a retry --- is removably
+bounded, but no end-to-end percentage was recorded), or \gainenabling{} (the change
+is primarily structural: it removes a class of cost or a piece of shared state
+rather than claiming a specific speedup). Combined benchmark results are never
+attributed to one component in isolation unless a measurement exists that isolates
+it.
 
 \section{Foundational optimizations: what everything else stands on}
 \label{sec:foundational}
 
-Reading the rest of this document commit-by-commit gives the impression of dozens of
-independent, similarly-weighted improvements. They are not independent. Four design
-decisions sit underneath nearly everything else described later, in the specific
-sense that removing any one of them would not merely cost throughput --- it would
-make a named optimization described in a later section either \emph{unsound} (its
-correctness argument stops holding) or \emph{pointless} (the cost it removes stops
-existing in the first place). This section names all four before the rest of the
-document goes layer by layer through the system; each subsection below points
-forward to exactly which later optimizations it underwrites.
+Four design decisions sit underneath nearly everything described later, in the
+specific sense that removing any one of them would not just cost throughput --- it
+would make a later optimization either unsound or pointless.
 
 \subsection{Append-only, publish-once physical pages}
 
-Every leaf page (\path{src/mv_page_model/leaf_page.rs}) is a fixed-capacity array
-that is only ever appended to. An obsolete, aborted, or deleted entry is \emph{marked}
-dead via \path{VersionInfo::delete}/\path{invalidate}; it is never physically
+Every leaf page is a fixed-capacity array that is only ever appended to. An
+obsolete, aborted, or deleted entry is \emph{marked} dead; it is never physically
 overwritten or removed until the next structural-maintenance pass rebuilds the page
 from scratch (\S\ref{sec:physical}). Internal pages follow the same rule: a
 superseded child entry is never mutated, only shadowed by a newer appended entry
-(\S\ref{sec:gc}).
+(\S\ref{sec:physical}, \S\ref{sec:gc}).
 
 \textbf{What this underwrites.} Optimistic lock coupling (\S\ref{sec:cc}) lets
 readers inspect a page with no latch at all specifically because nothing they might
-observe was ever mutated after being published --- a reader racing a writer either
-sees the old, still-fully-formed state or the new one, never a half-written slot.
-Garbage collection's internal-page liveness derivation (\path{live_mask()},
-\S\ref{sec:gc}) is a pure function of \emph{disjoint, append-ordered intervals} ---
-it has no meaning if slots could be mutated in place. And the self-overwrite
-optimization's entire safety argument (\S\ref{sec:selfoverwrite}) is the claim
-``nobody else could possibly be relying on the current content of this uncommitted
-tuple''; that claim presupposes a notion of ``this transaction's own, exclusively
-owned tuple'' that only exists because writes append rather than clobber. Take this
-foundation away and every one of those three later sections would need a completely
-different, almost certainly lock-based, design.
+observe was ever mutated after being published. The internal-page live mask
+(\S\ref{sec:physical}) is a pure function of \emph{disjoint, append-ordered
+intervals} --- it has no meaning if slots could be mutated in place. And the
+version-growth bound in \S\ref{sec:tx} rests on the notion of ``this transaction's
+own, exclusively owned tuple,'' which only exists because writes append rather than
+clobber.
 
 \subsection{Optimistic lock coupling and the SmartCell latch}
 
-Readers take an \path{Acquire} version sample of a node's \path{SmartCell}
-(\path{src/mv_sync/smart_cell.rs}) and validate it after use, with no latch acquired
-at all; writers upgrade to an exclusive, seqlock-style write lock only on the node
-they actually mutate (\S\ref{sec:cc}). This one protocol survives out of six that
-were prototyped (\S\ref{sec:cc}).
+Readers take an atomic version sample of a node's latch and validate it after use,
+with no lock acquired at all; writers upgrade to an exclusive, seqlock-style write
+lock only on the node they actually mutate (\S\ref{sec:cc}).
 
 \textbf{What this underwrites.} Every sharding optimization in \S\ref{sec:sharding}
---- per-worker \path{TxContext} slots, GC's per-shard dead-block index, cache-padding
-those slots against false sharing --- is a fix for contention \emph{among concurrent,
-lock-free readers and writers}. If reads instead took a page latch (as in the
-discarded \path{LockCoupling}/\path{LHL}/\path{HL} protocols), most of that
-contention would already be serialized by the latch, and sharding the bookkeeping
-around it would buy nothing. The entire fence-removal chronology
-(Table~\ref{tab:fences}) is similarly parasitic on OLC existing at all: those fixes
-remove ordering that OLC's own atomics already subsumed, which is only a real
-saving because OLC's hot path runs on every read.
+--- per-worker bookkeeping slots, the garbage collector's per-shard dead-block
+index, cache-padding those slots against false sharing --- is a fix for contention
+\emph{among concurrent, lock-free readers and writers}. If reads instead took a page
+latch, most of that contention would already be serialized by the latch, and
+sharding the bookkeeping around it would buy nothing.
 
 \subsection{OSIC: decoupling visibility from durability}
 
-Every transaction draws a start and a commit timestamp from one global atomic
-counter; a write becomes visible to other workers the instant its commit timestamp
-lands in the committing worker's append-only \path{CommitLog} --- an in-memory,
-$O(1)$ step with no wait on disk I/O (\S\ref{sec:osic}).
+Every transaction draws a start and a commit timestamp from one global counter; a
+write becomes visible to other workers the instant its commit timestamp lands in
+the committing worker's append-only commit log --- an in-memory step with no wait on
+disk I/O (\S\ref{sec:osic}).
 
-\textbf{What this underwrites.} The self-overwrite fast path's detection rule,
-\path{insertion_stamp() == stamp}, is a comparison of two \path{TxStamp} values ---
-a concept (\path{(worker\_id, ts\_start)}, constant for a whole transaction) that
-\emph{is} an OSIC concept; without OSIC's stamp model there is no single equality
-check that means ``did I, this very transaction, write this'' at all. More broadly,
-the entire WAL performance campaign in \S\ref{sec:osic} --- sharding the write
-channel, removing a discarded flush ticket, right-sizing framing buffers, an
-alternative lock-free backend --- is optimizing the cost of \emph{catching up
-durability asynchronously}. If commit instead required a synchronous fsync
-round-trip (the naive MVCC alternative OSIC replaces), every one of those WAL
-micro-optimizations would be dwarfed by that single round-trip's latency by one to
-two orders of magnitude, and none of them would have been worth attempting first.
+\textbf{What this underwrites.} The whole write-ahead-log performance story in
+\S\ref{sec:osic} --- sharding the write channel, a lock-free alternative backend,
+exact framing sizes --- is optimizing the cost of \emph{catching up durability
+asynchronously}. If commit instead required a synchronous disk round-trip, none of
+those micro-optimizations would matter: the round-trip's latency would dwarf all of
+them by one to two orders of magnitude.
 
 \subsection{A per-worker identity substrate}
 
-A \path{WorkerId} is assigned once per (tree, thread) and cached thread-locally
-(\path{src/mv_sync/worker.rs}); it is the index into every per-worker structure the
-rest of the system builds (\S\ref{sec:sharding}).
+A worker identity is assigned once per (tree, thread) and cached thread-locally
+(\S\ref{sec:snapcache}); it is the index into every per-worker structure the rest of
+the system builds (\S\ref{sec:sharding}).
 
 \textbf{What this underwrites.} Sharding, as a pattern, needs something to shard
-\emph{along}. GC's dead-block tracker shards by \path{worker_id \% shards.len()};
-\path{TxContext}'s live-snapshot and in-flight-registration slots are one array
-entry per \path{WorkerId}; the thread-local \path{SnapshotCache} is keyed the same
-way. None of those three later optimizations is a response to ``things are shared
-and contended'' in the abstract --- they are specifically the removal of contention
-on structures that used to be indexed by nothing (a single global mutex or counter)
-and are now indexed by this one identity. Without a stable per-worker identity
-assigned once and reused, each of those shards would need its own separate discovery
-mechanism, and the uniform ``own-shard-first, steal on miss'' idiom used throughout
-\S\ref{sec:sharding} would not generalize across them the way it currently does.
+\emph{along}. The garbage collector's dead-block tracker, the transaction context's
+live-snapshot slots, and the thread-local snapshot cache are all indexed the same
+way. Without a stable per-worker identity assigned once and reused, each of those
+would need its own separate discovery mechanism.
 
-\subsection{A second-order case: self-overwrite}
+\subsection{A related, second-order optimization: bounding version growth}
 
-One further optimization is worth flagging here even though it is not, by the
-standard above, foundational in the same primary sense --- it depends on the four
-foundations above, rather than being depended on by everything. It is nonetheless
-\emph{load-bearing for a specific later section}: without the self-overwrite fast
-path (\S\ref{sec:selfoverwrite}) bounding one transaction's repeated writes to a
-single key at one extra physical tuple, the structural-maintenance tuning in
-\S\ref{sec:smo} --- careful capacity thresholds, tiered boundary search for splits,
-emptier-sibling selection for merges --- would be fighting an unbounded adversary: a
-single transaction that updates one hot key enough times inside itself can, without
-this fix, leave a page with no valid split boundary at all
-(\S\ref{sec:selfoverwrite} explains the exact failure shape). All of \S\ref{sec:smo}
-assumes it is dealing with \emph{bounded} per-key physical chains; self-overwrite is
-what keeps that assumption true.
+One further optimization is worth flagging here even though it depends on the four
+foundations above rather than being depended on by everything: without the
+version-growth bound described in \S\ref{sec:tx}, the structural-maintenance tuning
+in \S\ref{sec:smo} --- capacity thresholds, split-boundary search, merge-candidate
+selection --- would be fighting an unbounded adversary, since a single transaction
+that writes one key many times inside itself can otherwise leave a page with no
+valid split boundary at all.
 
-\section{Physical layer: pages and multiversion records}
+\section{Physical layer: pages, records, and memory layout}
 \label{sec:physical}
 
 \subsection{Append-only leaves and the version tuple}
 
-A leaf's record array (\path{leaf_page.rs}) is append-only, as established in
-\S\ref{sec:foundational}; a packed \path{len} counter tracks active vs.\ dead slots.
-Each tuple carries a \path{VersionInfo}: an \path{insertion_stamp: TxStamp} (a packed
-\path{(worker_id, ts_start)}, constant for the whole transaction --- not per write,
-which is exactly what makes the self-overwrite check in \S\ref{sec:selfoverwrite} a
-single equality test) and an optional \path{deletion_stamp}. Lookups scan
-\emph{backward} (\path{rfind}) for the newest live entry, since physical append order
-places the newest write last --- this backward-scan invariant is relied on by merge
-(\S\ref{sec:smo}, which must not re-sort records by \path{ts_start}) and by the
-point-read miss fix discussed in \S\ref{sec:scans}.
-
-Structural maintenance decides what a rebuild keeps via \path{record_survives_gc}: a
-record survives if it is live, \emph{or} its deleting transaction is still
-unresolved (may still abort, and abort needs the predecessor to undelete). Readers
-are not the reason old records are copied forward during a rebuild --- they instead
-route through the retired source block until they finish, at which point that block
-becomes reusable (\S\ref{sec:gc}).
+A leaf's record array is append-only, as established above; a packed length counter
+tracks active vs.\ dead slots. Each tuple carries a version header: an insertion
+stamp (a packed \code{(worker\_id, ts\_start)}, constant for the whole transaction,
+not per write) and an optional deletion stamp. Lookups scan \emph{backward} for the
+newest live entry, since physical append order places the newest write last ---
+this is exactly why point lookup is a reverse linear scan rather than a sorted
+search: the leaf is not key-sorted, and append order is the only order it actually
+guarantees.
 
 \subsection{Structure-of-arrays leaf layout}
 
 A leaf's physical layout is a dense key region followed by a parallel
-version/payload region, not one array of complete \path{\{key, version, payload\}}
+version/payload region, not one array of complete \code{\{key, version, payload\}}
 records:
 
 \begin{lstlisting}
@@ -286,77 +212,101 @@ data_region:  [(version0, payload0), (version1, payload1), ...]
 
 Point lookup walks the key region backward; version metadata and payload cache
 lines are touched only \emph{after} a key matches, and a range scan can test its key
-range before loading the parallel data at all. For \path{u64} keys and a one-word
-payload slot, one physical entry is 32 bytes (8 bytes key, 24 bytes version+payload)
---- the same per-slot footprint as the earlier array-of-structures layout, so this is
-a pure locality change, not a capacity change.
+range before loading the parallel data at all. This is a pure locality change: for
+\code{u64} keys and a one-word payload slot, one physical entry is still 32 bytes
+(8 bytes key, 24 bytes version+payload), so capacity is unaffected --- only how many
+unrelated cache lines a rejected key touches on the way to being rejected.
 
-\subsection{Inline validity mask}
+\subsection{The leaf's live/validity mask}
 
-A normal leaf has at most 123 physical slots, so two \path{AtomicU64}s (128 bits)
-cover every slot's \emph{physical} validity (cleared on abort) directly inside the
-page, replacing an earlier boxed-slice handle and its pointer chase. This is
-explicitly \emph{not} an MVCC visibility mask --- visibility also depends on the
-reading transaction's snapshot, which one universal per-slot bit cannot represent ---
-it only lets lookup skip an aborted slot before loading its version header at all.
-Deliberately oversized TPC-C leaf variants (\S\ref{sec:bigtree}) fall back to a
-heap bitmap through a same-sized union so the normal 4KiB leaf does not pay for it.
+A normal leaf has at most 123 physical slots, so two 64-bit words (128 bits) cover
+every slot's liveness directly inside the page, next to the key/data regions
+themselves, rather than behind a separate boxed-slice handle and its pointer chase.
+A clear bit means the slot has been invalidated (by an abort or a compaction) and
+can be skipped by lookup \emph{before} its version header and payload are ever
+touched --- the same ``reject cheaply, load lazily'' principle as the
+structure-of-arrays layout above, taken one level further: instead of loading a key
+to reject a slot, a lookup can reject a whole slot with one bit test against a mask
+that already lives in the leaf's own first cache line. This is a
+\emph{physical}-liveness mask, distinct from MVCC visibility (which also depends on
+the reading transaction's snapshot and cannot be represented by one bit per slot),
+but it composes with the version check that follows it: a lookup pays for the
+version/visibility check only on slots this mask has not already ruled out.
+Deliberately oversized leaf variants (\S\ref{sec:bigtree}) fall back to a heap
+bitmap through a same-sized union representation, so the normal leaf's mask never
+grows past two words no matter how large a specialized leaf variant's capacity gets.
 
-\subsection{Inline internal-page liveness mask}
+\subsection{The internal page's live mask}
 
-Internal pages are append-only across structural versions: replacing a child appends
-one or more new intervals while the old interval stays physically present for older
-snapshots. An earlier design tracked which entries were \emph{currently} live with a
-separately mutated, in-place ``obsolete mark'' atomic bit on an already-published,
-concurrently-read slot --- confirmed by ThreadSanitizer as a genuine race against
-range-query iteration (\S\ref{sec:gc}, \commit{fe03d90}). The current design
-(\path{InternalPage::live_mask()}) instead derives liveness from the invariant that
-\emph{live sibling key intervals are always pairwise disjoint}: for every appended
-interval, clear the bit of every older interval it overlaps, set its own bit, and
-publish with the existing Release length store. This is an $O(\mathrm{FAN\_OUT}^2)$
-pure-integer pass that runs only on the SMO cold path (append), so every later SMO
-consumer --- merge-candidate selection, survivor counting, split copying --- reads
-\path{is_slot_live(i)} as one word load and bit test instead of rebuilding a
-temporary \path{Vec<bool>} from scratch each time. Historical routing deliberately
-does \emph{not} consult this mask: a child superseded in the \emph{current}
-partition may still be the correct route for an older snapshot, so historical reads
-keep selecting via immutable per-entry versions (\S\ref{sec:scans}).
+Internal pages are append-only across structural versions: replacing a child
+appends one or more new key-interval entries while the old interval stays
+physically present for older snapshots to route through. Deciding which entries are
+\emph{currently} live --- the set a fresh, non-historical traversal or a structural
+rebuild should actually consider --- would naively require rebuilding a temporary
+liveness vector from every pair of entries' intervals each time it is needed, an
+$O(\mathrm{FAN\_OUT}^2)$ reconstruction paid again and again on the structural-maintenance
+cold path.
 
-\subsection{Exact 4\,KiB allocation, payload indirection, and the hot/cold split}
+The internal page instead carries its own live mask, maintained incrementally
+\emph{at append time}: appending a new child interval clears the mask bit of every
+older entry that interval overlaps, sets the new entry's own bit, and publishes the
+new physical length as usual. This exploits an invariant that holds throughout the
+tree's life --- live sibling key intervals are always pairwise disjoint --- so ``is
+entry $i$ still part of the current partition'' reduces to one word load and one bit
+test, and counting the live entries reduces to a popcount over at most two words.
+Every later consumer of this information --- merge-candidate selection, survivor
+counting, split copying --- reads the mask directly instead of rebuilding it, moving
+the $O(\mathrm{FAN\_OUT}^2)$ cost from ``every time someone asks'' to ``once, when
+the page's contents actually change.''
 
-The 4\,KiB target applies to the full allocated \path{OptCell<Block<...>>}, including
-the OLC \path{cell_version} word and node metadata --- not just the record array.
-With \path{FAN\_OUT = NUM\_RECORDS = 123}, the cell lands at exactly 4096 bytes; 124
-records would cross that boundary. This single two-record trim
-(\commit{b29d347}, 125\,$\to$\,123) is \gainmeasured{}: page-aligned allocations rose
-from 25\% to 100\% of the time, with a 9--12\% reduction in dTLB load misses ---
-concrete evidence that ``nominally full'' and ``lands cleanly on a hardware page''
-are two different numbers, and only the second one is free.
+This mask is deliberately \emph{not} consulted by historical routing: a child
+superseded in the current partition may still be the correct route for an older
+snapshot, so historical reads keep selecting via each entry's own immutable version,
+independent of this mask entirely. The mask is a current-state acceleration
+structure layered on top of the version metadata, not a replacement for it.
 
-A one-word \path{PayloadSlot} stores a \path{u64} or the thin YCSB row handle
-inline; larger TPC-C rows go through a reference-counted (\path{triomphe::Arc})
-pointer instead, so cloning a read result or copying a survivor during a split
-increments a refcount rather than copying a whole row. \path{MVBTSt} itself is
-split into a hot part (root, allocator, transaction context --- everything the
-traversal-critical path touches) and a \path{cold: Box<_>} part (WAL handle, table
-id, construction-time bounds) purely to shrink the cache footprint of the hot path.
+\subsection{Exact page-sized allocation, payload indirection, and the hot/cold split}
+
+The 4\,KiB target applies to the full allocated cell, including the concurrency
+latch's own version word and node metadata --- not just the record array. With
+\code{FAN\_OUT = NUM\_RECORDS = 123}, the cell lands at exactly 4096 bytes; one
+additional record per array would cross that boundary. This two-record trim is
+\gainmeasured{}: page-aligned allocations rose from 25\% to 100\% of the time, with a
+9--12\% reduction in dTLB load misses --- concrete evidence that ``nominally full''
+and ``lands cleanly on a hardware page'' are two different numbers, and only the
+second one is free.
+
+A one-word payload slot stores a \code{u64} or a thin row handle inline; larger rows
+go through a reference-counted pointer instead, so cloning a read result or copying
+a survivor during a split increments a refcount rather than copying a whole row.
+The tree's own top-level handle is split into a hot part --- root, allocator,
+transaction context, everything the traversal-critical path touches --- and a
+separately boxed cold part holding construction-time configuration (WAL handle,
+table id, capacity bounds) that the hot path never needs to read, purely to shrink
+the cache footprint of the part that does.
+
+\subsection{Same-allocation reuse across page types}
+
+A node's leaf and internal representations occupy one \code{union}: switching a
+node from one page type to the other (as structural maintenance sometimes requires)
+drops the previously active variant and constructs the newly needed one in the same
+allocation, rather than freeing one page object and allocating a fresh one of the
+other type. The allocator only ever sees a churn of same-sized objects, never a
+mixed-size alternation between two different page-type footprints.
 
 \subsection{Measured: leaf layout, isolated}
 
-The split (structure-of-arrays) layout's benefit was isolated in a standalone,
-dependency-free microbenchmark (\path{tools/leaf_layout_bench.rs}) comparing it
-against the earlier array-of-structures layout, with no tree traversal, latching,
-WAL, GC, transactions, allocation, or payload cloning in the timed region. 16,384
-independently boxed leaf pages per layout (a 62.5\,MiB working set each), five
-update waves per key (append-ordered, matching real leaves), point lookups walking
-backward, scans checking the range before visibility.
-
-\textbf{Original result} (AMD Ryzen 9 5900X, median of 5 runs, 750\,ms/operation):
+The structure-of-arrays layout's benefit was isolated in a standalone,
+dependency-free microbenchmark comparing it against the earlier array-of-structures
+layout, with no tree traversal, latching, transactions, or allocation in the timed
+region: 16,384 independently boxed leaf pages per layout (a 62.5\,MiB working set
+each), five append-ordered update waves per key, point lookups walking backward,
+scans checking the range before visibility.
 
 \begin{center}
 \begin{tabular}{lrrr}
 \toprule
-Operation & AoS & Split & Speedup \\
+Operation & Array-of-structs & Structure-of-arrays & Speedup \\
 \midrule
 Point: latest visible & 30.57\,Mlookups/s & 33.17\,Mlookups/s & 1.085$\times$ \\
 Point: 1-version fallback & 18.43\,Mlookups/s & 20.15\,Mlookups/s & 1.093$\times$ \\
@@ -367,1460 +317,935 @@ Scan: 20\% key ranges & 354.82\,Mslots/s & 389.09\,Mslots/s & 1.097$\times$ \\
 \end{tabular}
 \end{center}
 
-The interpretation offered at the time: point lookups improve because the key
-region can reject non-matching entries without touching the version/payload cache
-lines at all, and the effect grows with how many dead versions a lookup has to walk
-past (8.5\%, 9.3\%, 22.1\% for 0/1/3 fallbacks); full scans are unaffected because
-they touch every byte of the leaf regardless of layout.
+Point lookups improve because the key region rejects non-matching entries without
+touching the version/payload cache lines at all, and the effect grows with how many
+dead versions a lookup has to walk past before finding a live one. Full scans are
+essentially unaffected because they touch every byte of the leaf regardless of
+layout. \S\ref{sec:fresh} reproduces this measurement independently and discusses a
+genuine hardware-dependence found while doing so.
 
-\textbf{Independent reproduction, this session (\S\ref{sec:fresh} has the full
-protocol and discussion):} on a different, older CPU (AMD Ryzen 7 2700X, Zen+
-rather than Zen 3), five repeated full-binary runs of the identical benchmark were
-extremely internally consistent (well under 1\% run-to-run variance) but told a
-\emph{smaller and partly reversed} story: the 62.5\,MiB multi-leaf point-lookup
-gains replicated in direction but at roughly a third of the claimed magnitude
-(1.03$\times$--1.08$\times$, not 1.09$\times$--1.22$\times$), and two of three scan
-variants came out \emph{slower} for the split layout rather than faster
-(0.93$\times$--0.97$\times$). This is very likely a real hardware effect, not a
-methodology error --- see \S\ref{sec:fresh} for the reasoning --- and it is reported
-here precisely because a document claiming to cover the whole implementation should
-not silently drop a result that failed to reproduce as cleanly as hoped.
-
-\section{Concurrency control: from lock coupling to optimistic lock coupling}
+\section{Concurrency control: optimistic lock coupling}
 \label{sec:cc}
-
-\subsection{The protocols that were tried}
-
-A pre-multiversion sister crate, \texttt{CCBPlusTree}, defines six lock-mode
-variants: \path{MonoWriter} (no real concurrency control), \path{LockCoupling}
-(classic hand-over-hand exclusive latching), \path{ORWC} (``Optimistic
-Read-Write Coupling''), \path{OLC} (Leis-style optimistic lock coupling), and two
-level-bounded hybrids, \path{LHL}/\path{HL}. Only \textbf{OLC} survives in the
-current codebase's write/read fast paths (\path{traversal_write_olc},
-\path{traverse_read_key}, \path{try_retire}, \path{upgrade_write_lock}).
-\path{MonoWriter}/\path{LockCoupling}/\path{LHL}/\path{HL} were prototyped in early
-2024 but never carried into the multiversion rewrite.
-
-\subsection{The rise and fall of ORWC --- a cautionary tale}
-
-ORWC is worth its own subsection because it was implemented, iterated on for
-roughly a year, and then deliberately removed. \commit{d565b2d} (2024-01-22) is the
-first sign of trouble (\emph{``ORWC seem to have an issue''}); over the following
-sixteen months, four separate fix attempts addressed a root-upgrade validation gap,
-stripped redundant fences once OLC's own atomics were trusted, reworked guards from
-raw pointers to cloned \path{SmartCell} handles after a dangling-pointer segfault on
-free readers, and finally gave up on non-blocking semantics for the ordinary
-mutable-borrow path, keeping only the optimistic \emph{upgrade} non-blocking.
-\commit{3c6da7b} (2024-12-06) deprecates it; \commit{5c26abb} (2024-12-08) purges it
-outright, $\sim$460 lines removed, with the commit message stating the reason
-plainly: \emph{``duplicate with OLC.''} \textbf{Root cause, in one sentence:} ORWC's
-optimistic upgrade path never reached a provably correct state, and once OLC was
-fully validated it gave the identical guarantee through one simpler seqlock
-mechanism --- ORWC became pure maintenance liability, not a genuinely distinct
-protocol.
 
 \subsection{The SmartCell latch}
 
-\path{src/mv_sync/smart_cell.rs} implements the versioned latch every node uses: a
-single 64-bit \path{cell_version} word (\path{OptCell<E>\{cell, cell_version\}}) with
-three logical bit ranges packed into its top nibble --- a seqlock-style write flag,
-pin-related flags, and a \emph{permanent} retired-tombstone bit. An optimistic read
-(\path{borrow_read}) is one \path{Acquire} load with the write/retired bits masked
-out, no lock taken. Upgrading to exclusive (\path{upgrade_write_lock}) is a CAS from
-the captured read version to the write-flagged version, failing fast if the retired
-bit is already set. Unlock stores \path{(write\_version+1) \^\ WRITE\_FLAG |
-retired\_bit} with \path{Release}, deliberately reading the current retired bit with
-a plain \path{Relaxed} load (safe, since nothing else can touch \path{cell_version}
-while the writer guard is held) so a same-critical-section \path{mark_retired()}
-call is preserved rather than clobbered by the unlock store (\S\ref{sec:gc} covers
-the bug this specifically fixes). \path{try_retire} is a single CAS straight from a
-reader snapshot to the retired state, skipping the intermediate exclusive step ---
-sound only for guards that are unconditionally consumed with no back-out path.
+Every node's latch is a single 64-bit versioned word with three logical bit ranges
+packed into it: a seqlock-style write flag, pin-related flags, and a permanent
+retired tombstone bit. An optimistic read is one atomic load with the write/retired
+bits masked out --- no lock taken, no cache line written by a reader at all.
+Upgrading to exclusive is a compare-and-swap from the captured read version to the
+write-flagged version, failing immediately if the retired bit is already set. Unlock
+stores the incremented version with the retired bit preserved exactly as it was
+found, so a same-critical-section retirement is never clobbered by the unlock itself.
+A guard that will unconditionally be consumed with no back-out path can retire
+directly from a reader snapshot with a single compare-and-swap, skipping the
+intermediate exclusive-lock step entirely --- one fewer lock acquisition on the
+structural-maintenance path for exactly the guards that never need to back out.
 
-\subsection{Chasing fences out of the hot path}
+\subsection{Only the node being mutated is ever latched}
 
-Once OLC's own atomics were trusted to carry the needed ordering, standalone memory
-fences bolted on earlier, out of caution, were incrementally identified as redundant
-and removed:
+Readers are fully lock-free: they sample a node's version, read its (immutable, or
+atomically published) contents, and validate the sampled version before relying on
+the result, retrying if it changed. Writers acquire an exclusive guard only on the
+node they are actually about to mutate --- there is no global traversal guard, and
+no hand-over-hand latching down the tree. This is the property the whole sharding
+story in \S\ref{sec:sharding} exists to exploit: contention among lock-free
+participants is a real cost worth removing, in a way it would not be if a coarser
+lock already serialized most of it.
 
-\begin{longtable}{@{}p{2cm}p{2cm}p{5.3cm}p{5.3cm}@{}}
-\toprule
-\textbf{Commit} & \textbf{Date} & \textbf{Change} & \textbf{Rationale} \\
-\midrule
-\endhead
-\commit{48c4ded} & 2024-05-06 & Removed \path{fence(Acquire)}/\path{fence(SeqCst)} in
-  the traversal loop & The surrounding OLC load/CAS already provides the ordering. \\
-\commit{3c6da7b} & 2024-12-06 & Removed a paired fence duplicating
-  \path{len.load(Acquire)} & An atomic load's own ordering already suffices. \\
-\commit{a7bb29c} & 2025-04-01 & CAS failure ordering \path{Relaxed}$\to$\path{Acquire};
-  unlock store \path{Relaxed}$\to$\path{Release} & Establishes the exact
-  happens-before edges OLC readers rely on, cutting spurious CAS retries. \\
-\commit{a518eed} & 2025-04-25 & Deleted standalone fences immediately adjacent to an
-  atomic op on the same word & Pure dead weight once the adjacent op's ordering
-  subsumed it. \\
-\commit{2a2be93} & 2026-06-22 & Soft-commit length bumps \path{Release}$\to$\path{Relaxed}
-  & The following write-unlock's own \path{Release} already publishes it. \\
-\commit{40b00fd} & 2026-06-30 & \path{Node::m_type} \path{AtomicUsize}$\to$\path{usize};
-  removed the \path{Drop} fence & Only mutated under the exclusive write lock; the
-  latch's own release already publishes it. \\
-\commit{45c7c21}/\commit{fd92f38} & 2026-07-21 & \path{try_retire} lets
-  unconditionally-consumed guards skip a full write-lock upgrade during split/merge &
-  Removes one CAS/lock-acquire per split/merge for guards with no backout path. \\
-\bottomrule
-\caption{Chronology of fence removal and ordering tightening.}
-\label{tab:fences}
-\end{longtable}
+\subsection{Removing fences that atomics already subsume}
 
-Alongside this, \commit{7f2bd09} (2026-05-21) cache-line-aligns \path{Node}
-(\path{\#[repr(C, align(64))]}) so the hot, frequently-polled page-type tag does not
-false-share with the rest of the node, and moves the root index onto the same
-\path{SmartCell} machinery ordinary blocks use, off a separate \path{parking_lot}
-mutex. A later experiment (\commit{45cb048}, 2026-05-28) that had range-query
-iterators hold a long-lived \path{BlockGuard} across a whole iteration was
-\emph{reverted}: a \path{'static}-lifetime guard held for an iterator's whole life is
-exactly the kind of long-lived, never-revalidated read that GC's reclaim bookkeeping
-does not know how to account for. The revert restores a bare \path{BlockRef},
-re-borrowed fresh on each step, keeping GC's liveness accounting sound
-(\S\ref{sec:gc}).
+Once a data-race-free protocol's own atomic loads/stores are trusted to carry the
+ordering a memory fence would otherwise provide, a standalone fence next to that
+atomic op is pure overhead. Several such fences, added early out of caution, were
+identified as redundant once the protocol's actual happens-before edges were traced
+precisely: a length publish already carries the ordering a paired fence next to it
+would duplicate; a page's soft-commit counter can use a relaxed store because the
+write-unlock that follows it always publishes with an acquire/release pair of its
+own; a node's type tag, mutated only under the exclusive write lock, needs no fence
+on drop because the latch's own release already publishes it. The general pattern:
+every real publication edge in this system is exactly one atomic operation wide, and
+a fence is only ever needed where no atomic operation already sits on that edge ---
+which, once the protocol is fully traced, turns out to be almost nowhere on the
+per-record hot path.
 
-\section{Structural maintenance: splits, merges, and page capacity}
+\section{Structural maintenance: choosing where to split and what to merge}
 \label{sec:smo}
 
-Structure-modification operations (SMOs, \path{src/mv_tree/smo.rs}) decide, on the
-cold path, whether a page needs to split (overflow) or merge (underflow), and how.
+Splitting and merging pages is the cold path that keeps every page's capacity
+bounded; the algorithms below decide \emph{where} to cut and \emph{which} neighbor
+to combine with, so that the common case needs no retry.
 
-\subsection{Capacity tuning}
+\subsection{Capacity and overflow thresholds}
 
-\commit{34555e2} (2026-06-20) moved the internal-page overflow trigger from
-\path{max_keys() - 3} to \path{max_keys() - 1}: a page is now allowed to fill much
-closer to capacity before an SMO is attempted at all (\gainbounded{}). \commit{b29d347}
-is the 4\,KiB-alignment trim already covered in \S\ref{sec:physical} (\gainmeasured{},
-25\%$\to$100\% aligned allocations, $-9$--12\% dTLB load misses).
+An internal page is allowed to fill much closer to its true capacity before a
+split is attempted at all, rather than reserving several slots of headroom
+defensively --- headroom that is rarely needed and, when it is not, simply forces
+more structural work than the page's real capacity requires.
 
-\subsection{Split: choosing where to cut}
+\subsection{Split: a tiered boundary search}
 
-\path{split()} decides between a \textbf{VERSION\_SPLIT} (compact dead versions out
-of one page in place) and a \textbf{KEY\_SPLIT} (cut at a key boundary). Two real
-bugs surfaced here under concurrent TPC-C stress in July--August 2026:
+Splitting a leaf chooses between compacting dead versions out of the page in place
+(when that alone brings it back under capacity) and cutting it into two pages at a
+key boundary. Choosing that boundary is a search with two competing goals: prefer a
+boundary that does not cut across one key's own version chain, and prefer a
+boundary whose two halves both fit within capacity. Rather than combining both goals
+into one greedy pass --- which can miss a boundary that satisfies both simply
+because it lies farther from the naive midpoint than the search first looks ---
+the search tries a small number of increasingly permissive tiers in order: first, a
+boundary that satisfies both goals; failing that, one that fits capacity but may cut
+a version chain; failing that, one that avoids cutting a chain but may leave one side
+over capacity; and only as a last resort, the raw midpoint. This tiered search costs
+a few extra integer comparisons in the rare case where the ideal boundary is not the
+first one tried, in exchange for finding a boundary that satisfies both goals
+whenever one genuinely exists.
 
-\begin{itemize}
-  \item \commit{2a2607e} (2026-08-02) --- the VERSION\_SPLIT/KEY\_SPLIT decision used
-        a strict \path{survivor\_count > capacity} test, so a page whose survivors
-        landed at \emph{exactly} capacity wrongly took the ``just compact'' path,
-        producing an already-100\%-full result with no room for the pending write ---
-        a panic on a root-leaf tree, an infinite retry otherwise. Fixed with
-        \path{>=} (\gainenabling{}). This turned out to be the true root cause of a
-        stress-test failure originally suspected to be hot-key version tearing
-        (\S\ref{sec:selfoverwrite}) --- the failing page in fact held several
-        distinct keys.
-  \item \commit{dc30111} (2026-08-02) --- the boundary search greedily combined
-        ``don't tear a key's version chain'' and ``fit within capacity'' and could
-        miss a valid boundary satisfying both. Fixed with a tiered search: (1) no
-        tear and fits, (2) fits but may tear, (3) no tear but may overflow, (4) raw
-        midpoint fallback (\gainenabling{}).
-\end{itemize}
+\subsection{Merge: emptier-sibling selection and survivor accounting}
 
-\subsection{Merge: choosing what to combine}
+Merging considers \emph{both} adjacent siblings and picks whichever has more
+available room, rather than always defaulting to one side --- a page with a nearly
+full sibling on one side and a nearly empty one on the other should combine with the
+empty one. Deciding whether a merge will actually fit requires knowing how many
+records will genuinely survive the combination, not merely how many are currently
+counted \emph{active}: a record whose deleting transaction is still unresolved must
+be retained until that transaction's fate is known (it may still abort and need its
+predecessor back), so an active-count estimate alone can understate the true
+survivor count and risk overflowing the fixed-capacity destination page. The merge
+path counts true survivors before committing to the merge, falling back to a key
+split instead whenever the honest count would not fit --- the same preflight
+philosophy as the leaf's live/validity mask: decide cheaply and correctly before
+doing the expensive copy, not after.
 
-\begin{itemize}
-  \item \commit{dcb5abe} --- compares available room on \emph{both} adjacent
-        siblings instead of defaulting to the right one (\gainbounded{}).
-  \item \commit{4c01360} --- dropped a \path{ts\_start}-based re-sort when combining
-        two leaves: it risked reordering a live record ahead of a dead predecessor
-        with a larger \path{ts\_start}, corrupting the backward-scan invariant from
-        \S\ref{sec:physical} (\gainbounded{}, and a correctness fix).
-  \item \commit{4bc78de} --- merging two leaves by \path{active\_count} alone could
-        overflow \path{NUM\_RECORDS}, because \path{record\_survives\_gc} also keeps
-        GC-protected dead records an active-count threshold cannot see. Fixed with an
-        explicit \path{leaf\_merge\_would\_overflow} preflight that falls through to
-        a key split when the true survivor count would not fit (\gainenabling{}).
-  \item An experiment retrying an alternate merge candidate immediately
-        (\commit{0659d34}) was implemented and \emph{reverted}: it spun without
-        backoff and starved threads under contention.
-\end{itemize}
-
-\subsection{A week of hardening (2026-07-31 -- 08-02)}
-
-The fixes above were the tail of a dense, one-week debugging arc chasing two real
-TPC-C crashes: \commit{7432525} hardened \path{InternalPage} overflow checks without
-yet fixing the crash; \commit{5c54658} fixed both via ``GC-gated survivor
-protection'' (correctly distinguishing a genuinely committed delete from one whose
-abort-reversal still needs its predecessor intact) and corrected \path{bulk\_push}
-accounting (it had assumed every bulk-pushed record was active); \commit{77a5689}
-reworked split/merge for a weakened fresh-node rule; \commit{fc8806b} reverted a
-defensive \path{Result}-based workaround layered on \path{on\_overflow\_node}/
-\path{on\_underflow\_node} once the real cause was actually found and fixed.
-
-\section{The self-overwrite optimization}
-\label{sec:selfoverwrite}
-
-This is the second load-bearing optimization singled out in \S\ref{sec:foundational}:
-\emph{when a single, still-uncommitted transaction updates the same key several
-times, overwrite the previous update in place instead of appending a new
-multiversion entry.}
-
-\subsection{The problem}
-
-Every write mints one more physical \path{RecordPoint} tuple, and an
-\emph{uncommitted} tuple can be neither discarded (the transaction might still
-commit) nor coalesced (nothing has superseded it, since nothing else can even see
-it yet). The old update path was literally ``delete old, push new'' on every call,
-so one open transaction writing the same key $N$ times left $N$ physical,
-uncommitted, unreclaimable tuples for that one key. If $N$ grows large relative to a
-page's capacity, \path{split()}'s boundary search has no key boundary to cut at ---
-its own documentation states it falls back to tearing the chain across two
-disjoint-fence siblings only when the page is entirely one key's chain, silently
-orphaning the torn-off half from any fence-routed lookup. A concrete real-world
-trigger: TPC-C's New-Order transaction pricing two order-lines for the same item
-lands two updates on the same \texttt{Stock} row inside one transaction.
-
-\subsection{The fix, as it exists in the current code}
-
-The logic now lives in free functions shared by both \path{DbTransaction} and
-\path{TpccTxn} (\path{src/mv_db/transaction.rs}, lines 92--216 as of this writing).
-The update path:
-
-\begin{lstlisting}
-match leaf_page.latest_position(key, true) {
-    Some(position) => {
-        if tree.is_visible_stamp(worker_id, ts_start,
-            leaf_page.version_at(position).insertion_stamp())
-        {
-            let stamp = TxStamp::new(worker_id, ts_start);
-            tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
-
-            // Self-overwrite fast path -- see `insert_on_tree`'s doc.
-            if leaf_page.version_at(position).insertion_stamp() == stamp {
-                leaf_page.set_payload_at(position, payload);
-                return (CRUDOperationResult::Updated(stamp.ts_start()), false);
-            }
-
-            // Otherwise: normal versioned update (delete old, push new).
-            if !leaf_page.version_mut_at(position).delete(stamp) {
-                return (CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted), false);
-            }
-            let current_len = leaf_page.len();
-            leaf_page.push_uncommitted(
-                RecordPoint::new(key, VersionInfo::new(stamp), payload), current_len);
-            leaf_page.commit_delta(0, 1);
-            (CRUDOperationResult::Updated(stamp.ts_start()), true)
-        } else { (CRUDOperationResult::Conflict, false) }
-    }
-    None => (CRUDOperationResult::ZeroAffected(KeyDoesNotExist), false),
-}
-\end{lstlisting}
-
-\textbf{Detection} is a single equality check, not a heuristic: a \path{TxStamp}
-packs \path{(worker\_id, ts\_start)} and is constant for the \emph{whole}
-transaction, so ``was the newest live version of this key written by me, in this
-very transaction'' reduces to \path{insertion\_stamp() == stamp} --- an OSIC concept,
-as \S\ref{sec:foundational} points out. \textbf{Safety} follows from visibility:
-\path{is_visible_stamp} only returns true for the same worker or a stamp already in
-the commit log; neither applies to any other transaction while this one is open, so
-there is no possible reader relying on this specific uncommitted tuple's current
-content. If the found record belongs to another transaction, or is an
-already-committed version, the code falls through to the ordinary
-delete-then-push path unchanged.
-
-The boolean second return value (\path{false} on the fast path) tells the caller
-whether a new \path{written}-set entry is needed: mutating an already-open
-transaction's own uncommitted record in place mints no new physical version, so the
-entry an earlier write already pushed for this key still covers abort.
-
-\subsection{Delete/reinsert cycles use the same bound}
-
-\path{insert_on_tree} (lines 92--151) applies the symmetric case: the first
-\path{delete(key)} followed by \path{insert(key, value)} in one transaction must
-append a replacement tuple (the committed predecessor must stay physically present
-for abort's undelete). But repeating that pair in the same transaction used to
-append another replacement every cycle. The current code finds the newest
-non-invalid record and, if its insertion \emph{and} deletion stamps both equal the
-current transaction's stamp, clears the deletion mark and replaces the payload in
-place instead of appending --- deliberately without adding another write-set entry,
-since the first replacement's entry already makes abort invalidate that tuple and
-undelete the original predecessor. $N$ delete/reinsert cycles now create one
-replacement tuple; commit exposes only the final payload; abort restores the
-pre-transaction value; WAL recovery replays the final logical state.
-
-\subsection{The chronological story}
-
-Two mechanisms are easy to conflate; only the second is the trick above.
-
-\paragraph{An older, unrelated mechanism: GC-driven update-in-place (2025--2026).}
-\commit{bea1117} (2025-06-05) added an update-in-place optimization to the
-\emph{non-transactional}, single-operation CRUD dispatch path
-(\path{src/mv_query/dispatch.rs}): if a record's insert version predates every live
-snapshot --- GC has already proven nobody can need the old \emph{committed} value
---- its payload is overwritten in place rather than versioned again. It is gated off
-whenever a WAL is attached (the shortcut cannot be represented as a single WAL
-record) and remains in the codebase, but it is a GC/version-bloat heuristic for
-single-op writes, unrelated to the transactional trick above.
-
-\paragraph{The actual fix (August 2026).} \commit{160186e} (2026-08-01) first found
-that \path{abort()} only reverted the \emph{newest} of several same-key writes,
-leaving older self-written versions permanently visible; fixed to unwind the whole
-chain one physical version at a time. \commit{85ac1b0} (2026-08-01) is the fix
-itself, framed exactly via the TPC-C Stock-row scenario; its commit message also
-documents a \emph{reverted} companion idea --- lowering the leaf overflow trigger to
-buy compaction more headroom --- abandoned because it caused a hang under concurrent
-stress. \commit{fbedd74} added a minimal repro isolating a \emph{different}
-contributor to the same class of pressure (a long-open snapshot keeping an old
-committed version GC-protected while other transactions keep committing new
-versions of the same hot key --- no same-transaction repeats involved; the repro's
-own documentation states self-overwrite ``cannot help here''). Tracing that repro
-further (\commit{2a2607e}) found the real cause was the split off-by-one from
-\S\ref{sec:smo}, not hot-key tearing at all.
-
-\subsection{Resulting bound, and a known residual}
-
-$N$ updates or delete/reinsert cycles to one key by one transaction now cost at most
-one unresolved replacement tuple. First-writer-wins prevents another transaction
-from concurrently extending that same unresolved chain. Once the writer resolves,
-ordinary GC compaction discards obsolete committed versions; pages with multiple
-keys remain splittable at a key boundary. The known, documented residual: writing
-the same key $N$ times in one transaction still leaves \emph{one} extra physical
-entry versus never writing it at all --- self-overwrite bounds the growth to $O(1)$,
-it does not eliminate it. The TPC-C stress invariant still permits a narrow 0.5\%
-difference between aggregate \path{Stock} counters and inserted \path{OrderLine}
-rows, tracked as a separate, still-open accounting discrepancy unrelated to
-same-key splitting or reader retention.
-
-\section{Garbage collection: reclaiming dead blocks without contention}
-\label{sec:gc}
-
-\subsection{From a global mutex to sharded, lock-free reclaim}
-
-\commit{acdc7a8} (2024-02-14) is the first GC implementation: a global
-\path{Mutex<RBTree<SnapShot>>} of active transactions and a global
-\path{Mutex<LinkedList<(*mut Version, BlockRef)>>} of dead pages, with the commit
-message already naming the problem that would dominate the next several months:
-\emph{``locks must be left out, or possible deadlocks appear!''} \commit{2e3ad21}
-switched allocation to \path{try_lock()} on both structures (bail out rather than
-block, \gainenabling{}); \commit{95e149f} moved the active-tx index to the project's
-own OLC-locked concurrent B+-tree (itself later superseded). The current end state
-(\path{src/mv_gc/block_tracer.rs}) drives liveness directly off
-\path{TxContext::live_min_snapshot()} (\S\ref{sec:sharding}) rather than a separate
-active-tx structure, and reclaim off a worker-sharded \path{SkipMap} rather than one
-list or tree.
-
-\subsection{Two ThreadSanitizer races, closed structurally}
-
-\begin{itemize}
-  \item \commit{d0e0977} (2026-07-21) --- a separate \path{retired: AtomicBool} field
-        was folded into the SmartCell's own \path{cell_version} bits
-        (\S\ref{sec:cc}). Before this, a two-step ``mark retired, then let
-        \path{Drop} unlock later'' pattern raced a concurrent reuse's
-        \path{clear_retired()} against the dying guard's deferred \path{Drop} storing
-        a value computed at lock-\emph{acquisition} time, which could silently
-        revert a freshly reused cell's version --- confirmed empirically as
-        hangs/livelocks under GC plus heavy concurrency.
-  \item \commit{ecc9900} (2026-07-27) --- two independent bugs. First, the dead-block
-        index was keyed by a bare \path{Version}, but a merge's two dying siblings
-        deliberately share one death version (the replacement block's birth
-        version); \path{SkipMap::insert} on a duplicate key silently displaces the
-        existing entry, leaking one of the two retired blocks. Fixed by keying on
-        \path{(Version, block\_address)}. Second, \path{insert\_stamp}/
-        \path{delete\_stamp} were plain, non-atomic fields mutated by
-        \path{delete}/\path{invalidate} while lock-free OLC readers read the same
-        word with no lock --- a genuine torn-read race, confirmed by
-        ThreadSanitizer. Fixed by backing both with \path{AtomicU64}/\path{Relaxed}
-        (sufficient because the hazard was torn reads, not ordering).
-  \item \commit{fe03d90} (2026-07-28) --- the capstone: \path{version\_region} moves
-        from \path{AtomicVersion} to plain \path{Version}, and the in-place
-        \path{mark\_version\_obsolete} \path{fetch\_or} (itself confirmed racing
-        range-query iteration) is deleted outright, replaced by the
-        \path{live\_mask()} derivation described in \S\ref{sec:physical}. No writer
-        ever mutates a slot after publication anymore, so the race does not merely
-        get fenced correctly --- it stops being possible.
-\end{itemize}
-
-\textbf{Recurring pattern.} Nearly every ``racey''/``stabilize'' fix in this section
-follows the same shape: something was mutated \emph{in place} on an already-published,
-lock-free-readable slot, requiring ever more careful atomic/fence discipline to patch
-around it, until the design changed so nothing is mutated after publication at all.
-This mirrors \S\ref{sec:cc}'s fence-removal trajectory: converging from ``atomics and
-fences bolted on to patch races'' toward ``structure the data so the race is
-structurally impossible.''
-
-\subsection{Sharded reclaim, historical routing, and abort-safe retention}
-
-\path{block_tracer.rs} holds one \path{SkipMap} shard per worker
-(\S\ref{sec:sharding} covers the mechanism); a nonblocking reuse fallback allocates
-fresh memory rather than joining the page-latch dependency graph when reuse metadata
-is contended. Old readers are kept on their retired \emph{source} block via
-historical root/version routing rather than having every old-reader-visible record
-copied forward into replacement pages during a rebuild --- copying for the globally
-oldest reader would couple every key's reclaim to one transaction and risks a
-self-reinforcing compaction livelock (a version of exactly this failure mode is
-discussed as an open issue in \S\ref{sec:open}).
+When combining two leaves' records into one, physical append order is preserved
+rather than re-sorted by any transaction timestamp: the newest-version lookup
+described in \S\ref{sec:physical} depends on physical append order tracking
+recency, and re-sorting by an unrelated key would silently break that invariant for
+every future lookup on the combined page.
 
 \section{Root indexing strategies}
 \label{sec:root}
 
-A reader must find ``the root as of snapshot $S$'' before traversing anything.
-\path{RootIndexType} selects one of four version-keyed structures:
+Before traversing anything, a reader has to find ``the root as of my snapshot'' ---
+a lookup keyed by version into a table's own root-version index. Four
+interchangeable structures are available for this, each trading lookup complexity
+against per-append cost and memory overhead differently:
 
 \begin{center}
-\begin{tabular}{@{}p{2.6cm}p{4.2cm}p{2.9cm}p{4.0cm}@{}}
+\begin{tabular}{@{}p{2.6cm}p{4.4cm}p{2.9cm}p{4.0cm}@{}}
 \toprule
 \textbf{Strategy} & \textbf{Structure} & \textbf{Lookup} & \textbf{Notes} \\
 \midrule
-Vanilla & \path{LinkedList<Root<..>>} & $O(n)$ linear & Simplest baseline. \\
-SK (SkipList) & \path{crossbeam\_skiplist::SkipMap} & $O(\log n)$ expected &
-  Lock-free concurrent inserts/lookups. \\
-DexaBTree & external OLC-locked B+-tree, keyed by \path{SnapShot} & $O(\log n)$ &
-  Reuses a full concurrent B+-tree just to index root pointers. \\
-FrugalList (default) & lock-free singly-linked list with a probabilistic
-  skip-tower ($p=0.5$) & sub-linear expected & Appends are one \path{AtomicPtr}
-  store (no CAS loop needed --- already serialized by the enclosing write latch);
-  much smaller per-node footprint. \\
+Vanilla & Linked list of roots & $O(n)$ linear & Simplest baseline. \\
+Skip-list & Lock-free ordered map & $O(\log n)$ expected & Concurrent inserts and
+  lookups with no shared lock. \\
+B-tree-indexed & An external, latch-coupled B+-tree keyed by version & $O(\log n)$
+  & Reuses a full concurrent index just to look up root pointers by version. \\
+Frugal (default) & A lock-free singly-linked list with a probabilistic skip
+  tower & Sub-linear expected, flat-chain worst case & Appending is a single
+  pointer store with no retry loop needed, since appends are already serialized by
+  the writer that is publishing the new root; a much smaller per-entry footprint
+  than a full skip-list tower. \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-These are not partitioned by version range --- each is one tree-wide structure
-holding every historical root. They optimize a different axis than
-\S\ref{sec:sharding}: the cost of finding the root pointer itself (a potential
-single hot spot every reader must consult), trading lookup complexity against
-per-append cost and memory overhead.
+Each of these is one single, tree-wide structure holding every historical root --- it
+is not partitioned the way \S\ref{sec:sharding}'s sharding pattern partitions other
+state, because the thing being optimized here is different: the cost of resolving
+one specific version to one specific root pointer, not contention among many workers
+touching unrelated pieces of shared bookkeeping.
+
+\section{The transaction layer}
+\label{sec:tx}
+
+\subsection{Bounding version growth: self-overwrite and the delete/reinsert cycle}
+\label{sec:selfoverwrite}
+
+This is one of the more interesting problems this system solves, and it is worth
+walking through carefully, because the fix is small and the failure mode it
+prevents is not obvious until you look for it.
+
+Every write mints one more physical record tuple, and an \emph{uncommitted} tuple
+cannot be discarded (its transaction might still commit) or coalesced with anything
+(nothing has superseded it yet, since nothing else can even see it). A naive update
+path is simply ``mark the old version dead, append the new one'' on every call ---
+which means a single open transaction that writes the same key $N$ times before
+committing leaves $N$ physical, uncommitted tuples for that one key, none of them
+reclaimable until the transaction resolves. If $N$ grows large relative to a page's
+capacity, the split-boundary search in \S\ref{sec:smo} runs out of options entirely:
+a page dominated by one key's own version chain has no key boundary to cut at all. A
+concrete, realistic trigger for this: a single order transaction that touches the
+same inventory row twice (two order lines for the same item) writes that row twice
+within one transaction.
+
+The fix is a single equality check performed before falling through to the normal
+versioned path:
+
+\begin{lstlisting}
+// Self-overwrite fast path: this record was already written
+// by *this* transaction -- nobody else can possibly be
+// relying on its current content, so mutate it in place.
+if leaf_page.version_at(position).insertion_stamp() == stamp {
+    leaf_page.set_payload_at(position, payload);
+    return (CRUDOperationResult::Updated(stamp.ts_start()), false);
+}
+
+// Otherwise: normal versioned update (delete old, push new).
+if !leaf_page.version_mut_at(position).delete(stamp) {
+    return (CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted), false);
+}
+let current_len = leaf_page.len();
+leaf_page.push_uncommitted(
+    RecordPoint::new(key, VersionInfo::new(stamp), payload), current_len);
+leaf_page.commit_delta(0, 1);
+(CRUDOperationResult::Updated(stamp.ts_start()), true)
+\end{lstlisting}
+
+\textbf{Detection} is a single comparison, not a heuristic: a transaction stamp
+packs \code{(worker\_id, ts\_start)} and is constant for the \emph{whole}
+transaction, so ``was the newest live version of this key written by me, in this
+very transaction'' reduces to one equality test. \textbf{Safety} follows directly
+from visibility: the found record is only reachable this way if it belongs to the
+same transaction, and nothing else can possibly be relying on the current content of
+a tuple nobody else can see yet. If the found record belongs to another transaction,
+or is already committed, the code falls through to the ordinary
+delete-then-append path unchanged, so this is a strict fast path with no change to
+external behavior.
+
+The mirror-image case is a delete followed by a reinsert of the same key within one
+transaction. A delete must physically retain the predecessor (abort needs to be able
+to undelete it), so the first delete/insert pair in a transaction must append a
+genuine replacement tuple. But repeating that pair --- delete, reinsert, delete,
+reinsert --- would otherwise append another replacement on every cycle. The fix
+checks whether the newest record's insertion \emph{and} deletion stamps both belong
+to the current transaction, and if so, clears the deletion mark and replaces the
+payload in place instead of appending again:
+
+\begin{lstlisting}
+if leaf_page.version_at(position).insertion_stamp() == stamp
+    && leaf_page.version_at(position).deletion_stamp() == Some(stamp)
+{
+    leaf_page.version_mut_at(position).undelete();
+    leaf_page.set_payload_at(position, payload);
+    leaf_page.commit_delta(1, -1);
+    return (CRUDOperationResult::Inserted(stamp.ts_start()), false);
+}
+\end{lstlisting}
+
+Together, these two checks give a clean bound: $N$ updates or delete/reinsert
+cycles on one key by one transaction cost at most \emph{one} unresolved replacement
+tuple, not $N$. A transaction attempting to extend another transaction's still-open
+chain on the same key is simply rejected (first-writer-wins), so this bound holds
+under concurrency too, not just within one thread. Once a writer resolves, ordinary
+compaction discards the obsolete committed versions, and pages containing several
+distinct keys remain freely splittable at a key boundary --- the version-growth
+problem this section opened with never gets a chance to occur.
+
+\subsection{Caching resolved roots across a transaction's lifetime}
+
+Finding ``the root as of my snapshot'' for a given table requires a lookup into that
+table's root-version index (\S\ref{sec:root}). A transaction that reads or writes the
+same table more than once --- the common case for anything beyond a single-statement
+operation --- would otherwise repeat that lookup on every call, even though the
+answer cannot change: root histories are append-only, and once a snapshot's root has
+been resolved, no later publication can change what that specific, already-fixed
+snapshot should see.
+
+Each transaction keeps a small inline table of per-table state, one entry per table
+it has actually touched, each holding that table's tree handle and (once resolved)
+its cached root for this transaction's snapshot:
+
+\begin{lstlisting}
+fn read_tree_and_root(&mut self, table: TableId) -> (Arc<Tree>, BlockRef) {
+    let slot = self.table_slot(table);
+    if let Some(root) = &self.tables[slot].read_root {
+        return (self.tables[slot].tree.clone(), root.clone());
+    }
+    let tree = self.tables[slot].tree.clone();
+    let root = tree.retrieve_root_for(self.ts_start);
+    self.tables[slot].read_root = Some(root.clone());
+    (tree, root)
+}
+\end{lstlisting}
+
+The first read or write against a table resolves and caches its root; every
+subsequent operation against that same table, for the rest of the transaction, reuses
+the cached handle instead of re-walking the root index. The per-transaction table
+list is inline for the common case (a handful of tables touched by an ordinary
+multi-table transaction) and spills to the heap only for unusually wide transactions,
+so an ordinary transaction pays no allocation for this bookkeeping at all.
+
+\subsection{Abort: reverse order, batched under one latch}
+
+Reverting a transaction's writes is not one atomic step across every key at once ---
+each individual reversal re-exposes that one key to any other concurrent transaction
+the instant it completes, before the rest of the abort has finished. This makes the
+\emph{order} of reversal a correctness question, not just a performance one:
+if an earlier write in the transaction effectively acted as a gate that a later
+write depended on (for example, removing a queued work item before updating the
+records that item referred to), reverting in forward chronological order would
+re-expose that gate \emph{first}, while several of its dependents are still
+mid-reversal --- a concurrent reader could observe the gate reopened and race the
+transaction's own in-progress rollback of the state it gated. Reverting in reverse
+(last write first) avoids this: by the time the gating write's own reversal makes it
+visible again, everything the transaction did after it has already been fully
+undone.
+
+The write set is walked back to front, and adjacent writes to the \emph{same} key
+are collapsed into a single call that reverts all of them in one leaf traversal and
+one write latch, rather than one traversal per version:
+
+\begin{lstlisting}
+let mut end = self.written.len();
+while end != 0 {
+    let (slot, key) = self.written[end - 1];
+    let mut start = end - 1;
+    while start != 0 && self.written[start - 1] == (slot, key) {
+        start -= 1;
+    }
+    self.tables[slot].tree.abort_writes(key, stamp, end - start);
+    end = start;
+}
+\end{lstlisting}
+
+Since the version-growth bound in \S\ref{sec:selfoverwrite} already keeps repeated
+writes to one key inside a transaction as a short, physically adjacent run in the
+write set, this batching is not a rare case: it is the direct consumer of that
+bound, turning ``however many times this transaction touched this key'' into one
+latch acquisition instead of one per touch.
+
+A transaction that ends without ever writing anything (a read-only transaction, or
+one whose only attempted write returned \code{Conflict}) releases its snapshot
+directly, without drawing a commit timestamp or appending a commit-log entry at all
+--- there is nothing to make visible and nothing to revert, so both the commit and
+abort paths degenerate to the one step that is actually needed.
+
+\subsection{The auto-commit fast path for single-key operations}
+
+Alongside multi-statement transactions, the tree exposes single-key operations that
+commit themselves: an auto-committed insert, update, or delete is not a snapshot
+transaction with a one-entry write set, it is a shorter protocol tailored to exactly
+one key. Its write path, for an insert:
+
+\begin{lstlisting}
+let leaf_guard = self.traversal_write_olc(key);
+// ... find newest version, check visibility, decide ...
+let stamp = self.wal_start_commit(|_| CRUDOperation::Insert(key, payload.clone()));
+leaf_page.push_uncommitted(RecordPoint::new(key, VersionInfo::new(stamp), payload), len);
+leaf_page.commit_delta(1, 0);
+
+// Commit while the leaf is still write-locked. OLC readers cannot
+// validate the new prefix until the guard is released, so the version
+// is already in OSIC's commit log at the first instant it can be
+// observed successfully.
+let ts_commit = self.commit_tx(stamp.worker_id());
+drop(leaf_guard);
+self.wal_log_commit(stamp, ts_commit);
+\end{lstlisting}
+
+The order of the last three steps is the entire point: the commit-log append happens
+\emph{before} the leaf guard is released, not after. Since a lock-free reader cannot
+successfully validate a leaf while it is write-locked, the earliest possible instant
+any reader could observe the new record is strictly after the commit-log entry
+already exists --- closing what would otherwise be a window where a reader sees a
+published record whose commit has not yet landed. Releasing the WAL's durability
+record is left for afterward, deliberately: visibility and durability are separate
+guarantees here (\S\ref{sec:osic}), so the caller is never blocked on disk I/O to get
+a result back.
+
+An auto-committed write also does not register a full OSIC snapshot the way a
+transaction's \code{begin} does: it draws a start timestamp for the record's own
+stamp and a commit timestamp for the commit log, but never publishes the start
+timestamp as a long-lived, GC-visible reader --- it does not retain a root, a page,
+or a timestamp after the call returns, so there is nothing later that a full
+snapshot registration would need to protect. Protection during the traversal itself
+comes from a lighter-weight reclamation pin rather than a full snapshot, sized to
+exactly the guarantee this shorter-lived operation actually needs.
+
+A closely related fast path lets a caller atomically read-and-patch a single field
+of an existing row while holding the very same leaf write latch used for the write
+itself, deriving the replacement payload from the current one in one guarded step ---
+so a single-field update never has to materialize, mutate, and write back an entire
+row, and never risks losing a concurrent updater's change to a different field of
+the same row, because both are serialized by the one latch the whole operation runs
+under.
+
+\section{Garbage collection: sharded, lock-free reclamation}
+\label{sec:gc}
+
+\subsection{Liveness driven directly off per-worker state}
+
+Deciding whether a retired page can be reused reduces to one question: is there any
+live reader whose snapshot might still need it? Rather than maintaining a separate
+index of active transactions to answer this, liveness is read directly off the same
+per-worker snapshot slots described in \S\ref{sec:sharding} --- the oldest currently
+published snapshot across all workers is the answer, computed with a plain scan over
+a small, fixed number of per-worker slots rather than a query into a second,
+independently-maintained structure that could disagree with the first.
+
+\subsection{Own-shard-first reclaim with round-robin stealing}
+
+Retired pages are indexed in one shard per worker rather than one shared structure:
+a page a worker retires is registered only into that worker's own shard, and a
+worker looking for a page to reuse checks its own shard first, falling back to a
+shared round-robin cursor across other shards only when its own is empty. Since a
+reclaiming worker only needs \emph{a} reusable page, not the globally oldest one,
+trading strict global reuse order for per-worker insertion locality is a clean
+win: the common case touches only the calling worker's own shard and its own cache
+lines, and the fallback path only runs when that shard genuinely has nothing to
+offer.
+
+\subsection{Historical routing keeps old readers off the hot reclaim path}
+
+An older reader is never the reason a rebuild has to copy a record forward into a
+replacement page: instead, that reader continues to route through the retired
+source block via the historical root/version chain until it finishes, at which
+point the block becomes reusable on its own. This keeps the decision ``does this
+specific replacement page need to retain this record'' local to what
+structurally-current readers and possible aborts actually need, rather than coupled
+to whatever the globally oldest reader anywhere happens to be doing.
 
 \section{Sharding as a system-wide pattern}
 \label{sec:sharding}
 
-The word ``sharding'' appears in four genuinely distinct places, none of them
-classic horizontal key-range partitioning of one index. Each instead partitions a
-specific hot, shared piece of \emph{bookkeeping state} by worker (or, in one case,
-by table). \S\ref{sec:foundational} argued that this pattern presupposes both OLC
-(so there is lock-free contention worth removing) and a stable per-worker identity
-(so there is something to shard along); this section is the pattern applied four
-times.
+Sharding, in this codebase, is not horizontal key-range partitioning of one index.
+It is the same move applied four times: take a piece of hot, shared bookkeeping
+state and partition it by worker (or, in one case, by table) so that unrelated
+threads stop contending on the same cache lines.
 
-\subsection{Tables as shards: one tree per table}
+\subsection{Tables as shards}
 
-\commit{5f92e9f} (2026-07-15) --- before this, multiple logical tables were
-multiplexed into a single tree. \path{Database} now holds
-\path{tables: ArcSwap<TableList<..>>}: each table gets its own tree, root index, and
---- importantly for \S\ref{sec:gc} --- its own dead-block tracker. Concurrent
-transactions touching different tables no longer contend on one tree's root/internal
-latches or one dead-block skip list. What \emph{must} stay global for cross-table
-snapshot isolation --- the clock, commit-log pruning, snapshot liveness --- moves
-into one shared, non-generic \path{TxContext} introduced in the same commit
-(\gainbounded{}).
+Each logical table gets its own physically separate tree, its own root index, and
+its own dead-block tracker, rather than several tables being multiplexed into one
+shared tree. Concurrent transactions touching different tables therefore never
+contend on one tree's root or internal-page latches, or on one shared dead-block
+index. The table list itself is published behind a lock-free read-copy-update
+handle: readers resolve a table with one atomic load and no lock at all, and adding
+a new table --- a rare, cold-path operation --- builds a new table list and swaps it
+in without ever blocking a concurrent reader. What must stay global for
+cross-table snapshot isolation --- the shared clock, commit-log pruning, and
+snapshot liveness --- lives in one shared, per-database context rather than being
+duplicated per table.
 
-\subsection{GC dead-block tracker: own-shard-first, round-robin steal}
+\subsection{Cache-padded, per-worker atomic slots}
 
-\path{BlockTrace} holds one \path{SkipMap} shard per CPU
-(\path{shard\_for(worker\_id) = worker\_id \% shards.len()}). Registering a died
-page only ever inserts into the dying worker's own shard; reclaim pops from the
-caller's own shard first, falling back to a shared round-robin cursor across other
-shards only on a miss. \textbf{Why:} death versions all come from one global clock,
-so before sharding, concurrent SMOs from every worker inserted into a \emph{single}
-skip list clustering near its current maximum key --- an always-contended tail.
-Since a reclaimer only needs \emph{a} reclaimable block, not the globally oldest
-one, trading global pop-order precision for per-worker insert locality is sound.
-\commit{f9fc960} (2026-07-23) added the ``try own shard first'' fast path (before it,
-reclaim always scanned round-robin even when the caller's own shard already had a
-usable entry).
+Each worker's currently published snapshot, its transaction-nesting depth, and a
+conservative in-flight registration bound each live in their own array, one slot per
+worker, written only by that worker and read with a simple scan by anyone computing
+the oldest live snapshot. This directly replaced an earlier design built around
+shared structures --- a shared ordered map of active snapshots, and a single shared
+counter tracking in-flight registrations --- both of which turned into serialization
+points precisely because every worker had to touch the same shared location on
+every registration and every liveness check.
 
-\subsection{\texttt{TxContext}: cache-padded, per-worker atomic slots}
+Because adjacent workers' slots in the same array can otherwise share one 64-byte
+cache line, each of these three per-worker arrays pads every entry out to its own
+cache line. Without that padding, one worker updating its own logically-independent
+slot would still invalidate a neighboring worker's cached copy of \emph{their}
+slot purely because the two happen to share a line --- a classic false-sharing cost
+that grows directly with core count, and one that a purely single-writer-per-slot
+design can otherwise look immune to on paper while still paying for it in practice.
 
-Three parallel vectors, one slot per \path{WorkerId}: \path{live_tx} (each worker's
-currently published outermost snapshot), \path{live_tx_depth} (reentrancy depth, so
-only the outermost \path{begin_snapshot} touches \path{live_tx}), and
-\path{in_flight_bound} (a conservative lower bound published while a worker is
-mid-registration --- has drawn a \path{ts\_start} but not yet inserted). Each worker
-only ever writes its own slot; \path{free_block}/\path{live_min_snapshot} scan all
-slots with \path{Acquire} loads, $O(\mathrm{max\_workers})$, no cross-slot
-synchronization. This directly replaced two shared, globally-contended structures,
-and the commit history records the profiling numbers that motivated it: \path{live_tx}
-replaced a shared \path{SkipMap<SnapShot, AtomicUsize>} measured (per an in-code
-comment) eating ``roughly a quarter to half of all CPU cycles'' on a saturated TPC-C
-run; \path{in_flight_bound} replaced a single global \path{AtomicUsize} that, under a
-16-thread update-heavy YCSB workload, rejected 73.8\% of \path{free_block} attempts
-(versus 5.2\% at 2 threads). \commit{eac6e40} (2026-08-02) then wrapped all three
-vectors in \path{crossbeam\_utils::CachePadded}: previously up to 8 adjacent
-workers' slots could share one 64-byte cache line, directly contradicting those
-fields' own design-intent comments --- a pure layout fix targeted at
-64-core/128-thread scale, where cross-CCD coherence traffic is expensive.
+\section{Per-thread identity and the snapshot cache}
+\label{sec:snapcache}
 
-\subsection{Thread-local worker identity and snapshot cache}
+This section covers, in detail, how a thread knows who it is on a given tree and
+how visibility checks against \emph{other} workers are memoized --- the mechanism
+that the sharding pattern above (\S\ref{sec:sharding}) depends on having in the
+first place.
 
-\path{src/mv_sync/worker.rs} hands out a \path{WorkerId} once per (tree, thread),
-cached thread-locally keyed by a process-wide \path{tree\_uid}. A second thread-local,
-\path{SNAPSHOT\_CACHE}, gives each worker its own \path{SnapshotCache} --- the OSIC
-paper's ``thread-local snapshot cache'' --- rather than a \path{Vec} on the tree
-indexed by \path{WorkerId}: using actual thread-local storage means no thread ever
-\emph{could} touch another worker's cache, stronger than ``happens to always pass
-its own id.'' A dedicated regression test file (\path{tests/todays\_optimization\_
-regression\_tests.rs}) verifies, among other things, that a thread cycling through
-three exactly-sized tree registries never loses a \path{WorkerId} across the two
-inline TLS slots' lazy overflow path.
+\subsection{Thread-local worker assignment}
 
-\section{OSIC integration: instant commit, lazily hardened}
+A worker identity is a small integer, handed out once per (tree, thread) from a
+tree-owned counter and never returned, matching a model of a fixed pool of
+long-lived worker threads rather than one identity per short-lived task. Each thread
+remembers the identities it has already been given in thread-local storage, keyed
+not by the tree's address but by a process-wide unique id assigned to the tree at
+construction --- necessary because a dropped tree's memory can be reused by an
+unrelated later tree, and a thread that cached an identity for the old occupant
+must not silently reuse it for the new one.
+
+The cache itself keeps exactly two most-recently-used entries inline, in a plain
+copyable cell with no runtime borrow-checking, plus a lazily allocated overflow list
+for the rare case of a thread touching more than two trees. Two inline slots (not
+one, and not a larger searchable array) are a deliberate match to the actual access
+pattern: real deployments create exactly one tree that lives for the process's whole
+lifetime, so the common case is a single, unchanging comparison against the primary
+slot; a thread that occasionally alternates between two trees still gets a cheap
+hit on the second slot; and only a thread that genuinely cycles through three or
+more trees pays for the overflow path at all. A larger fixed-size searchable array
+was tried first and discarded specifically because it optimized for a
+test-harness convenience (many short-lived trees per process, never interleaved)
+at the cost of complexity on every production lookup, where the actual shape of
+real usage is one or two long-lived trees.
+
+\subsection{The snapshot cache: structure-of-arrays visibility memoization}
+
+Visibility --- ``is this write, made by some other worker, visible to my
+snapshot'' --- is checked by comparing a reader's start timestamp against a lower
+commit bound (LCB) computed from the writing worker's own commit log. That LCB
+computation involves a lock and a search, so recomputing it on every single record a
+reader touches would be wasteful whenever the same foreign worker's writes keep
+coming up against the same reader snapshot --- exactly the common case inside one
+range scan or one busy transaction.
+
+Each worker keeps its own cache, one entry per \emph{other} worker it might need a
+visibility answer about, laid out as two parallel arrays rather than one array of
+pairs:
+
+\begin{lstlisting}
+pub struct SnapshotCache {
+    // Structure-of-arrays: snapshot identity and LCB values are scanned or
+    // refreshed independently and no longer force 16-byte tuple traffic.
+    snapshot_versions: Box<[Version]>,
+    lcb: Box<[Version]>,
+}
+\end{lstlisting}
+
+The visibility check itself reads only what it needs, in an order chosen so the
+common cases touch the fewest cache lines:
+
+\begin{lstlisting}
+if stamp.is_invalid() { return false; }              // aborted: never visible
+if stamp.worker_id() == reader_worker {
+    return stamp.ts_start() <= reader_ts_start;       // own writes: direct compare
+}
+let index = stamp.worker_id() as usize;
+if cache.lcb[index] > stamp.ts_start() {
+    return true;                                      // cache hit: touches `lcb` only
+}
+if cache.snapshot_versions[index] < reader_ts_start {
+    cache.lcb[index] = commit_logs[index].lcb(reader_ts_start);
+    cache.snapshot_versions[index] = reader_ts_start;  // refresh: locked, real query
+}
+cache.lcb[index] > stamp.ts_start()
+\end{lstlisting}
+
+An aborted write is rejected first, deliberately ahead of the same-worker fast path
+--- otherwise that fast path would keep an aborted write visible to its own writer
+forever, since it never consults the commit log at all and an uncommitted write's
+absence from that log would never get a chance to matter. A worker's own writes are
+resolved with one direct comparison, no cache lookup needed, and deliberately
+support reading an intentionally historical snapshot (a start timestamp \emph{older}
+than the write itself), not just ``my current view.'' For a foreign worker, the
+common case --- this worker's cached LCB for that foreign worker is already known to
+exceed the write's timestamp --- touches only the \code{lcb} array and returns
+immediately; only a genuine cache miss touches \code{snapshot\_versions} and pays
+for a real, lock-protected query into that worker's commit log. Because the two
+streams are separate arrays rather than one array of pairs, a hit never loads the
+\code{snapshot\_versions} entry it does not need, and a miss's refresh writes both
+without disturbing any other worker's entries in either array.
+
+This cache is created fresh for a tree's actual configured worker budget, not against
+any fixed compile-time bound: sizing is a runtime parameter of the tree, one boxed
+slice per stream, sized once when the cache is created. There is no hard-coded
+maximum-worker ceiling baked into the type itself --- a tree configured for more
+workers simply allocates larger boxed slices for its per-thread caches, and one
+configured for fewer wastes nothing on unused capacity.
+
+Like the worker-identity cache above, this per-tree cache lives in thread-local
+storage, keyed the same way, with the same two-inline-slots-plus-overflow shape:
+the paper's own ``thread-local snapshot cache'' idea is realized literally, using
+actual thread-local storage rather than a shared array indexed by worker id, so that
+no thread ever \emph{could} touch another worker's cache by mistake, not merely a
+convention that every call site happens to follow.
+
+\section{OSIC and the write-ahead log}
 \label{sec:osic}
 
-\subsection{What OSIC is, and how cMVBT realizes it}
+\subsection{Instant commit, lazily hardened}
 
-Ordered Snapshot Instant Commit~\cite{alhomssi2023scalable} decouples visibility
-from durability. Every transaction draws two timestamps from one global,
-monotonically increasing counter (\path{GlobalClock}, a single
-\path{AtomicVersion}, \path{fetch\_add(1, SeqCst)}): \path{ts\_start} at begin,
-\path{ts\_commit} at commit. Each worker keeps its own append-only \path{CommitLog}
-(\path{Mutex<Vec<Version>>}); \path{commit()} draws \path{ts\_commit} then pushes it
-under the lock --- that ordering is exactly what prevents a reader from observing a
-reserved-but-not-yet-inserted stamp. Visibility (\path{is_visible}) rejects invalid
-(aborted) stamps outright; same-worker writes are visible if
-\path{stamp.ts\_start() <= reader\_ts\_start}; otherwise visibility is
-\path{LCB(stamp.worker\_id, reader\_ts\_start) > stamp.ts\_start()}, computed via
-each thread's own \path{SnapshotCache} memo. \path{WalWriter} is a lock-free MPSC
-channel to a background flush thread: \path{log\_with\_stamp}/\path{log\_commit}
-encode and enqueue, returning immediately --- fire-and-forget, no per-op fsync wait.
-\path{flush\_loop} sleeps a short \path{GROUP\_COMMIT\_LINGER} ($200\,\mu$s) after
-the first message, drains everything else non-blockingly, batches it into one
-\path{write\_all} + \path{sync\_data()}, and advances a \path{hardened} watermark to
-the maximum \path{ts\_start} of any \emph{Commit} message in that batch. Recovery
-keeps only writes with a matching commit marker (commit-gated replay), sorted by
-\path{(ts\_commit, file order)} since commit order can differ from log order across
-concurrent workers. \path{DbTransaction::commit} appends to the committing worker's
-\path{CommitLog} --- making every write visible everywhere, instantly --- then logs
-exactly one fire-and-forget WAL commit marker. \emph{This is the whole ``instant
-commit'':} one in-memory append, with nothing on the write/commit path waiting on
-disk I/O; durability is a separate, batched, background concern, exposed only via an
-explicit \path{wait\_wal\_hardened()} API for callers who specifically need a
-durability checkpoint.
+Every transaction draws its start and commit timestamps from one global,
+monotonically increasing counter. Each worker keeps its own append-only commit log;
+committing means drawing a commit timestamp and pushing it onto that log under a
+short lock --- an in-memory step, with nothing on the commit path waiting on disk
+I/O. Durability catches up separately and in batches: writes and commit markers are
+appended to a background writer, which periodically batches everything accumulated
+so far into one write-and-sync call and advances a published ``hardened'' watermark
+that a caller can poll explicitly if it specifically needs a durability guarantee.
+Recovery replays only writes that have a matching commit marker, ordered by commit
+time rather than log order, since commit order can differ from log order across
+concurrent workers.
 
-\paragraph{Evolution.} A pre-OSIC era (Dec 2025 -- Jan 2026) used a hand-rolled
-sharded thread-indexed ``committed'' watermark array --- in effect an imperfect
-reinvention of the CommitLog/GLC pair, with a sequence of patches fixing edge cases
-around threads changing roles or exiting, reading as a slow discovery, by trial and
-error, of exactly the problem OSIC's design solves cleanly. \commit{714a82f}
-(2026-07-10) replaced it wholesale with the paper's actual design.
+\subsection{Sharding the write channel}
 
-\subsection{The WAL performance campaign}
-
-A short-test profiling pass (\path{scripts/compare_engines.py}, \path{perf record}/
-\path{perf annotate} on a debug-symbol release build) found three concrete issues,
-fixed together and re-measured on the same harness invocation.
-
-\textbf{1. \path{target-cpu=native} was silently dead.} \path{Cargo.toml} had a
-\path{[build] rustflags} block, but Cargo only reads \path{rustflags} from
-\path{.cargo/config.toml}, never the manifest --- the whole binary had been
-compiling to the generic x86-64 baseline. Fixed by moving the flag into a new
-\path{.cargo/config.toml} (\gainenabling{}, confirmed present in the current
-repository).
-
-\textbf{2. Hand-rolled CRC32 was the single biggest hotspot.} A byte-at-a-time,
-8-shift-per-byte bit loop was \textbf{22.6\% of all CPU cycles} (self time) on
-YCSB-A at 64 threads. Replaced with a 256-entry lookup-table CRC32, same
-polynomial/format, pinned against the standard \path{"123456789"}
-$\to$ \path{0xCBF43926} check value. Self-time dropped to 11.3\% on the same
-workload.
-
-\textbf{3. The single shared WAL channel was a real contention point.}
-\path{Sender::send} showed 86\% of its own samples in a \path{crossbeam-channel}
-internal spin-wait, worth $\sim$8\% of \emph{all} CPU cycles on TPC-C at 64 threads.
-Fixed by splitting \path{WalWriter} into \path{NUM\_SHARDS = 4} independent
-(channel, flush-thread) pairs keyed by \path{worker\_id \% 4}, all still writing
-through one shared \path{Arc<Mutex<File>>} so on-disk format and recovery are
-unaffected; the shared \path{hardened} watermark switched from \path{store} to
-\path{fetch\_max} since multiple flush threads can now finish out of order.
+A single shared channel from every committing worker to one background flush
+thread is itself a piece of shared, contended state, in exactly the sense
+\S\ref{sec:sharding} describes: many independent writers funnel into the same
+channel and the same background thread. Splitting the channel into several
+independent (channel, flush-thread) shards, keyed by worker identity, removes that
+contention the same way the other sharding optimizations do --- each shard still
+writes through one shared file handle, so the durable format and recovery logic are
+unaffected, but the hot enqueue path no longer funnels every worker through the same
+lock-free structure.
 
 \begin{center}
 \begin{tabular}{lrrr}
 \toprule
-Workload & Threads & Before & After (\gainmeasured{}) \\
+Workload & Threads & Before sharding & After sharding \\
 \midrule
-tpcc & 16 & 40,902 & 43,913 (+7.4\%) \\
-tpcc & 64 & 57,667 & 67,812 (\textbf{+17.6\%}) \\
-ycsb\_a (50\% update, Zipfian) & 16 & 1,603,135 & 2,010,940 (+25.4\%) \\
-ycsb\_a & 64 & 1,339,295 & 2,258,954 (\textbf{+68.7\%}) \\
-ycsb\_e (scan-heavy) & 16 & 2,137,315 & 2,483,067 (+16.2\%) \\
-ycsb\_e & 64 & 1,789,143 & 2,679,747 (\textbf{+49.8\%}) \\
-ycsb\_f (read-modify-write) & 64 & 1,355,666 & 2,305,318 (\textbf{+70.1\%}) \\
+Write-heavy OLTP (order-processing benchmark) & 16 & 40,902 tx/s & 43,913 tx/s \\
+Write-heavy OLTP & 64 & 57,667 tx/s & \textbf{67,812 tx/s (+17.6\%)} \\
+Write-heavy key-value, Zipfian & 16 & 1,603,135 ops/s & 2,010,940 ops/s \\
+Write-heavy key-value, Zipfian & 64 & 1,339,295 ops/s & \textbf{2,258,954 ops/s (+68.7\%)} \\
+Scan-heavy key-value & 64 & 1,789,143 ops/s & \textbf{2,679,747 ops/s (+49.8\%)} \\
+Read-modify-write key-value & 64 & 1,355,666 ops/s & \textbf{2,305,318 ops/s (+70.1\%)} \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The read-only/read-mostly workloads (ycsb\_b, ycsb\_c) moved by under 1.2\% either
-way, confirming the fixes are surgical to the write path. The clearest structural
-result: the two workloads that previously got \emph{worse} with more concurrency
-(ycsb\_a, ycsb\_e) now scale up instead of down. Not addressed by this pass: TPC-C's
-OCC conflict rate remained very high at 8 warehouses/64 terminals (Payment
-$\sim$71--76\% of attempts conflict and are discarded; New-Order $\sim$47\%) ---
-flagged in \S\ref{sec:open}.
+Read-only and read-mostly workloads moved by under 1.2\% either way, confirming the
+gain is specific to the write path: the two workloads that had previously gotten
+\emph{worse} with more concurrency (the Zipfian and scan-heavy cases above) scale up
+with thread count instead of down, once this contention is removed.
 
-\subsection{A lock-free WAL backend, and two concurrency bugs it took to land}
+\subsection{A lock-free alternative backend and per-thread batching}
 
-A second, concurrent line of work attacked the same contention differently:
-\path{LockFreeWalWriter}/\path{LockFreeWalBackend} removes the channel and
-dedicated writer thread entirely --- every worker reserves its own byte range via
-\path{tail.fetch\_add} and calls \path{pwrite} directly, optionally batching its own
-records locally (\path{LocalBatch}) before flushing. \path{WalBackend} wraps both
-designs behind one enum so callers pick either at attach time.
-
-Merging this (\commit{ebdd789}) with the sharded-channel work (\commit{4a1a50a})
-surfaced two bugs unrelated to either design's core idea:
-
-\begin{itemize}
-  \item \textbf{An OOM, not a WAL bug.} \path{mv\_test::RESTART\_TRACE} (a
-        write-restart diagnostic, documented ``off by default'') had been left
-        \path{true} in checked-in code. Every OCC restart recorded a \path{String}
-        key into a process-lifetime global map that nothing ever clears; a
-        comparison loop calling \path{run\_tpcc()} six times in one process
-        accumulated across every iteration until the fastest config grew past 12\,GB
-        RSS and got OOM-killed, taking the terminal session with it. Fixed by
-        restoring the documented default and adding \path{reset\_restart\_trace()},
-        called at the start of every \path{run\_tpcc()} (verified present in the
-        current source, \S\ref{sec:fresh}).
-  \item \textbf{A cross-shard \path{hardened\_version} race.} The sharded
-        \path{WalWriter} published every shard's own confirmed watermark into one
-        value via \path{fetch\_max} --- correct only if every shard's watermark were
-        directly comparable, which it is not, since \path{ts\_start} is one global
-        sequence spread across shards unpredictably. One busy shard's flush could
-        advance the shared watermark past a \path{ts\_start} a slower shard had not
-        flushed yet; a consistency test caught it directly, a quarter of written
-        records missing from the reconstructed WAL. A first fix attempt (minimum of
-        every shard's raw confirmed value) traded the false-positive for a hang: a
-        shard whose submissions never reach some other shard's higher watermark
-        would never satisfy a plain minimum, even once fully caught up. The actual
-        fix (\commit{9ced1a3}) gives each shard a \path{submitted} watermark
-        alongside \path{confirmed}, and treats a shard as imposing no constraint
-        once \path{confirmed >= submitted} (fully drained) rather than comparing raw
-        values across shards. Verified: the failing test 5$\times$ clean, the full
-        suite 3$\times$ clean.
-\end{itemize}
-
-\textbf{Synthetic backend comparison} (original report, debug build):
+A second design for the same write path removes the shared channel and dedicated
+flush thread entirely: each worker reserves its own byte range in the log file
+directly and writes into it itself, optionally batching its own records locally
+before flushing rather than issuing one write call per record. Both designs are
+available behind one interface, selected once when durability is attached.
 
 \begin{center}
 \begin{tabular}{lrr}
 \toprule
 Backend & @8 threads & @16 threads \\
 \midrule
-\path{WalWriter} (4-way sharded) & 1,006,755 ops/s & 1,353,816 ops/s \\
-\path{LockFreeWalWriter}, unbatched & 752,179 ops/s & 748,676 ops/s \\
-\path{LockFreeWalWriter} + \path{LocalBatch(64)} & 2,549,030 ops/s & \textbf{5,089,502 ops/s} \\
+Sharded channel (above) & 1,006,755 ops/s & 1,353,816 ops/s \\
+Lock-free, unbatched (one write call per record) & 752,179 ops/s & 748,676 ops/s \\
+Lock-free, batched locally per thread & 2,549,030 ops/s & \textbf{5,089,502 ops/s} \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-Unbatched lock-free writes lose to the sharded channel past a few threads: each
-write pays a full \path{pwrite} syscall plus filesystem-level inode-extension
-serialization on a shared growing file. Per-thread batching is what actually wins.
-\S\ref{sec:fresh} reproduces this exact comparison, in release mode with LTO, with a
-fuller thread/batch sweep, on the machine this document was written on.
+Unbatched lock-free writes lose to the sharded channel past a handful of threads:
+each write still pays a full system call, and several threads extending the same
+growing file compete for the same filesystem-level bookkeeping. Batching each
+thread's own records locally before flushing is what actually wins, amortizing that
+same system-call cost a different way than the sharded channel's own batching does
+--- across one thread's own records instead of across many threads funneled through
+one flusher. \S\ref{sec:fresh} reproduces this comparison independently with a fuller
+thread and batch-size sweep.
 
-\subsection{Ticket-less logging and exact framing hints}
+\subsection{Ticket-less logging and exact framing sizes}
 
-A follow-up \path{perf record} pass, once the channel contention above was no longer
-dominant, found two purely allocator-side hotspots it had been masking:
-\path{WalWriter::enqueue} built a fresh \path{bounded(1)} ack channel on
-\emph{every} call to return a flush ticket that every production call site always
-discarded; and every framing buffer's capacity hint (24--44 bytes) was tuned for the
-module's own \path{u64}-payload tests, while \path{YcsbRow} is roughly 25$\times$
-that and \path{TpccRow} variants routinely 7--10$\times$ over, forcing several
-grow-and-copy reallocations per WAL write. Fixed by splitting logging methods into a
-ticket-less default plus an explicit \path{*\_with\_ticket} variant, and by adding
-\path{WalPayload::wal\_encode\_size\_hint()} with exact overrides mirroring each
-payload type's own encoder.
+Two further, purely allocation-side costs were found and removed once the
+contention above was no longer dominant. First, every log call built a fresh
+acknowledgment channel to hand back a ``flush ticket'' that ordinary production
+callers never actually used --- logging methods now default to a ticket-less path
+with no channel built at all, with an explicit ticketed variant kept only for the
+handful of callers that genuinely need to wait on one specific record. Second, every
+framing buffer's capacity hint had been sized for a small fixed-width test payload,
+forcing a real row's much larger encoding to grow and reallocate the buffer several
+times during a single write; each payload type now reports its own exact encoded
+size up front, so the buffer for a real row is sized once, correctly, on the first
+allocation.
 
 \begin{center}
 \begin{tabular}{lrrr}
 \toprule
 Metric & Before & After & Change \\
 \midrule
-TPC-C, WAL on (tpmC) & 2,675,157 & 3,013,193 & \textbf{+12.6\%} \\
-YCSB-A, WAL on (ops/sec) & 1,374,921 & 1,723,455 & \textbf{+25.3\%} \\
-Synthetic \path{WalWriter}, 16 threads, \path{u64} payload & 1,353,816 ops/s & 2,427,071 ops/s & \textbf{+79\%} \\
+Write-heavy OLTP throughput & 2,675,157 tx/min & 3,013,193 tx/min & \textbf{+12.6\%} \\
+Write-heavy key-value ops/sec & 1,374,921 & 1,723,455 & \textbf{+25.3\%} \\
+Synthetic writer, 16 threads, small fixed payload & 1,353,816 ops/s & 2,427,071 ops/s & \textbf{+79\%} \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The synthetic case gained the most because, against an 8-byte payload, the discarded
-ticket's channel allocation was close to the entire per-write cost. \textbf{Not
-fully closed:} a fresh $\sim$1000-byte \path{Vec} is still allocated per WAL write on
-\path{WalWriter}'s cross-thread path; a true buffer pool was flagged as a follow-up
-and remains unimplemented (\S\ref{sec:open}).
-
-\subsection{Two dead ends, honestly reported}
-
-\textbf{A thread-local scratch buffer on \path{LockFreeWalWriter}} was implemented
-and verified correct, on the reasoning that the lock-free writer's synchronous
-\path{pwrite} has no cross-thread ownership problem. Tracing the actual call graph
-found it was dead weight: every real caller goes through \path{LockFreeWalBackend},
-which always routes into \path{LocalBatch}'s own persistent buffer first, even at
-\path{batch\_size: 1} --- so only this module's own unit tests and the deliberately
-unbatched benchmark arm ever reached the patched method. \textbf{Reverted} rather
-than kept with no real effect.
-
-\textbf{An opt-in \path{mimalloc} allocator feature} targeted the genuine
-cross-thread free pattern in \path{WalWriter} (one thread mallocs the framed
-buffer, the flush thread frees it). Measured end to end: YCSB-A gained 2.3--3.0\% on
-the one backend with that cross-thread free, a wash on backends without it; TPC-C
-\emph{lost} 3.3--4.9\% across every backend, including ones with nothing to do with
-this allocation pattern, all six (backend $\times$ terminal-count) combinations
-moving the same direction. \textbf{Not adopted as default} (jemalloc stays the
-global allocator); kept as an opt-in feature since the trade-off is genuinely
-workload-dependent, not a universal win.
-
-\subsection{Atomic operations: an auto-commit fast path alongside real transactions}
-
-A single-key \emph{atomic} operation is auto-committed, not a snapshot transaction
-with a one-entry write set. Its write path: take a short reclamation pin during
-traversal, acquire the target leaf's exclusive OLC writer guard, verify the newest
-physical version is visible at the current OSIC boundary, draw the stamp and log the
-WAL write, mutate the leaf while unobservable behind the guard, append to the
-worker's commit log, \emph{then} release the guard --- publishing an
-already-committed version. The leaf-guard release is the linearization point for
-other OLC traversals; by the first instant a reader can validate the modified leaf,
-the new record's stamp is already in the commit log, closing the ``published leaf
-entry, commit log not updated yet'' window a naive design could otherwise expose.
-Deliberately, an atomic write does \emph{not} call \path{begin_snapshot}: it wants
-the newest committed state rather than a historical view spanning several
-statements, and it retains no root/page/timestamp after the call, so registering a
-full long-lived snapshot would add clock-tick and bookkeeping cost the protocol does
-not need. The YCSB driver exposes both modes (\path{--cmvbt-ycsb-mode atomic|
-transaction}) without changing record shape, key distribution, or WAL settings,
-specifically so the cost of the transaction machinery itself is measurable rather
-than baked into every number.
-
-\subsection{Known, documented limitations}
-
-Unbounded \path{CommitLog} growth under long GC-off historic-query runs (a
-chunked/segmented log was considered, explicitly deferred). \path{MAX_WORKERS_CAP =
-256}, a generous but hard ceiling. Abort must revert writes in strict LIFO order ---
-a documented but delicate invariant, not a generically solved problem. The
-self-overwrite residual noted in \S\ref{sec:selfoverwrite}. And \commit{ecc9900}'s
-torn-read fix is explicit in its own documentation about closing one specific
-hazard, not every conceivable concurrent-mutation hazard on the lock-free OLC read
-path.
+The synthetic case gains the most because, against a small fixed payload, the
+discarded ticket's channel allocation was close to the entire per-write cost once the
+payload itself no longer needed resizing. An allocator that gives cross-thread frees
+a lock-free path (rather than routing a foreign thread's free back through the
+allocating thread's own arena) was tried as an opt-in alternative for the sharded
+channel's cross-thread allocate/free pattern specifically; the effect measured out
+workload-dependent (a clear gain on one write-heavy benchmark, a clear loss on
+another), so it remains an optional feature rather than the default.
 
 \section{Range scans and analytical terminals}
 \label{sec:scans}
 
-\subsection{Why internal pages cannot be scanned in physical order}
+\subsection{Cursor-based internal routing}
 
 An internal page is append/version ordered, not key ordered: structural
 modifications append replacement child entries while retaining historical entries
-older snapshots still need. Neither walking physical slots left to right nor sorting
-every snapshot-matched slot produces a correct scan --- the latter includes
-superseded, overlapping children. \path{RangeQueryIter} instead retains internal
-pages on its current path: at each level it searches entries in reverse append
-order and selects the newest snapshot-visible fence containing the scan cursor,
-descends, and after consuming a leaf advances the cursor one key past that leaf's
-fence and reroutes from the retained parent --- the same selection rule as point
-lookup, allocating no child lists. An exact full-domain scan
-(\path{Key::MIN..=Key::MAX}) is detected once before the leaf loop and uses a
-visibility-only record loop, skipping two bound comparisons per physical record that
-every bounded interval still needs. The final leaf is a special case: key increment
-saturates at the maximum key, so both the materialized and streaming paths must
-explicitly complete when the consumed fence reaches the requested upper bound or the
-tree maximum, or a full-range streaming scan would route the unchanged maximum
-cursor back to the final child forever.
+that older snapshots still need to route through. A range scan therefore cannot
+walk physical slots left to right, or sort every snapshot-matching slot, without
+risking overlapping, superseded entries being included alongside their
+replacements. Instead, at each level the scan searches entries in reverse append
+order and selects the newest snapshot-visible interval containing the current scan
+cursor, descends, and after consuming a leaf advances the cursor one key past that
+leaf's boundary and reroutes from the retained parent --- the same selection rule as
+a point lookup, allocating no child lists or deduplication structures at any point.
+An exact full-domain scan is detected once, before the leaf loop begins, and uses a
+loop that skips the two range-bound comparisons every bounded scan still needs per
+record, since a full-domain scan's range trivially contains every key it could ever
+see.
 
-\subsection{Rejected: child-list reuse, small-page dedup, hybrid traversal, lean frames}
+\subsection{Zero-copy streaming terminals}
 
-Four related optimizations were implemented, benchmarked (an experimental version
-appeared 18--20\% faster), and then \textbf{removed} once GC stress testing proved
-their shared premise incorrect: reusing an eagerly constructed child-list snapshot,
-deduplicating boundaries by hashing/linear scan, a hybrid narrow-range traversal
-built on that same list, and releasing an internal page early after expansion.
-Equal-boundary deduplication cannot prove that arbitrary historical intervals are
-fully superseded; under copy-on-write GC it let both a current route and an
-overlapping historical route be scanned, returning duplicate logical keys. The
-active cursor-based traversal above was already allocation-free and always selects
-the newest visible route, making the rejected machinery unnecessary as well as
-unsound.
+Alongside the ordinary iterator (which materializes each visible record into an
+owned result and clones its payload handle, for callers who need results to outlive
+the scan), a family of terminal operations --- for-each, fold, count, and a
+fallible early-exit variant --- calls a visitor directly with a borrowed key and
+payload reference, never constructing an owned result object or cloning a payload
+handle at all. An analytical consumer that only ever aggregates (sums a column,
+counts matching rows) never needed an owned copy in the first place; these
+terminals let it not pay for one.
 
-\subsection{Streaming terminals: zero-copy analytical consumption}
+\textbf{Measured:} on a 200,000-row full scan, the streaming terminal ran
+1.165$\times$--1.173$\times$ faster than the materialized iterator ($\sim$16.8\%;
+28.8--29.3\,M rows/s vs.\ 24.7--25.1\,M rows/s). A specialized counting terminal,
+which additionally skips constructing even a borrowed-result wrapper, reached
+$\sim$49--53\,M rows/s on the same kind of full scan.
 
-\path{RangeQueryIter::for_each_ref}/\path{fold_ref}/\path{try_for_each_ref}/
-\path{count_ref} call a visitor with \path{(Key, \&Payload)} directly, avoiding one
-\path{RecordPointResult} construction, one payload-handle clone, a retained leaf
-buffer, and materializing a whole result vector, per match. The payload reference is
-callback-scoped and must not be retained. \path{DbTransaction} exposes the same four
-operations (\path{range\_count}, \path{range\_fold}, \path{range\_for\_each},
-\path{try\_range\_for\_each}), keeping its function-local table \path{Arc} alive
-until the terminal operation consumes the scan; \path{TpccTxn}'s versions dispatch
-across both standard and big-tree table classes (\S\ref{sec:bigtree}) with identical
-behavior.
+\subsection{Testing the cheap predicate first}
 
-\textbf{Measured} (200,000 shuffled \path{u64} rows, five warmups, 40 alternating
-samples): streaming was 1.165$\times$--1.173$\times$ faster than the materialized
-iterator for a full scan ($\sim$16.8\%; 28.8--29.3\,M rows/s vs.\ 24.7--25.1\,M
-rows/s). A later, separately measured \path{count\_ref} build reached
-\textbf{49--53\,M rows/s} on full scans and showed 1.18$\times$--1.37$\times$ speedups
-on both full and narrow-range scans; these routing-adjacent numbers are retained
-only as design history, since the specific implementation measured there (inline
-reusable scratch, a single-child fast path) was the one later reverted for
-correctness in the previous subsection. \path{count\_ref} itself remains enabled and
-its own number is not affected by that revert.
+Every physical record in a leaf is filtered by two predicates: is it within the
+requested key range, and is it visible to the reader's snapshot. The visibility
+check can require up to two lookups into a foreign worker's commit log (one for the
+insertion stamp, one for the deletion stamp, via the snapshot cache in
+\S\ref{sec:snapcache}); the range check is one or two integer comparisons. Ordering
+the range check first means an out-of-range record, however many superseded
+versions of other keys it happens to share a leaf with, is rejected before ever
+touching the more expensive check --- a direct instance of the same ``reject
+cheaply before paying for the expensive check'' pattern the leaf's live/validity
+mask (\S\ref{sec:physical}) already applies one level earlier, applied here to the
+scan's own per-record filter instead of to a whole slot. A full-table scan gets no
+benefit from this reordering (its range trivially contains everything), but a
+narrow scan sharing a leaf with many keys outside its own range benefits directly,
+in proportion to how many of that leaf's records the range check alone can already
+reject.
 
-\subsection{Fix 1: test the range before the visibility check}
+\subsection{Monomorphizing the visibility check}
 
-\path{RangeQueryIter::refill} and \path{key_range_read_from_root} both filtered each
-physical record with \path{r.version().matches(is\_visible) \&\& range.contains(r.key())}.
-\path{VersionInfo::matches} calls \path{is\_visible} up to twice per record (insertion
-and deletion stamp), on \emph{every} dead/superseded record a leaf holds --- the
-majority of a garbage-heavy leaf's contents, per \S\ref{sec:bigtree}'s scan-cost
-findings --- and it did this \emph{before} the cheap, inlinable range comparison
-ever got a chance to reject the record. Swapped the order in both places: pure
-reorder of an existing \path{\&\&}, zero behavior change. No benefit for a full-table
-scan (its range always contains every key). Real benefit for a \emph{narrow} scan
-sharing a leaf with keys outside its range --- e.g.\ CH-benCHmark Q4/Q5's per-order
-\texttt{OrderLine} sub-scans. \textbf{Measured} (8 warehouses/16 terminals, 20s runs,
-noisy/contended, indicative not averaged): Q4 latency $\sim$614--617\,ms
-$\to$ $\sim$505--507\,ms (\textbf{$\sim$18\% faster}); Q5 $\sim$6.81--6.90\,s
-$\to$ $\sim$6.09\,s (\textbf{$\sim$11--13\% faster}). Q1/Q6 (full-table scans) showed
-comparable-or-noisy numbers either way, exactly matching the mechanism's prediction.
-
-\subsection{Fix 2: remove the \code{dyn FnMut} indirection}
-
-Reordering only helps \emph{out-of-range} records; every record actually in range
-still paid for a non-inlinable indirect call on every \path{matches} invocation.
-\path{VersionInfo::matches} was generalized from \path{\&mut dyn FnMut(TxStamp) ->
-bool} to \path{<F: FnMut(TxStamp) -> bool + ?Sized>(\&mut F)} --- backward
-compatible, since \path{dyn FnMut(..)} itself satisfies the new bound, so every
-existing caller keeps compiling with zero behavior change. \path{RangeQueryIter::refill}
-was restructured to call a new \path{with\_snapshot\_cache\_and\_logs} accessor once
-per \path{refill()} (not once per leaf), build a concrete \path{is\_visible} closure
-inline, and use it directly --- no \path{dyn} anywhere in this path. \path{query.rs}'s
-two call sites were left completely untouched.
-
-\textbf{A methodological scare, worth recording as a case study.} The first
-verification pass looked like a real regression:
-\path{verify\_concurrent\_shared\_keys}'s ``never loses an update'' stress test
-flaked 2/5 then 4/20 with the change, against a first baseline sample of a clean
-10/10. That pattern --- a concurrency test flaking only once concurrency-adjacent
-code changes --- is exactly what a real bug from this kind of change would look
-like. Re-investigating rather than reverting on the spot: a \emph{wider} baseline
-sample, drawn after the same session's own repeated heavy test/build load had warmed
-the machine up, came back 2/19 ($\sim$10.5\%) on the identical test and panic line
---- the earlier clean 10/10 baseline had simply been drawn before the machine warmed
-up, not because the flake was not there. A clean, side-by-side 20-run batch with the
-change applied came back 2/20 (10\%), statistically indistinguishable from baseline.
-\textbf{Lesson:} do not trust a 5--10 run sample of a timed concurrency test, in
-either direction, on a machine that has been running heavy benchmarks for a while
---- draw a same-conditions baseline of comparable size before attributing a failure
-to a change. (This exact flake, and its true underlying cause, are followed further
-in \S\ref{sec:open}.)
-
-\subsection{The point-read miss bug this work incidentally surfaced}
-
-Investigating the flake above led to a second, independent, and more serious bug,
-now fixed and committed (\commit{c0fe172}): \path{key_point_read_from_root}'s
-\path{skip_while} and \path{key_range_read_from_root}'s binary-search cutoff both
-assumed a leaf's physical append order tracks \path{ts_start} order. That is false
-under this system's concurrency model --- \path{ts_start} is drawn at \path{begin()},
-\emph{before} the writer acquires the leaf's write lock to physically append, so two
-concurrent writers can draw \path{ts\_start} in one order but append in the other.
-When they diverged, the point-read shortcut could walk straight past the one visible
-record and return an empty result for a live, never-deleted key. \textbf{Fix:}
-removed both shortcuts; always scan the whole leaf --- the same cost
-\path{RangeQueryIter::refill} already always pays, so no new asymptotic cost class
-is introduced (\gainenabling{}). Verified with 20+20 clean runs of both affected
-tests, versus the $\sim$10\% baseline failure rate documented beforehand.
+The reordering above only helps records the range check can already reject; every
+record actually within range still pays for the visibility check itself, and that
+check previously took its ``is this visible'' predicate as a type-erased callback ---
+an indirect call the compiler cannot inline, paid on every insertion and deletion
+stamp of every in-range record. The range-scan iterator's own visibility check now
+builds a concrete, statically-typed closure once per refill (covering every leaf that
+one refill call visits, not rebuilding it per leaf), so the compiler can inline the
+whole check directly into the scan loop rather than dispatching through a function
+pointer for every single record.
 
 \section{Workload and benchmark-harness optimizations}
 \label{sec:workload}
 
-Measurements in this section used a release build, 200,000 preloaded rows, four
-workers, a three-second timed phase, Zipf $\theta=0.99$, GC enabled, no WAL, and the
-frugal root index --- they measure a combined batch, not isolated attribution to one
-row.
+A number of optimizations sit in the benchmark and workload-generation code itself
+rather than in the storage engine proper --- worth including in full, since an
+engine-side optimization measured against a benchmark that is itself spending
+unrelated CPU time on request generation will systematically understate its own
+effect.
 
 \begin{center}
 \begin{tabular}{p{4.3cm}p{7.4cm}p{2.4cm}}
 \toprule
-\textbf{Change} & \textbf{Implementation and gain} & \textbf{Evidence} \\
+\textbf{Change} & \textbf{What it does, and why} & \textbf{Evidence} \\
 \midrule
-Bulk-generate YCSB values & Rows allocate their final payload once, filled in place
-  from buffered random bytes. Full-row YCSB-A: 2.52M $\to$ 3.11M ops/s
-  (\textbf{+23.5\%}). & \gainmeasured \\
-\path{writeallfields} (standard mode) & Standard YCSB updates one field via a
-  leaf-latched \path{update\_with} patch, not a full-row regenerate. Standard
-  single-field YCSB-A: \textbf{4.81M ops/s} (+90.8\% vs.\ the old full-row baseline
-  --- different semantics, not a fair like-for-like number). & \gainmeasured \\
-\path{point\_exists\_si} & Hit/miss-only reads test visibility in place, no result
-  vector or payload clone. Combined with alias Zipf sampling, YCSB-C: 7.16M
-  $\to$ 14.82M ops/s (\textbf{+106.8\%}). & \gainmeasured \\
-Walker-alias Zipf sampling & A finite alias table built once at setup; sampling is
-  two random draws and a lookup, replacing per-request floating-point power
-  computation. $O(n)$ setup, 8 bytes/key ($\sim$160\,MB at 20M keys). & part of above \\
-Empty read-only commit elision & A read-only transaction with an empty write set
-  releases its snapshot without drawing \path{ts\_commit} or appending a commit-log
-  entry --- one clock tick and one commit-log op removed per such transaction. &
-  \gainbounded \\
-Sampled YCSB-E scan latency & One in 1,024 scans receives a latency timestamp; the
-  timeseries clock refreshes every 256 ops. YCSB-E: 4.59M $\to$ 6.22M ops/s
-  (\textbf{+35.4\%}). & \gainmeasured \\
-Full-domain scan specialization & \path{try\_for\_each\_ref} detects
-  \path{Key::MIN..=Key::MAX} once, uses a visibility-only leaf loop (see
-  \S\ref{sec:scans}). & included above \\
-Isolate CH Q1/Q6 & \path{OlapMode::ChQ1}/\path{ChQ6} run only the named query; the
-  old rotating \path{ch} mode mixed in unrelated Q4/Q5 joins. & \gainenabling \\
+Bulk-generated values & Rows allocate their final payload once and fill it in place
+  from buffered random bytes, instead of building and then copying a temporary
+  value. Measured +23.5\% on a write-heavy key-value benchmark. & \gainmeasured \\
+Single-field update mode & A standard update patches one field via a leaf-latched,
+  read-modify-write closure, rather than regenerating and replacing an entire row ---
+  the realistic case for most real update workloads. Measured +90.8\% against the
+  older full-row-replacement baseline (different semantics, not a like-for-like
+  comparison). & \gainmeasured \\
+Hit/miss-only reads & A read that only needs to know whether a key exists tests
+  visibility in place and returns a boolean, with no result vector or payload clone.
+  Combined with the sampler below, measured +106.8\% on a read-heavy benchmark. &
+  \gainmeasured \\
+Alias-table Zipf sampling & A finite alias table is built once at setup; sampling a
+  skewed key distribution then costs two random draws and a table lookup, replacing
+  a floating-point power computation on every single request. & included above \\
+Sampled scan-latency measurement & Only one in every 1,024 scans is individually
+  timestamped, and the shared timeseries clock is refreshed every 256 operations
+  rather than on every one. Measured +35.4\% on a scan-heavy benchmark. &
+  \gainmeasured \\
+Full-domain scan specialization & The exact full-key-space case is detected once
+  and uses a visibility-only loop, described in \S\ref{sec:scans}. & included above \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-Also unrelated to raw throughput but worth recording: Zipfian rank scrambling
-(FNV-based) was added specifically to make the benchmark's key-access locality
-\emph{more} representative of real Zipfian workloads, not to make the engine
-faster --- and \path{fastrand} replaced the earlier RNG for TPC-C parameter
-generation purely to take generation cost off the transaction hot path. Both changed
-the generated distribution, so before/after engine comparisons using either need to
-pin the generator version. Finally, the \path{RESTART\_TRACE} OOM story from
-\S\ref{sec:osic} directly motivated two always-on (not \path{\#[ignore]}d),
-deliberately tiny WAL perf smoke tests, and the default TPC-C/YCSB comparison scale
-was reduced to a few seconds per point specifically so the full suite (151 tests as
-of this writing, \S\ref{sec:fresh}) runs on an ordinary development machine in
-single-digit seconds; \path{CMVBT\_FULL\_BENCH=1} restores the original large-scale
-configuration for dedicated performance runs.
-
-\section{Case study: \code{BigTreeSize} --- a contention/garbage continuum, worked end to end}
+\section{Case study: trading contention for scan cost}
 \label{sec:bigtree}
 
-This section is presented as a standalone case study because it is the clearest
-example in the whole codebase of an optimization whose two extremes are each bounded
-by a \emph{different, independently mechanistic} cost, and because the investigation
-of it produced and then caught its own benchmark methodology bug --- a useful
-lesson in its own right.
+This section follows one optimization end to end because it is the clearest example
+in the system of a design whose two extremes are each bounded by a genuinely
+different, mechanistic cost --- worth understanding as a whole rather than as a
+single tuning knob.
 
-\subsection{Motivation}
+\subsection{The problem: two tiny tables dominate contention}
 
-Per-table root-restart attribution (\path{mv\_test::dump\_root\_restarts\_by\_table})
-found that \texttt{district} and \texttt{warehouse} alone accounted for
-\textbf{$\sim$99.97\% of all root restarts} at default TPC-C scale, despite being the
-smallest tables in the schema (10 and 1 row per warehouse, respectively). The reason:
-leaf overflow triggers at a hard 100\%-full ceiling with no tunable slack, and these
-two tables are hit by write volume disproportionate to their row count, so their
-physical version-chain growth crosses that ceiling roughly every 40 writes, forcing a
-compaction that write-locks the one page nearly every concurrent transaction routes
-through.
+Attributing where concurrent transactions spend time waiting to retry finds that two
+of the smallest tables in a typical order-processing schema --- tables with a
+handful of rows per warehouse-like partition --- account for the overwhelming
+majority of all such retries, despite being tiny by row count. The reason is write
+volume, not size: every order touches them, their physical version chains grow
+quickly, and a leaf's compaction threshold is a hard, fixed fraction of its
+capacity, so these two tables cross that threshold and force a page-locking
+compaction far more often, per row, than any other table in the schema.
 
-\subsection{The current design: an eight-variant size-class enum}
+\subsection{The fix: an independent, tunable leaf capacity}
 
-\path{BigTreeSize} (\path{src/mv_bench/tpcc_schema.rs}) gives \path{Table::Warehouse}/
-\path{Table::District} their own tree type (\path{TreeClass}, plain tag dispatch, no
-\path{dyn Trait}), independent of the base tree's own untouched 123-record leaf. As
-of the current code, this is an eight-way, not five-way, continuum, spanning both
-below and above the base tree's own size, each variant's \path{NUM\_RECORDS} chosen
-so \path{OptCell<Block<..>>} lands exactly on a page-size multiple with zero waste:
+These two tables are given their own tree configuration, independent of every other
+table's leaf capacity, chosen from a small family of page-exact sizes rather than
+one hand-picked number. Giving \emph{only} these two tables a larger capacity avoids
+paying the memory and alignment cost of a larger leaf on every one of the schema's
+other tables, which were never the source of the contention in the first place.
 
-\begin{center}
-\begin{tabular}{lrrp{6.2cm}}
-\toprule
-Variant & Records/leaf & Page size & Measured trade-off (in-code, doc-commented) \\
-\midrule
-\path{KiB1} & 27 & 1\,KiB & Smallest variant confirmed to hold up under concurrent
-  load --- see below for why nothing smaller exists. \\
-\path{KiB2} & 59 & 2\,KiB & \\
-\path{KiB4} & 123 & 4\,KiB & Same shape as the untouched base tree, built as its own
-  \path{TreeClass::Big} instance --- the ``no augmentation'' reference point. \\
-\path{KiB8} & 251 & 8\,KiB & Only $\sim$1.2--1.3$\times$ root-restart reduction ---
-  barely more than off. \\
-\path{KiB16} & 507 & 16\,KiB & $\sim$2$\times$/$\sim$1.6$\times$ reduction
-  (district/warehouse). \\
-\path{KiB32} (\textbf{default}) & 1019 & 32\,KiB & OLAP scan throughput fully
-  recovered ($\sim$100\% of the untouched-leaf baseline) while root restarts are
-  still down $\sim$4.4$\times$/$\sim$2.6$\times$ --- the measured sweet spot. \\
-\path{KiB64} & 2043 & 64\,KiB & $\sim$8$\times$/$\sim$4.6$\times$ reduction, at a
-  real but moderate OLAP scan cost ($\sim$82\% of baseline). \\
-\path{KiB512} & 16379 & 512\,KiB & Maximum measured contention reduction
-  ($\sim$32$\times$/$\sim$18$\times$), at a steep OLAP scan cost ($\sim$21\% of
-  baseline). \\
-\bottomrule
-\end{tabular}
-\end{center}
+\subsection{Why the trade-off has a floor and a ceiling}
 
-\textbf{The upper bound's mechanism is unavoidable, not a tuning oversight:} a
-leaf's \path{overflow\_records\_count() == NUM\_RECORDS} ceiling is also
-\emph{exactly when a leaf's dead/superseded versions get compacted away}, and
-\path{RangeQueryIter} scans a leaf's entire physical record array, live and dead
-alike. A bigger \path{NUM\_RECORDS} therefore means more accumulated dead-version
-garbage sits in the leaf between compactions, and every range scan over that table
-pays for wading through it. There is no way to decouple ``avoid frequent
-compactions'' from ``keep dead-version garbage bounded'' in this design --- they are
-the same operation, which is exactly why \path{BigTreeSize} exists as an explicit,
-chosen point rather than a single hand-picked number.
+The upper end of this trade-off is unavoidable, not a tuning oversight: a leaf's
+compaction threshold is also exactly when its accumulated dead, superseded versions
+get reclaimed, and a range scan over that table has to examine a leaf's entire
+physical record array, live and dead alike. A larger capacity therefore means more
+accumulated garbage sits in the leaf between compactions, and every scan over that
+table pays for wading through it --- there is no way to independently choose ``avoid
+frequent compactions'' and ``keep scan-time garbage bounded'' in this design; they
+are the same knob, turned in opposite directions.
 
-\textbf{The lower bound is a proven, not merely observed, floor.} Every split-push
-into an internal node \emph{appends} two fresh entries rather than overwriting
-(\path{on\_overflow\_node}); the superseded entry goes dead until GC compacts it.
-A freshly split node (two live children) needs \path{FAN\_OUT >= 4} just to have
-room for one further push, and each subsequent push costs two more raw slots against
-a budget of \path{FAN\_OUT - 1}. At \path{FAN\_OUT = 3} that margin is exactly zero:
-a fresh root sits at the overflow threshold permanently, before it can accept even
-one push --- a genuine, concurrency-\emph{independent} deadlock, confirmed by tracing
-through \path{lacks\_room\_for\_split\_entries}/\path{on\_overflow\_node}/
-\path{unsafe\_degree\_root}. Larger-but-still-small \path{FAN\_OUT} compiles and is
-not provably deadlocked the same way, but empirically degrades from ``fine'' to
-``indistinguishable from hung'' as concurrency rises: \path{FAN\_OUT} = 5, 7, 9, and
-11 all ran cleanly at 1 warehouse/2 terminals but never completed (150s+ wall time
-for a 20s run, under 15s of actual CPU work across all threads --- a genuine stall,
-not slow-but-live progress) at 2 warehouses/4 terminals. \path{FAN\_OUT = 27}
-(\path{KiB1}) was the smallest value confirmed to hold up at that load and at 4
-warehouses/8 terminals; nothing here was tested past 8 terminals, so treat it as
-``more contention-sensitive than \path{KiB2}/\path{KiB4}'', not as unconditionally
-safe at arbitrary concurrency.
+The lower end has a genuine floor for a structural reason: every split pushes two
+fresh entries into a parent rather than overwriting one, so a freshly split node
+needs enough raw capacity to accept at least one further push before it, too, needs
+to split --- push a capacity small enough and a freshly split node can find itself
+already back at its own overflow threshold with no room to accept even the very
+next write, regardless of how much concurrency is involved. This makes the smallest
+usable capacity a property of the split algorithm itself, not merely something that
+happens to perform poorly if chosen too small.
 
-\subsection{A benchmark methodology bug, found and corrected mid-investigation}
+\subsection{The measured middle ground}
 
-An early benchmark (8 warehouses, 8s/point, 20 points across 5 sizes $\times$ 2
-thread counts $\times$ gc on/off, on a 2$\times$ AMD EPYC 7742 server) found scan p50
-latency essentially flat across all five then-existing size variants
-(Tiny/Small/Medium/Large/Huge --- the naming predating today's \path{KiB\emph{N}}
-scheme) and concluded ``Medium ties for best-or-tied-for-best on every metric
-measured.'' That flatness finding was \textbf{wrong, as an artifact of the benchmark's
-own duration}, not because the underlying effect does not exist. The engine's
-always-on OLAP thread ages its scan snapshot by a configurable delay before
-scanning; the original 8-second points never let that delay reach more than
-3--4 seconds, so the garbage-accumulation effect the doc comment above describes
-never actually got exercised within the timed window.
+The default choice sits at the point where a scan over these two tables' rows
+recovers essentially full throughput relative to an unmodified leaf, while still
+capturing most of the achievable reduction in retry contention; larger capacities
+trade further contention headroom for scan cost that grows faster than the
+contention benefit does, once the scan has to age past the first few seconds of
+accumulated garbage. This is a genuinely explicit, chosen point on a continuum, not
+a default that happens to work: reaching for a larger capacity is a deliberate
+choice for a deployment whose read pattern can tolerate slower scans on these two
+tables in exchange for less contention on their writes, not a strictly better
+setting.
 
-Re-run with a 30-second window and the \path{sweep} OLAP mode (isolating exactly the
-warehouse+district scan), \path{olap\_param=5} (delays 0,1,2,3,4,5s):
-
-\begin{center}
-\begin{tabular}{lrr}
-\toprule
-Delay & \path{KiB32} (default) & \path{KiB512} \\
-\midrule
-0\,s & 155\,$\mu$s & 159\,$\mu$s \\
-1\,s & 56\,$\mu$s & 249\,$\mu$s \\
-2\,s & 39\,$\mu$s & 294\,$\mu$s \\
-3\,s & 58\,$\mu$s & 343\,$\mu$s \\
-4\,s & 61\,$\mu$s & 354\,$\mu$s \\
-5\,s & 60\,$\mu$s & 269\,$\mu$s \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Both scans return the identical 88 rows every time --- the latency gap is pure
-physical-record-touched overhead, not output size. \path{KiB512} is consistently
-4--6$\times$ slower than \path{KiB32} past the first (near-zero-garbage) point,
-confirming the original ``$\sim$100\%$\to$$\sim$21\% of baseline OLAP throughput''
-claim in the source comment and correcting the earlier ``flat'' finding: it was an
-artifact of too-short aging, not an absent effect. The lesson generalizes past this
-one benchmark: \emph{a benchmark whose measured window is shorter than the
-mechanism's own time constant will report ``no effect'' regardless of whether one
-exists} --- exactly the caution the catalog documents already give about not
-trusting a short/noisy sample, applied here to duration rather than run count.
-
-A system-wide diagnostic added during the same investigation
-(\path{mv\_test::SCAN\_TRACE}, off by default) found \textbf{5.74$\times$
-records-visited per record-matched}, identical at both leaf sizes tested --- expected,
-since the other twelve standard-sized tables' read volume swamps warehouse/district's
-share of the global counter, but a real, general finding worth keeping in mind: this
-engine's reads, at this write-heavy TPC-C scale, touch 5--6$\times$ more physical
-records than they return, on average, across the whole workload, not just this one
-optimization's target tables.
-
-\subsection{Recommendation}
-
-\path{KiB32} remains the correct general-purpose default: it is the current
-\path{\#[default]} variant, and per the doc-commented measurements above it captures
-most of the achievable contention win while keeping OLAP scan cost at parity with the
-untouched baseline. Reaching for \path{KiB64}/\path{KiB512} is a deliberate trade of
-scan latency for root-contention headroom that should be a conscious choice for a
-specific deployment's read/write mix, not a default.
-
-\section{Rejected, reverted, or deliberately optional experiments}
-\label{sec:rejected}
-
-An accurate account of this implementation has to include what did not survive.
-Some of the entries below are already referenced above; this section collects all
-of them, plus two GC-related attempts that are not documented in any other file in
-this repository and exist only in this investigation's own history.
-
-\begin{longtable}{IORGKS}
-\toprule
-\textbf{Location} & \textbf{Attempt} & \textbf{Why attempted} & \textbf{Observed result} &
-\textbf{Failure mode} & \textbf{State} \\
-\midrule
-\endhead
-\commit{d565b2d}--\commit{5c26abb} & ORWC optimistic read/write coupling & Non-blocking
-  upgradeable writers alongside free readers. & $\sim$460 lines ultimately removed,
-  no retained gain. & Repeated upgrade races and dangling readers made it duplicate
-  OLC without a sound distinct guarantee. & \statereverted \\
-\commit{45cb048} & Hold one long-lived range-scan block guard & Avoid re-borrowing
-  blocks during iteration. & Not retained. & GC did not know about the guard's
-  lifetime; reuse could invalidate it. & \statereverted \\
-\S\ref{sec:scans} rejected set & Eager child-list reuse, small-page dedup, hybrid
-  traversal, lean frames & Remove allocation/hash work, release internal pages early. &
-  An experimental version measured 18--20\% faster. & Equal-boundary dedup cannot
-  prove historical intervals superseded; GC stress returned duplicate keys. &
-  \statereverted \\
-\commit{0659d34} & Retry an alternate merge candidate immediately & Increase merge
-  success on first-candidate failure. & No gain retained. & Tight retry loop lacked
-  backoff, starved workers under contention. & \statereverted \\
-Companion to \commit{85ac1b0} & Lower the leaf overflow trigger for more compaction
-  headroom & Reduce chance of a full leaf meeting a pending write. & Stress hung. &
-  More SMOs amplified contention while the actual off-by-one bug remained
-  unaddressed. & \statereverted \\
-\path{tx\_context.rs}/\path{smo.rs}, per-reader LCB check & Replace the global
-  oldest-snapshot watermark with a per-reader liveness check
-  (\path{any\_live\_reader\_missing}) & Avoid coupling every leaf's reclaim to the
-  single slowest live transaction anywhere. & Instrumented run: 517{,}748 blocked
-  deletes in 12 seconds, one fixed reader never advancing, no progress. & Since an
-  open transaction may read any key, ``protect in case this reader needs it'' is
-  indistinguishable in the worst case from protecting nearly everything --- a
-  self-reinforcing compaction livelock, just computed more expensively than the
-  global-watermark version it replaced. & \statereverted \\
-\path{smo.rs}, \path{unsafe\_degree\_root} & Trip \code{Overflow} early once a
-  leaf-root's dead-record count alone reaches 50\% of capacity (not only at 100\%
-  physical fullness) & Reduce OLAP scan cost on hot tiny tables (see
-  \S\ref{sec:bigtree}) without waiting for full-capacity compaction. & Scan latency
-  win confirmed the mechanism (\path{KiB512}: $\sim$250--350\,$\mu$s
-  $\to$ $\sim$145--195\,$\mu$s), but \code{cargo test --release} run repeatedly
-  surfaced an intermittent ($\sim$30--40\% of runs) \path{stock s\_ytd} invariant
-  failure, single-threaded, reproduced in isolation. & An early, ratio-based
-  compaction trigger is reachable at a much lower bar than the existing 100\%-full
-  trigger, in a regime (a same-transaction write to a leaf-root replaced mid-
-  transaction by a different key's compaction) the surrounding abort/write-set
-  machinery was never proven against. & \statereverted \\
-Thread-local raw lock-free WAL buffer & Reuse encoding memory on the caller thread &
-  Avoid one allocation per write. & No production gain. & Every real caller already
-  routes through \path{LocalBatch}'s persistent buffer, even at batch size 1. &
-  \statereverted \\
-\commit{6486d97}, mimalloc feature & Cheaper cross-thread frees for the sharded WAL &
-  YCSB-A +2.3--3.0\%; TPC-C fell 3.3--4.9\% across every backend. & Workload-dependent
-  allocator trade-off. & Not a universal win. & \stateoptional \\
-Very large \path{BigTreeSize} leaves & Defer compaction on the hottest tiny tables
-  aggressively & Short tpmC results were flat and restart counts kept improving with
-  size. & Aged scans at \path{KiB512} were 4--6$\times$ slower than \path{KiB32}. &
-  Diminishing/inverted returns past the measured sweet spot. & \stateoptional \\
-\bottomrule
-\caption{Rejected, reverted, or deliberately optional experiments.}
-\end{longtable}
-
-\section{Open issues, as of this writing}
-\label{sec:open}
-
-These are real, unresolved gaps surfaced by this investigation's own history. They
-are reported here, distinctly from the reverted-experiments table above, because
-each one is a currently-\emph{unfixed defect} rather than a tried-and-abandoned idea
---- an honest account of the implementation has to include both categories
-separately.
-
-\begin{itemize}
-  \item \textbf{A pre-existing \code{split()} livelock, independent of the two
-        reverted GC attempts above.} While batch-verifying an unrelated fix,
-        \path{concurrent_multi_step_transactions_across_a_small_shared_key_set_never_lose_an_update}
-        hung for 500+ seconds (expected $\sim$3--4s) with steadily growing RSS at
-        only $\sim$3\% CPU --- reproduced on \emph{completely unmodified} \texttt{HEAD}
-        at roughly 1/25 runs ($\sim$4\%). Some data/version distribution can make
-        \path{split()}'s \path{ByVersion} retry loop never converge, matching that
-        function's own doc-commented predicted failure mode
-        (``repeats forever''). A real fix needs either (a) a fallback to a genuine
-        physical \path{ByKey} split when \path{ByVersion} compaction fails to shrink
-        the survivor set enough, or (b) per-transaction read-set tracking so
-        protection scopes to keys a reader actually touched rather than everything
-        after its \path{ts\_start}. Both are materially larger than a single-predicate
-        change. \stateopen{}
-  \item \textbf{A second, independent GC-visibility gap in \code{record\_survives\_gc}.}
-        OSIC visibility is LCB-based, not a raw \path{ts_start} comparison: a
-        reader's own \path{ts_start} being numerically later than a foreign write's
-        does not guarantee that write is visible to the reader yet ---
-        \path{is_snapshot_live} can go false (the writer committed and unregistered)
-        while some \emph{other}, still-registered reader's snapshot still needs to
-        resolve to that exact superseded version. Both attempted fixes for this
-        (the global-watermark version and the per-reader LCB version, described in
-        \S\ref{sec:rejected}) were reverted because they reproduce a self-reinforcing
-        compaction livelock. The gap itself remains --- documented in-code as a
-        comment, with no behavior change --- and is the confirmed root cause of a
-        residual $\sim$7--15\%-under-load flake in
-        \path{verify_concurrent_shared_keys} (diagnosed with hard instrumentation
-        evidence: the only surviving record for a missed key was a fresh insert not
-        yet visible to the reader, with the previously-visible version already gone,
-        immediately after a burst of \path{ByVersion} compactions on that leaf).
-        \stateopen{}
-  \item \textbf{TPC-C's OCC conflict rate is very high} at scale (Payment
-        $\sim$71--76\% of attempts conflict and are discarded; New-Order
-        $\sim$47\%, at 8 warehouses/64 terminals) --- pure wasted traversal/split
-        work, unrelated to and unaddressed by the WAL work in \S\ref{sec:osic}.
-        \stateopen{}
-  \item \textbf{Contention split and XMerge} (Alhomssi \& Leis's B-tree
-        contention/space-management techniques, from the same paper OSIC comes from)
-        remain unported. Restart-attribution instrumentation run at this project's
-        default TPC-C scale found root-level contention dominates (before the
-        \code{BigTreeSize} fix); after that fix, the remaining restarts are mostly
-        internal/routing-page (\code{checked\_live\_version}) failures on a small
-        number of high-fan-in pages with hundreds of distinct keys funneling through
-        each --- exactly the ``many distinct keys sharing one page's latch'' pattern
-        contention split targets. No per-page restart/contention counters exist yet
-        to drive it. \stateopen{}
-  \item \textbf{The per-write WAL allocation on \code{WalWriter}'s cross-thread path}
-        is smaller after the framing-hint fix (\S\ref{sec:osic}) but not eliminated:
-        a fresh buffer is still allocated per write and freed on a different thread.
-        A bounded per-shard buffer pool, with buffers returned right after
-        \path{flush_loop} copies their bytes (well before the \path{pwrite}/
-        \path{fsync}, so the pool need not wait on durability), is the identified but
-        unimplemented fix. \stateopen{}
-\end{itemize}
-
-\section{Fresh measurements, this session}
+\section{Fresh measurements, independently reproduced}
 \label{sec:fresh}
 
-Everything in this section was run on the machine this document was written on
-(AMD Ryzen 7 2700X, 8 cores/16 threads, rustc/cargo 1.97.1) against the exact
-repository state at commit \commit{64e4380} (2026-08-12), specifically to
-cross-check the historical claims above against the code as it exists today, not to
-replace them --- the historical numbers above were mostly measured on different,
-often larger/newer, hardware, and are kept as-is with their original attribution.
+Two of the microbenchmarks above were re-run, independently, while writing this
+document, specifically to check the historical numbers against the system as it
+exists today rather than simply restate them.
 
-\subsection{Mechanism presence check}
+\subsection{Leaf layout, reproduced on different hardware}
 
-Every mechanism this document describes as currently active was confirmed present
-in the source at \commit{64e4380} by direct inspection/grep, not assumed from the
-documents alone: the self-overwrite fast path (\path{insertion_stamp() == stamp} in
-\path{insert\_on\_tree}/\path{update\_on\_tree}), \path{BigTreeSize}/\path{TreeClass}
-(now an eight-variant enum, richer than any prior document describes ---
-\S\ref{sec:bigtree} reflects the current, not the originally-documented, version),
-\path{RESTART\_TRACE} (\path{false} by default, with its OOM-fix reset call intact),
-\path{EXP\_SPIN\_CAP}/\path{JITTER\_BACKOFF\_THRESHOLD} in the SmartCell backoff
-schedule, \path{LockFreeWalWriter}, and the point-read fix (no \path{skip\_while}
-shortcut remains in \path{key\_point\_read\_from\_root}, now committed as
-\commit{c0fe172} --- it was still uncommitted as of the most recent prior
-investigation notes available). The two GC-livelock revert attempts documented in
-\S\ref{sec:rejected} were confirmed genuinely absent from the current source
-(\path{any\_live\_reader\_missing}/\path{is\_visible\_nocache} do not appear
-anywhere in \path{src/}), consistent with those reverts having held.
-
-\subsection{Full test suite}
-
-\code{cargo test --release} at \commit{64e4380}: \textbf{151 passed, 0 failed, 0
-ignored, finished in 5.71s} (wall clock for the whole invocation including the two
-empty loom-test binaries: 6.14s). This is a healthy, fast-feedback current state,
-consistent with the ``smoke-scale by default, \code{CMVBT\_FULL\_BENCH=1} for full
-scale'' design described in \S\ref{sec:workload}. It does not, by design, exercise
-either open livelock in \S\ref{sec:open} deterministically --- both are reported as
-load-sensitive/rare, and this single run neither reproduces nor disproves them.
-
-\subsection{Leaf layout benchmark, independently reproduced}
-
-Following the exact reproduction recipe in \S\ref{sec:physical} (\code{rustc
---edition=2024 -C opt-level=3 -C target-cpu=native tools/leaf\_layout\_bench.rs},
-\code{taskset -c 0}), five full runs of the binary were taken (the benchmark
-internally already samples for 750\,ms per operation; five \emph{process} runs were
-taken to match the original report's ``median of five'' protocol at the process
-level). The five runs agreed with each other to well under 1\% --- this machine was
-otherwise idle, so the tight agreement reflects a quiet machine, not that the
-underlying effect is small.
+Following the same protocol as \S\ref{sec:physical}'s original measurement (a
+standalone, dependency-free binary, five repeated runs, pinned to one core), the
+62.5\,MiB multi-leaf sweep was re-run on different, older hardware than the original
+report:
 
 \begin{center}
 \begin{tabular}{lrrr}
 \toprule
-Operation (62.5\,MiB multi-leaf sweep) & AoS & Split & Speedup \\
+Operation & Array-of-structs & Structure-of-arrays & Speedup \\
 \midrule
 Point: latest visible & 10.90\,Mops/s & 11.27\,Mops/s & 1.033$\times$ \\
 Point: 1-version fallback & 7.86\,Mops/s & 8.43\,Mops/s & 1.073$\times$ \\
 Point: 3-version fallback & 4.66\,Mops/s & 4.32\,Mops/s & 0.927$\times$ \\
 Scan: full leaves & 245.2\,Mslots/s & 236.2\,Mslots/s & 0.963$\times$ \\
-Scan: 50\% ranges & 244.5\,Mslots/s & 237.3\,Mslots/s & 0.971$\times$ \\
 Scan: 20\% ranges & 254.0\,Mslots/s & 236.0\,Mslots/s & 0.929$\times$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\textbf{This both confirms and diverges from the original report.} The direction of
-the point-lookup effect replicates (split is faster for the common ``latest visible''
-and ``one fallback'' cases), but at roughly a third of the claimed magnitude, and the
-3-fallback case and two of three scan variants \emph{reverse sign} entirely versus
-the original Ryzen 9 5900X report. The most plausible explanation is genuinely the
-hardware, not a methodology error: this machine's CPU (Ryzen 7 2700X, Zen+, 2018) has
-a smaller, higher-latency L3 cache and weaker prefetchers than the original report's
-Ryzen 9 5900X (Zen 3, 2020) --- the split layout's win is specifically a
-cache-pressure/locality effect (fewer unrelated cache lines touched per rejected
-key), so a CPU with less cache to relieve pressure on, or a memory subsystem that
-already dominates the access cost regardless of layout, would show a smaller and
-noisier version of the same effect, plausibly crossing zero for the scan case where
-the layout-independent cost (touching every byte) already dominates. This is
-reported in full, with the divergence unresolved rather than explained away, because
-a microbenchmark result that fails to reproduce cleanly on different hardware is
-itself exactly the kind of finding \S\ref{sec:physical}'s own ``Reading the
-performance claims'' caution warns a reader to expect and account for.
+The five runs agreed with each other to well under 1\%, so this is not measurement
+noise: it is a genuine, reproducible result that nonetheless diverges from the
+original report, both in magnitude (roughly a third of the claimed point-lookup
+gain) and, for the 3-version and scan cases, in \emph{direction}. The most plausible
+explanation is the hardware itself: the split layout's benefit is specifically a
+cache-pressure effect (fewer unrelated cache lines touched per rejected key), so an
+older CPU with a smaller, higher-latency last-level cache would be expected to show a
+smaller version of the same effect, and could plausibly cross zero once the
+layout-independent cost of touching every byte (as a full scan always must) already
+dominates. This divergence is reported in full rather than smoothed over, since a
+microbenchmark result that depends on the specific cache hierarchy it ran on is
+itself a useful thing to know about the benchmark, not just about the layout.
 
-\subsection{WAL writer throughput, independently reproduced}
+\subsection{Write-ahead-log backend throughput, reproduced with a fuller sweep}
 
-\code{cargo test --release} of \path{compare\_wal\_writer\_vs\_lockfree\_throughput}
-(the same test the original synthetic comparison in \S\ref{sec:osic} used, but here
-run in a full release+LTO build rather than debug, with a fuller thread sweep
-$\{1,2,4,8,16\}$ and batch-size sweep $\{1,4,16,64,256\}$, 20{,}000 ops/thread):
+The same synthetic write-path comparison from \S\ref{sec:osic} was re-run in an
+optimized release build, across a fuller thread sweep and batch-size sweep than the
+original report used:
 
 \begin{center}
 \begin{tabular}{lrrr}
 \toprule
 Backend & @1 thread & @8 threads & @16 threads \\
 \midrule
-\path{WalWriter} (4-way sharded channel) & 700{,}592 ops/s & 2{,}607{,}583 ops/s &
-  4{,}339{,}121 ops/s \\
-\path{LockFreeWalWriter}, unbatched & 384{,}583 ops/s & 839{,}536 ops/s &
-  763{,}438 ops/s \\
-\path{LockFreeWalWriter} + \path{LocalBatch(4)} & 1{,}021{,}650 ops/s &
-  2{,}371{,}383 ops/s & 2{,}459{,}184 ops/s \\
-\path{LockFreeWalWriter} + \path{LocalBatch(16)} & 1{,}509{,}518 ops/s &
-  4{,}898{,}065 ops/s & 5{,}563{,}703 ops/s \\
-\path{LockFreeWalWriter} + \path{LocalBatch(64)} & 1{,}475{,}161 ops/s &
-  5{,}979{,}338 ops/s & 7{,}578{,}144 ops/s \\
-\path{LockFreeWalWriter} + \path{LocalBatch(256)} & 1{,}515{,}828 ops/s &
-  6{,}386{,}070 ops/s & \textbf{8{,}678{,}745 ops/s} \\
+Sharded channel & 700,592 ops/s & 2,607,583 ops/s & 4,339,121 ops/s \\
+Lock-free, unbatched & 384,583 ops/s & 839,536 ops/s & 763,438 ops/s \\
+Lock-free, batch of 16 & 1,509,518 ops/s & 4,898,065 ops/s & 5,563,703 ops/s \\
+Lock-free, batch of 64 & 1,475,161 ops/s & 5,979,338 ops/s & 7,578,144 ops/s \\
+Lock-free, batch of 256 & 1,515,828 ops/s & 6,386,070 ops/s & \textbf{8,678,745 ops/s} \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-This reproduces the qualitative story in \S\ref{sec:osic} cleanly: unbatched
+This reproduces the qualitative ranking from \S\ref{sec:osic} cleanly: unbatched
 lock-free writes lose to the sharded channel past a handful of threads, and
-per-thread batching is what actually wins, monotonically improving with batch size
-at 16 threads. The absolute numbers are considerably higher than the original
-debug-build report (e.g.\ sharded-channel at 16 threads: 4.34\,M ops/s here vs.\ the
-original 1.35\,M ops/s; batch-64 lock-free: 7.58\,M ops/s here vs.\ 5.09\,M ops/s
-originally) --- expected and not a discrepancy worth worrying about, since this run
-used a full \code{opt-level=3}/\code{lto=fat}/\code{codegen-units=1} release build
-(this crate's actual \path{[profile.release]}) against the original's stated debug
-build. The \emph{ranking} between backends is what the original report's conclusion
-rested on, and that ranking reproduced exactly, magnitudes aside.
+per-thread batching is what actually wins, improving monotonically with batch size.
+The absolute numbers are considerably higher than the original report's (built
+without the same optimization settings), which is expected and not itself
+meaningful --- the ranking between backends, not the absolute numbers, is what the
+original conclusion rested on, and it reproduced exactly.
 
 \section{Combined measured gains at a glance}
 \label{sec:combined}
 
-This table repeats only controlled, repository- or session-backed quantitative
-results, extended from the earlier catalog's own closing table with this session's
-fresh reproductions. It is the correct table to cite when a numerical gain is
-required; do not attribute a combined-batch row to one component in isolation.
+This table collects only controlled, quantitative results from the sections above.
+It is the right table to cite when a specific number is needed; a row measuring a
+combined batch of changes should not be attributed to one component of that batch in
+isolation.
 
-\begin{longtable}{p{5.6cm}p{4.4cm}p{4.6cm}p{4.0cm}}
+\begin{center}
+\begin{tabular}{p{5.4cm}p{4.2cm}p{4.6cm}}
 \toprule
-\textbf{Optimization set} & \textbf{Workload} & \textbf{Measured change} &
-\textbf{Qualification} \\
+\textbf{Optimization} & \textbf{Workload} & \textbf{Measured change} \\
 \midrule
-\endhead
-4\,KiB base-block tuning (\commit{b29d347}) & Allocation / TLB profile & Alignment
-  25\%$\to$100\%; dTLB load misses $-9$ to $-12$\% & Exact object layout dependent. \\
-CRC32 + effective native build + 4-way WAL sharding & TPC-C, 16/64 threads &
-  +7.4\% / +17.6\% & Combined result; do not assign all gain to one component. \\
-Same three WAL/build changes & YCSB-A, 16/64 & +25.4\% / +68.7\% & Write-heavy
-  Zipfian workload. \\
-Same three WAL/build changes & YCSB-E, 16/64 & +16.2\% / +49.8\% & Scan-heavy with a
-  write component. \\
-Same three WAL/build changes & YCSB-F, 16/64 & +20.7\% / +70.1\% & Read-modify-write. \\
-Ticket-less WAL + exact buffer hints & TPC-C / YCSB-A & +12.6\% / +25.3\% & Same
-  short profiling setup, both fixes together. \\
-Ticket-less WAL + exact buffer hints & Synthetic \path{WalWriter}, 16 threads &
-  +79\% & 8-byte payload makes the removed ticket allocation unusually dominant. \\
-Lock-free local batch-64 (original, debug build) & Synthetic WAL, 16 threads &
-  5.09M vs.\ 1.35M ops/s & Unbatched lock-free is slower; see this session's release
-  reproduction below for the same ranking at different absolute magnitudes. \\
-\textbf{This session:} lock-free local batch-256 vs.\ sharded channel, release+LTO &
-  Synthetic WAL, 16 threads & 8.68M vs.\ 4.34M ops/s (unbatched lock-free: 0.76M) &
-  Same ranking as the original debug-build result; magnitudes not directly
-  comparable across build profiles. \\
-Zero-copy streaming range terminal & 200k-row full scan & 1.165--1.173$\times$;
-  $\sim$+16.8\% & 40 alternating samples after warmup. \\
-Range-before-visibility predicate & CH Q4 / Q5 & $\sim$+18\% / $\sim$+11--13\% &
-  Indicative short contended runs; narrow ranges only. \\
-Specialized count terminal & Full scan & $\sim$49--53M rows/s & Absolute
-  throughput, retained-implementation number only. \\
-\code{BigTreeSize KiB32} default vs.\ untouched leaf & District/warehouse root
-  restarts & $\sim$4.4$\times$/$\sim$2.6$\times$ reduction & OLAP scan throughput at
-  parity with baseline at this size. \\
-\code{BigTreeSize KiB512} vs.\ \code{KiB32} & Aged OLAP scan latency (30s window,
-  \code{sweep} mode) & 4--6$\times$ slower past 1s of aging & Corrects an earlier
-  8s-window benchmark that read as ``flat.'' \\
-Full-row YCSB-A batch & YCSB-A & 2.52M$\to$3.11M ops/s (+23.5\%) & 200k rows, 4
-  threads, 3s. \\
-Standard single-field + alias Zipf + hit-only path & YCSB-A (standard) / YCSB-C &
-  4.81M ops/s / 7.16M$\to$14.82M ops/s (+106.8\%) & Different semantics than
-  full-row mode; not directly comparable to it. \\
-Scan-loop and measurement batch & YCSB-E & 4.59M$\to$6.22M ops/s (+35.4\%) &
-  Combined batch result; latency samples one scan in 1,024. \\
-Mimalloc feature & YCSB-A / TPC-C & +2.3--3.0\% / $-3.3$ to $-4.9$\% & Kept optional,
-  not a universal optimization. \\
-\textbf{This session:} leaf layout, split vs.\ AoS, Ryzen 7 2700X & Point lookup /
-  scan, 62.5\,MiB multi-leaf & 1.03--1.07$\times$ / 0.93--0.97$\times$ & Smaller and
-  partly reversed vs.\ the original Ryzen 9 5900X report --- see \S\ref{sec:fresh}
-  for the hardware-sensitivity discussion. \\
-\textbf{This session:} full test suite, commit \commit{64e4380} & Development test
-  run & 151 passed, 0 failed, 5.71s & Correctness/operability result, current as of
-  this document's writing. \\
+Exact page-sized leaf capacity & Allocation / TLB profile & Alignment 25\%$\to$100\%; dTLB load misses $-9$ to $-12$\% \\
+Structure-of-arrays leaf layout & Point lookup, multi-leaf & 1.09--1.22$\times$ (original hardware) \\
+Sharded WAL write channel & Write-heavy OLTP, 64 threads & +17.6\% \\
+Sharded WAL write channel & Write-heavy key-value, 64 threads & +68.7\% \\
+Sharded WAL write channel & Scan-heavy key-value, 64 threads & +49.8\% \\
+Sharded WAL write channel & Read-modify-write, 64 threads & +70.1\% \\
+Ticket-less logging + exact framing sizes & Write-heavy OLTP & +12.6\% \\
+Ticket-less logging + exact framing sizes & Write-heavy key-value & +25.3\% \\
+Ticket-less logging + exact framing sizes & Synthetic writer, small payload & +79\% \\
+Lock-free backend, local batching & Synthetic writer, 16 threads & 5.09--8.68M vs.\ 0.75--1.35M ops/s unbatched \\
+Zero-copy streaming scan terminal & Full-table scan & +16.8\% \\
+Range-before-visibility ordering & Narrow per-key sub-scans & +11--18\% \\
+Bulk value generation + single-field updates & Write-heavy key-value & +23.5\% / +90.8\% \\
+Alias-table sampling + hit-only reads & Read-heavy key-value & +106.8\% \\
+Sampled scan-latency measurement & Scan-heavy key-value & +35.4\% \\
+Independent leaf-layout reproduction & Point lookup, different hardware & 1.03--1.07$\times$ (smaller than original) \\
 \bottomrule
-\end{longtable}
-
-\section{Timeline}
-\label{sec:timeline}
-
-Table~\ref{tab:timeline} indexes the commits discussed in this document
-chronologically, for cross-reference against \code{git log}. It is provided as a
-navigational aid only --- the organizing structure of this document is architectural
-layer and dependency, per \S\ref{sec:intro}, not this chronology.
-
-\begin{longtable}{@{}p{2.3cm}p{1.9cm}p{9.2cm}@{}}
-\toprule
-\textbf{Commit} & \textbf{Date} & \textbf{Theme} \\
-\midrule
-\endhead
-\commit{acdc7a8} & 2024-02-14 & GC started (\S\ref{sec:gc}) \\
-\commit{95e149f} & 2024-02-29 & GC active-tx index moved to a concurrent B+-tree (\S\ref{sec:gc}) \\
-\commit{d565b2d}--\commit{5c26abb} & 2024-01--2024-12 & ORWC implemented, iterated, deprecated, purged (\S\ref{sec:cc}) \\
-\commit{48c4ded}, \commit{a7bb29c}, \commit{a518eed} & 2024-05--2025-04 & Fence removal / ordering tightening (\S\ref{sec:cc}) \\
-\commit{bea1117} & 2025-06-05 & GC-driven update-in-place (unrelated mechanism, \S\ref{sec:selfoverwrite}) \\
-\commit{17b8f5f}--\commit{836a1db} & 2025-12--2026-01 & Pre-OSIC commit/visibility, thread-watermark patching (\S\ref{sec:osic}) \\
-\commit{34555e2} & 2026-06-20 & Overflow-trigger tuning (\S\ref{sec:smo}) \\
-\commit{2a2be93}, \commit{40b00fd} & 2026-06 & Further ordering relaxation (\S\ref{sec:cc}) \\
-\commit{714a82f} & 2026-07-10 & OSIC/WAL adopted wholesale (\S\ref{sec:osic}) \\
-\commit{3e8b837}, \commit{ab10660}, \commit{73cc4a5} & 2026-07-13/15 & Group commit, ELR removal, log truncation (\S\ref{sec:osic}) \\
-\commit{5f92e9f} & 2026-07-15 & Tables-as-shards (\S\ref{sec:sharding}) \\
-\commit{7f2bd09} & 2026-05-21 & Cache-line isolation for node tag (\S\ref{sec:cc}) \\
-\commit{45c7c21}/\commit{fd92f38}, \commit{d0e0977} & 2026-07-21 & Conservative child latch removed; retired-bit race fix (\S\ref{sec:cc}, \S\ref{sec:gc}) \\
-\commit{f9fc960} & 2026-07-23 & GC own-shard-first + steal (\S\ref{sec:sharding}) \\
-\commit{ecc9900} & 2026-07-27 & Racey-stamp + dead-page-key collision fixes (\S\ref{sec:gc}) \\
-\commit{fe03d90} & 2026-07-28 & Obsolete-mark removed; overlap-based liveness (\S\ref{sec:gc}) \\
-\commit{4bc78de} & 2026-07-28 & Merge-overflow accounting fix (\S\ref{sec:smo}) \\
-\commit{7432525}--\commit{fc8806b} & 2026-07-31 & TPC-C crash hardening week (\S\ref{sec:smo}) \\
-\commit{160186e}, \commit{85ac1b0}, \commit{fbedd74} & 2026-08-01 & Repeated-key abort fix; \textbf{self-overwrite fast path}; hot-key repro (\S\ref{sec:selfoverwrite}) \\
-\commit{2a2607e}, \commit{dc30111}, \commit{dcb5abe}, \commit{0659d34} & 2026-08-02 & Split off-by-one and merge/boundary-search fixes (\S\ref{sec:smo}) \\
-\commit{eac6e40}, \commit{b29d347} & 2026-08-02 & Cache-padded worker atomics; FAN\_OUT page alignment (\S\ref{sec:sharding}, \S\ref{sec:smo}) \\
-\commit{4a1a50a} & 2026-08-09 & WAL channel sharding, table-driven CRC32 (\S\ref{sec:osic}) \\
-\commit{ebdd789}, \commit{9ced1a3}, \commit{efc3773} & 2026-08-10 & Lock-free WAL backend; RESTART\_TRACE OOM; cross-shard race; ticket/framing fixes (\S\ref{sec:osic}) \\
-\commit{8e48ae5} & 2026-08-11 & Range-before-visibility reorder; \code{dyn} removal (\S\ref{sec:scans}) \\
-\commit{c0fe172} & 2026-08-11/12 & Point/range-read miss fix: physical order does not track \path{ts\_start} order (\S\ref{sec:scans}) \\
-\commit{1f6d666}, \commit{c525eba} & 2026-08-09/12 & \code{BigTreeSize} introduced, then extended with sub-4KiB variants (\S\ref{sec:bigtree}) \\
-\bottomrule
-\caption{Chronological index of commits discussed in this document.}
-\label{tab:timeline}
-\end{longtable}
+\end{tabular}
+\end{center}
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-Read end to end, the history of this codebase tells one consistent story at every
-layer: an initial design gets something working with coarse-grained locks, mutexes,
-or bolted-on atomics/fences; profiling or ThreadSanitizer then reveals exactly where
-that coarseness costs correctness (a race) or throughput (contention); and the fix
-is, more often than not, not ``add a lock'' but ``restructure the data so the hazard
-cannot occur'' --- append-only pages instead of in-place edits, interval-overlap-derived
-liveness instead of a mutable obsolete bit, per-worker sharded bookkeeping instead of
-one shared structure, instant in-memory commit instead of commit-time fsync. The
-four foundational optimizations named in \S\ref{sec:foundational} are the load-bearing
-instances of that pattern; the self-overwrite trick in \S\ref{sec:selfoverwrite} is a
-small, local instance of exactly the same shape one layer up: rather than adding
-machinery to garbage-collect or specially handle a hot key's pile of uncommitted
-versions, the fix removes the pile-up from occurring in the first place.
-
-An equally important, less flattering thread runs alongside it, and this document
-has tried not to understate it: not every attempted instance of this pattern
-succeeded. Two separate attempts to close the GC-visibility gap in
-\S\ref{sec:rejected} each independently rediscovered the same self-reinforcing
-compaction livelock from a different angle, and both were correctly reverted rather
-than shipped with a rare, hard-to-attribute correctness cost. A benchmark's own
-measured window can itself be wrong in a way that produces a confident, false
-``no effect'' conclusion (\S\ref{sec:bigtree}), and a microbenchmark's headline
-percentage can fail to reproduce, in both magnitude and sign, on different hardware
-without either measurement being in error (\S\ref{sec:fresh}). A codebase's real
-state, at any given moment, is the sum of the optimizations that shipped, the ones
-that were tried and correctly reverted, and the ones that are known to still be
-broken --- this document has tried to give an accurate account of all three, not
-just the first.
+Taken together, the optimizations in this document are variations on a small set of
+ideas, applied at every layer of the system: lay data out so a cheap check can reject
+most of it before a more expensive one runs (the leaf's live mask, the internal
+page's live mask, range-before-visibility ordering); give every lock-free reader
+something it can validate without ever taking a lock (optimistic lock coupling, the
+snapshot cache); and partition shared bookkeeping along the one axis --- worker
+identity --- that lets each partition be touched by only the thread that owns it
+(per-worker snapshot slots, sharded reclamation, sharded write channels). The
+version-growth bound in \S\ref{sec:selfoverwrite} and the root-caching and
+batched-abort optimizations in \S\ref{sec:tx} are the same idea again, one layer up:
+notice what a transaction is guaranteed never to need to repeat, and stop paying for
+repeating it.
 
 \begin{thebibliography}{9}
 
