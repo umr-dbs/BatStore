@@ -232,7 +232,7 @@ fn explicit_abort_after_insert_conflict_reverts_earlier_writes() {
                     tx2.insert(t, 2, 999),
                     CRUDOperationResult::Inserted(_)
                 ));
-            tx2.commit();
+                tx2.commit();
             })
             .join()
             .unwrap();
@@ -296,7 +296,7 @@ fn explicit_abort_after_update_conflict_reverts_earlier_writes() {
                     tx2.update(t, 2, 222),
                     CRUDOperationResult::Updated(_)
                 ));
-            tx2.commit();
+                tx2.commit();
             })
             .join()
             .unwrap();
@@ -366,7 +366,7 @@ fn explicit_abort_after_delete_conflict_reverts_earlier_writes() {
                     tx2.update(t, 2, 222),
                     CRUDOperationResult::Updated(_)
                 ));
-            tx2.commit();
+                tx2.commit();
             })
             .join()
             .unwrap();
@@ -441,7 +441,7 @@ fn explicit_abort_reverts_every_self_written_version_of_a_repeatedly_written_key
                     tx2.update(t, 2, 999),
                     CRUDOperationResult::Updated(_)
                 ));
-            tx2.commit();
+                tx2.commit();
             })
             .join()
             .unwrap();

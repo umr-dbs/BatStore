@@ -53,12 +53,23 @@ fn streaming_terminals_count_fold_and_stop_on_error() {
     let version = tree.current_version();
     let narrow = Interval::new(19, 23);
 
-    assert_eq!(RangeQueryIter::new(&tree, version, narrow, false, tree.worker_id()).count_ref(), 5);
+    assert_eq!(
+        RangeQueryIter::new(&tree, version, narrow, false, tree.worker_id()).count_ref(),
+        5
+    );
     // `inc_key(u64::MAX)` saturates. A full-range streaming scan must mark
     // the final leaf complete instead of routing MAX back into it forever.
-    assert_eq!(RangeQueryIter::new(
-        &tree, version, Interval::new(u64::MIN, u64::MAX), false, tree.worker_id()
-    ).count_ref(), 64);
+    assert_eq!(
+        RangeQueryIter::new(
+            &tree,
+            version,
+            Interval::new(u64::MIN, u64::MAX),
+            false,
+            tree.worker_id()
+        )
+        .count_ref(),
+        64
+    );
     let sum = RangeQueryIter::new(&tree, version, narrow, false, tree.worker_id())
         .fold_ref(0u64, |sum, _, payload| sum + *payload);
     assert_eq!(sum, (19..=23).map(payload_for).sum());
@@ -75,16 +86,20 @@ fn streaming_terminals_count_fold_and_stop_on_error() {
 
 fn collect_range(tree: &TestTree, range: Interval<u64>, version: Version) -> HashMap<u64, u64> {
     match tree.dispatch_crud(CRUDOperation::Range(range, version)) {
-        CRUDOperationResult::MatchedRecords(records) =>
-            records.into_iter().map(|r| (r.key, *r.payload)).collect(),
+        CRUDOperationResult::MatchedRecords(records) => {
+            records.into_iter().map(|r| (r.key, *r.payload)).collect()
+        }
         other => panic!("unexpected Range result: {other}"),
     }
 }
 
-fn collect_range_iter(tree: &TestTree, range: Interval<u64>, version: Version) -> HashMap<u64, u64> {
+fn collect_range_iter(
+    tree: &TestTree,
+    range: Interval<u64>,
+    version: Version,
+) -> HashMap<u64, u64> {
     match tree.dispatch_crud(CRUDOperation::RangeIter(range, version)) {
-        CRUDOperationResult::MatchedRecordIter(iter) =>
-            iter.map(|r| (r.key, *r.payload)).collect(),
+        CRUDOperationResult::MatchedRecordIter(iter) => iter.map(|r| (r.key, *r.payload)).collect(),
         other => panic!("unexpected RangeIter result: {other}"),
     }
 }
@@ -129,21 +144,38 @@ fn range_and_iter_query_return_exactly_the_concurrently_inserted_records() {
     let version = tree.current_version();
     let full_range = Interval::new(0, TOTAL - 1);
 
-    assert_eq!(collect_range(&tree, full_range, version), expected, "Range missed or corrupted concurrently inserted records");
-    assert_eq!(collect_range_iter(&tree, full_range, version), expected, "RangeIter missed or corrupted concurrently inserted records");
+    assert_eq!(
+        collect_range(&tree, full_range, version),
+        expected,
+        "Range missed or corrupted concurrently inserted records"
+    );
+    assert_eq!(
+        collect_range_iter(&tree, full_range, version),
+        expected,
+        "RangeIter missed or corrupted concurrently inserted records"
+    );
 
     // Sub-range spanning several splits (FAN == 8, TOTAL == 1600 keys): must
     // return exactly the keys inside it, no more, no fewer.
     let lo = TOTAL / 3;
     let hi = lo + TOTAL / 4;
     let sub_range = Interval::new(lo, hi);
-    let expected_sub: HashMap<u64, u64> = expected.iter()
+    let expected_sub: HashMap<u64, u64> = expected
+        .iter()
         .filter(|&(&k, _)| k >= lo && k <= hi)
         .map(|(&k, &v)| (k, v))
         .collect();
 
-    assert_eq!(collect_range(&tree, sub_range, version), expected_sub, "Range over a sub-interval returned the wrong records");
-    assert_eq!(collect_range_iter(&tree, sub_range, version), expected_sub, "RangeIter over a sub-interval returned the wrong records");
+    assert_eq!(
+        collect_range(&tree, sub_range, version),
+        expected_sub,
+        "Range over a sub-interval returned the wrong records"
+    );
+    assert_eq!(
+        collect_range_iter(&tree, sub_range, version),
+        expected_sub,
+        "RangeIter over a sub-interval returned the wrong records"
+    );
 }
 
 /// A range query taken at a version from *before* a concurrent batch of
@@ -197,7 +229,8 @@ fn range_query_respects_snapshot_isolation_across_concurrent_inserts() {
     let version_after = tree.current_version();
     let full_range = Interval::new(0, AFTER_BASE + AFTER_TOTAL);
 
-    let expected_before: HashMap<u64, u64> = (0..BEFORE_COUNT).map(|k| (k, payload_for(k))).collect();
+    let expected_before: HashMap<u64, u64> =
+        (0..BEFORE_COUNT).map(|k| (k, payload_for(k))).collect();
     let mut expected_after = expected_before.clone();
     expected_after.extend((AFTER_BASE..AFTER_BASE + AFTER_TOTAL).map(|k| (k, payload_for(k))));
 
@@ -252,6 +285,9 @@ fn range_min_by_key_finds_the_true_minimum_despite_descending_insertion_order() 
         .min_by_key()
         .expect("range should have at least one match");
 
-    assert_eq!(min.key, 0, "min_by_key must return the smallest key in range, not whichever the leaf happened to store first");
+    assert_eq!(
+        min.key, 0,
+        "min_by_key must return the smallest key in range, not whichever the leaf happened to store first"
+    );
     assert_eq!(*min.payload, payload_for(0));
 }

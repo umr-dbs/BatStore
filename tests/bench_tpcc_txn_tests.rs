@@ -123,7 +123,7 @@ fn first_writer_wins_conflict_holds_per_table_under_shared_ctx() {
                     tx2.update(Table::District, d_key, sample_district()),
                     CRUDOperationResult::Updated(_)
                 ));
-            tx2.commit();
+                tx2.commit();
             })
             .join()
             .unwrap();
@@ -169,7 +169,7 @@ fn dropped_tpcc_txn_reverts_writes_across_tables_on_conflict() {
                     tx2.insert(Table::District, d_key2, sample_district()),
                     CRUDOperationResult::Inserted(_)
                 ));
-            tx2.commit();
+                tx2.commit();
             })
             .join()
             .unwrap();

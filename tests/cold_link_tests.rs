@@ -158,7 +158,8 @@ fn on_reuse_clears_a_populated_cold_link() {
     let cold = crate::mv_sync::smart_cell::SmartCell(std::ptr::addr_of!(cell));
     let link = ColdLink::<TEST_FAN, TEST_RECORDS, ProdKey, ProdPayload>::new(cold, 1, 1, 1, 1);
 
-    let mut node = Node::<TEST_FAN, TEST_RECORDS, ProdKey, ProdPayload>::new_leaf_with_cold_link(link);
+    let mut node =
+        Node::<TEST_FAN, TEST_RECORDS, ProdKey, ProdPayload>::new_leaf_with_cold_link(link);
     assert!(!node.cold_link().is_none());
 
     node.on_reuse();

@@ -821,23 +821,39 @@ impl<
 
     /// Divides retained history into write-facing hot state and historical
     /// cold state without changing the relative order of either set.
-    fn hot_cold_records(
+    fn grouped_hot_cold_records(
         &self,
         records: Vec<RecordPoint<Key, Payload>>,
     ) -> (
         Vec<RecordPoint<Key, Payload>>,
         Vec<RecordPoint<Key, Payload>>,
     ) {
-        let mut newest_valid = std::collections::HashMap::with_capacity(records.len());
-        for (i, record) in records.iter().enumerate() {
-            if !record.version().insertion_stamp().is_invalid() {
-                newest_valid.insert(record.key(), i);
+        let mut newest_valid = vec![false; records.len()];
+        let mut group_start = 0;
+        while group_start < records.len() {
+            let key = records[group_start].key();
+            let mut group_end = group_start + 1;
+            while group_end < records.len() && records[group_end].key() == key {
+                group_end += 1;
             }
+            if let Some(i) = (group_start..group_end)
+                .rev()
+                .find(|&i| !records[i].version().insertion_stamp().is_invalid())
+            {
+                newest_valid[i] = true;
+            }
+            group_start = group_end;
         }
-        let mut hot = Vec::with_capacity(newest_valid.len());
-        let mut cold = Vec::with_capacity(records.len().saturating_sub(newest_valid.len()));
+
+        let hot_count = records
+            .iter()
+            .enumerate()
+            .filter(|(i, record)| record.version().is_live() || newest_valid[*i])
+            .count();
+        let mut hot = Vec::with_capacity(hot_count);
+        let mut cold = Vec::with_capacity(records.len() - hot_count);
         for (i, record) in records.into_iter().enumerate() {
-            if record.version().is_live() || newest_valid.get(&record.key()) == Some(&i) {
+            if record.version().is_live() || newest_valid[i] {
                 hot.push(record);
             } else {
                 cold.push(record);
@@ -846,20 +862,25 @@ impl<
         (hot, cold)
     }
 
-    fn hot_record_count(&self, records: &[RecordPoint<Key, Payload>]) -> usize {
-        let mut newest_valid = std::collections::HashMap::with_capacity(records.len());
-        for (i, record) in records.iter().enumerate() {
-            if !record.version().insertion_stamp().is_invalid() {
-                newest_valid.insert(record.key(), i);
+    /// Counts write-facing records in an already stably key-grouped history.
+    fn grouped_hot_record_count(records: &[RecordPoint<Key, Payload>]) -> usize {
+        let mut count = 0;
+        let mut group_start = 0;
+        while group_start < records.len() {
+            let key = records[group_start].key();
+            let mut group_end = group_start + 1;
+            while group_end < records.len() && records[group_end].key() == key {
+                group_end += 1;
             }
+            let newest_valid = (group_start..group_end)
+                .rev()
+                .find(|&i| !records[i].version().insertion_stamp().is_invalid());
+            count += (group_start..group_end)
+                .filter(|&i| records[i].version().is_live() || newest_valid == Some(i))
+                .count();
+            group_start = group_end;
         }
-        records
-            .iter()
-            .enumerate()
-            .filter(|(i, record)| {
-                record.version().is_live() || newest_valid.get(&record.key()) == Some(i)
-            })
-            .count()
+        count
     }
 
     /// Constructs a private newest-to-oldest chain. No page is shared with
@@ -896,15 +917,17 @@ impl<
     fn populate_leaf_history(
         &self,
         page: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
-        records: Vec<RecordPoint<Key, Payload>>,
-    ) {
+        mut records: Vec<RecordPoint<Key, Payload>>,
+    ) -> usize {
+        records.sort_by_key(|record| record.key());
         if records.len() <= NUM_RECORDS {
+            let hot_count = Self::grouped_hot_record_count(&records);
             page.unsafe_borrow_mut()
                 .as_leaf_page()
                 .bulk_push_owned(records);
-            return;
+            return hot_count;
         }
-        let (hot, cold) = self.hot_cold_records(records);
+        let (hot, cold) = self.grouped_hot_cold_records(records);
         assert!(
             hot.len() < NUM_RECORDS,
             "cold offload must leave room for the write that triggered the SMO"
@@ -914,6 +937,7 @@ impl<
         node.set_cold_link(link);
         let hot_count = hot.len();
         node.as_leaf_page().bulk_push_owned(hot);
+        hot_count
     }
 
     pub(crate) fn merge<'a>(
@@ -1630,10 +1654,6 @@ impl<
 
                     let block_records = block.as_records();
                     let records = retained_history.expect("leaf history");
-                    let hot_count = self.hot_record_count(&records);
-
-                    record_version_split(fence.to_string(), hot_count);
-
                     // debug_assert!(active_records.len() >= block.filling_40_percent(),
                     //               "Active records = {}, required >= {}", active_records.len(), block.filling_40_percent());
 
@@ -1648,7 +1668,8 @@ impl<
                     // debug_assert!(active_records.len() <=
                     //     BlockManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::min_active_records());
 
-                    self.populate_leaf_history(new_leaf, records);
+                    let hot_count = self.populate_leaf_history(new_leaf, records);
+                    record_version_split(fence.to_string(), hot_count);
 
                     if TRACE_KEY_DEBUG {
                         push_trace(format!(

@@ -9,10 +9,9 @@
 //! planner, just this tree's point/range scans. Every query here is
 //! hand-written as a scan (or nested scans) plus in-memory grouping/joining,
 //! which is exactly how each is implemented: small dimension tables
-//! (REGION: 5 rows, NATION: 25, SUPPLIER: ~10,000) are loaded once into a
-//! `HashMap`, then joined in memory against a scan of the large fact tables
-//! (ORDERS/ORDER_LINE) — the same "build a hash table for the small side"
-//! strategy a real query planner would pick for these table sizes.
+//! (REGION: 5 rows, NATION: 25, SUPPLIER: ~10,000) are loaded once into
+//! direct-index arrays, then joined in memory against scans of the large
+//! fact tables (ORDERS/ORDER_LINE).
 //!
 //! Only 4 of CH-benCHmark's 22 queries are implemented, chosen to cover a
 //! representative spread of query shapes: [`q1`] (pure aggregation, no
@@ -26,8 +25,6 @@
 //! All 4 queries here are adaptations, not literal ports of the published
 //! CH-benCHmark SQL — see each function's doc comment for the specific
 //! simplifications relative to the original TPC-H query it's modeled on.
-
-use std::collections::HashMap;
 
 use crate::mv_bench::tpcc_schema::*;
 use crate::mv_bench::tpcc_txn::{TpccTxn, many, one};
@@ -150,7 +147,7 @@ pub fn q4(
     let ts_start = tx.ts_start();
     let orders = many(tx.range(Table::Orders, orders_table_range(), true));
 
-    let mut counts: HashMap<u8, u64> = HashMap::new();
+    let mut counts = [0u64; 256];
     for order_rec in &orders {
         let order = order_rec.payload.as_order();
         if order.o_entry_d < date_lo || order.o_entry_d >= date_hi {
@@ -162,23 +159,24 @@ pub fn q4(
         let late = lines
             .iter()
             .any(|l| match l.payload.as_order_line().ol_delivery_d {
-            Some(d) => d > order.o_entry_d + late_slack_millis,
-            None => true,
-        });
+                Some(d) => d > order.o_entry_d + late_slack_millis,
+                None => true,
+            });
         if late {
-            *counts.entry(order.o_ol_cnt).or_insert(0) += 1;
+            counts[order.o_ol_cnt as usize] += 1;
         }
     }
     tx.commit();
 
-    let mut out: Vec<_> = counts
+    let out = counts
         .into_iter()
+        .enumerate()
+        .filter(|(_, order_count)| *order_count != 0)
         .map(|(o_ol_cnt, order_count)| OrderPriorityCount {
-            o_ol_cnt,
+            o_ol_cnt: o_ol_cnt as u8,
             order_count,
         })
         .collect();
-    out.sort_by_key(|c| c.o_ol_cnt);
     (out, ts_start)
 }
 
@@ -225,30 +223,29 @@ pub fn q5(
     };
 
     let nations = many(tx.range(Table::Nation, nation_table_range(), true));
-    let nation_names: HashMap<u8, String> = nations
+    let mut nation_names: [Option<String>; 256] = std::array::from_fn(|_| None);
+    for nation in nations
         .iter()
         .filter(|n| n.payload.as_nation().n_regionkey == region_id)
-        .map(|n| {
-            (
-                decode_nation_id(n.key),
-                n.payload.as_nation().n_name.clone(),
-            )
-        })
-        .collect();
+    {
+        nation_names[decode_nation_id(nation.key) as usize] =
+            Some(nation.payload.as_nation().n_name.clone());
+    }
 
     let suppliers = many(tx.range(Table::Supplier, supplier_table_range(), true));
-    let supplier_nation: HashMap<u32, u8> = suppliers
+    let supplier_capacity = suppliers
         .iter()
-        .map(|s| {
-            (
-                decode_supplier_id(s.key),
-                s.payload.as_supplier().s_nationkey,
-            )
-        })
-        .collect();
+        .map(|supplier| decode_supplier_id(supplier.key) as usize)
+        .max()
+        .map_or(0, |max_id| max_id + 1);
+    let mut supplier_nation = vec![None; supplier_capacity];
+    for supplier in &suppliers {
+        supplier_nation[decode_supplier_id(supplier.key) as usize] =
+            Some(supplier.payload.as_supplier().s_nationkey);
+    }
 
     let orders = many(tx.range(Table::Orders, orders_table_range(), true));
-    let mut revenue: HashMap<u8, f64> = HashMap::new();
+    let mut revenue = [None; 256];
     for order_rec in &orders {
         let order = order_rec.payload.as_order();
         if order.o_entry_d < date_lo || order.o_entry_d >= date_hi {
@@ -263,24 +260,27 @@ pub fn q5(
                 continue;
             };
             let su_id = stock.payload.as_stock().s_su_suppkey;
-            let Some(&nation_id) = supplier_nation.get(&su_id) else {
+            let Some(nation_id) = supplier_nation.get(su_id as usize).copied().flatten() else {
                 continue;
             };
-            if !nation_names.contains_key(&nation_id) {
+            if nation_names[nation_id as usize].is_none() {
                 continue; // supplier's nation isn't in the requested region
             }
-            *revenue.entry(nation_id).or_insert(0.0) += ol.ol_amount;
+            *revenue[nation_id as usize].get_or_insert(0.0) += ol.ol_amount;
         }
     }
     tx.commit();
 
     let mut out: Vec<_> = revenue
         .into_iter()
-        .filter_map(|(nation_id, rev)| {
-            nation_names.get(&nation_id).map(|name| NationRevenue {
-                n_name: name.clone(),
-                revenue: rev,
-            })
+        .enumerate()
+        .filter_map(|(nation_id, revenue)| {
+            revenue
+                .zip(nation_names[nation_id].as_ref())
+                .map(|(revenue, name)| NationRevenue {
+                    n_name: name.clone(),
+                    revenue,
+                })
         })
         .collect();
     out.sort_by(|a, b| b.revenue.partial_cmp(&a.revenue).unwrap());

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::mv_bench::olap_scan::OlapMode;
-use crate::mv_bench::tpcc_driver::{run_tpcc, DriverConfig};
+use crate::mv_bench::tpcc_driver::{DriverConfig, run_tpcc};
 use crate::mv_bench::tpcc_schema::TpccConfig;
 use crate::mv_root::index_root::RootIndexType;
 
@@ -40,9 +40,17 @@ fn full_scale() -> bool {
     std::env::var_os("CMVBT_FULL_BENCH").is_some()
 }
 
-fn config(num_terminals: usize, wal_path: PathBuf, batch_size: Option<usize>, full: bool) -> DriverConfig {
+fn config(
+    num_terminals: usize,
+    wal_path: PathBuf,
+    batch_size: Option<usize>,
+    full: bool,
+) -> DriverConfig {
     let tpcc = if full {
-        TpccConfig { num_warehouses: FULL_WAREHOUSES, ..TpccConfig::default() }
+        TpccConfig {
+            num_warehouses: FULL_WAREHOUSES,
+            ..TpccConfig::default()
+        }
     } else {
         TpccConfig {
             num_warehouses: 2,
@@ -86,7 +94,10 @@ fn compare_wal_backends_tpcc() {
     println!("=== TPC-C: WAL backend comparison ({warehouses} warehouses, {duration}s/run) ===");
     for &threads in thread_counts {
         for &(label, batch_size) in BACKENDS {
-            let wal_path = dir.join(format!("cmvbt_tpcc_wal_bench_{label}_{threads}_{}.log", std::process::id()));
+            let wal_path = dir.join(format!(
+                "cmvbt_tpcc_wal_bench_{label}_{threads}_{}.log",
+                std::process::id()
+            ));
             let _ = std::fs::remove_file(&wal_path);
 
             let summary = run_tpcc(config(threads, wal_path.clone(), batch_size, full));

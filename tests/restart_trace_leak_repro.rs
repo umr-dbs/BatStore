@@ -58,7 +58,10 @@ fn restart_trace_reset_clears_previous_run_data() {
     mv_test::reset_restart_trace();
     record_some_restarts();
     let after_first = mv_test::restart_trace_footprint();
-    assert!(after_first > 0, "expected recorded restarts to show up in the global footprint");
+    assert!(
+        after_first > 0,
+        "expected recorded restarts to show up in the global footprint"
+    );
 
     mv_test::reset_restart_trace();
     record_some_restarts();

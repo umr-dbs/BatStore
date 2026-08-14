@@ -36,7 +36,10 @@ fn commit_log_grows_unbounded_without_gc_enabled() {
     tree.allow_historic_query(true);
 
     for k in 0..10_000u64 {
-        assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(k, k)), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            tree.dispatch_crud(CRUDOperation::Insert(k, k)),
+            CRUDOperationResult::Inserted(_)
+        ));
     }
 
     let worker_id = tree.worker_id();
@@ -58,7 +61,10 @@ fn commit_log_stays_bounded_with_gc_enabled() {
     tree.enable_gc(false);
 
     for k in 0..10_000u64 {
-        assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(k, k)), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            tree.dispatch_crud(CRUDOperation::Insert(k, k)),
+            CRUDOperationResult::Inserted(_)
+        ));
     }
 
     let worker_id = tree.worker_id();
@@ -84,7 +90,10 @@ fn commit_log_stays_bounded_with_gc_enabled() {
 fn failed_update_leaves_counts_unchanged() {
     let tree = TestTree::make_standard(RootIndexType::default());
 
-    assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(1, 100)), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        tree.dispatch_crud(CRUDOperation::Insert(1, 100)),
+        CRUDOperationResult::Inserted(_)
+    ));
 
     // Update on a key that was never inserted: delete_after_update finds
     // no prior record for it at all -> Ok(None).
@@ -93,19 +102,33 @@ fn failed_update_leaves_counts_unchanged() {
         tree.dispatch_crud(CRUDOperation::Update(999, 1)),
         CRUDOperationResult::ZeroAffected(_)
     ));
-    assert_eq!(leaf_counts(&tree, 1), before, "counts changed after an Ok(None) (KeyDoesNotExist) failure");
+    assert_eq!(
+        leaf_counts(&tree, 1),
+        before,
+        "counts changed after an Ok(None) (KeyDoesNotExist) failure"
+    );
 
     // Insert key=2, delete it, then Update it again: delete_after_update
     // finds the prior record but it's already deleted -> Err(()).
-    assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(2, 200)), CRUDOperationResult::Inserted(_)));
-    assert!(matches!(tree.dispatch_crud(CRUDOperation::Delete(2)), CRUDOperationResult::Deleted(_)));
+    assert!(matches!(
+        tree.dispatch_crud(CRUDOperation::Insert(2, 200)),
+        CRUDOperationResult::Inserted(_)
+    ));
+    assert!(matches!(
+        tree.dispatch_crud(CRUDOperation::Delete(2)),
+        CRUDOperationResult::Deleted(_)
+    ));
 
     let before2 = leaf_counts(&tree, 2);
     assert!(matches!(
         tree.dispatch_crud(CRUDOperation::Update(2, 201)),
         CRUDOperationResult::ZeroAffected(_)
     ));
-    assert_eq!(leaf_counts(&tree, 2), before2, "counts changed after an Err(()) (KeyAlreadyDeleted) failure");
+    assert_eq!(
+        leaf_counts(&tree, 2),
+        before2,
+        "counts changed after an Err(()) (KeyAlreadyDeleted) failure"
+    );
 }
 
 /// Same bug, repeated many times on a small-fanout tree, then verified
@@ -118,7 +141,10 @@ fn failed_update_leaves_counts_unchanged() {
 fn repeated_failed_updates_do_not_corrupt_later_state() {
     let tree = TestTree::make_standard(RootIndexType::default());
 
-    assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(1, 100)), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        tree.dispatch_crud(CRUDOperation::Insert(1, 100)),
+        CRUDOperationResult::Inserted(_)
+    ));
 
     let before = leaf_counts(&tree, 1);
     for k in 1000..1000 + (FAN as u64) * 4 {
@@ -127,10 +153,17 @@ fn repeated_failed_updates_do_not_corrupt_later_state() {
             CRUDOperationResult::ZeroAffected(_)
         ));
     }
-    assert_eq!(leaf_counts(&tree, 1), before, "counts drifted after a batch of failed updates");
+    assert_eq!(
+        leaf_counts(&tree, 1),
+        before,
+        "counts drifted after a batch of failed updates"
+    );
 
     for k in 2..=(FAN as u64) * 3 {
-        assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(k, k * 10)), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            tree.dispatch_crud(CRUDOperation::Insert(k, k * 10)),
+            CRUDOperationResult::Inserted(_)
+        ));
     }
 
     // Point queries, not Range: Range has a separate, pre-existing bug
@@ -145,8 +178,11 @@ fn repeated_failed_updates_do_not_corrupt_later_state() {
     for k in 1..=(FAN as u64) * 3 {
         let expected_payload = if k == 1 { 100 } else { k * 10 };
         match tree.dispatch_crud(CRUDOperation::Point(k, version)) {
-            CRUDOperationResult::MatchedRecords(records) if records.len() == 1 && records[0].payload == expected_payload => {}
-            other => panic!("key {k} missing or wrong after failed updates + real inserts: {other}"),
+            CRUDOperationResult::MatchedRecords(records)
+                if records.len() == 1 && records[0].payload == expected_payload => {}
+            other => {
+                panic!("key {k} missing or wrong after failed updates + real inserts: {other}")
+            }
         }
     }
 }
@@ -158,14 +194,20 @@ fn repeated_failed_updates_do_not_corrupt_later_state() {
 /// versioned path and get a fresh version instead.
 #[test]
 fn update_in_place_disabled_while_wal_attached() {
-    let path = std::env::temp_dir().join(format!("cmvbt_dispatch_wal_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "cmvbt_dispatch_wal_test_{}.log",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&path);
 
     let tree = TestTree::make_standard(RootIndexType::default())
-        .with_wal(&path, std::time::Duration::from_millis(2)).unwrap();
+        .with_wal(&path, std::time::Duration::from_millis(2))
+        .unwrap();
     tree.enable_gc(true);
 
-    let CRUDOperationResult::Inserted(insert_version) = tree.dispatch_crud(CRUDOperation::Insert(1, 100)) else {
+    let CRUDOperationResult::Inserted(insert_version) =
+        tree.dispatch_crud(CRUDOperation::Insert(1, 100))
+    else {
         panic!("expected Inserted");
     };
 
@@ -173,10 +215,15 @@ fn update_in_place_disabled_while_wal_attached() {
     // WAL this would take the in-place fast path (see
     // wal_disabled_path_unaffected in wal_integration_tests.rs) and reuse
     // the current version. With a WAL attached it must mint a fresh one.
-    let CRUDOperationResult::Updated(update_version) = tree.dispatch_crud(CRUDOperation::Update(1, 200)) else {
+    let CRUDOperationResult::Updated(update_version) =
+        tree.dispatch_crud(CRUDOperation::Update(1, 200))
+    else {
         panic!("expected Updated");
     };
-    assert!(update_version > insert_version, "Update must mint a fresh version while a WAL is attached");
+    assert!(
+        update_version > insert_version,
+        "Update must mint a fresh version while a WAL is attached"
+    );
 
     let _ = std::fs::remove_file(&path);
 }

@@ -24,7 +24,13 @@ type TestLeaf = LeafPage<FAN, u64, u64>;
 type TestBlock = Block<FAN, FAN, u64, u64>;
 type TestCell = OptCell<TestBlock>;
 
-fn insert_deleted(leaf: &mut TestLeaf, key: u64, insert_stamp: TxStamp, delete_stamp: TxStamp, payload: u64) {
+fn insert_deleted(
+    leaf: &mut TestLeaf,
+    key: u64,
+    insert_stamp: TxStamp,
+    delete_stamp: TxStamp,
+    payload: u64,
+) {
     let len = leaf.len();
     leaf.push_uncommitted(
         RecordPoint::new(key, VersionInfo::from(insert_stamp, delete_stamp), payload),
@@ -33,7 +39,10 @@ fn insert_deleted(leaf: &mut TestLeaf, key: u64, insert_stamp: TxStamp, delete_s
     leaf.commit_delta(1, 0);
 }
 
-fn build_cell(link: ColdLink<FAN, FAN, u64, u64>, build: impl FnOnce(&mut TestLeaf)) -> Box<TestCell> {
+fn build_cell(
+    link: ColdLink<FAN, FAN, u64, u64>,
+    build: impl FnOnce(&mut TestLeaf),
+) -> Box<TestCell> {
     let mut node = Node::<FAN, FAN, u64, u64>::new_leaf_with_cold_link(link);
     if let PageType::LeafMut(leaf) = node.as_page_mut() {
         build(leaf);
@@ -43,8 +52,20 @@ fn build_cell(link: ColdLink<FAN, FAN, u64, u64>, build: impl FnOnce(&mut TestLe
     }))
 }
 
-fn cold_link_to(cell: &TestCell, count: u32, min_ts: u64, chain_len: u16, chain_total: u32) -> ColdLink<FAN, FAN, u64, u64> {
-    ColdLink::new(SmartCell(cell as *const _), count, min_ts, chain_len, chain_total)
+fn cold_link_to(
+    cell: &TestCell,
+    count: u32,
+    min_ts: u64,
+    chain_len: u16,
+    chain_total: u32,
+) -> ColdLink<FAN, FAN, u64, u64> {
+    ColdLink::new(
+        SmartCell(cell as *const _),
+        count,
+        min_ts,
+        chain_len,
+        chain_total,
+    )
 }
 
 fn visible_iff_ts_start_le(threshold: u64) -> impl FnMut(TxStamp) -> bool {
@@ -139,15 +160,10 @@ fn nothing_visible_in_range_yields_no_calls() {
     // threshold(5) predates the insertion -- nothing visible anywhere.
     let mut is_visible = visible_iff_ts_start_le(5);
     let mut visits = 0;
-    TestIter::walk_cold_chain_for_range(
-        link,
-        Interval::new(0, 100),
-        &mut is_visible,
-        |_| {
-            visits += 1;
-            true
-        },
-    );
+    TestIter::walk_cold_chain_for_range(link, Interval::new(0, 100), &mut is_visible, |_| {
+        visits += 1;
+        true
+    });
     assert_eq!(visits, 0);
 }
 
