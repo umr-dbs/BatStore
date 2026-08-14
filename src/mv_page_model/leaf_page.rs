@@ -480,26 +480,27 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
         }
     }
     pub(crate) fn bulk_push<R: LeafRecordSource<Key, Payload>>(&mut self, records: Vec<R>) {
-        self.bulk_push_iter(records)
+        let count = records.len();
+        self.bulk_push_iter(records, count)
     }
     pub(crate) fn bulk_push_from_slice_ref<R: LeafRecordSource<Key, Payload>>(
         &mut self,
         records: &[R],
     ) {
-        self.bulk_push_iter(records.iter())
+        self.bulk_push_iter(records.iter(), records.len())
     }
     fn bulk_push_iter<R: LeafRecordSource<Key, Payload>, I: IntoIterator<Item = R>>(
         &mut self,
         records: I,
+        count: usize,
     ) {
-        let records: Vec<R> = records.into_iter().collect();
         let len = self.len();
-        assert!(len + records.len() <= N);
-        let active = records
-            .iter()
-            .filter(|r| r.source_version().is_live())
-            .count();
-        for (index, r) in records.iter().enumerate() {
+        assert!(len + count <= N);
+        let mut active = 0;
+        let mut written = 0;
+        for (index, r) in records.into_iter().enumerate() {
+            written += 1;
+            active += usize::from(r.source_version().is_live());
             unsafe {
                 self.key_region
                     .as_mut_ptr()
@@ -518,13 +519,55 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
                 !r.source_version().insertion_stamp().is_invalid(),
             );
         }
+        assert_eq!(written, count, "bulk source length changed while inserting");
         self.len.store(
             from_active_dead(
                 (len + active) as PageLenPrimitive,
-                (records.len() - active) as PageLenPrimitive,
+                (count - active) as PageLenPrimitive,
             ),
             Release,
         )
+    }
+
+    /// Moves materialized records into the page. SMOs already own these
+    /// records, so cloning their versions and refcounted payload slots would
+    /// only add an avoidable increment/decrement pair.
+    pub(crate) fn bulk_push_owned<I>(&mut self, records: I)
+    where
+        I: IntoIterator<Item = RecordPoint<Key, Payload>>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let records = records.into_iter();
+        let count = records.len();
+        let len = self.len();
+        assert!(len + count <= N);
+        let mut active = 0;
+        let mut written = 0;
+        for (index, record) in records.enumerate() {
+            written += 1;
+            let (key, version, payload) = record.into_parts();
+            active += usize::from(version.is_live());
+            let valid = !version.insertion_stamp().is_invalid();
+            unsafe {
+                self.key_region
+                    .as_mut_ptr()
+                    .add(len + index)
+                    .write(MaybeUninit::new(key));
+                self.data_region
+                    .as_mut_ptr()
+                    .add(len + index)
+                    .write(MaybeUninit::new(LeafData { version, payload }));
+            }
+            self.set_valid(len + index, valid);
+        }
+        assert_eq!(written, count, "owned bulk source length was incorrect");
+        self.len.store(
+            from_active_dead(
+                (len + active) as PageLenPrimitive,
+                (count - active) as PageLenPrimitive,
+            ),
+            Release,
+        );
     }
     pub(crate) fn delete(&mut self, key: Key, del: TxStamp) -> Result<Option<VersionInfo>, ()> {
         let Some(i) = self.latest_position(key, true) else {
@@ -560,29 +603,101 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
             Err(())
         }
     }
-    pub(crate) fn abort_write(&mut self, key: Key, my_stamp: TxStamp) -> AbortOutcome {
+    /// The second element of the return tuple is only ever `Some` when the
+    /// first is `Invalidated`: an `Update`-abort whose own linked
+    /// predecessor (see `apply_invalidate`'s doc) wasn't found on *this*
+    /// page. A plain `Insert`'s abort looks identical from here (both "no
+    /// predecessor found locally") — that ambiguity is fine, see
+    /// `apply_invalidate`'s doc for why a further, empty search for the
+    /// pending stamp is a harmless no-op in that case. A cold-chain-aware
+    /// caller (`mv_sync::version_handle`) uses this to keep searching a
+    /// leaf's cold chain (`mv_page_model::node::ColdLink`) for that exact
+    /// `deletion_stamp`; a caller that doesn't care (e.g. this file's own
+    /// tests, which only ever exercise a single page) can ignore it.
+    pub(crate) fn abort_write(
+        &mut self,
+        key: Key,
+        my_stamp: TxStamp,
+    ) -> (AbortOutcome, Option<TxStamp>) {
         let Some(i) = self.latest_position(key, true) else {
-            return AbortOutcome::NotFound;
+            return (AbortOutcome::NotFound, None);
         };
         if self.version_at(i).insertion_stamp() == my_stamp {
-            self.apply_invalidate(key);
-            AbortOutcome::Invalidated
+            let pending_predecessor = self.apply_invalidate(key);
+            (AbortOutcome::Invalidated, pending_predecessor)
         } else if self.apply_undelete(key) {
-            AbortOutcome::Undeleted
+            (AbortOutcome::Undeleted, None)
         } else {
-            AbortOutcome::NotFound
+            (AbortOutcome::NotFound, None)
         }
     }
     pub(crate) fn abort_writes(&mut self, key: Key, my_stamp: TxStamp, limit: usize) -> usize {
         let mut n = 0;
-        while n < limit && !matches!(self.abort_write(key, my_stamp), AbortOutcome::NotFound) {
+        while n < limit && !matches!(self.abort_write(key, my_stamp).0, AbortOutcome::NotFound) {
             n += 1
         }
         n
     }
-    pub(crate) fn apply_invalidate(&mut self, key: Key) {
+    /// Finds an entry for `key` — physically before index `before` if
+    /// given (bounds the search to `0..before`, exactly `apply_invalidate`'s
+    /// own local predecessor search), else searches this whole page — whose
+    /// own `deletion_stamp` exactly matches `stamp`, and undeletes it.
+    /// Shared by `apply_invalidate` (local, bounded) and a cold-chain-aware
+    /// caller (`mv_sync::version_handle`; whole-page, unbounded, one call
+    /// per cold page walked — see `abort_write`'s doc).
+    pub(crate) fn undelete_matching_deletion_stamp(
+        &mut self,
+        key: Key,
+        stamp: TxStamp,
+        before: Option<usize>,
+    ) -> bool {
+        let end = before.unwrap_or_else(|| self.len());
+        if let Some(j) = (0..end).rev().find(|j| {
+            self.keys()[*j] == key
+                && self.bit_is_valid(*j)
+                && self.version_at(*j).deletion_stamp() == Some(stamp)
+        }) {
+            self.version_mut_at(j).undelete();
+            self.commit_delta(1, -1);
+            return true;
+        }
+        false
+    }
+
+    /// Clones the exact predecessor an aborted hot update must resurrect,
+    /// but leaves this historical page unchanged. The caller installs the
+    /// undeleted clone in the owning hot leaf, preserving the invariant that
+    /// all current write-facing state is hot.
+    pub(crate) fn clone_undeleted_matching(
+        &self,
+        key: Key,
+        stamp: TxStamp,
+    ) -> Option<RecordPoint<Key, Payload>> {
+        let i = (0..self.len()).rev().find(|i| {
+            self.keys()[*i] == key
+                && self.bit_is_valid(*i)
+                && self.version_at(*i).deletion_stamp() == Some(stamp)
+        })?;
+        let mut record =
+            RecordPoint::new(key, self.version_at(i).clone(), self.payload_at(i).clone());
+        record.version_mut().undelete();
+        Some(record)
+    }
+    /// Invalidates `key`'s latest (valid) entry — the reversal half of an
+    /// aborted `Insert`/`Update`'s own insert — and, if it was itself an
+    /// `Update`'s insert-half, tries to resurrect the predecessor its own
+    /// `delete_after_update` marked deleted (same stamp on both halves).
+    ///
+    /// Returns `None` if that predecessor was found and resurrected
+    /// locally, or if there plainly was none to begin with (a bare
+    /// `Insert`'s abort); returns `Some(stamp)` — the exact
+    /// `deletion_stamp` still being searched for — if a bounded, same-page
+    /// search didn't find it. `abort_write` passes this straight through
+    /// as its own return tuple's second element (see that method's doc)
+    /// so a cold-chain-aware caller further up can keep looking.
+    pub(crate) fn apply_invalidate(&mut self, key: Key) -> Option<TxStamp> {
         let Some(i) = self.latest_position(key, true) else {
-            return;
+            return None;
         };
         let stamp = self.version_at(i).insertion_stamp();
         let was_live = self.version_at(i).is_live();
@@ -591,14 +706,10 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
         if was_live {
             self.commit_delta(-1, 1)
         }
-        if let Some(j) = (0..i)
-            .rev()
-            .find(|j| self.keys()[*j] == key && self.bit_is_valid(*j))
-        {
-            if self.version_at(j).deletion_stamp() == Some(stamp) {
-                self.version_mut_at(j).undelete();
-                self.commit_delta(1, -1)
-            }
+        if self.undelete_matching_deletion_stamp(key, stamp, Some(i)) {
+            None
+        } else {
+            Some(stamp)
         }
     }
     pub(crate) fn apply_undelete(&mut self, key: Key) -> bool {

@@ -1,11 +1,12 @@
 use crate::mv_block::block::BlockGuard;
 use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::mv_page_model::leaf_page::{LeafPage, LeafRecordRef};
 use crate::mv_page_model::node::PageType;
 use crate::mv_page_model::time_matcher::TimeMatcher;
 use crate::mv_page_model::{Attempts, BlockRef};
 use crate::mv_query::interval::Interval;
 use crate::mv_record_model::record_point::RecordPointResult;
-use crate::mv_record_model::tx_stamp::WorkerId;
+use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::Version;
 use crate::mv_root::index_root::RootIndex;
 use crate::mv_sync::smart_cell::sched_yield;
@@ -198,6 +199,70 @@ impl<const FAN_OUT: usize,
         leafs
     }
 
+    /// Scans one leaf's own records (hot leaf or one cold-chain hop) for
+    /// `key`, returning the first (physically last, i.e. newest-to-oldest)
+    /// record whose version is visible to `is_visible`. Not SIMD-optimized
+    /// like `key_point_read_from_root`'s own hot-leaf scan below on
+    /// purpose: this only ever runs for a cold-chain hop today (see that
+    /// method's fallback), which by design should be rare — only a reader
+    /// whose snapshot needs an already-superseded version, one that a hot
+    /// leaf's hot/cold split has since moved out of the hot page, reaches
+    /// it at all. Generic over `F`, not `dyn FnMut`, matching
+    /// `VersionInfo::matches`'s own signature (see that method's doc for
+    /// why: an inlinable concrete closure, not a vtable call, on a path
+    /// this hot).
+    #[inline]
+    pub(crate) fn scan_leaf_for_key<'a, F: FnMut(TxStamp) -> bool>(
+        leaf: &'a LeafPage<NUM_RECORDS, Key, Payload>,
+        key: Key,
+        is_visible: &mut F,
+    ) -> Option<LeafRecordRef<'a, Key, Payload>> {
+        leaf.keys()
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, k)| **k == key)
+            .map(|(i, _)| leaf.record(i))
+            .find(|r| r.version().matches(is_visible))
+    }
+
+    /// Continues a hot-leaf point-read miss down the cold chain (see
+    /// `ColdLink`'s doc for the whole design): a reader whose snapshot
+    /// needs a version already offloaded to a cold page won't find it on
+    /// the hot leaf at all. Walks newest-to-oldest cold page, stopping at
+    /// the first visible match; returns `None` if the whole chain (or no
+    /// chain at all) doesn't have one either — a genuine miss, same as
+    /// today's behavior for a key that never existed or whose delete is
+    /// visible to this reader.
+    ///
+    /// Safe to follow `link.cold()` without any extra version validation
+    /// beyond the traversal that already got us here: a leaf's `cold_link`
+    /// is set once, at construction, before that leaf is ever linked into
+    /// the tree (mirrors every other child page in this codebase — see
+    /// `traverse_read_key`'s doc on child pages being "effectively
+    /// append-only once linked"), and a cold page is likewise never
+    /// mutated after construction, only ever retired outright (see
+    /// `ColdLink`'s doc on "retire, don't reuse"). Whatever `cold_link()`
+    /// this reader observes on an already-reachable leaf is therefore
+    /// either the final state or has already been fully superseded by a
+    /// wholesale leaf replacement this reader simply hasn't navigated to
+    /// -- never a half-written one.
+    pub(crate) fn scan_cold_chain_for_key<F: FnMut(TxStamp) -> bool>(
+        mut link: crate::mv_page_model::node::ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        key: Key,
+        is_visible: &mut F,
+    ) -> Option<RecordPointResult<Key, Payload>> {
+        while !link.is_none() {
+            let cold_guard = link.cold().borrow_read();
+            let cold_leaf = cold_guard.as_leaf_page_ref();
+            if let Some(r) = Self::scan_leaf_for_key(cold_leaf, key, is_visible) {
+                return Some(RecordPointResult::from_leaf(r));
+            }
+            link = *cold_guard.cold_link();
+        }
+        None
+    }
+
     #[inline]
     pub(crate) fn key_point_read_from_root<'a>(
         &self,
@@ -296,6 +361,22 @@ impl<const FAN_OUT: usize,
 
             match found {
                 None => {
+                    // Hot leaf came up empty -- either the key genuinely
+                    // isn't visible to this reader, or the version it needs
+                    // has since been offloaded to a cold page (see
+                    // `ColdLink`'s doc). `is_none()` makes this a single
+                    // field read for the overwhelming common case (no cold
+                    // chain at all), so a plain fresh-snapshot read pays
+                    // nothing extra here.
+                    let cold_link = *records.cold_link();
+                    if !cold_link.is_none() {
+                        if let Some(result) =
+                            Self::scan_cold_chain_for_key(cold_link, key, &mut is_visible)
+                        {
+                            return CRUDOperationResult::MatchedRecords(vec![result]);
+                        }
+                    }
+
                     if crate::mv_test::DIAG {
                         let same_key: Vec<String> = keys.iter().enumerate()
                             .filter(|(_, k)| **k == key)

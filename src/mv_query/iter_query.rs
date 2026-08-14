@@ -5,13 +5,13 @@ use std::hash::Hash;
 
 use crate::mv_page_model::BlockRef;
 
-use crate::mv_page_model::node::PageType;
+use crate::mv_page_model::node::{ColdLink, PageType};
 use crate::mv_page_model::time_matcher::TimeMatcher;
 use crate::mv_query::SnapShot;
 use crate::mv_query::interval::Interval;
 use crate::mv_query::snapshot::ReaderIsolatedSnapShot;
 use crate::mv_record_model::record_point::RecordPointResult;
-use crate::mv_record_model::tx_stamp::WorkerId;
+use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::mv_record_model::version_info::Version;
 use crate::mv_tree::mvbt::MVBTSt;
 
@@ -135,6 +135,65 @@ impl<
     Payload: Display + Clone + Default + Sync + 'static,
 > RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
 {
+    /// Continues a leaf's range scan down its cold chain (see `ColdLink`'s
+    /// doc in `mv_page_model::node` for the whole design): a reader whose
+    /// snapshot needs a version already offloaded to a cold page won't
+    /// find it in the hot leaf's own records at all, so a plain scan of
+    /// `leaf_page.as_records()` alone would silently drop that key from
+    /// the range result. Calls `f` with every additional visible, in-range
+    /// match found walking the chain newest-to-oldest, stopping early the
+    /// moment `f` returns `false` (mirrors `try_for_each_ref`'s own
+    /// stop-on-error shape; `RangeQueryIter`'s own buffered scan below
+    /// just always returns `true`, i.e. never stops early). A key never
+    /// contributes from both hot and cold to the same reader: MVCC
+    /// guarantees exactly one version in a key's whole chain is visible to
+    /// a given snapshot, so whichever page (hot or cold) currently holds
+    /// that specific version is the only one whose filter passes for it —
+    /// no separate dedup needed here.
+    ///
+    /// Safe to call unconditionally whenever `link` isn't `ColdLink::none()`
+    /// with no extra OLC validation beyond the traversal that already got
+    /// to this leaf — see `MVBTSt::scan_cold_chain_for_key`'s doc
+    /// (`mv_query::query`) for why: a cold chain is fixed for a leaf's
+    /// whole lifetime, set once before that leaf is ever linked into the
+    /// tree, and a cold page is likewise never mutated after construction.
+    pub(crate) fn walk_cold_chain_for_range<F, V>(
+        mut link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        range: Interval<Key>,
+        is_visible: &mut F,
+        mut f: V,
+    ) where
+        F: FnMut(TxStamp) -> bool,
+        V: FnMut(crate::mv_page_model::leaf_page::LeafRecordRef<'_, Key, Payload>) -> bool,
+    {
+        while !link.is_none() {
+            let cold_guard = link.cold().borrow_read();
+            let cold_leaf = cold_guard.as_leaf_page_ref();
+            for r in cold_leaf.as_records() {
+                if range.contains(r.key()) && r.version().matches(is_visible) {
+                    if !f(r) {
+                        return;
+                    }
+                }
+            }
+            link = *cold_guard.cold_link();
+        }
+    }
+
+    /// `walk_cold_chain_for_range`, collecting into `out` the same way the
+    /// hot leaf's own matches get collected into `self.buff` below.
+    fn extend_from_cold_chain<F: FnMut(TxStamp) -> bool>(
+        link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        range: Interval<Key>,
+        is_visible: &mut F,
+        out: &mut VecDeque<RecordPointResult<Key, Payload>>,
+    ) {
+        Self::walk_cold_chain_for_range(link, range, is_visible, |r| {
+            out.push_back(RecordPointResult::from_leaf(r));
+            true
+        });
+    }
+
     /// Advances the scan until `self.buff` holds at least one more match —
     /// always a whole leaf's worth at once, since a leaf's live/visible
     /// records are filtered into `buff` together in one `extend` call
@@ -249,6 +308,16 @@ impl<
                         );
                         crate::mv_test::record_leaf_scan(records.len(), self.buff.len() - before);
 
+                        let cold_link = *curr_block.cold_link();
+                        if !cold_link.is_none() {
+                            Self::extend_from_cold_chain(
+                                cold_link,
+                                self.range,
+                                &mut is_visible,
+                                &mut self.buff,
+                            );
+                        }
+
                         self.path.pop();
                         let reached_end = curr_fence.upper >= self.range.upper
                             || curr_fence.upper == tree.cold.max_key;
@@ -331,6 +400,26 @@ impl<
                             }
                         }
                         crate::mv_test::record_leaf_scan(records.len(), matched);
+
+                        let cold_link = *curr_block.cold_link();
+                        if !cold_link.is_none() {
+                            Self::walk_cold_chain_for_range(
+                                cold_link,
+                                self.range,
+                                &mut is_visible,
+                                |r| match visit(r.key(), r.payload()) {
+                                    Ok(()) => true,
+                                    Err(error) => {
+                                        visit_error = Some(error);
+                                        false
+                                    }
+                                },
+                            );
+                            if visit_error.is_some() {
+                                return;
+                            }
+                        }
+
                         self.path.pop();
                         if curr_fence.upper >= self.range.upper
                             || curr_fence.upper == tree.cold.max_key

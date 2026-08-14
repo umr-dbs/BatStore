@@ -1,8 +1,9 @@
 use crate::mv_block::block::{Block, BlockGuard};
 use crate::mv_block::block_handle::BlockAllocManager;
-use crate::mv_page_model::node::PageType;
+use crate::mv_page_model::node::{ColdLink, PageType};
 use crate::mv_page_model::{BlockRef, Height};
 use crate::mv_query::interval::Interval;
+use crate::mv_record_model::record_point::RecordPoint;
 use crate::mv_root::index_root::RootIndexGuard;
 use crate::mv_root::root::Root;
 use crate::mv_test::{DIAG, VERBOSE, record_version_split};
@@ -115,6 +116,25 @@ fn nearest_key_boundary<T, K: PartialEq>(
         .unwrap_or(target)
 }
 
+/// Finds a genuine key boundary whose two sides both fit. Unlike
+/// `nearest_key_boundary`, this never tears a same-key version run: `None`
+/// is the signal that an ordinary key split cannot converge and cold
+/// offload is required.
+fn fitting_key_boundary<T, K: PartialEq>(
+    items: &[T],
+    target: usize,
+    capacity: usize,
+    key_of: impl Fn(&T) -> K,
+) -> Option<usize> {
+    if items.len() < 2 {
+        return None;
+    }
+    (1..items.len())
+        .filter(|i| *i <= capacity && items.len() - *i <= capacity)
+        .filter(|i| key_of(&items[*i - 1]) != key_of(&items[*i]))
+        .min_by_key(|i| i.abs_diff(target))
+}
+
 #[repr(u8)]
 pub enum BlockUnsafeDegree {
     Ok,
@@ -181,6 +201,20 @@ impl<
         let (active, dead) = self.active_dead_count();
 
         let (active, dead) = (active as usize, dead as usize);
+
+        // A leaf with private cold history is intentionally sparse on its
+        // hot side. Treating that as an underflow immediately merges the
+        // freshly compacted leaf and rebuilds the same chain again, causing
+        // split/merge oscillation. It still overflows normally when its hot
+        // physical slots fill; otherwise the cold chain makes underflow a
+        // meaningless structural signal.
+        if self.is_leaf() && !self.cold_link().is_none() {
+            return if active + dead >= self.overflow_units_count() {
+                BlockUnsafeDegree::Overflow
+            } else {
+                BlockUnsafeDegree::Ok
+            };
+        }
 
         let one_d = self.filling_20_percent();
 
@@ -301,8 +335,8 @@ pub(crate) enum BlockSplit<
 > {
     ByKey(
         Interval<Key>,
-          BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
-          Interval<Key>,
+        BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        Interval<Key>,
         BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
     ),
     ByVersion(BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>),
@@ -325,17 +359,17 @@ pub(crate) enum MergeResult<
 > {
     Merged(
         usize,
-           Interval<Key>,
-           BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
-           // Already retired (`SmartGuard::try_retire`) by the time
-           // `merge()` builds this — see that call site's doc — so this is
-           // a bare cell, not a guard: there's no lock left to hold or
-           // later release.
+        Interval<Key>,
+        BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        // Already retired (`SmartGuard::try_retire`) by the time
+        // `merge()` builds this — see that call site's doc — so this is
+        // a bare cell, not a guard: there's no lock left to hold or
+        // later release.
         BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
     ),
     KeySplit(
         usize,
-             BlockSplit<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        BlockSplit<FAN_OUT, NUM_RECORDS, Key, Payload>,
         BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
     ),
     Error,
@@ -578,7 +612,7 @@ impl<
                 if VERBOSE {
                     println!(
                         "MergeResult::Merged: Simba-fence: {} - Sibling-fence: {}",
-                             mufasa_deref_mut.as_internal_page_ref().get_key(index_simba),
+                        mufasa_deref_mut.as_internal_page_ref().get_key(index_simba),
                         fence_sibling
                     );
                 }
@@ -636,11 +670,11 @@ impl<
                        \tright-fence: {}.\
                         \n\tSimba-fence: {} - Sibling-fence: {}\n\
                         \tsimba:\n{}",
-                                 left_interval,
-                                 right_interval,
-                                 mufasa_deref_mut.keys().get_unchecked(index_simba),
-                                 mufasa_deref_mut.keys().get_unchecked(index_sibling),
-                                 simba_cell.deref().node_data.as_ref()
+                            left_interval,
+                            right_interval,
+                            mufasa_deref_mut.keys().get_unchecked(index_simba),
+                            mufasa_deref_mut.keys().get_unchecked(index_sibling),
+                            simba_cell.deref().node_data.as_ref()
                         );
                     }
                 }
@@ -749,6 +783,139 @@ impl<
                 .is_some_and(|del| self.ctx.is_snapshot_live(del.ts_start()))
     }
 
+    /// Returns all records owned by this leaf generation in per-key physical
+    /// order, oldest to newest. Cold links point newest-to-oldest, while the
+    /// hot leaf contains the newest portion, hence the page-order reversal.
+    fn retained_owned_leaf_history(
+        &self,
+        block: &Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    ) -> Vec<RecordPoint<Key, Payload>> {
+        let initial_link = *block.cold_link();
+        let mut cold_pages = Vec::with_capacity(initial_link.chain_len() as usize);
+        let mut link = *block.cold_link();
+        while !link.is_none() {
+            let guard = link.cold().borrow_read();
+            let cold = guard.deref();
+            cold_pages.push(link.cold());
+            link = *cold.cold_link();
+        }
+
+        let mut history = Vec::with_capacity(
+            initial_link.chain_total_count() as usize + block.as_records().len(),
+        );
+        for page in cold_pages.into_iter().rev() {
+            let guard = page.borrow_read();
+            for record in guard.deref().as_records().iter() {
+                if self.record_survives_gc(record.version()) {
+                    history.push(RecordPoint::clone_from_leaf(record));
+                }
+            }
+        }
+        for record in block.as_records().iter() {
+            if self.record_survives_gc(record.version()) {
+                history.push(RecordPoint::clone_from_leaf(record));
+            }
+        }
+        history
+    }
+
+    /// Divides retained history into write-facing hot state and historical
+    /// cold state without changing the relative order of either set.
+    fn hot_cold_records(
+        &self,
+        records: Vec<RecordPoint<Key, Payload>>,
+    ) -> (
+        Vec<RecordPoint<Key, Payload>>,
+        Vec<RecordPoint<Key, Payload>>,
+    ) {
+        let mut newest_valid = std::collections::HashMap::with_capacity(records.len());
+        for (i, record) in records.iter().enumerate() {
+            if !record.version().insertion_stamp().is_invalid() {
+                newest_valid.insert(record.key(), i);
+            }
+        }
+        let mut hot = Vec::with_capacity(newest_valid.len());
+        let mut cold = Vec::with_capacity(records.len().saturating_sub(newest_valid.len()));
+        for (i, record) in records.into_iter().enumerate() {
+            if record.version().is_live() || newest_valid.get(&record.key()) == Some(&i) {
+                hot.push(record);
+            } else {
+                cold.push(record);
+            }
+        }
+        (hot, cold)
+    }
+
+    fn hot_record_count(&self, records: &[RecordPoint<Key, Payload>]) -> usize {
+        let mut newest_valid = std::collections::HashMap::with_capacity(records.len());
+        for (i, record) in records.iter().enumerate() {
+            if !record.version().insertion_stamp().is_invalid() {
+                newest_valid.insert(record.key(), i);
+            }
+        }
+        records
+            .iter()
+            .enumerate()
+            .filter(|(i, record)| {
+                record.version().is_live() || newest_valid.get(&record.key()) == Some(i)
+            })
+            .count()
+    }
+
+    /// Constructs a private newest-to-oldest chain. No page is shared with
+    /// another hot generation, so its owning hot leaf is its sole GC owner.
+    fn build_private_cold_chain(
+        &self,
+        records: Vec<RecordPoint<Key, Payload>>,
+    ) -> ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let mut link = ColdLink::none();
+        let mut total = 0u32;
+        let mut chain_len = 0u16;
+        let mut records = records.into_iter();
+        while records.len() != 0 {
+            let count = records.len().min(NUM_RECORDS);
+            let page = self.block_manager.new_empty_leaf(&self.ctx);
+            let node = page.unsafe_borrow_mut();
+            node.as_leaf_page()
+                .bulk_push_owned(records.by_ref().take(count));
+            node.set_cold_link(link);
+            total += count as u32;
+            chain_len = chain_len.saturating_add(1);
+            let min_ts = node
+                .as_records()
+                .iter()
+                .filter_map(|r| r.version().deletion_stamp())
+                .map(|stamp| stamp.ts_start())
+                .min()
+                .unwrap_or(0);
+            link = ColdLink::new(page, count as u32, min_ts, chain_len, total);
+        }
+        link
+    }
+
+    fn populate_leaf_history(
+        &self,
+        page: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        records: Vec<RecordPoint<Key, Payload>>,
+    ) {
+        if records.len() <= NUM_RECORDS {
+            page.unsafe_borrow_mut()
+                .as_leaf_page()
+                .bulk_push_owned(records);
+            return;
+        }
+        let (hot, cold) = self.hot_cold_records(records);
+        assert!(
+            hot.len() < NUM_RECORDS,
+            "cold offload must leave room for the write that triggered the SMO"
+        );
+        let link = self.build_private_cold_chain(cold);
+        let node = page.unsafe_borrow_mut();
+        node.set_cold_link(link);
+        let hot_count = hot.len();
+        node.as_leaf_page().bulk_push_owned(hot);
+    }
+
     pub(crate) fn merge<'a>(
         &self,
         mufasa: &'a Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -802,9 +969,9 @@ impl<
         let mut compute_candidate = || {
             let insertion_point =
                 match all_candidates.binary_search_by_key(&simba_fence.lower, |(.., f)| f.lower) {
-                Ok(index) => return Ok(all_candidates.remove(index)),
-                Err(index) => index,
-            };
+                    Ok(index) => return Ok(all_candidates.remove(index)),
+                    Err(index) => index,
+                };
 
             let right = (insertion_point < all_candidates.len()).then_some(insertion_point);
             let left = insertion_point.checked_sub(1);
@@ -888,22 +1055,14 @@ impl<
         // whenever the single-leaf merge wouldn't fit costs nothing extra
         // in the common case (this closure only runs when `is_simba_leaf`)
         // and cannot itself overflow.
-        let leaf_merge_would_overflow = is_simba_leaf && {
-            let simba_survivors = simba
-                .as_records()
-                .iter()
-                .filter(|r| self.record_survives_gc(r.version()))
-                .count();
-
-            let candidate_survivors = candidate_cell
-                .deref()
-                .as_records()
-                .iter()
-                .filter(|r| self.record_survives_gc(r.version()))
-                .count();
-
-            simba_survivors + candidate_survivors > simba_max_units
-        };
+        let retained_leaf_histories = is_simba_leaf.then(|| {
+            let mut records = self.retained_owned_leaf_history(simba);
+            records.extend(self.retained_owned_leaf_history(candidate_cell.deref()));
+            records
+        });
+        let leaf_merge_would_overflow = retained_leaf_histories
+            .as_ref()
+            .is_some_and(|records| records.len() > simba_max_units);
 
         if !leaf_merge_would_overflow
             && candidate_active_count + simba_active_count <= ((4 * simba_max_units) / 5)
@@ -935,11 +1094,11 @@ impl<
                         .merge_by(
                             c_keys
                                 .iter()
-                                      .zip(c_versions.iter().copied())
-                                      .zip(c_pointers.iter())
-                                      .enumerate()
-                                      .filter(|(index, ..)| candidate_internal.is_slot_live(*index))
-                                      .map(|(_, rest)| rest),
+                                .zip(c_versions.iter().copied())
+                                .zip(c_pointers.iter())
+                                .enumerate()
+                                .filter(|(index, ..)| candidate_internal.is_slot_live(*index))
+                                .map(|(_, rest)| rest),
                             |((.., v0), ..), ((.., v1), ..)| v0 <= v1,
                         )
                         .collect_vec();
@@ -970,19 +1129,9 @@ impl<
                     // (see those for the actual hazard), there's no live-
                     // ahead-of-dead reordering risk to avoid in the first
                     // place — nothing here spans more than one key's chain.
-                    combined_block.unsafe_borrow_mut().as_leaf_page().bulk_push(
-                        simba
-                            .as_records()
-                            .iter()
-                            .filter(|r| self.record_survives_gc(r.version()))
-                            .chain(
-                                candidate_cell
-                                       .deref()
-                                       .as_records()
-                                       .iter()
-                                    .filter(|r| self.record_survives_gc(r.version())),
-                            )
-                            .collect_vec(),
+                    self.populate_leaf_history(
+                        combined_block,
+                        retained_leaf_histories.expect("leaf histories"),
                     );
 
                     if TRACE_KEY_DEBUG {
@@ -1036,34 +1185,39 @@ impl<
                 true => unsafe {
                     let candidate_records = candidate_cell.deref().as_records();
                     let simba_records = simba.as_records();
-
-                    let mut joined = candidate_records
-                        .iter()
-                        .filter(|r| self.record_survives_gc(r.version()))
-                        .sorted_by_key(|r| r.key)
-                        .merge_by(
-                            simba_records
-                                      .iter()
-                                      .filter(|r| self.record_survives_gc(r.version()))
-                                      .sorted_by_key(|r| r.key),
-                            |f, s| f.key() <= s.key(),
-                        )
-                        .collect_vec();
-
-                    let joined_len = joined.len();
-                    let middle =
-                        nearest_key_boundary(&joined, joined_len / 2, simba_max_units, |r| r.key());
-                    let (first, second) = joined.split_at_mut(middle);
+                    let records = retained_leaf_histories.expect("leaf histories");
+                    let mut sorted_records = records.iter().collect_vec();
+                    sorted_records.sort_by_key(|r| r.key());
+                    let Some(middle) = fitting_key_boundary(
+                        &sorted_records,
+                        sorted_records.len() / 2,
+                        simba_max_units,
+                        |r| r.key(),
+                    ) else {
+                        // Combined history is indivisible by key. A private
+                        // cold chain is the only converging one-child merge.
+                        let combined = self.block_manager.new_empty_leaf(&self.ctx);
+                        self.populate_leaf_history(combined, records);
+                        return MergeResult::Merged(
+                            candidate_index,
+                            candidate_fence.clone(),
+                            combined,
+                            candidate_cell,
+                        );
+                    };
+                    let split_key = sorted_records[middle].key();
+                    let (mut first, mut second): (Vec<_>, Vec<_>) =
+                        records.into_iter().partition(|r| r.key() < split_key);
+                    first.sort_by_key(|r| r.key());
+                    second.sort_by_key(|r| r.key());
 
                     let left_interval = Interval::new(
                         candidate_fence.lower.min(simba_fence.lower),
-                        (self.cold.dec_key)(second.get_unchecked(0).key()),
+                        (self.cold.dec_key)(split_key),
                     );
 
-                    let right_interval = Interval::new(
-                        second.get_unchecked(0).key(),
-                        candidate_fence.upper.max(simba_fence.upper),
-                    );
+                    let right_interval =
+                        Interval::new(split_key, candidate_fence.upper.max(simba_fence.upper));
 
                     // No re-sort by `insertion_stamp().ts_start()` here (there
                     // used to be one for each half): `joined` is already in
@@ -1093,15 +1247,8 @@ impl<
 
                     let combined_block_1 = self.block_manager.new_empty_leaf(&self.ctx);
 
-                    combined_block_0
-                        .unsafe_borrow_mut()
-                        .as_leaf_page()
-                        .bulk_push_from_slice_ref(first);
-
-                    combined_block_1
-                        .unsafe_borrow_mut()
-                        .as_leaf_page()
-                        .bulk_push_from_slice_ref(second);
+                    self.populate_leaf_history(combined_block_0, first);
+                    self.populate_leaf_history(combined_block_1, second);
 
                     if TRACE_KEY_DEBUG {
                         push_trace(format!(
@@ -1178,12 +1325,12 @@ impl<
                         .merge_by(
                             s_keys
                                 .iter()
-                                      .zip(s_version.iter().copied())
-                                      .zip(s_children.iter())
-                                      .enumerate()
-                                      .filter(|(index, ..)| simba_internal.is_slot_live(*index))
-                                      .map(|(_, rest)| rest)
-                                      .sorted_by_key(|((k, ..), ..)| k.lower),
+                                .zip(s_version.iter().copied())
+                                .zip(s_children.iter())
+                                .enumerate()
+                                .filter(|(index, ..)| simba_internal.is_slot_live(*index))
+                                .map(|(_, rest)| rest)
+                                .sorted_by_key(|((k, ..), ..)| k.lower),
                             |((f, ..), ..), ((s, ..), ..)| f.lower < s.lower,
                         )
                         .collect_vec();
@@ -1259,13 +1406,10 @@ impl<
         // shape. Folded into the KEY_SPLIT decision below instead, exactly
         // like `merge()`'s equivalent check, so this size is never chosen
         // when it can't actually fit in one page.
-        let survivor_count = match is_leaf {
-            true => block
-                .as_records()
-                .iter()
-                .filter(|r| self.record_survives_gc(r.version()))
-                .count(),
-            false => block.as_internal_page_ref().live_count(),
+        let retained_history = is_leaf.then(|| self.retained_owned_leaf_history(block));
+        let survivor_count = match &retained_history {
+            Some(records) => records.len(),
+            None => block.as_internal_page_ref().live_count(),
         };
 
         let capacity = if is_leaf { NUM_RECORDS } else { FAN_OUT };
@@ -1335,31 +1479,39 @@ impl<
                             block.as_records().iter().join("\n\t")
                         );
                     }
+                    let block_records = block.as_records();
+                    let records = retained_history.expect("leaf history");
+                    let mut sorted_records = records.iter().collect_vec();
+                    sorted_records.sort_by_key(|r| r.key());
+                    let Some(middle) = fitting_key_boundary(
+                        &sorted_records,
+                        sorted_records.len() / 2,
+                        capacity,
+                        |r| r.key(),
+                    ) else {
+                        // Neither version compaction nor a non-tearing key
+                        // split can make progress. This is the exceptional
+                        // repeated-key-history case cold pages exist for.
+                        let replacement = self.block_manager.new_empty_leaf(&self.ctx);
+                        record_version_split(fence.to_string(), records.len());
+                        self.populate_leaf_history(replacement, records);
+                        return BlockSplit::ByVersion(replacement);
+                    };
+                    let split_key = sorted_records[middle].key();
+
                     let (left, right) = (
                         self.block_manager.new_empty_leaf(&self.ctx),
                         self.block_manager.new_empty_leaf(&self.ctx),
                     );
 
-                    let block_records = block.as_records();
+                    let (mut first, mut second): (Vec<_>, Vec<_>) =
+                        records.into_iter().partition(|r| r.key() < split_key);
+                    // Stable key sorting preserves physical order within a
+                    // key while keeping range iteration's key ordering.
+                    first.sort_by_key(|r| r.key());
+                    second.sort_by_key(|r| r.key());
 
-                    let mut sorted_block = block_records
-                        .iter()
-                        .filter(|r| self.record_survives_gc(r.version()))
-                        .sorted_by_key(|r| r.key())
-                        .collect_vec();
-
-                    let middle = nearest_key_boundary(
-                        &sorted_block,
-                        sorted_block.len() / 2,
-                        capacity,
-                        |r| r.key(),
-                    );
-                    let (first, second) = sorted_block.split_at_mut(middle);
-
-                    let fence_left = Interval::new(
-                        fence.lower,
-                        (self.cold.dec_key)(second.get_unchecked(0).key),
-                    );
+                    let fence_left = Interval::new(fence.lower, (self.cold.dec_key)(split_key));
 
                     // No re-sort by `insertion_stamp().ts_start()` here (there
                     // used to be one for each half) — see `merge`'s identical
@@ -1372,15 +1524,9 @@ impl<
                     // `rfind`/`is_live_lineage` depend on. Confirmed as the
                     // root cause of the Delivery `OrderLine`
                     // `ZeroAffected(KeyAlreadyDeleted)` panic.
-                    if let PageType::LeafMut(leaf_page) = left.unsafe_borrow_mut().as_page_mut() {
-                        leaf_page.bulk_push_from_slice_ref(first);
-                    }
-
-                    let fence_right = Interval::new(second.get_unchecked(0).key, fence.upper);
-
-                    if let PageType::LeafMut(leaf_page) = right.unsafe_borrow_mut().as_page_mut() {
-                        leaf_page.bulk_push_from_slice_ref(second)
-                    }
+                    let fence_right = Interval::new(split_key, fence.upper);
+                    self.populate_leaf_history(left, first);
+                    self.populate_leaf_history(right, second);
 
                     if TRACE_KEY_DEBUG {
                         push_trace(format!(
@@ -1470,7 +1616,7 @@ impl<
 
                     BlockSplit::ByKey(fence_left, left, fence_right, right)
                 },
-                }
+            }
         } else {
             // < max_units_safe. meaning: active >= 40% and active < 80%
             // VERSION SPLIT
@@ -1483,13 +1629,10 @@ impl<
                     let new_leaf = self.block_manager.new_empty_leaf(&self.ctx);
 
                     let block_records = block.as_records();
+                    let records = retained_history.expect("leaf history");
+                    let hot_count = self.hot_record_count(&records);
 
-                    let active_records = block_records
-                        .iter()
-                        .filter(|record| self.record_survives_gc(record.version()))
-                        .collect_vec();
-
-                    record_version_split(fence.to_string(), active_records.len());
+                    record_version_split(fence.to_string(), hot_count);
 
                     // debug_assert!(active_records.len() >= block.filling_40_percent(),
                     //               "Active records = {}, required >= {}", active_records.len(), block.filling_40_percent());
@@ -1505,10 +1648,7 @@ impl<
                     // debug_assert!(active_records.len() <=
                     //     BlockManager::<FAN_OUT, NUM_RECORDS, Key, Payload>::min_active_records());
 
-                    if let PageType::LeafMut(leaf_page) = new_leaf.unsafe_borrow_mut().as_page_mut()
-                    {
-                        leaf_page.bulk_push(active_records);
-                    }
+                    self.populate_leaf_history(new_leaf, records);
 
                     if TRACE_KEY_DEBUG {
                         push_trace(format!(

@@ -1,0 +1,129 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand*\HyPL@Entry[1]{}
+\HyPL@Entry{0<</S/D>>}
+\@writefile{toc}{\contentsline {section}{\numberline {1}System Overview}{2}{section.1}\protected@file@percent }
+\newlabel{sec:overview}{{1}{2}{System Overview}{section.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}Purpose and Capabilities}{2}{subsection.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.1.1}Transactional Model}{2}{subsubsection.1.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.1.2}Concurrency Control}{2}{subsubsection.1.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.1.3}Garbage Collection}{2}{subsubsection.1.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.1.4}Durability}{2}{subsubsection.1.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.2}Architectural Layers}{2}{subsection.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Datastructure Changes}{4}{section.2}\protected@file@percent }
+\newlabel{sec:datastruct}{{2}{4}{Datastructure Changes}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Leaf Page Layout}{4}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.1.1}Problem}{4}{subsubsection.2.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.1.2}Solution: Split Layout}{4}{subsubsection.2.1.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Split layout separates keys from metadata, allowing point lookup to reject unmatched keys without loading their version/payload cache lines.}}{4}{figure.1}\protected@file@percent }
+\newlabel{fig:leaf_layout}{{1}{4}{Split layout separates keys from metadata, allowing point lookup to reject unmatched keys without loading their version/payload cache lines}{figure.1}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.1.3}Measured Performance}{4}{subsubsection.2.1.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Split layout improves point lookup (8.5--22.1\%) and selective scans (1.9--9.7\%), with full scans unchanged. The multi-leaf working set is more representative of real trees than a single hot page.}}{4}{table.1}\protected@file@percent }
+\newlabel{tab:leaf_layout}{{1}{4}{Split layout improves point lookup (8.5--22.1\%) and selective scans (1.9--9.7\%), with full scans unchanged. The multi-leaf working set is more representative of real trees than a single hot page}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Inline Validity Mask}{5}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.2.1}Problem}{5}{subsubsection.2.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.2.2}Solution}{5}{subsubsection.2.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.2.3}Measured Performance}{5}{subsubsection.2.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Exact 4 KiB Allocation}{5}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.3.1}Problem}{5}{subsubsection.2.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.3.2}Solution}{5}{subsubsection.2.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.3.3}Measured Performance}{5}{subsubsection.2.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Inline Liveness Mask for Internal Pages}{5}{subsection.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.4.1}Problem}{5}{subsubsection.2.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.4.2}Solution}{6}{subsubsection.2.4.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Internal page liveness mask tracks current vs. historical child entries. When new intervals are appended, overlapping old intervals are marked as superseded but remain available for historical snapshots.}}{6}{figure.2}\protected@file@percent }
+\newlabel{fig:internal_liveness}{{2}{6}{Internal page liveness mask tracks current vs. historical child entries. When new intervals are appended, overlapping old intervals are marked as superseded but remain available for historical snapshots}{figure.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.4.3}Measured Performance}{6}{subsubsection.2.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Payload Indirection Strategy}{7}{subsection.2.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.5.1}Problem}{7}{subsubsection.2.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.5.2}Solution}{7}{subsubsection.2.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.5.3}Measured Performance}{7}{subsubsection.2.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6}Transaction-Local Version Reuse}{7}{subsection.2.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.6.1}Problem}{7}{subsubsection.2.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.6.2}Solution}{7}{subsubsection.2.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.6.3}Measured Performance}{7}{subsubsection.2.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Optimizations: Problem, Solution, Measurement, Adoption}{8}{section.3}\protected@file@percent }
+\newlabel{sec:optimizations}{{3}{8}{Optimizations: Problem, Solution, Measurement, Adoption}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}WAL and Visibility Path Optimizations}{8}{subsection.3.1}\protected@file@percent }
+\newlabel{sec:wal_optimizations}{{3.1}{8}{WAL and Visibility Path Optimizations}{subsection.3.1}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.1.1}Optimization 1: Target-CPU Native Code Generation}{8}{subsubsection.3.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.1.2}Optimization 2: Table-Driven CRC32}{8}{subsubsection.3.1.2}\protected@file@percent }
+\newlabel{sec:wal_crc32}{{3.1.2}{8}{Optimization 2: Table-Driven CRC32}{subsubsection.3.1.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces CRC32 table-driven replacement. The write-heavy YCSB-A shows the largest gain because the CRC32 path is directly on every update's critical path. TPC-C gains are smaller because it also includes contention and structural-maintenance costs.}}{8}{table.2}\protected@file@percent }
+\newlabel{tab:crc32_impact}{{2}{8}{CRC32 table-driven replacement. The write-heavy YCSB-A shows the largest gain because the CRC32 path is directly on every update's critical path. TPC-C gains are smaller because it also includes contention and structural-maintenance costs}{table.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.1.3}Optimization 3: Sharded WAL Channels}{8}{subsubsection.3.1.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces WAL sharding reduces producer contention by partitioning the channel. Workers are assigned to shards by \texttt  {worker\_id \% 4}; all shards still write through one shared file and one hardened watermark.}}{9}{figure.3}\protected@file@percent }
+\newlabel{fig:wal_sharding}{{3}{9}{WAL sharding reduces producer contention by partitioning the channel. Workers are assigned to shards by \code {worker\_id \% 4}; all shards still write through one shared file and one hardened watermark}{figure.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Sharded WAL channels show strongest impact on write workloads. Read-only workloads gain little (they do not tax the WAL path). * YCSB-D's gains are treated as unverified; single-trial result with high variance.}}{9}{table.3}\protected@file@percent }
+\newlabel{tab:wal_sharding}{{3}{9}{Sharded WAL channels show strongest impact on write workloads. Read-only workloads gain little (they do not tax the WAL path). * YCSB-D's gains are treated as unverified; single-trial result with high variance}{table.3}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.1.4}Optimization 4: Removing Flush Tickets}{10}{subsubsection.3.1.4}\protected@file@percent }
+\newlabel{sec:wal_tickets}{{3.1.4}{10}{Optimization 4: Removing Flush Tickets}{subsubsection.3.1.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Flush-ticket removal is a pure allocator saving on the write path. Synthetic tests show larger gain because the ticket allocation was the entire per-write cost in that scenario.}}{10}{table.4}\protected@file@percent }
+\newlabel{tab:ticket_removal}{{4}{10}{Flush-ticket removal is a pure allocator saving on the write path. Synthetic tests show larger gain because the ticket allocation was the entire per-write cost in that scenario}{table.4}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.1.5}Optimization 5: Payload-Size Hints for WAL Encoding}{10}{subsubsection.3.1.5}\protected@file@percent }
+\newlabel{sec:wal_buffer_size}{{3.1.5}{10}{Optimization 5: Payload-Size Hints for WAL Encoding}{subsubsection.3.1.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Right-sizing WAL buffers eliminates the majority of encoding allocator churn. Gains combine with ticket removal (Optimization~\ref {sec:wal_tickets}) in these numbers.}}{10}{table.5}\protected@file@percent }
+\newlabel{tab:buffer_sizing}{{5}{10}{Right-sizing WAL buffers eliminates the majority of encoding allocator churn. Gains combine with ticket removal (Optimization~\ref {sec:wal_tickets}) in these numbers}{table.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Visibility and Range-Scan Optimizations}{10}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:visibility_optimizations}{{3.2}{10}{Visibility and Range-Scan Optimizations}{subsection.3.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.1}Optimization 6: Range-Scan Filter Reorder}{10}{subsubsection.3.2.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Cumulative impact of WAL optimizations (Optimizations 2--5) showing how each successive fix removes another CPU hotspot. The final state achieves $\sim $89\% cost reduction from baseline.}}{11}{figure.4}\protected@file@percent }
+\newlabel{fig:wal_cumulative}{{4}{11}{Cumulative impact of WAL optimizations (Optimizations 2--5) showing how each successive fix removes another CPU hotspot. The final state achieves $\sim $89\% cost reduction from baseline}{figure.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Filter reorder improves narrow range scans (Q4/Q5) by 11--18\%. Full-table scans (Q1/Q6) show no benefit because their range always contains every key in any visited leaf. (8 warehouses, 16 terminals, 20s runs on contended machine.)}}{11}{table.6}\protected@file@percent }
+\newlabel{tab:filter_reorder}{{6}{11}{Filter reorder improves narrow range scans (Q4/Q5) by 11--18\%. Full-table scans (Q1/Q6) show no benefit because their range always contains every key in any visited leaf. (8 warehouses, 16 terminals, 20s runs on contended machine.)}{table.6}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.2}Optimization 7: Remove Visibility Closure Indirection}{11}{subsubsection.3.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.3}Optimization 8: Specialized Full-Domain Scan Path}{12}{subsubsection.3.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Range Scan Iteration and Streaming}{12}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:range_scans}{{3.3}{12}{Range Scan Iteration and Streaming}{subsection.3.3}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.1}Optimization 9: Zero-Copy Streaming Range Terminals}{12}{subsubsection.3.3.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Streaming terminals are 16.8\% faster on full scans (median of three runs, 200K rows). Savings include eliminated result-vector allocation, payload-handle clones, and unused result construction.}}{12}{table.7}\protected@file@percent }
+\newlabel{tab:streaming}{{7}{12}{Streaming terminals are 16.8\% faster on full scans (median of three runs, 200K rows). Savings include eliminated result-vector allocation, payload-handle clones, and unused result construction}{table.7}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Streaming range terminals (Optimization 9) eliminate per-record allocation and cloning by using callback-scoped borrowed references. The borrowed payload has limited lifetime—it must not be retained beyond the callback execution.}}{13}{figure.5}\protected@file@percent }
+\newlabel{fig:streaming_vs_materialized}{{5}{13}{Streaming range terminals (Optimization 9) eliminate per-record allocation and cloning by using callback-scoped borrowed references. The borrowed payload has limited lifetime—it must not be retained beyond the callback execution}{figure.5}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.3.2}Optimization 10: Ordered Cursor-Based Internal Page Routing}{13}{subsubsection.3.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Transaction State and Abort Path Optimizations}{13}{subsection.3.4}\protected@file@percent }
+\newlabel{sec:tx_optimizations}{{3.4}{13}{Transaction State and Abort Path Optimizations}{subsection.3.4}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.4.1}Optimization 11: Inline Write Set and Transaction Context}{13}{subsubsection.3.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.4.2}Optimization 12: Reverse-Order Batched Abort}{14}{subsubsection.3.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.4.3}Optimization 13: Empty Read-Only Commit Elision}{14}{subsubsection.3.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Garbage Collection and Allocation Sharding}{14}{subsection.3.5}\protected@file@percent }
+\newlabel{sec:gc_optimizations}{{3.5}{14}{Garbage Collection and Allocation Sharding}{subsection.3.5}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.5.1}Optimization 14: Sharded Retired-Block Reuse Pool}{14}{subsubsection.3.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.5.2}Optimization 15: Conservative Update-In-Place}{15}{subsubsection.3.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6}Leaf Sizing and Structural Maintenance}{15}{subsection.3.6}\protected@file@percent }
+\newlabel{sec:leaf_sizing}{{3.6}{15}{Leaf Sizing and Structural Maintenance}{subsection.3.6}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.6.1}Optimization 16: Big-Tree Leaf Size Classes for Hot Tables}{15}{subsubsection.3.6.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces Big-tree leaf sizes show flat throughput (all within $\sim $68K--76K new\_order/s at 64 threads, with/without GC). Scan latency at 64 threads is flat (54--101 µs p50, 89--279 µs p99). Medium remains the default and is optimal across metrics.}}{15}{table.8}\protected@file@percent }
+\newlabel{tab:bigtree_sizes}{{8}{15}{Big-tree leaf sizes show flat throughput (all within $\sim $68K--76K new\_order/s at 64 threads, with/without GC). Scan latency at 64 threads is flat (54--101 µs p50, 89--279 µs p99). Medium remains the default and is optimal across metrics}{table.8}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7}Workload-Specific and Benchmark Harness Optimizations}{16}{subsection.3.7}\protected@file@percent }
+\newlabel{sec:workload_optimizations}{{3.7}{16}{Workload-Specific and Benchmark Harness Optimizations}{subsection.3.7}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.7.1}Optimization 17: YCSB Single-Field Patch}{16}{subsubsection.3.7.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces Single-field patching nearly doubles YCSB-A throughput by avoiding full-row reconstruction. Using \texttt  {writeallfields=true} recovers old semantics for historical comparisons.}}{16}{table.9}\protected@file@percent }
+\newlabel{tab:ycsb_patch}{{9}{16}{Single-field patching nearly doubles YCSB-A throughput by avoiding full-row reconstruction. Using \code {writeallfields=true} recovers old semantics for historical comparisons}{table.9}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.7.2}Optimization 18: YCSB Point-Read Hit/Miss Only}{16}{subsubsection.3.7.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {10}{\ignorespaces Point-hit-miss testing without allocation doubles read-only workload throughput. This is a pure harness optimization, not a change to the engine.}}{16}{table.10}\protected@file@percent }
+\newlabel{tab:ycsb_hit_miss}{{10}{16}{Point-hit-miss testing without allocation doubles read-only workload throughput. This is a pure harness optimization, not a change to the engine}{table.10}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.7.3}Optimization 19: Walker-Alias Zipf Sampling}{16}{subsubsection.3.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.7.4}Optimization 20: Amortized Benchmark Clock Sampling}{17}{subsubsection.3.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.7.5}Optimization 21: Configurable YCSB Execution Mode}{17}{subsubsection.3.7.5}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {11}{\ignorespaces Transaction mode includes registration, snapshot maintenance, conflict retry, and explicit commit overhead. The difference is intentional and measurable.}}{17}{table.11}\protected@file@percent }
+\newlabel{tab:ycsb_modes}{{11}{17}{Transaction mode includes registration, snapshot maintenance, conflict retry, and explicit commit overhead. The difference is intentional and measurable}{table.11}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Summary of Architectural Decisions}{18}{section.4}\protected@file@percent }
+\newlabel{sec:summary}{{4}{18}{Summary of Architectural Decisions}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Combined Performance Impact Across Workloads}{18}{subsection.4.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces Combined throughput improvement from all optimizations across representative workloads. Gains are highest in write-heavy, high-concurrency scenarios where WAL contention and allocator pressure dominate baseline cost.}}{18}{figure.6}\protected@file@percent }
+\newlabel{fig:combined_impact}{{6}{18}{Combined throughput improvement from all optimizations across representative workloads. Gains are highest in write-heavy, high-concurrency scenarios where WAL contention and allocator pressure dominate baseline cost}{figure.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Optimization Categories}{18}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Adoption Summary}{18}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Combined Performance Impact}{18}{subsection.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}Design Principles}{18}{subsection.4.5}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {7}{\ignorespaces Optimization taxonomy: 6 datastructure changes plus 21 optimizations across 5 categories. WAL optimizations have the largest single impact on write-heavy workloads.}}{19}{figure.7}\protected@file@percent }
+\newlabel{fig:optimization_categories}{{7}{19}{Optimization taxonomy: 6 datastructure changes plus 21 optimizations across 5 categories. WAL optimizations have the largest single impact on write-heavy workloads}{figure.7}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {12}{\ignorespaces Optimization summary: all optimizations were adopted, some conditionally or with specific configuration flags.}}{20}{table.12}\protected@file@percent }
+\newlabel{tab:opt_summary}{{12}{20}{Optimization summary: all optimizations were adopted, some conditionally or with specific configuration flags}{table.12}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {13}{\ignorespaces Combined throughput improvements from the full optimization series. Multiple optimizations (WAL, visibility, allocation) contributed to each workload.}}{20}{table.13}\protected@file@percent }
+\newlabel{tab:combined_impact}{{13}{20}{Combined throughput improvements from the full optimization series. Multiple optimizations (WAL, visibility, allocation) contributed to each workload}{table.13}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Open Issues and Future Work}{20}{section.5}\protected@file@percent }
+\newlabel{sec:open}{{5}{20}{Open Issues and Future Work}{section.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Conclusion}{22}{section.6}\protected@file@percent }
+\gdef \@abspage@last{22}

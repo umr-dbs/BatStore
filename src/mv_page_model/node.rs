@@ -4,6 +4,7 @@ use crate::mv_page_model::leaf_page::LeafPage;
 use crate::mv_query::interval::Interval;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_sync::safe_cell::SafeCell;
+use crate::mv_sync::smart_cell::SmartCell;
 use itertools::Itertools;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
@@ -37,7 +38,176 @@ pub const fn from_active_dead(active: Active, dead: Dead) -> PageLenPrimitive {
     (active << 16) | dead
 }
 
-const PADDING: usize = 54;
+/// Metadata for a leaf's optional chain of "cold" satellite pages: leaves
+/// that overflow purely from dead-but-still-GC-protected records (not real
+/// growth in live keys) can offload that protected-dead content here instead
+/// of repeatedly re-`VERSION_SPLIT`/re-`KEY_SPLIT`ing a garbage-inflated
+/// page — confirmed via `SPLIT_CONVERGENCE_TRACE` and the
+/// `verify_concurrent_shared_keys` repro as a real ~4% livelock, root-caused
+/// to `unsafe_degree()`/`split()`/`merge()` all basing their overflow/
+/// underflow/redistribution decisions on physical occupancy that a
+/// continuously-churning small live-key population can never stably clear.
+/// A cold page is structurally just another leaf `Block` (reusing the same
+/// type, same `OptCell`/OLC machinery — no new page shape to harden), linked
+/// from here and potentially chaining further (`chain_len` > 1) if more
+/// survivors need a home than fit in one page. Lives in `Node`'s previously
+/// pure-filler `_pad` — replacing part of it costs nothing: `Node`'s own
+/// trailing alignment padding already had this slack (see `PADDING`'s
+/// comment) and the current field layout is intentionally sized to leave
+/// `PADDING - COLD_LINK_SIZE` bytes still spare after this addition.
+///
+/// Written by `MVBTSt::split`'s `VERSION_SPLIT` leaf branch
+/// (`rebuild_cold_chain`, `mv_tree::smo`) and read by the point/range-read
+/// fallback (`MVBTSt::scan_cold_chain_for_key`/`RangeQueryIter::
+/// walk_cold_chain_for_range`, `mv_query`). `merge()` does not populate or
+/// consult it yet, nor does `unsafe_degree()`/`split()`'s own
+/// `KEY_SPLIT`-vs-`VERSION_SPLIT` decision — those are staged follow-up
+/// work. Every construction site that doesn't explicitly install a link
+/// (`new_leaf`/`new_internal`/`Default`/`Clone`) sets `ColdLink::none()`,
+/// and `on_reuse()` resets a recycled block back to `none()` too, so an
+/// unpopulated link is indistinguishable from the original plain
+/// zero-filled `_pad`.
+// Hand-written `Clone`/`Copy`, not `#[derive(..)]`: the naive derive
+// expansion adds a blanket `Key: Copy, Payload: Copy` bound (since it can't
+// see that `BlockRef`/`SmartCell` is `Copy` regardless of its own type
+// parameters' `Copy`-ness — it's a raw pointer underneath), which breaks at
+// every real call site: `Payload` is only ever bounded by `Clone` there
+// (e.g. `MVBTSt`'s own bounds), never `Copy`. None of `ColdLink`'s actual
+// fields need `Key`/`Payload` to be `Copy` to themselves be `Copy`.
+pub(crate) struct ColdLink<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display,
+    Payload: Clone + Default,
+> {
+    /// Pointer to the newest cold page in the chain — the one directly
+    /// linked from this hot leaf — or a null `SmartCell` if there is none.
+    /// Reuses `BlockRef`/`SmartCell<Block<..>>` unchanged: same type every
+    /// other block pointer in this codebase already uses, same OLC
+    /// read/retire discipline, no new synchronization primitive.
+    cold: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    /// Exact count of surviving (dead-but-still-protected) records in
+    /// *this* directly-linked cold page alone, not the whole chain — each
+    /// chained cold page tracks its own count the same way, recursively.
+    /// `0` whenever `cold` is null.
+    cold_count: u32,
+    /// Smallest `ts_start` among the transactions currently protecting a
+    /// record in the directly-linked cold page (meaningless/unused while
+    /// `cold` is null). A cheap, always-safe-to-be-wrong-in-one-direction
+    /// gate: if `TxContext::is_snapshot_live` on this value comes back
+    /// `false`, at least one entry is provably reclaimable and a real sweep
+    /// of the cold page is worth running; if `true`, it's safe to skip the
+    /// sweep this round without ever touching the cold page.
+    min_protecting_ts_start: Version,
+    /// Number of cold pages currently chained behind this leaf (`0` iff
+    /// `cold` is null). Lets an overflow/underflow check notice a growing
+    /// chain and consider a consolidation pass without walking it.
+    chain_len: u16,
+    /// Cached aggregate survivor count across the *whole* chain, not just
+    /// the directly-linked page. Not required to be perfectly up to date
+    /// after every single event — only recomputed authoritatively when a
+    /// consolidation sweep actually walks the chain.
+    chain_total_count: u32,
+}
+
+impl<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display,
+    Payload: Clone + Default,
+> Clone for ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display,
+    Payload: Clone + Default,
+> Copy for ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+}
+
+impl<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display,
+    Payload: Clone + Default,
+> ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+    #[inline(always)]
+    pub(crate) const fn none() -> Self {
+        Self {
+            cold: SmartCell(std::ptr::null()),
+            cold_count: 0,
+            min_protecting_ts_start: 0,
+            chain_len: 0,
+            chain_total_count: 0,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_none(&self) -> bool {
+        self.cold.0.is_null()
+    }
+
+    #[inline(always)]
+    pub(crate) fn cold(&self) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
+        self.cold
+    }
+
+    #[inline(always)]
+    pub(crate) const fn cold_count(&self) -> u32 {
+        self.cold_count
+    }
+
+    #[inline(always)]
+    pub(crate) const fn min_protecting_ts_start(&self) -> Version {
+        self.min_protecting_ts_start
+    }
+
+    #[inline(always)]
+    pub(crate) const fn chain_len(&self) -> u16 {
+        self.chain_len
+    }
+
+    #[inline(always)]
+    pub(crate) const fn chain_total_count(&self) -> u32 {
+        self.chain_total_count
+    }
+
+    #[inline(always)]
+    pub(crate) fn new(
+        cold: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        cold_count: u32,
+        min_protecting_ts_start: Version,
+        chain_len: u16,
+        chain_total_count: u32,
+    ) -> Self {
+        debug_assert!(!cold.0.is_null());
+        debug_assert!(chain_len > 0);
+        Self {
+            cold,
+            cold_count,
+            min_protecting_ts_start,
+            chain_len,
+            chain_total_count,
+        }
+    }
+}
+
+/// Fixed regardless of `FAN_OUT`/`NUM_RECORDS`/`Key`/`Payload`: `cold` is a
+/// raw pointer (`BlockRef`'s size never depends on its pointee's layout) and
+/// every other field is a plain integer, so `ColdLink`'s size is the same
+/// for any instantiation — safe to compute once via an arbitrary concrete
+/// one and reuse for sizing `Node`'s padding split below.
+pub(crate) const COLD_LINK_SIZE: usize = size_of::<ColdLink<1, 1, u64, u64>>();
+
+pub(crate) const PADDING: usize = 54;
 #[repr(C, align(64))]
 pub struct Node<
     const FAN_OUT: usize,
@@ -46,7 +216,8 @@ pub struct Node<
     Payload: Clone + Default,
 > {
     m_type: usize,
-    _pad: [u8; PADDING],
+    cold_link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    _pad: [u8; PADDING - COLD_LINK_SIZE],
     page: SafeCell<InnerPage<FAN_OUT, NUM_RECORDS, Key, Payload>>,
 }
 
@@ -126,6 +297,24 @@ impl<
     }
 
     #[inline(always)]
+    pub(crate) const fn cold_link(&self) -> &ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload> {
+        &self.cold_link
+    }
+
+    /// Installs `link`, replacing whatever was there. Only ever safe to
+    /// call before this leaf is linked into the tree (a freshly-allocated
+    /// leaf a caller is still populating — e.g. `MVBTSt::split`'s
+    /// `VERSION_SPLIT` branch, right after `new_empty_leaf`, before
+    /// `push_uncommitted` publishes it to the parent). See `ColdLink`'s
+    /// doc: a `cold_link` is otherwise fixed for a leaf's whole reachable
+    /// lifetime, exactly like every other child page in this codebase —
+    /// never mutated in place once installed.
+    #[inline(always)]
+    pub(crate) fn set_cold_link(&mut self, link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>) {
+        self.cold_link = link;
+    }
+
+    #[inline(always)]
     pub fn as_page_ref(&self) -> PageType<'_, FAN_OUT, NUM_RECORDS, Key, Payload> {
         match self.m_type() {
             PAGE_TYPE_INTERNAL => PageType::IndexRef(unsafe { &self.page.internal }),
@@ -145,7 +334,30 @@ impl<
     pub fn new_leaf() -> Self {
         Self {
             m_type: PAGE_TYPE_LEAF,
-            _pad: [0u8; PADDING],
+            cold_link: ColdLink::none(),
+            _pad: [0u8; PADDING - COLD_LINK_SIZE],
+            page: SafeCell::new(InnerPage {
+                leaf: ManuallyDrop::new(LeafPage::new()),
+            }),
+        }
+    }
+
+    /// Same as `new_leaf`, but installs `cold_link` at construction —
+    /// the only point in this leaf's lifetime `cold_link` is ever set (see
+    /// `ColdLink`'s doc: never mutated in place on an already-installed
+    /// leaf). The real cold-offload path (staged follow-up work) builds a
+    /// fresh replacement leaf this way, exactly like `MVBTSt::split`'s
+    /// `VERSION_SPLIT` branch already builds a fresh leaf today — this
+    /// constructor just gives that path (and, until it lands, tests of the
+    /// read-side fallback) a way to produce one with a populated link.
+    #[inline(always)]
+    pub(crate) fn new_leaf_with_cold_link(
+        cold_link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    ) -> Self {
+        Self {
+            m_type: PAGE_TYPE_LEAF,
+            cold_link,
+            _pad: [0u8; PADDING - COLD_LINK_SIZE],
             page: SafeCell::new(InnerPage {
                 leaf: ManuallyDrop::new(LeafPage::new()),
             }),
@@ -156,7 +368,8 @@ impl<
     pub const fn new_internal() -> Self {
         Self {
             m_type: PAGE_TYPE_INTERNAL,
-            _pad: [0u8; PADDING],
+            cold_link: ColdLink::none(),
+            _pad: [0u8; PADDING - COLD_LINK_SIZE],
             page: SafeCell::new(InnerPage {
                 internal: ManuallyDrop::new(InternalPage::new()),
             }),
@@ -308,6 +521,18 @@ impl<
         // `InternalPage` would overwrite the mask pointer. A type-changing
         // `mark_leaf`/`mark_internal` constructs the destination variant
         // properly; same-type internal reuse was reset in its branch above.
+
+        // `cold_link` lives outside the leaf/internal union above (see its
+        // doc), so neither branch above touches it -- without this, a
+        // reused block would carry its *previous* life's cold pointer
+        // straight into its new one, a stale/dangling reference the new
+        // owner never wrote and has no way to know about. Every real
+        // cold-offload write builds a fresh replacement leaf and sets
+        // `cold_link` there before install (never mutates an already-live
+        // leaf's link in place — see `ColdLink`'s doc), so this reset is
+        // the only place a *recycled* block's leftover link ever needs
+        // clearing.
+        self.cold_link = ColdLink::none();
     }
 
     #[inline(always)]
@@ -392,7 +617,8 @@ impl<
     fn default() -> Self {
         Self {
             m_type: PAGE_TYPE_LEAF,
-            _pad: [0u8; PADDING],
+            cold_link: ColdLink::none(),
+            _pad: [0u8; PADDING - COLD_LINK_SIZE],
             page: SafeCell::new(InnerPage {
                 leaf: ManuallyDrop::new(LeafPage::new()),
             }),
@@ -407,11 +633,20 @@ impl<
     Payload: Clone + Default,
 > Clone for Node<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
+    /// Deliberately does *not* deep-clone a populated `cold_link` (nor its
+    /// chain) — resets to `ColdLink::none()` instead, same as `Default`.
+    /// Fine today: every caller of this impl (`mv_test`'s scratch-copy
+    /// helper, `Block`'s own `Clone`) only ever clones freshly-constructed
+    /// or cold-link-less blocks. Revisit if a future caller ever clones a
+    /// leaf that legitimately has a populated cold chain — copying the raw
+    /// pointer would create two leaves referencing (and potentially
+    /// independently retiring) the same cold page, which is not safe.
     fn clone(&self) -> Self {
         if self.is_leaf() {
             Self {
                 m_type: PAGE_TYPE_LEAF,
-                _pad: [0u8; PADDING],
+                cold_link: ColdLink::none(),
+                _pad: [0u8; PADDING - COLD_LINK_SIZE],
                 page: SafeCell::new(InnerPage {
                     leaf: unsafe { self.page.leaf.clone() },
                 }),
@@ -419,7 +654,8 @@ impl<
         } else {
             Self {
                 m_type: PAGE_TYPE_INTERNAL,
-                _pad: [0u8; PADDING],
+                cold_link: ColdLink::none(),
+                _pad: [0u8; PADDING - COLD_LINK_SIZE],
                 page: SafeCell::new(InnerPage {
                     internal: unsafe { self.page.internal.clone() },
                 }),

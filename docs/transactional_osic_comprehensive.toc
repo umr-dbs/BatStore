@@ -1,0 +1,69 @@
+\contentsline {section}{\numberline {1}System Overview}{2}{section.1}%
+\contentsline {subsection}{\numberline {1.1}Purpose and Capabilities}{2}{subsection.1.1}%
+\contentsline {subsubsection}{\numberline {1.1.1}Transactional Model}{2}{subsubsection.1.1.1}%
+\contentsline {subsubsection}{\numberline {1.1.2}Concurrency Control}{2}{subsubsection.1.1.2}%
+\contentsline {subsubsection}{\numberline {1.1.3}Garbage Collection}{2}{subsubsection.1.1.3}%
+\contentsline {subsubsection}{\numberline {1.1.4}Durability}{2}{subsubsection.1.1.4}%
+\contentsline {subsection}{\numberline {1.2}Architectural Layers}{2}{subsection.1.2}%
+\contentsline {section}{\numberline {2}Datastructure Changes}{4}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Leaf Page Layout}{4}{subsection.2.1}%
+\contentsline {subsubsection}{\numberline {2.1.1}Problem}{4}{subsubsection.2.1.1}%
+\contentsline {subsubsection}{\numberline {2.1.2}Solution: Split Layout}{4}{subsubsection.2.1.2}%
+\contentsline {subsubsection}{\numberline {2.1.3}Measured Performance}{4}{subsubsection.2.1.3}%
+\contentsline {subsection}{\numberline {2.2}Inline Validity Mask}{5}{subsection.2.2}%
+\contentsline {subsubsection}{\numberline {2.2.1}Problem}{5}{subsubsection.2.2.1}%
+\contentsline {subsubsection}{\numberline {2.2.2}Solution}{5}{subsubsection.2.2.2}%
+\contentsline {subsubsection}{\numberline {2.2.3}Measured Performance}{5}{subsubsection.2.2.3}%
+\contentsline {subsection}{\numberline {2.3}Exact 4 KiB Allocation}{5}{subsection.2.3}%
+\contentsline {subsubsection}{\numberline {2.3.1}Problem}{5}{subsubsection.2.3.1}%
+\contentsline {subsubsection}{\numberline {2.3.2}Solution}{5}{subsubsection.2.3.2}%
+\contentsline {subsubsection}{\numberline {2.3.3}Measured Performance}{5}{subsubsection.2.3.3}%
+\contentsline {subsection}{\numberline {2.4}Inline Liveness Mask for Internal Pages}{5}{subsection.2.4}%
+\contentsline {subsubsection}{\numberline {2.4.1}Problem}{5}{subsubsection.2.4.1}%
+\contentsline {subsubsection}{\numberline {2.4.2}Solution}{6}{subsubsection.2.4.2}%
+\contentsline {subsubsection}{\numberline {2.4.3}Measured Performance}{6}{subsubsection.2.4.3}%
+\contentsline {subsection}{\numberline {2.5}Payload Indirection Strategy}{7}{subsection.2.5}%
+\contentsline {subsubsection}{\numberline {2.5.1}Problem}{7}{subsubsection.2.5.1}%
+\contentsline {subsubsection}{\numberline {2.5.2}Solution}{7}{subsubsection.2.5.2}%
+\contentsline {subsubsection}{\numberline {2.5.3}Measured Performance}{7}{subsubsection.2.5.3}%
+\contentsline {subsection}{\numberline {2.6}Transaction-Local Version Reuse}{7}{subsection.2.6}%
+\contentsline {subsubsection}{\numberline {2.6.1}Problem}{7}{subsubsection.2.6.1}%
+\contentsline {subsubsection}{\numberline {2.6.2}Solution}{7}{subsubsection.2.6.2}%
+\contentsline {subsubsection}{\numberline {2.6.3}Measured Performance}{7}{subsubsection.2.6.3}%
+\contentsline {section}{\numberline {3}Optimizations: Problem, Solution, Measurement, Adoption}{8}{section.3}%
+\contentsline {subsection}{\numberline {3.1}WAL and Visibility Path Optimizations}{8}{subsection.3.1}%
+\contentsline {subsubsection}{\numberline {3.1.1}Optimization 1: Target-CPU Native Code Generation}{8}{subsubsection.3.1.1}%
+\contentsline {subsubsection}{\numberline {3.1.2}Optimization 2: Table-Driven CRC32}{8}{subsubsection.3.1.2}%
+\contentsline {subsubsection}{\numberline {3.1.3}Optimization 3: Sharded WAL Channels}{8}{subsubsection.3.1.3}%
+\contentsline {subsubsection}{\numberline {3.1.4}Optimization 4: Removing Flush Tickets}{10}{subsubsection.3.1.4}%
+\contentsline {subsubsection}{\numberline {3.1.5}Optimization 5: Payload-Size Hints for WAL Encoding}{10}{subsubsection.3.1.5}%
+\contentsline {subsection}{\numberline {3.2}Visibility and Range-Scan Optimizations}{10}{subsection.3.2}%
+\contentsline {subsubsection}{\numberline {3.2.1}Optimization 6: Range-Scan Filter Reorder}{10}{subsubsection.3.2.1}%
+\contentsline {subsubsection}{\numberline {3.2.2}Optimization 7: Remove Visibility Closure Indirection}{11}{subsubsection.3.2.2}%
+\contentsline {subsubsection}{\numberline {3.2.3}Optimization 8: Specialized Full-Domain Scan Path}{12}{subsubsection.3.2.3}%
+\contentsline {subsection}{\numberline {3.3}Range Scan Iteration and Streaming}{12}{subsection.3.3}%
+\contentsline {subsubsection}{\numberline {3.3.1}Optimization 9: Zero-Copy Streaming Range Terminals}{12}{subsubsection.3.3.1}%
+\contentsline {subsubsection}{\numberline {3.3.2}Optimization 10: Ordered Cursor-Based Internal Page Routing}{13}{subsubsection.3.3.2}%
+\contentsline {subsection}{\numberline {3.4}Transaction State and Abort Path Optimizations}{13}{subsection.3.4}%
+\contentsline {subsubsection}{\numberline {3.4.1}Optimization 11: Inline Write Set and Transaction Context}{13}{subsubsection.3.4.1}%
+\contentsline {subsubsection}{\numberline {3.4.2}Optimization 12: Reverse-Order Batched Abort}{14}{subsubsection.3.4.2}%
+\contentsline {subsubsection}{\numberline {3.4.3}Optimization 13: Empty Read-Only Commit Elision}{14}{subsubsection.3.4.3}%
+\contentsline {subsection}{\numberline {3.5}Garbage Collection and Allocation Sharding}{14}{subsection.3.5}%
+\contentsline {subsubsection}{\numberline {3.5.1}Optimization 14: Sharded Retired-Block Reuse Pool}{14}{subsubsection.3.5.1}%
+\contentsline {subsubsection}{\numberline {3.5.2}Optimization 15: Conservative Update-In-Place}{15}{subsubsection.3.5.2}%
+\contentsline {subsection}{\numberline {3.6}Leaf Sizing and Structural Maintenance}{15}{subsection.3.6}%
+\contentsline {subsubsection}{\numberline {3.6.1}Optimization 16: Big-Tree Leaf Size Classes for Hot Tables}{15}{subsubsection.3.6.1}%
+\contentsline {subsection}{\numberline {3.7}Workload-Specific and Benchmark Harness Optimizations}{16}{subsection.3.7}%
+\contentsline {subsubsection}{\numberline {3.7.1}Optimization 17: YCSB Single-Field Patch}{16}{subsubsection.3.7.1}%
+\contentsline {subsubsection}{\numberline {3.7.2}Optimization 18: YCSB Point-Read Hit/Miss Only}{16}{subsubsection.3.7.2}%
+\contentsline {subsubsection}{\numberline {3.7.3}Optimization 19: Walker-Alias Zipf Sampling}{16}{subsubsection.3.7.3}%
+\contentsline {subsubsection}{\numberline {3.7.4}Optimization 20: Amortized Benchmark Clock Sampling}{17}{subsubsection.3.7.4}%
+\contentsline {subsubsection}{\numberline {3.7.5}Optimization 21: Configurable YCSB Execution Mode}{17}{subsubsection.3.7.5}%
+\contentsline {section}{\numberline {4}Summary of Architectural Decisions}{18}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Combined Performance Impact Across Workloads}{18}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Optimization Categories}{18}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Adoption Summary}{18}{subsection.4.3}%
+\contentsline {subsection}{\numberline {4.4}Combined Performance Impact}{18}{subsection.4.4}%
+\contentsline {subsection}{\numberline {4.5}Design Principles}{18}{subsection.4.5}%
+\contentsline {section}{\numberline {5}Open Issues and Future Work}{20}{section.5}%
+\contentsline {section}{\numberline {6}Conclusion}{22}{section.6}%
