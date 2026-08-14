@@ -401,42 +401,17 @@ impl TxContext {
         })
     }
 
-    #[inline(always)]
-    pub(crate) fn with_visibility_checker<R>(
-        &self,
-        reader_worker: WorkerId,
-        reader_ts_start: Version,
-        f: impl FnOnce(&mut dyn FnMut(TxStamp) -> bool) -> R,
-    ) -> R {
-        crate::mv_sync::worker::with_snapshot_cache(&self.worker_registry, |cache| {
-            f(&mut |stamp| {
-                visibility::is_visible(
-                    &self.commit_logs,
-                    cache,
-                    reader_worker,
-                    reader_ts_start,
-                    stamp,
-                )
-            })
-        })
-    }
-
-    /// Same TLS `SnapshotCache` access `with_visibility_checker` uses, but
-    /// hands back the raw `(cache, commit_logs)` pair instead of a
-    /// pre-built, type-erased checker closure — so a caller that builds its
-    /// *own* `is_visible` closure directly in its own function body (rather
-    /// than receiving one across this call's boundary) ends up with a
-    /// concrete, `Sized` closure type the compiler can inline, instead of
-    /// the `&mut dyn FnMut(..)` `with_visibility_checker` is forced to
-    /// return (a closure built *inside* this function and handed out across
-    /// a generic callback can only be named as `dyn` on the other side of
-    /// that boundary). Exists specifically for
+    /// Same TLS `SnapshotCache` access `is_visible_stamp` uses, but hands
+    /// back the raw `(cache, commit_logs)` pair instead of checking one
+    /// stamp itself — so a caller that needs to check many stamps in one
+    /// call (a scanned leaf page, a point/range query's candidate versions)
+    /// can build its *own* `is_visible` closure directly in its own function
+    /// body, ending up with a concrete, `Sized` closure type the compiler
+    /// can inline, rather than paying for a `dyn FnMut` built on one side of
+    /// a generic callback and invoked across it. Used by
     /// `mv_query::iter_query::RangeQueryIter::refill`'s leaf-scan hot loop
-    /// (see its call site) — `with_visibility_checker` stays exactly as-is
-    /// for every other caller (`is_visible_stamp`, `mv_query::query`'s
-    /// point/range reads), since those don't run per-record often enough in
-    /// one call for the dynamic-dispatch cost to matter the way a full
-    /// leaf-array scan's does.
+    /// and `mv_query::query`'s point/range reads (both can call `is_visible`
+    /// once per physical record in a leaf, not just once per call).
     #[inline(always)]
     pub(crate) fn with_snapshot_cache_and_logs<R>(
         &self,

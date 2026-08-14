@@ -149,9 +149,10 @@ thread_local! {
     // aliasing a live `&mut` — checked here by inspection instead, the same
     // way the rest of this crate already trusts `SafeCell` for its
     // concurrency-critical block/node access (see `mv_sync::safe_cell`):
-    // `with_snapshot_cache`'s only two callers (`version_handle.rs`'s
-    // `is_visible_stamp`/`with_visibility_checker`) pass a closure that never
-    // calls back into `with_snapshot_cache` (or `worker_id_for`) itself.
+    // `with_snapshot_cache`'s only two callers (`tx_context.rs`'s
+    // `is_visible_stamp`/`with_snapshot_cache_and_logs`) pass a closure that
+    // never calls back into `with_snapshot_cache` (or `worker_id_for`)
+    // itself.
     // Two-entry MRU: the normal hot path still performs exactly the same one
     // primary-UID comparison as before. Only a primary miss checks the second
     // slot, avoiding allocation churn when one thread alternates between two

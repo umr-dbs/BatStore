@@ -90,20 +90,6 @@ impl<
             .is_visible_stamp(reader_worker, reader_ts_start, stamp)
     }
 
-    /// Same OSIC check as `is_visible_stamp`, but for a whole batch of
-    /// records (a scanned leaf page, a point-query's candidate versions)
-    /// rather than one stamp — see `TxContext::with_visibility_checker`.
-    #[inline(always)]
-    pub(crate) fn with_visibility_checker<R>(
-        &self,
-        reader_worker: WorkerId,
-        reader_ts_start: Version,
-        f: impl FnOnce(&mut dyn FnMut(TxStamp) -> bool) -> R,
-    ) -> R {
-        self.ctx
-            .with_visibility_checker(reader_worker, reader_ts_start, f)
-    }
-
     /// See `TxContext::with_snapshot_cache_and_logs`'s doc.
     #[inline(always)]
     pub(crate) fn with_snapshot_cache_and_logs<R>(

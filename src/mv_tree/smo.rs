@@ -5,7 +5,7 @@ use crate::mv_page_model::{BlockRef, Height};
 use crate::mv_query::interval::Interval;
 use crate::mv_root::index_root::RootIndexGuard;
 use crate::mv_root::root::Root;
-use crate::mv_test::{DIAG, VERBOSE};
+use crate::mv_test::{DIAG, VERBOSE, record_version_split};
 use crate::mv_tree::mvbt::MVBTSt;
 use itertools::Itertools;
 use std::fmt::Display;
@@ -1296,6 +1296,34 @@ impl<
         // now runs instead, which produces two pages with real free space.
         // Transaction-level self-overwrite/reinsert reuse and first-writer-
         // wins keep an unresolved single-key chain below page capacity.
+        //
+        // Attempted and reverted (this session): forcing `KEY_SPLIT` here
+        // whenever a `VERSION_SPLIT` wouldn't shrink a fence's survivor
+        // count versus its last `VERSION_SPLIT` (tracked via a per-fence
+        // watermark) — motivated by `SPLIT_CONVERGENCE_TRACE` confirming
+        // this exact "same fence, same survivor count, forever" pattern as
+        // one real mechanism behind `verify_concurrent_shared_keys`'s ~4%
+        // livelock. Reverted for two reasons, not one: (1) it can force a
+        // `KEY_SPLIT` at 0-1 survivors, which `nearest_key_boundary` can't
+        // partition (asserts `len >= 2`) — confirmed as a real, reproducible
+        // panic (`min > max` in `nearest_key_boundary`) across 3 unrelated
+        // tests; guarding `survivor_count >= 2` stopped that panic there,
+        // but (2) the same shape of panic then reappeared via `merge`'s own
+        // keysplit-on-overflow fallback (its `nearest_key_boundary` call a
+        // few hundred lines up), because forcing more frequent real
+        // `KEY_SPLIT`s shrinks leaves more aggressively, producing smaller
+        // leaves that `merge()`'s combine-then-keysplit path apparently
+        // never had to handle before — a second, pre-existing edge case
+        // this exposed, not one this change introduced. Also: even before
+        // the panics, `SPLIT_CONVERGENCE_TRACE` confirmed the watermark
+        // check correctly stopped the originally-diagnosed pattern, but the
+        // test still hung at the same ~4% rate regardless — a second,
+        // separate livelock (something keeps re-forming the *same* fence at
+        // very high frequency regardless of which split type resolves it,
+        // most likely a split/merge oscillation on tiny key ranges) survives
+        // this fix untouched. Needs its own investigation before
+        // reattempting; see the project memory entry on this session for
+        // details.
         if active_block as usize >= block.filling_80_percent() || survivor_count >= capacity {
             // KEY_SPLIT
             match is_leaf {
@@ -1460,6 +1488,8 @@ impl<
                         .iter()
                         .filter(|record| self.record_survives_gc(record.version()))
                         .collect_vec();
+
+                    record_version_split(fence.to_string(), active_records.len());
 
                     // debug_assert!(active_records.len() >= block.filling_40_percent(),
                     //               "Active records = {}, required >= {}", active_records.len(), block.filling_40_percent());
