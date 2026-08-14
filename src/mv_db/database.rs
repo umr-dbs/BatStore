@@ -21,12 +21,17 @@ use crate::mv_wal::recovery;
 /// `Database::tables`' own `Arc` allocation, rather than in a second,
 /// separately-heap-allocated buffer the way a plain `Vec` always would be —
 /// see `TableList`'s doc for why that second indirection is worth avoiding.
-/// 256 is a generous margin over any realistic table count (TPC-C, the
-/// closest existing precedent, uses 14) while keeping the inline array's
-/// footprint (256 * size_of::<TableEntry<..>>(), a few KB at most, however
-/// many bytes an `Arc<MVBTSt<..>>` pointer plus a `String` header comes to)
-/// trivial to carry inside every `Database` instance.
-pub const INLINE_TABLE_CAPACITY: usize = 256;
+/// Set to the actual table count `Database::create_table` is ever called
+/// with across this codebase's own workloads: TPC-C/HTAP's `TpccDatabase`
+/// creates exactly 12 tables here (`tpcc_schema::TpccDatabase::
+/// create_all_tables`'s doc — `Table::Warehouse`/`Table::District` are
+/// deliberately excluded from this list, resolved through their own
+/// `big_trees` instead). Past this capacity, `SmallVec` transparently spills
+/// to its own heap buffer (see `TableList`'s doc) — correctness never
+/// depends on staying under it, only performance does, so a workload that
+/// legitimately needs more tables than this just pays one extra indirection
+/// rather than breaking.
+pub const INLINE_TABLE_CAPACITY: usize = 12;
 
 #[derive(Clone)]
 struct TableEntry<

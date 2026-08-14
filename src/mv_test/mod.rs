@@ -242,6 +242,63 @@ pub fn dump_scan_trace() {
     );
 }
 
+/// Diagnostic: investigates the `verify_concurrent_shared_keys` livelock
+/// (~4% hang rate, reproduced on unmodified `main`) by checking whether
+/// `mv_tree::smo::split`'s `VERSION_SPLIT` branch actually shrinks a leaf's
+/// survivor set across successive re-splits of the *same key range*, or just
+/// churns — copies a same-or-larger survivor set into a fresh page that
+/// overflows again almost immediately. Keyed by the leaf's fence (stable
+/// across a version-split, unlike the page address, which changes every
+/// time). Off by default, dead-code-eliminated when off, same idiom as
+/// `RESTART_TRACE`/`SCAN_TRACE` above.
+pub const SPLIT_CONVERGENCE_TRACE: bool = false;
+
+static VERSION_SPLIT_PREV_SURVIVORS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static VERSION_SPLIT_TOTAL: AtomicU64 = AtomicU64::new(0);
+static VERSION_SPLIT_NON_SHRINKING: AtomicU64 = AtomicU64::new(0);
+
+/// Records one `VERSION_SPLIT` of a leaf: `fence_key` identifies the key
+/// range (stable across repeated re-splits of the same leaf lineage),
+/// `survivor_count` is exactly what's about to be copied into the fresh
+/// page. Compares against the last recorded `survivor_count` for the same
+/// `fence_key` — if it didn't shrink, this `VERSION_SPLIT` made no real
+/// progress. No-op, and dead-code eliminated, unless `SPLIT_CONVERGENCE_TRACE`
+/// is `true`.
+#[inline(always)]
+pub fn record_version_split(fence_key: String, survivor_count: usize) {
+    if !SPLIT_CONVERGENCE_TRACE {
+        return;
+    }
+    VERSION_SPLIT_TOTAL.fetch_add(1, Relaxed);
+    let mut prev = VERSION_SPLIT_PREV_SURVIVORS.lock();
+    if let Some(&last) = prev.get(&fence_key) {
+        if survivor_count >= last {
+            VERSION_SPLIT_NON_SHRINKING.fetch_add(1, Relaxed);
+            eprintln!(
+                "DIAG version_split non-shrinking fence={fence_key} prev_survivors={last} now_survivors={survivor_count}"
+            );
+        }
+    }
+    prev.insert(fence_key, survivor_count);
+}
+
+/// Prints the accumulated `VERSION_SPLIT` convergence stats. Only ever
+/// non-zero when `SPLIT_CONVERGENCE_TRACE` is `true`.
+pub fn dump_split_convergence_trace() {
+    let total = VERSION_SPLIT_TOTAL.load(Relaxed);
+    let non_shrinking = VERSION_SPLIT_NON_SHRINKING.load(Relaxed);
+    println!(
+        "dump_split_convergence_trace: {total} VERSION_SPLITs, {non_shrinking} non-shrinking \
+        ({:.1}%)",
+        if total == 0 {
+            0.0
+        } else {
+            100.0 * non_shrinking as f64 / total as f64
+        }
+    );
+}
+
 /// Count of write-traversal restarts caused by root contention specifically
 /// (every writer touches the root, so this is expected to be nonzero; it's
 /// tracked separately from per-page attribution below since there's only
@@ -1936,6 +1993,9 @@ mod wal_writer_tests;
 #[cfg(test)]
 #[path = "../../tests/wal_writer_throughput_bench.rs"]
 mod wal_writer_throughput_bench;
+#[cfg(test)]
+#[path = "../../tests/ycsb_autocommit_vs_txn_bench.rs"]
+mod ycsb_autocommit_vs_txn_bench;
 #[cfg(test)]
 #[path = "../../tests/ycsb_wal_backend_bench.rs"]
 mod ycsb_wal_backend_bench;

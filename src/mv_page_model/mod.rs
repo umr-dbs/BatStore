@@ -6,6 +6,7 @@ use crate::mv_sync::smart_cell::SmartCell;
 pub mod internal_page;
 pub mod leaf_page;
 pub mod node;
+pub(crate) mod simd_keys;
 pub mod time_matcher;
 
 pub type ObjectCount = u16;

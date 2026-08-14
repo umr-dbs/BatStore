@@ -40,11 +40,19 @@ CROSS-ENGINE BENCHMARK HARNESS - MANUAL
 
 ## Engineering notes
 
-- [Index optimization guide](docs/index_optimizations.md)
-- [Range-scan iteration: ordered routing and zero-copy streaming](docs/range_scan_iteration.md)
-- [Range-scan visibility-check optimization](docs/range_scan_visibility_check.md)
-- [Big-tree leaf-size benchmark](docs/bigtree_size_benchmark.md)
-- [OLTP/WAL optimization](docs/oltp_wal_optimization.md)
+- **[Transactional Support via OSIC on cMVBT: System Design, Datastructure Changes, and Optimizations](docs/transactional_osic_comprehensive.tex)** ([PDF](docs/transactional_osic_comprehensive.pdf)) --
+  comprehensive synthesis of system design, all datastructure modifications, and every optimization tested or applied, with measured performance numbers and adoption decisions.
+
+- [Unified optimization report](docs/optimization_report.tex) ([PDF](docs/optimization_report.pdf)) --
+  the implementation's optimizations organized bottom-up by architectural dependency, with fresh measurements and known open issues.
+
+- [Index optimization guide](docs/index_optimizations.md) -- compact guide to the optimizations used by the current cMVBT index
+
+- Supporting documentation:
+  - [Range-scan iteration: ordered routing and zero-copy streaming](docs/range_scan_iteration.md)
+  - [Range-scan visibility-check optimization](docs/range_scan_visibility_check.md)
+  - [Big-tree leaf-size benchmark](docs/bigtree_size_benchmark.md)
+  - [OLTP/WAL optimization](docs/oltp_wal_optimization.md)
 
 # Contact
     Name:               Amir Tonta

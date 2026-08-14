@@ -210,57 +210,110 @@ impl<const FAN_OUT: usize,
         let records
             = Self::traverse_read_key(&root, key, reader_ts_start);
 
-        self.with_visibility_checker(reader_worker, reader_ts_start, |is_visible| {
-            match records
-                .as_records()
-                .iter()
-                .rev()
-                // No `skip_while` on `insertion_stamp().ts_start() >
-                // reader_ts_start` here (there used to be one) — it assumed
-                // a leaf's physical (append) order tracks `ts_start` order,
-                // so once a "future" (not-yet-visible) entry was skipped
-                // walking backwards, everything further back was assumed
-                // visible-or-older too. That assumption dates back to a
-                // single-global-version model (`git log -L` on this line:
-                // originally `r.version.insert_version > lookup_version`)
-                // and never held under OSIC's actual concurrency model: a
-                // transaction's `ts_start` is drawn at `begin()`, *before*
-                // it acquires the leaf's write lock to physically append —
-                // two concurrent writers can draw `ts_start` in one order
-                // but append in the other (whichever wins the lock lands in
-                // the leaf first), so physical order and `ts_start` order
-                // can diverge. When they did, this `skip_while` could walk
-                // straight past the one record actually visible to
-                // `reader_ts_start`, silently returning `None` for a live,
-                // definitely-committed key — confirmed as the mechanism
-                // behind `verify_concurrent_shared_keys`'s intermittent
-                // `v[0]` index-out-of-bounds panic (empty `MatchedRecords`
-                // for a key that's never deleted). `RangeQueryIter::refill`
-                // (`iter_query.rs`) never had this shortcut and scans every
-                // record regardless of order, which is why only the
-                // point-read path was ever affected. Removing the shortcut
-                // costs an unbounded scan back to this key's actual visible
-                // version in the pathological case — no worse than a range
-                // scan already pays over the same leaf.
-                .find(|r|
-                    r.key() == key && r.version().matches(is_visible))
+        // `LeafPage`'s SoA layout keeps keys in their own contiguous region,
+        // physically separate from the version/payload region (see
+        // `LeafPage::keys`/`record`'s docs) — so scanning `keys` alone finds
+        // every candidate position without paying, for every *non-matching*
+        // slot, for `record(i)`'s `VersionInfo`/`PayloadSlot` reference
+        // construction or the `self.len()` reload `keys()`/`data()` each do
+        // internally. Only positions that already match `key` ever reach
+        // `leaf.record(i)` below.
+        let leaf = records.as_leaf_page_ref();
+        let keys = leaf.keys();
+
+        // `with_snapshot_cache_and_logs`, not `with_visibility_checker`: see
+        // that method's doc and `RangeQueryIter::refill`'s identical call —
+        // builds `is_visible` as a concrete, inlinable closure right here
+        // instead of receiving a `&mut dyn FnMut` across the callback
+        // boundary.
+        self.with_snapshot_cache_and_logs(|cache, commit_logs| {
+            let mut is_visible = |stamp| crate::mv_sync::visibility::is_visible(
+                commit_logs, cache, reader_worker, reader_ts_start, stamp);
+
+            let mut found = None;
+            // Shared by both branches below: given a candidate position
+            // that already matched `key`, check its visibility and record
+            // it as `found` — returns `true` to signal "stop looking" to
+            // whichever scan is driving it.
+            let mut check_candidate = |i: usize| {
+                let r = leaf.record(i);
+                if r.version().matches(&mut is_visible) {
+                    found = Some(r);
+                    true
+                } else {
+                    false
+                }
+            };
+
+            // `Key` is `u64` for every real table in this codebase — see
+            // `mv_page_model::simd_keys`'s doc — so this AVX2-accelerated
+            // scan (falls back to an identical scalar loop when AVX2 isn't
+            // available, e.g. off `x86_64`) is the common path in practice;
+            // the `filter().any()` below only ever runs for a hypothetical
+            // non-`u64` `Key`, which nothing in this codebase instantiates.
+            match crate::mv_page_model::simd_keys::try_u64_scalar(key)
+                .zip(crate::mv_page_model::simd_keys::try_u64_keys(keys))
             {
+                Some((target, u64_keys)) => {
+                    crate::mv_page_model::simd_keys::find_eq_desc(u64_keys, target, &mut check_candidate);
+                }
+                None => {
+                    // No `skip_while`/early exit on
+                    // `insertion_stamp().ts_start() > reader_ts_start` here
+                    // (there used to be one) — it assumed a leaf's physical
+                    // (append) order tracks `ts_start` order, so once a
+                    // "future" (not-yet-visible) entry was skipped walking
+                    // backwards, everything further back was assumed
+                    // visible-or-older too. That assumption dates back to a
+                    // single-global-version model (`git log -L` on this
+                    // line: originally `r.version.insert_version >
+                    // lookup_version`) and never held under OSIC's actual
+                    // concurrency model: a transaction's `ts_start` is drawn
+                    // at `begin()`, *before* it acquires the leaf's write
+                    // lock to physically append — two concurrent writers can
+                    // draw `ts_start` in one order but append in the other
+                    // (whichever wins the lock lands in the leaf first), so
+                    // physical order and `ts_start` order can diverge. When
+                    // they did, this `skip_while` could walk straight past
+                    // the one record actually visible to `reader_ts_start`,
+                    // silently returning `None` for a live,
+                    // definitely-committed key — confirmed as the mechanism
+                    // behind `verify_concurrent_shared_keys`'s intermittent
+                    // `v[0]` index-out-of-bounds panic (empty
+                    // `MatchedRecords` for a key that's never deleted).
+                    // `RangeQueryIter::refill` (`iter_query.rs`) never had
+                    // this shortcut and scans every record regardless of
+                    // order, which is why only the point-read path was ever
+                    // affected. Every position that matches `key` above
+                    // still gets its version checked via `check_candidate`
+                    // — this reorder only defers *which* records pay for a
+                    // version/visibility check, never skips one outright.
+                    keys.iter().enumerate().rev()
+                        .filter(|(_, k)| **k == key)
+                        .any(|(i, _)| check_candidate(i));
+                }
+            }
+
+            match found {
                 None => {
                     if crate::mv_test::DIAG {
-                        let same_key: Vec<String> = records.as_records().iter()
-                            .filter(|r| r.key() == key)
-                            .map(|r| format!(
-                                "insert=(w{},{}) invalid={} deleted={} is_vis_insert={} is_vis_del={:?}",
-                                r.version.insertion_stamp().worker_id(),
-                                r.version.insertion_stamp().ts_start(),
-                                r.version.insertion_stamp().is_invalid(),
-                                r.version.deletion_stamp().map(|d| d.to_string()).unwrap_or_else(|| "*".to_string()),
-                                is_visible(r.version.insertion_stamp()),
-                                r.version.deletion_stamp().map(|d| is_visible(d)),
-                            )).collect();
+                        let same_key: Vec<String> = keys.iter().enumerate()
+                            .filter(|(_, k)| **k == key)
+                            .map(|(i, _)| {
+                                let r = leaf.record(i);
+                                format!(
+                                    "insert=(w{},{}) invalid={} deleted={} is_vis_insert={} is_vis_del={:?}",
+                                    r.version.insertion_stamp().worker_id(),
+                                    r.version.insertion_stamp().ts_start(),
+                                    r.version.insertion_stamp().is_invalid(),
+                                    r.version.deletion_stamp().map(|d| d.to_string()).unwrap_or_else(|| "*".to_string()),
+                                    is_visible(r.version.insertion_stamp()),
+                                    r.version.deletion_stamp().map(|d| is_visible(d)),
+                                )
+                            }).collect();
                         eprintln!(
                             "DIAG key_point_read_from_root: MISS key={key} reader=(w{reader_worker},{reader_ts_start}) leaf_len={} same_key_records={same_key:?}",
-                            records.as_records().len(),
+                            keys.len(),
                         );
                     }
                     CRUDOperationResult::MatchedRecords(Vec::with_capacity(0))
@@ -304,7 +357,14 @@ impl<const FAN_OUT: usize,
             &lookup_range,
             reader_ts_start);
 
-        self.with_visibility_checker(reader_worker, reader_ts_start, |is_visible| {
+        // See `key_point_read_from_root`'s identical switch to
+        // `with_snapshot_cache_and_logs` — same rationale: this closure runs
+        // once per physical record across every leaf `blocks` holds, not
+        // once per call, so an inlinable `is_visible` beats a `dyn FnMut`
+        // received across the callback boundary.
+        self.with_snapshot_cache_and_logs(|cache, commit_logs| {
+            let mut is_visible = |stamp| crate::mv_sync::visibility::is_visible(
+                commit_logs, cache, reader_worker, reader_ts_start, stamp);
             CRUDOperationResult::MatchedRecords(blocks
                 .into_iter()
                 .map(|leaf| {
@@ -338,7 +398,7 @@ impl<const FAN_OUT: usize,
                     // `iter_query.rs::refill`'s identical reorder for why.
                     .filter(|r|
                         lookup_range.contains(r.key()) &&
-                            r.version().matches(is_visible))
+                            r.version().matches(&mut is_visible))
                     // .sorted_by_key(|r| r.key())
                     .map(RecordPointResult::from_leaf)
                     .collect::<Vec<_>>()
