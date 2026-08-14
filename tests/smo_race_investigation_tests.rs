@@ -70,10 +70,19 @@ const ITERATIONS: usize = 30;
 fn run_range(tree: &TestTree, t: u64) {
     for i in 0..KEYS_PER_THREAD {
         let key = t * KEYS_PER_THREAD + i;
-        assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(key, key * 3 + 1)), CRUDOperationResult::Inserted(_)));
-        assert!(matches!(tree.dispatch_crud(CRUDOperation::Update(key, key * 3 + 2)), CRUDOperationResult::Updated(_)));
+        assert!(matches!(
+            tree.dispatch_crud(CRUDOperation::Insert(key, key * 3 + 1)),
+            CRUDOperationResult::Inserted(_)
+        ));
+        assert!(matches!(
+            tree.dispatch_crud(CRUDOperation::Update(key, key * 3 + 2)),
+            CRUDOperationResult::Updated(_)
+        ));
         if key % 2 == 0 {
-            assert!(matches!(tree.dispatch_crud(CRUDOperation::Delete(key)), CRUDOperationResult::Deleted(_)));
+            assert!(matches!(
+                tree.dispatch_crud(CRUDOperation::Delete(key)),
+                CRUDOperationResult::Deleted(_)
+            ));
         }
     }
 }
@@ -87,15 +96,24 @@ fn run_range_serialized(tree: &TestTree, t: u64, lock: &Mutex<()>) {
         let key = t * KEYS_PER_THREAD + i;
         {
             let _guard = lock.lock().unwrap();
-            assert!(matches!(tree.dispatch_crud(CRUDOperation::Insert(key, key * 3 + 1)), CRUDOperationResult::Inserted(_)));
+            assert!(matches!(
+                tree.dispatch_crud(CRUDOperation::Insert(key, key * 3 + 1)),
+                CRUDOperationResult::Inserted(_)
+            ));
         }
         {
             let _guard = lock.lock().unwrap();
-            assert!(matches!(tree.dispatch_crud(CRUDOperation::Update(key, key * 3 + 2)), CRUDOperationResult::Updated(_)));
+            assert!(matches!(
+                tree.dispatch_crud(CRUDOperation::Update(key, key * 3 + 2)),
+                CRUDOperationResult::Updated(_)
+            ));
         }
         if key % 2 == 0 {
             let _guard = lock.lock().unwrap();
-            assert!(matches!(tree.dispatch_crud(CRUDOperation::Delete(key)), CRUDOperationResult::Deleted(_)));
+            assert!(matches!(
+                tree.dispatch_crud(CRUDOperation::Delete(key)),
+                CRUDOperationResult::Deleted(_)
+            ));
         }
     }
 }

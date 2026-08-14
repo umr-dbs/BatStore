@@ -199,10 +199,10 @@ fn wal_logged_concurrent_workload_recovers_to_a_consistent_snapshot() {
         let stop = Arc::new(AtomicBool::new(false));
         let handles: Vec<_> = (0..6)
             .map(|_| {
-            let db = db.clone();
-            let stop = stop.clone();
-            let history_seq = history_seq.clone();
-            thread::spawn(move || stress_worker(db, cfg, stop, history_seq))
+                let db = db.clone();
+                let stop = stop.clone();
+                let history_seq = history_seq.clone();
+                thread::spawn(move || stress_worker(db, cfg, stop, history_seq))
             })
             .collect();
 
@@ -225,7 +225,7 @@ fn wal_logged_concurrent_workload_recovers_to_a_consistent_snapshot() {
 
     let recovered =
         TpccDatabase::open_recovered(RootIndexType::default(), &wal_path, flush_interval)
-        .expect("recovery from a cleanly-closed WAL must succeed");
+            .expect("recovery from a cleanly-closed WAL must succeed");
     let after = full_snapshot(&recovered);
 
     assert_snapshots_match(&before, &after);

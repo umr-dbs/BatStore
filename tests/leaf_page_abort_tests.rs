@@ -163,7 +163,10 @@ fn cold_predecessor_is_cloned_undeleted_without_mutating_history() {
     assert!(restored.version().is_live());
     assert_eq!(restored.version().insertion_stamp(), insert_stamp);
     assert_eq!(*restored.payload(), 50);
-    assert!(cold.version_at(0).is_deleted(), "cold history remains immutable");
+    assert!(
+        cold.version_at(0).is_deleted(),
+        "cold history remains immutable"
+    );
     assert_eq!(cold.active_dead_count(), (0, 1));
 }
 

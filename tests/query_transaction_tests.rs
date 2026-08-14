@@ -173,11 +173,11 @@ fn multi_op_transaction_sees_own_writes_and_isolates_others() {
         scope
             .spawn(move || {
                 let mut tx2 = DbTransaction::begin(db_ref);
-            match tx2.point(t, 1) {
-                CRUDOperationResult::MatchedRecords(r) if r.is_empty() => {}
-                other => panic!("tx2 should not see tx1's uncommitted insert yet, got {other}"),
-            }
-            tx2.commit();
+                match tx2.point(t, 1) {
+                    CRUDOperationResult::MatchedRecords(r) if r.is_empty() => {}
+                    other => panic!("tx2 should not see tx1's uncommitted insert yet, got {other}"),
+                }
+                tx2.commit();
             })
             .join()
             .unwrap();
@@ -191,12 +191,12 @@ fn multi_op_transaction_sees_own_writes_and_isolates_others() {
         scope
             .spawn(move || {
                 let mut tx3 = DbTransaction::begin(db_ref);
-            match tx3.point(t, 1) {
+                match tx3.point(t, 1) {
                     CRUDOperationResult::MatchedRecords(r)
                         if r.len() == 1 && r[0].payload == 100 => {}
-                other => panic!("tx3 should see tx1's now-committed insert, got {other}"),
-            }
-            tx3.commit();
+                    other => panic!("tx3 should see tx1's now-committed insert, got {other}"),
+                }
+                tx3.commit();
             })
             .join()
             .unwrap();
@@ -225,7 +225,7 @@ fn first_writer_wins_conflict() {
                     tx2.update(t, 1, 200),
                     CRUDOperationResult::Updated(_)
                 ));
-            tx2.commit();
+                tx2.commit();
             })
             .join()
             .unwrap();
@@ -337,7 +337,7 @@ fn dropped_transaction_reverts_its_earlier_writes_on_conflict() {
                     tx2.insert(t, 2, 999),
                     CRUDOperationResult::Inserted(_)
                 ));
-            tx2.commit();
+                tx2.commit();
             })
             .join()
             .unwrap();

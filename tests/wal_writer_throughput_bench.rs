@@ -10,8 +10,8 @@
 //! seconds on the development machine) while still exercising real files.
 
 use std::fs;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -103,7 +103,12 @@ fn bench_wal_writer(threads: usize, path: &std::path::Path) -> RunStats {
     let wall = wall_start.elapsed();
     let _ = issue_done; // kept for future drill-down; wall (incl. drain) is what's reported
 
-    RunStats { threads, total_ops: threads * OPS_PER_THREAD, wall, latencies_ns }
+    RunStats {
+        threads,
+        total_ops: threads * OPS_PER_THREAD,
+        wall,
+        latencies_ns,
+    }
 }
 
 fn bench_lockfree_writer(threads: usize, path: &std::path::Path) -> RunStats {
@@ -145,7 +150,12 @@ fn bench_lockfree_writer(threads: usize, path: &std::path::Path) -> RunStats {
     let wall = wall_start.elapsed();
     let _ = issue_done;
 
-    RunStats { threads, total_ops: threads * OPS_PER_THREAD, wall, latencies_ns }
+    RunStats {
+        threads,
+        total_ops: threads * OPS_PER_THREAD,
+        wall,
+        latencies_ns,
+    }
 }
 
 /// Same shape as `bench_lockfree_writer`, but each thread groups its own
@@ -156,7 +166,11 @@ fn bench_lockfree_writer(threads: usize, path: &std::path::Path) -> RunStats {
 /// the cheap local accumulate; every `batch_size`-th one also pays that
 /// group's `pwrite`, so the latency distribution below has a "usually
 /// cheap, occasionally pays for the whole group" shape by construction.
-fn bench_lockfree_batched_writer(threads: usize, batch_size: usize, path: &std::path::Path) -> RunStats {
+fn bench_lockfree_batched_writer(
+    threads: usize,
+    batch_size: usize,
+    path: &std::path::Path,
+) -> RunStats {
     let _ = fs::remove_file(path);
     let writer: Arc<LockFreeWalWriter<u64, u64>> =
         Arc::new(LockFreeWalWriter::open(path, FLUSH_INTERVAL).unwrap());
@@ -194,7 +208,12 @@ fn bench_lockfree_batched_writer(threads: usize, batch_size: usize, path: &std::
     drop(writer);
     let wall = wall_start.elapsed();
 
-    RunStats { threads, total_ops: threads * OPS_PER_THREAD, wall, latencies_ns }
+    RunStats {
+        threads,
+        total_ops: threads * OPS_PER_THREAD,
+        wall,
+        latencies_ns,
+    }
 }
 
 #[test]

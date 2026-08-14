@@ -15,12 +15,12 @@
 use crate::mv_block::block::Block;
 use crate::mv_page_model::leaf_page::LeafPage;
 use crate::mv_page_model::node::{ColdLink, Node, PageType};
-use crate::mv_tree::mvbt::MVBTSt as Query;
 use crate::mv_record_model::record_point::RecordPoint;
 use crate::mv_record_model::tx_stamp::TxStamp;
 use crate::mv_record_model::version_info::VersionInfo;
 use crate::mv_sync::safe_cell::SafeCell;
 use crate::mv_sync::smart_cell::{OptCell, SmartCell};
+use crate::mv_tree::mvbt::MVBTSt as Query;
 
 const FAN: usize = 8;
 type TestQuery = Query<FAN, FAN, u64, u64>;
@@ -40,7 +40,13 @@ fn insert(leaf: &mut TestLeaf, key: u64, stamp: TxStamp, payload: u64) {
 /// Same, but the record is already deleted by `delete_stamp` at
 /// construction (`VersionInfo::from`), standing in for what a real
 /// cold-offload would migrate: an already-superseded version.
-fn insert_deleted(leaf: &mut TestLeaf, key: u64, insert_stamp: TxStamp, delete_stamp: TxStamp, payload: u64) {
+fn insert_deleted(
+    leaf: &mut TestLeaf,
+    key: u64,
+    insert_stamp: TxStamp,
+    delete_stamp: TxStamp,
+    payload: u64,
+) {
     let len = leaf.len();
     leaf.push_uncommitted(
         RecordPoint::new(key, VersionInfo::from(insert_stamp, delete_stamp), payload),
@@ -67,8 +73,20 @@ fn build_cell(
     }))
 }
 
-fn cold_link_to(cell: &TestCell, count: u32, min_ts: u64, chain_len: u16, chain_total: u32) -> ColdLink<FAN, FAN, u64, u64> {
-    ColdLink::new(SmartCell(cell as *const _), count, min_ts, chain_len, chain_total)
+fn cold_link_to(
+    cell: &TestCell,
+    count: u32,
+    min_ts: u64,
+    chain_len: u16,
+    chain_total: u32,
+) -> ColdLink<FAN, FAN, u64, u64> {
+    ColdLink::new(
+        SmartCell(cell as *const _),
+        count,
+        min_ts,
+        chain_len,
+        chain_total,
+    )
 }
 
 /// A record inserted at `ts_start` t and (if any) deleted at `ts_start` d is
@@ -180,7 +198,5 @@ fn scan_cold_chain_for_key_is_none_for_an_empty_link() {
     // Regression-safety check: a leaf with no cold chain at all must not
     // pay for (or find anything via) a chain walk.
     let mut is_visible = visible_iff_ts_start_le(100);
-    assert!(
-        TestQuery::scan_cold_chain_for_key(ColdLink::none(), 42, &mut is_visible).is_none()
-    );
+    assert!(TestQuery::scan_cold_chain_for_key(ColdLink::none(), 42, &mut is_visible).is_none());
 }

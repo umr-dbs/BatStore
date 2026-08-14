@@ -2,13 +2,12 @@
 //! read-modify-write increments against a *small shared set* of keys (not
 //! just one hot key - `verify_range_scan.rs`/earlier lost-update tests
 //! already cover the single-key case cleanly), tracking the exact number of
-//! successful commits per key via a Mutex<HashMap>, then comparing against
+//! successful commits per key via a mutex-protected dense counter array, then comparing against
 //! each key's actual final value. No multi-table/multi-step transaction
 //! shape yet - this isolates "real concurrency across a handful of shared
 //! keys sitting in the same leaf" as the one new variable, before adding
 //! New-Order's extra table touches on top.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -51,42 +50,42 @@ fn run(num_threads: usize, duration: Duration) {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    let success_counts: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let success_counts = Arc::new(Mutex::new(vec![0u64; NUM_KEYS as usize]));
 
     let handles: Vec<_> = (0..num_threads)
         .map(|seed| {
-        let db = db.clone();
-        let stop = stop.clone();
-        let success_counts = success_counts.clone();
-        thread::spawn(move || {
-            let mut rng_state: u64 = 0x9E3779B97F4A7C15u64.wrapping_add(seed as u64);
-            let mut next_key = || {
-                // xorshift64 - fast, no external RNG crate dependency needed here.
-                rng_state ^= rng_state << 13;
-                rng_state ^= rng_state >> 7;
-                rng_state ^= rng_state << 17;
-                rng_state % NUM_KEYS
-            };
-            while !stop.load(Relaxed) {
-                let key = next_key();
-                    let mut tx = DbTransaction::begin(&db);
-                let cur = match tx.point(t, key) {
-                    CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
-                    other => panic!("unexpected point result: {other}"),
+            let db = db.clone();
+            let stop = stop.clone();
+            let success_counts = success_counts.clone();
+            thread::spawn(move || {
+                let mut rng_state: u64 = 0x9E3779B97F4A7C15u64.wrapping_add(seed as u64);
+                let mut next_key = || {
+                    // xorshift64 - fast, no external RNG crate dependency needed here.
+                    rng_state ^= rng_state << 13;
+                    rng_state ^= rng_state >> 7;
+                    rng_state ^= rng_state << 17;
+                    rng_state % NUM_KEYS
                 };
-                match tx.update(t, key, cur + 1) {
-                    CRUDOperationResult::Updated(_) => {}
+                while !stop.load(Relaxed) {
+                    let key = next_key();
+                    let mut tx = DbTransaction::begin(&db);
+                    let cur = match tx.point(t, key) {
+                        CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
+                        other => panic!("unexpected point result: {other}"),
+                    };
+                    match tx.update(t, key, cur + 1) {
+                        CRUDOperationResult::Updated(_) => {}
                         CRUDOperationResult::Conflict => {
                             drop(tx);
                             continue;
                         }
-                    other => panic!("unexpected update result: {other}"),
+                        other => panic!("unexpected update result: {other}"),
+                    }
+                    if tx.commit().is_some() {
+                        success_counts.lock().unwrap()[key as usize] += 1;
+                    }
                 }
-                if tx.commit().is_some() {
-                    *success_counts.lock().unwrap().entry(key).or_insert(0) += 1;
-                }
-            }
-        })
+            })
         })
         .collect();
 
@@ -115,7 +114,7 @@ fn run(num_threads: usize, duration: Duration) {
     let mut mismatches = Vec::new();
     for r in &rows {
         let actual = *r.payload;
-        let exp = *expected.get(&r.key).unwrap_or(&0);
+        let exp = expected[r.key as usize];
         total_expected += exp;
         total_actual += actual;
         if actual != exp {
@@ -174,63 +173,63 @@ fn run_multi_step(num_threads: usize, duration: Duration) {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    let success_counts: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let success_counts = Arc::new(Mutex::new(vec![0u64; NUM_KEYS as usize]));
 
     let handles: Vec<_> = (0..num_threads)
         .map(|seed| {
-        let db = db.clone();
-        let stop = stop.clone();
-        let success_counts = success_counts.clone();
+            let db = db.clone();
+            let stop = stop.clone();
+            let success_counts = success_counts.clone();
             let my_misc_keys: Vec<u64> = (0..MISC_KEYS_PER_THREAD)
                 .map(|i| 1_000 + seed as u64 * MISC_KEYS_PER_THREAD + i)
                 .collect();
-        thread::spawn(move || {
-            let mut rng_state: u64 = 0x9E3779B97F4A7C15u64.wrapping_add(seed as u64);
-            let mut next_key = || {
-                rng_state ^= rng_state << 13;
-                rng_state ^= rng_state >> 7;
-                rng_state ^= rng_state << 17;
-                rng_state % NUM_KEYS
-            };
-            while !stop.load(Relaxed) {
-                let key = next_key();
+            thread::spawn(move || {
+                let mut rng_state: u64 = 0x9E3779B97F4A7C15u64.wrapping_add(seed as u64);
+                let mut next_key = || {
+                    rng_state ^= rng_state << 13;
+                    rng_state ^= rng_state >> 7;
+                    rng_state ^= rng_state << 17;
+                    rng_state % NUM_KEYS
+                };
+                while !stop.load(Relaxed) {
+                    let key = next_key();
                     let mut tx = DbTransaction::begin(&db);
 
-                // Several earlier, unrelated steps before the shared key.
-                for &k in &my_misc_keys {
-                    let cur = match tx.point(misc_t, k) {
-                        CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
-                        other => panic!("unexpected misc point result: {other}"),
-                    };
+                    // Several earlier, unrelated steps before the shared key.
+                    for &k in &my_misc_keys {
+                        let cur = match tx.point(misc_t, k) {
+                            CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
+                            other => panic!("unexpected misc point result: {other}"),
+                        };
                         assert!(matches!(
                             tx.update(misc_t, k, cur + 1),
                             CRUDOperationResult::Updated(_)
                         ));
-                }
+                    }
 
-                let cur = match tx.point(shared_t, key) {
-                    CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
-                    other => panic!("unexpected shared point result: {other}"),
-                };
-                match tx.update(shared_t, key, cur + 1) {
-                    CRUDOperationResult::Updated(_) => {}
+                    let cur = match tx.point(shared_t, key) {
+                        CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
+                        other => panic!("unexpected shared point result: {other}"),
+                    };
+                    match tx.update(shared_t, key, cur + 1) {
+                        CRUDOperationResult::Updated(_) => {}
                         CRUDOperationResult::Conflict => {
                             drop(tx);
                             continue;
                         }
-                    other => panic!("unexpected shared update result: {other}"),
-                }
+                        other => panic!("unexpected shared update result: {other}"),
+                    }
 
-                // More unrelated work after the shared key, before commit.
-                for &k in &my_misc_keys {
-                    let _ = tx.point(misc_t, k);
-                }
+                    // More unrelated work after the shared key, before commit.
+                    for &k in &my_misc_keys {
+                        let _ = tx.point(misc_t, k);
+                    }
 
-                if tx.commit().is_some() {
-                    *success_counts.lock().unwrap().entry(key).or_insert(0) += 1;
+                    if tx.commit().is_some() {
+                        success_counts.lock().unwrap()[key as usize] += 1;
+                    }
                 }
-            }
-        })
+            })
         })
         .collect();
 
@@ -259,7 +258,7 @@ fn run_multi_step(num_threads: usize, duration: Duration) {
     let mut mismatches = Vec::new();
     for r in &rows {
         let actual = *r.payload;
-        let exp = *expected.get(&r.key).unwrap_or(&0);
+        let exp = expected[r.key as usize];
         total_expected += exp;
         total_actual += actual;
         if actual != exp {

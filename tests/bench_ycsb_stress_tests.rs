@@ -15,13 +15,15 @@
 //! reader still needs would all show up here as a missing key or a
 //! wrong-shaped row.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
 use crate::mv_bench::ycsb_load::populate;
-use crate::mv_bench::ycsb_random::{pick_op, random_scan_length, KeySampler, RequestDistribution, YcsbMix, YcsbOpType};
+use crate::mv_bench::ycsb_random::{
+    KeySampler, RequestDistribution, YcsbMix, YcsbOpType, pick_op, random_scan_length,
+};
 use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbTree};
 use crate::mv_bench::ycsb_txn;
 use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
@@ -30,7 +32,11 @@ use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::mv_root::index_root::RootIndexType;
 
 fn stress_cfg() -> YcsbConfig {
-    YcsbConfig { record_count: 500, field_count: 4, field_length: 16 }
+    YcsbConfig {
+        record_count: 500,
+        field_count: 4,
+        field_length: 16,
+    }
 }
 
 fn read_bytes(tree: &YcsbTree, key: u64) -> Option<Vec<u8>> {
@@ -60,7 +66,12 @@ fn stress_worker(
                 ycsb_txn::read(&tree, sampler.sample(record_count, max_key_now));
             }
             YcsbOpType::Update => {
-                ycsb_txn::update(&tree, &cfg, sampler.sample(record_count, max_key_now), false);
+                ycsb_txn::update(
+                    &tree,
+                    &cfg,
+                    sampler.sample(record_count, max_key_now),
+                    false,
+                );
             }
             YcsbOpType::Insert => {
                 let key = current_max_key.fetch_add(1, Relaxed) + 1;
@@ -71,7 +82,12 @@ fn stress_worker(
                 ycsb_txn::scan(&tree, key, random_scan_length(max_scan_length));
             }
             YcsbOpType::ReadModifyWrite => {
-                ycsb_txn::read_modify_write(&tree, &cfg, sampler.sample(record_count, max_key_now), false);
+                ycsb_txn::read_modify_write(
+                    &tree,
+                    &cfg,
+                    sampler.sample(record_count, max_key_now),
+                    false,
+                );
             }
         }
     }
@@ -93,13 +109,15 @@ fn run_stress_and_check_every_row(
     let current_max_key = Arc::new(AtomicU64::new(cfg.record_count));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let handles: Vec<_> = (0..num_threads).map(|_| {
-        let tree = tree.clone();
-        let sampler = sampler.clone();
-        let current_max_key = current_max_key.clone();
-        let stop = stop.clone();
-        thread::spawn(move || stress_worker(tree, cfg, mix, sampler, 50, current_max_key, stop))
-    }).collect();
+    let handles: Vec<_> = (0..num_threads)
+        .map(|_| {
+            let tree = tree.clone();
+            let sampler = sampler.clone();
+            let current_max_key = current_max_key.clone();
+            let stop = stop.clone();
+            thread::spawn(move || stress_worker(tree, cfg, mix, sampler, 50, current_max_key, stop))
+        })
+        .collect();
 
     thread::sleep(duration);
     stop.store(true, Relaxed);
@@ -108,17 +126,27 @@ fn run_stress_and_check_every_row(
     }
 
     let final_max_key = current_max_key.load(Relaxed);
-    assert!(final_max_key >= cfg.record_count, "current_max_key must never move backwards");
+    assert!(
+        final_max_key >= cfg.record_count,
+        "current_max_key must never move backwards"
+    );
 
     for key in 1..=final_max_key {
-        let bytes = read_bytes(&tree, key)
-            .unwrap_or_else(|| panic!("key {key} (loaded or concurrently inserted) must be readable after the stress run"));
+        let bytes = read_bytes(&tree, key).unwrap_or_else(|| {
+            panic!(
+                "key {key} (loaded or concurrently inserted) must be readable after the stress run"
+            )
+        });
         assert_eq!(
-            bytes.len(), cfg.field_count * cfg.field_length,
+            bytes.len(),
+            cfg.field_count * cfg.field_length,
             "row at key {key} has the wrong byte width after concurrent ops"
         );
     }
-    assert!(read_bytes(&tree, final_max_key + 1).is_none(), "no key beyond the final max key should exist");
+    assert!(
+        read_bytes(&tree, final_max_key + 1).is_none(),
+        "no key beyond the final max key should exist"
+    );
 }
 
 /// Every op type nonzero, uniform key distribution, copy-on-write GC:
@@ -126,8 +154,20 @@ fn run_stress_and_check_every_row(
 /// updates/scans over the whole loaded+inserted range.
 #[test]
 fn concurrent_mixed_ops_keep_every_row_readable_and_correctly_shaped() {
-    let mix = YcsbMix { read: 0.3, update: 0.3, insert: 0.2, scan: 0.1, read_modify_write: 0.1 };
-    run_stress_and_check_every_row(false, mix, RequestDistribution::Uniform, 8, Duration::from_millis(1500));
+    let mix = YcsbMix {
+        read: 0.3,
+        update: 0.3,
+        insert: 0.2,
+        scan: 0.1,
+        read_modify_write: 0.1,
+    };
+    run_stress_and_check_every_row(
+        false,
+        mix,
+        RequestDistribution::Uniform,
+        8,
+        Duration::from_millis(1500),
+    );
 }
 
 /// Workload D ("read latest": 95% read, 5% insert, `latest` distribution)
@@ -137,5 +177,11 @@ fn concurrent_mixed_ops_keep_every_row_readable_and_correctly_shaped() {
 #[test]
 fn concurrent_workload_d_read_latest_keeps_inserted_rows_consistent() {
     let mix = YcsbMix::workload("d").expect("workload d must be defined");
-    run_stress_and_check_every_row(true, mix, RequestDistribution::Latest { theta: 0.99 }, 8, Duration::from_millis(1500));
+    run_stress_and_check_every_row(
+        true,
+        mix,
+        RequestDistribution::Latest { theta: 0.99 },
+        8,
+        Duration::from_millis(1500),
+    );
 }

@@ -358,8 +358,6 @@ pub fn record_root_restart_for_table(tree_addr: usize) {
 /// caveat as `dump_restart_trace`).
 pub fn dump_root_restarts_by_table(path: &str, table_names: &[(usize, String)]) {
     let global = ROOT_RESTARTS_BY_TABLE.lock();
-    let names: HashMap<usize, &str> = table_names.iter().map(|(a, n)| (*a, n.as_str())).collect();
-
     let mut rows: Vec<(&usize, &u64)> = global.iter().collect();
     rows.sort_by(|a, b| b.1.cmp(a.1));
 
@@ -368,7 +366,10 @@ pub fn dump_root_restarts_by_table(path: &str, table_names: &[(usize, String)]) 
     );
     writeln!(f, "table_name,tree_addr,root_restarts").unwrap();
     for (addr, count) in rows {
-        let name = names.get(addr).copied().unwrap_or("<unresolved>");
+        let name = table_names
+            .iter()
+            .find(|(candidate, _)| candidate == addr)
+            .map_or("<unresolved>", |(_, name)| name.as_str());
         writeln!(f, "{name},0x{addr:x},{count}").unwrap();
     }
 
@@ -433,9 +434,9 @@ pub fn record_restart(page_addr: usize, key: &impl Display, site: &'static str) 
             .0
             .entry(page_addr)
             .or_insert_with(|| RestartPageStats {
-            total: 0,
-            by_site_key: HashMap::new(),
-        });
+                total: 0,
+                by_site_key: HashMap::new(),
+            });
         entry.total += 1;
         *entry.by_site_key.entry((site, key)).or_insert(0) += 1;
     });
@@ -529,11 +530,11 @@ pub struct ThreadWorkerInfo {
 }
 fn olap_tests(
     index: Arc<MVBT>,
-              num_olaps: usize,
-              tx_per_thread: usize,
-              skew: f32,
-              range: Either<Key, Arc<AtomicU64>>,
-              fixed_si: bool,
+    num_olaps: usize,
+    tx_per_thread: usize,
+    skew: f32,
+    range: Either<Key, Arc<AtomicU64>>,
+    fixed_si: bool,
     control_signal: Option<Receiver<ThreadWorkerInfo>>,
 ) -> (usize, u128) {
     if control_signal.is_none() {
@@ -563,10 +564,10 @@ fn olap_tests(
 
     let v_index = format!(
         "mv_{}",
-                          match index.root_star_index() {
-                              RootIndexType::FrugalList => "fg",
-                              RootIndexType::SkipList => "sk",
-                              RootIndexType::BTree => "bt",
+        match index.root_star_index() {
+            RootIndexType::FrugalList => "fg",
+            RootIndexType::SkipList => "sk",
+            RootIndexType::BTree => "bt",
             RootIndexType::LinkedList => "ll",
         }
     );
@@ -626,7 +627,7 @@ fn olap_tests(
                 };
 
                 let (current_root_position, roots_count) = (0, 0);
-                    // = index.retrieve_root_number_for(si);
+                // = index.retrieve_root_number_for(si);
                 // println!("Min = {key_min}, max = {key_max}");
 
                 let op = CRUDOperation::Range((key_min..key_max).into(), si);
@@ -685,13 +686,13 @@ fn olap_tests(
     olaps.into_iter().for_each(
         |(
             target_si,
-                       current_si,
-                       sleep_time,
-                       key_min,
-                       key_max,
-                       count_results,
-                       time_spent,
-                       current_root_psotion,
+            current_si,
+            sleep_time,
+            key_min,
+            key_max,
+            count_results,
+            time_spent,
+            current_root_psotion,
             c_roots_count,
         )| {
             olap_file
@@ -735,19 +736,19 @@ pub(crate) fn main_insert_rate_limiter(parms: Vec<String>) {
     // let olaps_si_freshest = parms[10].parse::<bool>().unwrap_or(false);
     // let (info_sender, info_receiver)
     //     = unbounded();
-    // 
+    //
     // let file_name
     //     = format!("mv_runtime_{runtime_sec}_workers_{num_workers}_fps_{fps}_crud_{crud}.csv");
-    // 
+    //
     // let _ = fs::remove_file(file_name.as_str());
     // let mut log_file = BufWriter::new(OpenOptions::new()
     //     .write(true)
     //     .append(true)
     //     .create(true)
     //     .open(file_name.as_str()).unwrap());
-    // 
+    //
     // log_file.write_all(b"tid,crud,fps,load,tick_ops,total_ops\n").unwrap();
-    // 
+    //
     // let start_time = Instant::now();
     // let workers = (0..num_workers)
     //     .map(|_| ThreadWorker::new(
@@ -757,7 +758,7 @@ pub(crate) fn main_insert_rate_limiter(parms: Vec<String>) {
     //         log,
     //         info_sender.clone()))
     //     .collect_vec();
-    // 
+    //
     // let signal = info_receiver.clone();
     // spawn(move || olap_tests(
     //     index,
@@ -767,7 +768,7 @@ pub(crate) fn main_insert_rate_limiter(parms: Vec<String>) {
     //     Either::Left(olaps_key_range),
     //     olaps_si_freshest,
     //     Some(signal)));
-    // 
+    //
     // while start_time.elapsed().as_secs() < runtime_sec {
     //     match info_receiver.try_recv() {
     //         Ok(info) =>
@@ -775,7 +776,7 @@ pub(crate) fn main_insert_rate_limiter(parms: Vec<String>) {
     //         _ => thread::yield_now()
     //     }
     // }
-    // 
+    //
     // println!("Total Ops = {}", workers
     //     .into_iter()
     //     .map(|t| t.stop())
@@ -783,7 +784,7 @@ pub(crate) fn main_insert_rate_limiter(parms: Vec<String>) {
     //     .into_iter()
     //     .map(|handle| handle.join().unwrap())
     //     .sum::<usize>());
-    // 
+    //
     // mem::drop(info_receiver);
 }
 pub(crate) fn main_test(parms: Vec<String>) {
@@ -838,11 +839,11 @@ pub(crate) fn main_test(parms: Vec<String>) {
                     } else {
                         println!(
                             "Found Version = {}\nQuery Version = {}",
-                                 *r[0].payload,
+                            *r[0].payload,
                             *v + o
                         );
                     }
-            }
+                }
                 _ => panic!(),
             },
         );
@@ -916,9 +917,9 @@ pub(crate) fn main_sorted_insert(parms: Vec<String>) {
 
     let mut query_file = BufWriter::new(
         OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(format!("{query_file_name}"))
+            .create(true)
+            .append(true)
+            .open(format!("{query_file_name}"))
             .unwrap(),
     );
 
@@ -985,8 +986,8 @@ pub fn main_load_ycsb(parms: Vec<String>) {
                 - Range = {range}\n\
                 - Root* = {root_star_index}\n\
                 - GC = {gc_str}",
-             num_cpus::get_physical(),
-             num_cpus::get(),
+        num_cpus::get_physical(),
+        num_cpus::get(),
         if concurrent {
             format!("Continuous\n- OLTP Threads = {scans_per_thread}")
         } else {
@@ -1084,7 +1085,7 @@ pub fn main_load_ycsb(parms: Vec<String>) {
 
         let oltp_total_time = start_time_oltp.elapsed().as_nanos();
 
-        let (num_scans_executed, olap_total_time) = (0,0);
+        let (num_scans_executed, olap_total_time) = (0, 0);
 
         // let reuse_blocks
         //     = index.block_manager.reuse_count.load(SeqCst);
@@ -1166,7 +1167,7 @@ pub(crate) fn main_load(parms: Vec<String>) {
     let index = Arc::new(if wal {
         MVBTSt::make_standard(root_star_index)
             .with_wal(
-            Path::new(wal_dir.as_str()),
+                Path::new(wal_dir.as_str()),
                 Duration::from_millis(wal_epoch),
             )
             .expect("Error creating WAL")
@@ -1191,8 +1192,8 @@ pub(crate) fn main_load(parms: Vec<String>) {
                 - Range = {range}\n\
                 - Root* = {root_star_index}\n\
                 - GC = {gc_str}",
-             num_cpus::get_physical(),
-             num_cpus::get(),
+        num_cpus::get_physical(),
+        num_cpus::get(),
         if concurrent {
             format!("Continuous\n- OLTP Threads = {scans_per_thread}")
         } else {
@@ -1290,12 +1291,12 @@ pub(crate) fn main_load(parms: Vec<String>) {
         let index_olaps = index.clone();
         let olaps = spawn(move || {
             olap_tests(
-            index_olaps,
-            num_olaps,
-            1,
-            skew,
-            Either::Left(range),
-            false,
+                index_olaps,
+                num_olaps,
+                1,
+                skew,
+                Either::Left(range),
+                false,
                 Some(olap_sink),
             )
         });
@@ -1455,12 +1456,12 @@ pub(crate) fn main_load_cc_new(parms: Vec<String>) {
 
     let olaps = spawn(move || {
         olap_tests(
-        index,
-        num_olaps,
-        workers_per_thread,
-        skew,
-        Either::Right(atomic_key),
-        true,
+            index,
+            num_olaps,
+            workers_per_thread,
+            skew,
+            Either::Right(atomic_key),
+            true,
             Some(olap_sink),
         )
     });
@@ -1568,9 +1569,9 @@ fn generate_query(
     println!("Finished generating {} init keys", init_population);
     let mut query_file = BufWriter::new(
         OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(format!("{query_file_name}"))
+            .create(true)
+            .append(true)
+            .open(format!("{query_file_name}"))
             .unwrap(),
     );
 
@@ -1627,7 +1628,7 @@ fn generate_query(
                 CRUDOperation::UpdateRand => *c = CRUDOperation::Update(key, payload),
                 CRUDOperation::DeleteRand => *c = CRUDOperation::Delete(key),
                 CRUDOperation::InsertRand => *c = CRUDOperation::Insert(key, payload),
-                    _ => panic!("Unknown CRUD Operation for blocks"),
+                _ => panic!("Unknown CRUD Operation for blocks"),
             });
             crud
         }
@@ -1669,8 +1670,8 @@ fn generate_query(
 fn load_query_into_memory(query_file: &str) -> Vec<CRUDOperation<Key, Payload>> {
     let mut query_file = BufReader::new(
         OpenOptions::new()
-        .read(true)
-        .open(format!("{query_file}"))
+            .read(true)
+            .open(format!("{query_file}"))
             .unwrap(),
     );
 
@@ -1713,8 +1714,8 @@ fn load_query_into_memory(query_file: &str) -> Vec<CRUDOperation<Key, Payload>> 
 fn load_query(query_file: &str, index: Arc<MVBT>, report_signal: Option<Arc<AtomicU64>>) -> usize {
     let mut query_file = BufReader::new(
         OpenOptions::new()
-        .read(true)
-        .open(format!("{query_file}"))
+            .read(true)
+            .open(format!("{query_file}"))
             .unwrap(),
     );
 

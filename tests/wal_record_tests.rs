@@ -2,8 +2,9 @@ use crate::mv_crud_model::crud_operation::CRUDOperation;
 use crate::mv_record_model::tx_stamp::TxStamp;
 use crate::mv_record_model::version_info::Version;
 use crate::mv_wal::record::{
-    decode, decode_entry, decode_entry_for_table, encode, encode_entry, encode_entry_for_table_framed,
-    encode_entry_framed, frame, read_frame, resync_next, WalEntry, WalRecord, TABLE_ID_COMMIT_SENTINEL,
+    TABLE_ID_COMMIT_SENTINEL, WalEntry, WalRecord, decode, decode_entry, decode_entry_for_table,
+    encode, encode_entry, encode_entry_for_table_framed, encode_entry_framed, frame, read_frame,
+    resync_next,
 };
 
 fn assert_ops_eq(a: &CRUDOperation<u64, u64>, b: &CRUDOperation<u64, u64>) {
@@ -27,7 +28,10 @@ fn round_trips_all_variants() {
     ];
 
     for (i, op) in ops.into_iter().enumerate() {
-        let record = WalRecord { stamp: TxStamp::new(7, i as Version + 1), op };
+        let record = WalRecord {
+            stamp: TxStamp::new(7, i as Version + 1),
+            op,
+        };
         let mut body = Vec::new();
         encode(&record, &mut body);
 
@@ -46,14 +50,20 @@ fn round_trips_all_variants() {
 
 #[test]
 fn detects_truncated_frame() {
-    let record = WalRecord { stamp: TxStamp::new(1, 42), op: CRUDOperation::Insert(1u64, 2u64) };
+    let record = WalRecord {
+        stamp: TxStamp::new(1, 42),
+        op: CRUDOperation::Insert(1u64, 2u64),
+    };
     let mut body = Vec::new();
     encode(&record, &mut body);
     let mut framed = Vec::new();
     frame(&body, &mut framed);
 
     for cut in 1..framed.len() {
-        assert!(read_frame(&framed[..cut]).is_none(), "cut at {cut} should be incomplete");
+        assert!(
+            read_frame(&framed[..cut]).is_none(),
+            "cut at {cut} should be incomplete"
+        );
     }
 }
 
@@ -64,7 +74,10 @@ fn detects_truncated_frame() {
 /// different wire format.
 #[test]
 fn encode_entry_framed_matches_two_step_encode_and_frame() {
-    let record = WalRecord { stamp: TxStamp::new(3, 99), op: CRUDOperation::Update(5u64, 6u64) };
+    let record = WalRecord {
+        stamp: TxStamp::new(3, 99),
+        op: CRUDOperation::Update(5u64, 6u64),
+    };
 
     let mut body = Vec::new();
     encode(&record, &mut body);
@@ -90,7 +103,10 @@ fn encode_entry_framed_matches_two_step_encode_and_frame() {
 /// arithmetic must stay correct if that changes).
 #[test]
 fn encode_entry_framed_patches_length_correctly_with_a_nonempty_prefix() {
-    let record: WalRecord<u64, u64> = WalRecord { stamp: TxStamp::new(1, 1), op: CRUDOperation::Delete(7u64) };
+    let record: WalRecord<u64, u64> = WalRecord {
+        stamp: TxStamp::new(1, 1),
+        op: CRUDOperation::Delete(7u64),
+    };
 
     let mut body = Vec::new();
     encode(&record, &mut body);
@@ -109,7 +125,10 @@ fn encode_entry_framed_patches_length_correctly_with_a_nonempty_prefix() {
 /// ts_start, ts_commit)` it was built with.
 #[test]
 fn commit_entry_round_trips() {
-    let entry: WalEntry<u64, u64> = WalEntry::Commit { stamp: TxStamp::new(9, 123), ts_commit: 456 };
+    let entry: WalEntry<u64, u64> = WalEntry::Commit {
+        stamp: TxStamp::new(9, 123),
+        ts_commit: 456,
+    };
 
     let mut framed = Vec::new();
     encode_entry_framed(&entry, &mut framed);
@@ -132,7 +151,10 @@ fn commit_entry_round_trips() {
 /// happen to succeed on either.
 #[test]
 fn write_entry_decodes_as_write_not_commit() {
-    let record = WalRecord { stamp: TxStamp::new(2, 10), op: CRUDOperation::Insert(1u64, 2u64) };
+    let record = WalRecord {
+        stamp: TxStamp::new(2, 10),
+        op: CRUDOperation::Insert(1u64, 2u64),
+    };
     let mut framed = Vec::new();
     encode_entry_framed(&WalEntry::Write(record), &mut framed);
 
@@ -147,7 +169,10 @@ fn write_entry_decodes_as_write_not_commit() {
 /// same record data `decode_entry` already covers.
 #[test]
 fn table_tagged_entry_round_trips() {
-    let record = WalRecord { stamp: TxStamp::new(4, 55), op: CRUDOperation::Insert(9u64, 10u64) };
+    let record = WalRecord {
+        stamp: TxStamp::new(4, 55),
+        op: CRUDOperation::Insert(9u64, 10u64),
+    };
     let mut framed = Vec::new();
     encode_entry_for_table_framed(42, &WalEntry::Write(record), &mut framed);
 
@@ -170,7 +195,10 @@ fn table_tagged_entry_round_trips() {
 /// encode/decode pair itself must still preserve whatever was written.
 #[test]
 fn table_tagged_commit_round_trips_with_sentinel() {
-    let entry: WalEntry<u64, u64> = WalEntry::Commit { stamp: TxStamp::new(1, 7), ts_commit: 8 };
+    let entry: WalEntry<u64, u64> = WalEntry::Commit {
+        stamp: TxStamp::new(1, 7),
+        ts_commit: 8,
+    };
     let mut framed = Vec::new();
     encode_entry_for_table_framed(TABLE_ID_COMMIT_SENTINEL, &entry, &mut framed);
 
@@ -196,7 +224,10 @@ fn table_tagged_commit_round_trips_with_sentinel() {
 /// the non-table-tagged path.
 #[test]
 fn table_tagged_framed_matches_manual_prefix_plus_frame() {
-    let record: WalRecord<u64, u64> = WalRecord { stamp: TxStamp::new(2, 3), op: CRUDOperation::Delete(5u64) };
+    let record: WalRecord<u64, u64> = WalRecord {
+        stamp: TxStamp::new(2, 3),
+        op: CRUDOperation::Delete(5u64),
+    };
     let entry = WalEntry::Write(record);
 
     let mut expected_body = Vec::new();
@@ -215,18 +246,27 @@ fn table_tagged_framed_matches_manual_prefix_plus_frame() {
 /// the table-tagged framing.
 #[test]
 fn detects_truncated_table_tagged_frame() {
-    let record = WalRecord { stamp: TxStamp::new(1, 1), op: CRUDOperation::Insert(1u64, 2u64) };
+    let record = WalRecord {
+        stamp: TxStamp::new(1, 1),
+        op: CRUDOperation::Insert(1u64, 2u64),
+    };
     let mut framed = Vec::new();
     encode_entry_for_table_framed(7, &WalEntry::Write(record), &mut framed);
 
     for cut in 1..framed.len() {
-        assert!(read_frame(&framed[..cut]).is_none(), "cut at {cut} should be incomplete");
+        assert!(
+            read_frame(&framed[..cut]).is_none(),
+            "cut at {cut} should be incomplete"
+        );
     }
 }
 
 #[test]
 fn detects_corrupted_body() {
-    let record = WalRecord { stamp: TxStamp::new(1, 42), op: CRUDOperation::Insert(1u64, 2u64) };
+    let record = WalRecord {
+        stamp: TxStamp::new(1, 42),
+        op: CRUDOperation::Insert(1u64, 2u64),
+    };
     let mut body = Vec::new();
     encode(&record, &mut body);
     let mut framed = Vec::new();
@@ -247,8 +287,14 @@ fn detects_corrupted_body() {
 /// true end) would fail this.
 #[test]
 fn resync_next_skips_an_interior_hole_of_unaligned_length() {
-    let first = WalRecord { stamp: TxStamp::new(1, 1), op: CRUDOperation::Insert(1u64, 100u64) };
-    let second = WalRecord { stamp: TxStamp::new(1, 2), op: CRUDOperation::Insert(2u64, 200u64) };
+    let first = WalRecord {
+        stamp: TxStamp::new(1, 1),
+        op: CRUDOperation::Insert(1u64, 100u64),
+    };
+    let second = WalRecord {
+        stamp: TxStamp::new(1, 2),
+        op: CRUDOperation::Insert(2u64, 200u64),
+    };
 
     let mut bytes = Vec::new();
     encode_entry_framed(&WalEntry::Write(first), &mut bytes);
@@ -271,8 +317,16 @@ fn resync_next_skips_an_interior_hole_of_unaligned_length() {
         offset += consumed;
     }
 
-    assert_eq!(offset, bytes.len(), "must consume every byte, including the hole, once fully resynced");
-    assert_eq!(found.len(), 2, "both records must survive, despite the hole between them");
+    assert_eq!(
+        offset,
+        bytes.len(),
+        "must consume every byte, including the hole, once fully resynced"
+    );
+    assert_eq!(
+        found.len(),
+        2,
+        "both records must survive, despite the hole between them"
+    );
     match &found[0] {
         WalEntry::Write(r) => assert_eq!(r.stamp.ts_start(), 1),
         _ => panic!("expected first Write"),
@@ -293,15 +347,22 @@ fn resync_next_skips_an_interior_hole_of_unaligned_length() {
 /// is found", not "keep looking forever".
 #[test]
 fn resync_next_returns_none_when_the_hole_reaches_eof() {
-    let first = WalRecord { stamp: TxStamp::new(1, 1), op: CRUDOperation::Insert(1u64, 100u64) };
+    let first = WalRecord {
+        stamp: TxStamp::new(1, 1),
+        op: CRUDOperation::Insert(1u64, 100u64),
+    };
     let mut bytes = Vec::new();
     encode_entry_framed(&WalEntry::Write(first), &mut bytes);
     bytes.extend(std::iter::repeat(0u8).take(20));
 
-    let (entry, consumed) = resync_next(&bytes, decode_entry::<u64, u64>).expect("first record still found");
+    let (entry, consumed) =
+        resync_next(&bytes, decode_entry::<u64, u64>).expect("first record still found");
     match entry {
         WalEntry::Write(r) => assert_eq!(r.stamp.ts_start(), 1),
         _ => panic!("expected a Write"),
     }
-    assert!(resync_next(&bytes[consumed..], decode_entry::<u64, u64>).is_none(), "trailing hole-to-EOF must not fabricate a record");
+    assert!(
+        resync_next(&bytes[consumed..], decode_entry::<u64, u64>).is_none(),
+        "trailing hole-to-EOF must not fabricate a record"
+    );
 }

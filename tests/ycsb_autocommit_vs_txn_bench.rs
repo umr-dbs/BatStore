@@ -71,15 +71,15 @@ fn atomic_vs_transaction_across_payload_sizes() {
         "mode", "field_len", "payload_bytes", "ops/sec", "vs atomic"
     );
 
-    let mut atomic_throughput = std::collections::HashMap::new();
     for &field_length in FIELD_LENGTHS {
+        let mut atomic_throughput = None;
         for &(label, mode) in MODES {
             let summary = run_ycsb(config(field_length, mode));
             let ops = summary.throughput_ops_sec;
             if label == "atomic" {
-                atomic_throughput.insert(field_length, ops);
+                atomic_throughput = Some(ops);
             }
-            let baseline = atomic_throughput.get(&field_length).copied().unwrap_or(ops);
+            let baseline = atomic_throughput.unwrap_or(ops);
             let ratio = if baseline > 0.0 { ops / baseline } else { 1.0 };
             println!(
                 "{label:<12} {field_length:>12} {:>16} {ops:>16.1} {ratio:>9.2}x",

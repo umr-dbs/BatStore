@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::mv_bench::mem_stats::read_vm_rss_kb;
 use crate::mv_bench::olap_scan::OlapMode;
-use crate::mv_bench::tpcc_driver::{run_tpcc, DriverConfig};
+use crate::mv_bench::tpcc_driver::{DriverConfig, run_tpcc};
 use crate::mv_bench::tpcc_schema::TpccConfig;
 use crate::mv_root::index_root::RootIndexType;
 
@@ -76,11 +76,17 @@ fn wal_backend_perf_sweep_tpcc() {
     println!("\n=== TPC-C WAL backend perf sweep ({WAREHOUSES} warehouses, {DURATION:?}/run) ===");
     for &threads in THREAD_COUNTS {
         for &(label, batch_size) in BACKENDS {
-            let wal_path = dir.join(format!("cmvbt_tpcc_wal_perf_{label}_{threads}_{}.log", std::process::id()));
+            let wal_path = dir.join(format!(
+                "cmvbt_tpcc_wal_perf_{label}_{threads}_{}.log",
+                std::process::id()
+            ));
             let _ = std::fs::remove_file(&wal_path);
 
             let summary = run_tpcc(config(threads, wal_path.clone(), batch_size));
-            println!("TPCC  backend={label:<18} terminals={threads:<3} tpmC={:>10.1}", summary.tpm_c);
+            println!(
+                "TPCC  backend={label:<18} terminals={threads:<3} tpmC={:>10.1}",
+                summary.tpm_c
+            );
             assert!(
                 summary.totals.iter().sum::<u64>() > 0,
                 "backend={label} terminals={threads}: no transactions completed at all"
@@ -92,7 +98,12 @@ fn wal_backend_perf_sweep_tpcc() {
 
     let rss_after = read_vm_rss_kb().unwrap_or(0);
     let growth_kb = rss_after.saturating_sub(rss_before);
-    println!("RSS before={}MB after={}MB growth={}MB", rss_before / 1024, rss_after / 1024, growth_kb / 1024);
+    println!(
+        "RSS before={}MB after={}MB growth={}MB",
+        rss_before / 1024,
+        rss_after / 1024,
+        growth_kb / 1024
+    );
     assert!(
         growth_kb < MAX_RSS_GROWTH_KB,
         "TPC-C WAL perf sweep grew RSS by {}MB (budget: {}MB)",

@@ -105,49 +105,49 @@ fn concurrent_multi_step_transactions_never_overflow_or_lose_a_committed_update(
 
     let handles: Vec<_> = (0..num_threads)
         .map(|t| {
-        let db = db.clone();
-        let stop = stop.clone();
-        let hot_success_count = hot_success_count.clone();
+            let db = db.clone();
+            let stop = stop.clone();
+            let hot_success_count = hot_success_count.clone();
             let my_misc_keys: Vec<u64> = (0..MISC_KEYS_PER_THREAD)
                 .map(|i| 1_000 + t as u64 * MISC_KEYS_PER_THREAD + i)
                 .collect();
-        thread::spawn(move || {
-            while !stop.load(Relaxed) {
+            thread::spawn(move || {
+                while !stop.load(Relaxed) {
                     let mut tx = DbTransaction::begin(&db);
 
-                for &k in &my_misc_keys {
-                    let cur = match tx.point(misc_t, k) {
-                        CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
-                        other => panic!("unexpected misc point result: {other}"),
-                    };
+                    for &k in &my_misc_keys {
+                        let cur = match tx.point(misc_t, k) {
+                            CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
+                            other => panic!("unexpected misc point result: {other}"),
+                        };
                         assert!(matches!(
                             tx.update(misc_t, k, cur + 1),
                             CRUDOperationResult::Updated(_)
                         ));
-                }
+                    }
 
-                let cur = match tx.point(hot_t, HOT_KEY) {
-                    CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
-                    other => panic!("unexpected hot point result: {other}"),
-                };
-                match tx.update(hot_t, HOT_KEY, cur + 1) {
-                    CRUDOperationResult::Updated(_) => {}
+                    let cur = match tx.point(hot_t, HOT_KEY) {
+                        CRUDOperationResult::MatchedRecords(v) => *v[0].payload,
+                        other => panic!("unexpected hot point result: {other}"),
+                    };
+                    match tx.update(hot_t, HOT_KEY, cur + 1) {
+                        CRUDOperationResult::Updated(_) => {}
                         CRUDOperationResult::Conflict => {
                             drop(tx);
                             continue;
                         }
-                    other => panic!("unexpected hot update result: {other}"),
-                }
+                        other => panic!("unexpected hot update result: {other}"),
+                    }
 
-                for &k in &my_misc_keys {
-                    let _ = tx.point(misc_t, k);
-                }
+                    for &k in &my_misc_keys {
+                        let _ = tx.point(misc_t, k);
+                    }
 
-                if tx.commit().is_some() {
-                    hot_success_count.fetch_add(1, Relaxed);
+                    if tx.commit().is_some() {
+                        hot_success_count.fetch_add(1, Relaxed);
+                    }
                 }
-            }
-        })
+            })
         })
         .collect();
 

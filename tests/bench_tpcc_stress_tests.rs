@@ -215,12 +215,12 @@ fn run_stress_and_check_invariants(
 
     let handles: Vec<_> = (0..num_threads)
         .map(|_| {
-        let db = db.clone();
-        let stop = stop.clone();
-        let history_seq = history_seq.clone();
-        let committed_new_order = committed_new_order.clone();
-        let committed_payment = committed_payment.clone();
-        let delivered_districts = delivered_districts.clone();
+            let db = db.clone();
+            let stop = stop.clone();
+            let history_seq = history_seq.clone();
+            let committed_new_order = committed_new_order.clone();
+            let committed_payment = committed_payment.clone();
+            let delivered_districts = delivered_districts.clone();
             thread::spawn(move || {
                 stress_worker(
                     db,
