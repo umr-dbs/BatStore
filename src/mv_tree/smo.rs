@@ -862,27 +862,6 @@ impl<
         (hot, cold)
     }
 
-    /// Counts write-facing records in an already stably key-grouped history.
-    fn grouped_hot_record_count(records: &[RecordPoint<Key, Payload>]) -> usize {
-        let mut count = 0;
-        let mut group_start = 0;
-        while group_start < records.len() {
-            let key = records[group_start].key();
-            let mut group_end = group_start + 1;
-            while group_end < records.len() && records[group_end].key() == key {
-                group_end += 1;
-            }
-            let newest_valid = (group_start..group_end)
-                .rev()
-                .find(|&i| !records[i].version().insertion_stamp().is_invalid());
-            count += (group_start..group_end)
-                .filter(|&i| records[i].version().is_live() || newest_valid == Some(i))
-                .count();
-            group_start = group_end;
-        }
-        count
-    }
-
     /// Constructs a private newest-to-oldest chain. No page is shared with
     /// another hot generation, so its owning hot leaf is its sole GC owner.
     fn build_private_cold_chain(
@@ -920,14 +899,12 @@ impl<
         mut records: Vec<RecordPoint<Key, Payload>>,
     ) -> usize {
         records.sort_by_key(|record| record.key());
-        if records.len() <= NUM_RECORDS {
-            let hot_count = Self::grouped_hot_record_count(&records);
-            page.unsafe_borrow_mut()
-                .as_leaf_page()
-                .bulk_push_owned(records);
+        let (hot, cold) = self.grouped_hot_cold_records(records);
+        let hot_count = hot.len();
+        if cold.is_empty() {
+            page.unsafe_borrow_mut().as_leaf_page().bulk_push_owned(hot);
             return hot_count;
         }
-        let (hot, cold) = self.grouped_hot_cold_records(records);
         assert!(
             hot.len() < NUM_RECORDS,
             "cold offload must leave room for the write that triggered the SMO"
@@ -935,7 +912,6 @@ impl<
         let link = self.build_private_cold_chain(cold);
         let node = page.unsafe_borrow_mut();
         node.set_cold_link(link);
-        let hot_count = hot.len();
         node.as_leaf_page().bulk_push_owned(hot);
         hot_count
     }
