@@ -1928,6 +1928,18 @@ mod bench_ycsb_correctness_tests;
 #[path = "../../tests/bench_ycsb_stress_tests.rs"]
 mod bench_ycsb_stress_tests;
 #[cfg(test)]
+#[path = "../../tests/cold_chain_range_fallback_tests.rs"]
+mod cold_chain_range_fallback_tests;
+#[cfg(test)]
+#[path = "../../tests/cold_chain_read_fallback_tests.rs"]
+mod cold_chain_read_fallback_tests;
+#[cfg(test)]
+#[path = "../../tests/cold_link_tests.rs"]
+mod cold_link_tests;
+#[cfg(test)]
+#[path = "../../tests/cold_smo_focused_tests.rs"]
+mod cold_smo_focused_tests;
+#[cfg(test)]
 #[path = "../../tests/db_integration_tests.rs"]
 mod db_integration_tests;
 #[cfg(test)]

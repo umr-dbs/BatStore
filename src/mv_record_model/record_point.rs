@@ -276,6 +276,17 @@ impl<Key: Ord + Copy + Hash + Default, Payload: Clone + Default> RecordPoint<Key
     }
 
     #[inline(always)]
+    pub(crate) fn clone_from_leaf(
+        record: crate::mv_page_model::leaf_page::LeafRecordRef<'_, Key, Payload>,
+    ) -> Self {
+        Self {
+            key: record.key(),
+            version: record.version().clone(),
+            payload: record.payload_slot().clone(),
+        }
+    }
+
+    #[inline(always)]
     pub(crate) fn payload_slot(&self) -> &PayloadSlot<Payload> {
         &self.payload
     }

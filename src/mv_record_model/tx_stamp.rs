@@ -21,7 +21,7 @@ pub type WorkerId = u16;
 /// `size_of::<u64>` (8 bytes), restoring `VersionInfo`/leaf fan-out to their
 /// pre-OSIC footprint. Bit 63 is deliberately left unused here — it's
 /// `DeletedTxStamp`'s own presence flag (see `version_info::DeletedTxStamp`).
-#[derive(Copy, Clone, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Default, Eq, PartialEq, Debug)]
 pub struct TxStamp(u64);
 
 impl TxStamp {
