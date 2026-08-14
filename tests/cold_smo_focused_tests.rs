@@ -122,6 +122,32 @@ fn indivisible_required_same_key_history_creates_one_cold_page() {
     assert_eq!(hot.cold_link().chain_total_count(), N as u32);
 }
 
+#[test]
+fn under_capacity_protected_history_is_opportunistically_offloaded() {
+    let tree = Tree::default();
+    let delete = TxStamp::new(0, 500);
+    tree.ctx.on_tx_start(delete.ts_start());
+
+    // Six retained records fit comfortably in this eight-slot leaf. Five
+    // are nevertheless historical and continuously snapshot-protected: a
+    // version split must shed them from the write-facing hot page instead
+    // of reproducing the same six-record page and inviting another SMO.
+    let mut node = Node::new_leaf();
+    for ts in 1..=5 {
+        push_protected(&mut node, 7, ts, delete, ts * 10);
+    }
+    push_live(&mut node, 7, 6, 60);
+    let source = boxed_leaf(node);
+    let output =
+        output_of_version_split(tree.split(source.cell.get_mut(), &Interval::new(0, u64::MAX)));
+    tree.ctx.on_tx_completed(delete.ts_start());
+
+    let hot = output.unsafe_borrow();
+    assert_eq!(hot.as_leaf_page_ref().len(), 1);
+    assert_eq!(hot.cold_link().chain_total_count(), 5);
+    assert_eq!(chain_pages(*hot.cold_link()).len(), 1);
+}
+
 fn make_three_page_output(tree: &Tree) -> (SmartCell<TestBlock>, TxStamp) {
     let delete = TxStamp::new(0, 500);
     tree.ctx.on_tx_start(delete.ts_start());
