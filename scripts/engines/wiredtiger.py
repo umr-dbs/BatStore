@@ -21,7 +21,7 @@ SUPPORTS_GC_TOGGLE = False
 
 
 def ensure_built() -> None:
-    leanstore_build.ensure_built(("wiredtiger_tpcc", "wiredtiger_ycsb"))
+    leanstore_build.ensure_built(("wiredtiger_tpcc", "wiredtiger_ycsb", "wiredtiger_s_htap"))
 
 
 def _sum_stdout_column(stdout_path: Path, column: str) -> float:
