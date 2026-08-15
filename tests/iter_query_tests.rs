@@ -72,7 +72,7 @@ fn streaming_terminals_count_fold_and_stop_on_error() {
     );
     let sum = RangeQueryIter::new(&tree, version, narrow, false, tree.worker_id())
         .fold_ref(0u64, |sum, _, payload| sum + *payload);
-    assert_eq!(sum, (19..=23).map(payload_for).sum());
+    assert_eq!(sum, (19..=23).map(payload_for).sum::<u64>());
 
     let mut visited = 0;
     let result = RangeQueryIter::new(&tree, version, narrow, false, tree.worker_id())

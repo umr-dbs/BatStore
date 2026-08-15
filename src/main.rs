@@ -28,6 +28,11 @@ mod mv_root;
 mod mv_sync;
 mod mv_wal;
 mod mv_db;
+#[cfg(feature = "datafusion")]
+mod mv_datafusion;
+#[cfg(all(test, feature = "datafusion"))]
+#[path = "../tests/datafusion_sql_tests.rs"]
+mod datafusion_sql_tests;
 #[cfg(feature = "tree-viz")]
 mod mv_viz;
 
@@ -330,4 +335,3 @@ pub fn hle() -> &'static str {
         "OFF   "
     }
 }
-

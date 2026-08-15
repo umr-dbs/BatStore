@@ -341,6 +341,11 @@ impl<
             .collect()
     }
 
+    /// Names of all tables in stable `TableId` order.
+    pub fn table_names(&self) -> Vec<String> {
+        self.tables.load().iter().map(|entry| entry.name.clone()).collect()
+    }
+
     pub(crate) fn wal_writer(&self) -> Arc<WalBackend<Key, Payload>> {
         self.wal.clone()
     }
