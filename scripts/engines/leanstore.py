@@ -17,7 +17,7 @@ SUPPORTS_GC_TOGGLE = False
 
 
 def ensure_built() -> None:
-    leanstore_build.ensure_built(("tpcc", "ycsb"))
+    leanstore_build.ensure_built(("tpcc", "ycsb", "s_htap"))
 
 
 def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", reload: bool = True,
