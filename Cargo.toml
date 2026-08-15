@@ -94,10 +94,3 @@ path = "tests/loom_registration_ordering.rs"
 [[test]]
 name = "loom_read_validation"
 path = "tests/loom_read_validation.rs"
-
-# Standalone microbenchmark, not a real test - its own `fn main` (see the file's own doc)
-# would conflict with libtest's generated one, hence harness = false.
-[[test]]
-name = "leaf_layout_bench"
-path = "tests/leaf_layout_bench.rs"
-harness = false
