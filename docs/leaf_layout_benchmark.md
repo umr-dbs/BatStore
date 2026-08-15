@@ -76,14 +76,10 @@ are outside the timed region.
 
 ## Reproduction
 
-```bash
-cargo test --release --test leaf_layout_bench -- --nocapture
-```
-
-Or standalone, without Cargo:
+Standalone tool, not wired into `cargo test`:
 
 ```bash
 rustc --edition=2024 -C opt-level=3 -C target-cpu=native \
-  tests/leaf_layout_bench.rs -o /tmp/cmvbt_leaf_layout_bench
+  tools/leaf_layout_bench.rs -o /tmp/cmvbt_leaf_layout_bench
 taskset -c 0 /tmp/cmvbt_leaf_layout_bench
 ```
