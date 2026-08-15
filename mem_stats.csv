@@ -1,2 +1,0 @@
-elapsed_sec,rss_kb,jemalloc_allocated_bytes,jemalloc_active_bytes,jemalloc_resident_bytes,jemalloc_mapped_bytes
-0.000,4904,507904,593920,5455872,8982528
