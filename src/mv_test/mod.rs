@@ -1941,6 +1941,9 @@ mod cold_link_tests;
 #[path = "../../tests/cold_smo_focused_tests.rs"]
 mod cold_smo_focused_tests;
 #[cfg(test)]
+#[path = "../../tests/crud_persistence_tests.rs"]
+mod crud_persistence_tests;
+#[cfg(test)]
 #[path = "../../tests/db_integration_tests.rs"]
 mod db_integration_tests;
 #[cfg(test)]
