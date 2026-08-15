@@ -148,6 +148,58 @@ fn under_capacity_protected_history_is_opportunistically_offloaded() {
     assert_eq!(chain_pages(*hot.cold_link()).len(), 1);
 }
 
+#[test]
+fn hot_key_split_keeps_capacity_exact_side_when_its_cold_slice_is_empty() {
+    let tree = Tree::default();
+    let delete = TxStamp::new(0, 500);
+    tree.ctx.on_tx_start(delete.ts_start());
+
+    // Key 2's snapshot-protected history (9 dead versions -- one page can't
+    // hold that alone) already sits in a private two-page chain, exactly
+    // like an earlier SMO would have left it. Key 1 supplies N (= 8) live,
+    // currently-visible versions directly on the resident page, with no
+    // garbage of its own. Combined (17 records), the only key boundary
+    // (between key 1 and key 2, at index 8) doesn't fit capacity on its raw
+    // right side -- forcing `split()` into the `try_hot_key_split` fallback.
+    // There, key 1's write-facing half lands exactly at capacity, but
+    // carries none of key 2's garbage: it must come out as a plain,
+    // fully-packed `ByKey` leaf, not get needlessly forced into a
+    // cold-chained `ByVersion` fallback just because it happens to land
+    // exactly at capacity.
+    let mut oldest = Node::new_leaf();
+    for ts in 1..=5 {
+        push_protected(&mut oldest, 2, ts, delete, ts * 10);
+    }
+    let oldest = boxed_leaf(oldest);
+
+    let mut newer = Node::new_leaf_with_cold_link(link_to(&oldest, 5, 1, 5));
+    for ts in 6..=9 {
+        push_protected(&mut newer, 2, ts, delete, ts * 10);
+    }
+    let newer = boxed_leaf(newer);
+
+    let mut node = Node::new_leaf_with_cold_link(link_to(&newer, 4, 2, 9));
+    for ts in 1..=N as u64 {
+        push_live(&mut node, 1, ts, ts * 10);
+    }
+    let source = boxed_leaf(node);
+
+    let split = tree.split(source.cell.get_mut(), &Interval::new(0, u64::MAX));
+    tree.ctx.on_tx_completed(delete.ts_start());
+
+    match split {
+        BlockSplit::ByKey(_, left, _, right) => {
+            assert!(left.unsafe_borrow().cold_link().is_none());
+            assert_eq!(left.unsafe_borrow().as_leaf_page_ref().len(), N);
+            assert!(!right.unsafe_borrow().cold_link().is_none());
+        }
+        BlockSplit::ByVersion(..) => panic!(
+            "key 1's capacity-exact half carries no garbage of its own and \
+             should not need cold offload to split"
+        ),
+    }
+}
+
 fn make_three_page_output(tree: &Tree) -> (SmartCell<TestBlock>, TxStamp) {
     let delete = TxStamp::new(0, 500);
     tree.ctx.on_tx_start(delete.ts_start());

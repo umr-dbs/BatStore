@@ -135,6 +135,16 @@ fn fitting_key_boundary<T, K: PartialEq>(
         .min_by_key(|i| i.abs_diff(target))
 }
 
+/// A real two-key-range split recovered from an otherwise-indivisible batch
+/// by first shedding cold-eligible garbage (see `try_hot_key_split`).
+struct HotKeySplit<Key: Ord + Copy + Hash + Default, Payload: Clone + Default> {
+    split_key: Key,
+    hot_left: Vec<RecordPoint<Key, Payload>>,
+    cold_left: Vec<RecordPoint<Key, Payload>>,
+    hot_right: Vec<RecordPoint<Key, Payload>>,
+    cold_right: Vec<RecordPoint<Key, Payload>>,
+}
+
 #[repr(u8)]
 pub enum BlockUnsafeDegree {
     Ok,
@@ -900,6 +910,22 @@ impl<
     ) -> usize {
         records.sort_by_key(|record| record.key());
         let (hot, cold) = self.grouped_hot_cold_records(records);
+        self.push_hot_cold_onto(page, hot, cold)
+    }
+
+    /// Writes an already-classified hot/cold split onto one page: `hot`
+    /// stays resident (the ordinary write path only ever looks here), `cold`
+    /// (if any) becomes a private chain hanging off it. `hot` must leave
+    /// room for the write that triggered the surrounding SMO -- callers that
+    /// can't already guarantee `hot.len() < NUM_RECORDS` should route
+    /// through `try_hot_key_split` first (see its doc) rather than land
+    /// here directly with an oversized `hot`.
+    fn push_hot_cold_onto(
+        &self,
+        page: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        hot: Vec<RecordPoint<Key, Payload>>,
+        cold: Vec<RecordPoint<Key, Payload>>,
+    ) -> usize {
         let hot_count = hot.len();
         if cold.is_empty() {
             page.unsafe_borrow_mut().as_leaf_page().bulk_push_owned(hot);
@@ -907,13 +933,80 @@ impl<
         }
         assert!(
             hot.len() < NUM_RECORDS,
-            "cold offload must leave room for the write that triggered the SMO"
+            "cold offload must leave room for the write that triggered the SMO: \
+             {} write-facing records, page capacity {NUM_RECORDS} -- a single key must \
+             hold more concurrently-live versions than one page can fit",
+            hot.len(),
         );
         let link = self.build_private_cold_chain(cold);
         let node = page.unsafe_borrow_mut();
         node.set_cold_link(link);
         node.as_leaf_page().bulk_push_owned(hot);
         hot_count
+    }
+
+    /// Retries a real key-boundary split using only the write-facing (`hot`)
+    /// subset of a batch `fitting_key_boundary` already rejected outright
+    /// against the raw, garbage-inflated `records`. Shedding cold-eligible
+    /// history first can free up a boundary that didn't exist before: it
+    /// shrinks a key's version run without ever removing the key itself, so
+    /// a batch that looked like one indivisible run of records can resolve
+    /// into a real two-key-range split once its garbage is out of the way.
+    /// `Err` means even the fully-reduced write-facing set has no such
+    /// boundary -- true only when a single key alone needs more
+    /// concurrently-live versions than one page can hold, in which case the
+    /// caller's only remaining option is a single cold-chained leaf.
+    fn try_hot_key_split(
+        &self,
+        mut records: Vec<RecordPoint<Key, Payload>>,
+        capacity: usize,
+    ) -> Result<HotKeySplit<Key, Payload>, (Vec<RecordPoint<Key, Payload>>, Vec<RecordPoint<Key, Payload>>)>
+    {
+        records.sort_by_key(|record| record.key());
+        let (hot, cold) = self.grouped_hot_cold_records(records);
+        match fitting_key_boundary(&hot, hot.len() / 2, capacity, |r| r.key()) {
+            Some(mid) => {
+                let split_key = hot[mid].key();
+                let (hot_left, hot_right): (Vec<_>, Vec<_>) =
+                    hot.into_iter().partition(|r| r.key() < split_key);
+                let (cold_left, cold_right): (Vec<_>, Vec<_>) =
+                    cold.into_iter().partition(|r| r.key() < split_key);
+                // `cold_left`/`cold_right` are sliced by the same
+                // `split_key` independently of how full `hot_left`/
+                // `hot_right` came out, so nothing above stops a boundary
+                // that fills one side of `hot` all the way to `capacity`
+                // while that same side also gets a non-empty cold slice --
+                // violating `push_hot_cold_onto`'s "leave a slot for the
+                // triggering write" invariant (every other caller gets that
+                // invariant for free: their `hot`/`cold` are a partition of
+                // one already-bounded vec, so non-empty `cold` there
+                // automatically means a strictly smaller `hot`). Rather than
+                // reserve a slot in the search itself -- which would reject
+                // plenty of boundaries that are perfectly safe because the
+                // full side's cold slice is empty -- check the actual
+                // condition after partitioning and only give up on this
+                // boundary (falling back to the caller's indivisible-history
+                // handling, same as `None`) when a side genuinely can't
+                // carry the cold slice it was just handed.
+                let side_overflows =
+                    |hot_side: &[_], cold_side: &[_]| !cold_side.is_empty() && hot_side.len() >= capacity;
+                if side_overflows(&hot_left, &cold_left) || side_overflows(&hot_right, &cold_right) {
+                    let mut hot = hot_left;
+                    hot.extend(hot_right);
+                    let mut cold = cold_left;
+                    cold.extend(cold_right);
+                    return Err((hot, cold));
+                }
+                Ok(HotKeySplit {
+                    split_key,
+                    hot_left,
+                    cold_left,
+                    hot_right,
+                    cold_right,
+                })
+            }
+            None => Err((hot, cold)),
+        }
     }
 
     pub(crate) fn merge<'a>(
@@ -1194,16 +1287,50 @@ impl<
                         simba_max_units,
                         |r| r.key(),
                     ) else {
-                        // Combined history is indivisible by key. A private
-                        // cold chain is the only converging one-child merge.
-                        let combined = self.block_manager.new_empty_leaf(&self.ctx);
-                        self.populate_leaf_history(combined, records);
-                        return MergeResult::Merged(
-                            candidate_index,
-                            candidate_fence.clone(),
-                            combined,
-                            candidate_cell,
-                        );
+                        // No non-tearing key split of the raw (garbage-
+                        // inflated) combined history converges. Retry
+                        // against just the write-facing subset -- shedding
+                        // cold-eligible garbage first can free up a boundary
+                        // this couldn't find (see `try_hot_key_split`).
+                        return match self.try_hot_key_split(records, simba_max_units) {
+                            Ok(hks) => {
+                                let left_interval = Interval::new(
+                                    candidate_fence.lower.min(simba_fence.lower),
+                                    (self.cold.dec_key)(hks.split_key),
+                                );
+                                let right_interval = Interval::new(
+                                    hks.split_key,
+                                    candidate_fence.upper.max(simba_fence.upper),
+                                );
+                                let combined_block_0 = self.block_manager.new_empty_leaf(&self.ctx);
+                                let combined_block_1 = self.block_manager.new_empty_leaf(&self.ctx);
+                                self.push_hot_cold_onto(combined_block_0, hks.hot_left, hks.cold_left);
+                                self.push_hot_cold_onto(combined_block_1, hks.hot_right, hks.cold_right);
+                                MergeResult::KeySplit(
+                                    candidate_index,
+                                    BlockSplit::ByKey(
+                                        left_interval,
+                                        combined_block_0,
+                                        right_interval,
+                                        combined_block_1,
+                                    ),
+                                    candidate_cell,
+                                )
+                            }
+                            Err((hot, cold)) => {
+                                // Truly indivisible even discounting
+                                // garbage. A private cold chain is the only
+                                // converging one-child merge.
+                                let combined = self.block_manager.new_empty_leaf(&self.ctx);
+                                self.push_hot_cold_onto(combined, hot, cold);
+                                MergeResult::Merged(
+                                    candidate_index,
+                                    candidate_fence.clone(),
+                                    combined,
+                                    candidate_cell,
+                                )
+                            }
+                        };
                     };
                     let split_key = sorted_records[middle].key();
                     let (mut first, mut second): (Vec<_>, Vec<_>) =
@@ -1489,13 +1616,38 @@ impl<
                         capacity,
                         |r| r.key(),
                     ) else {
-                        // Neither version compaction nor a non-tearing key
-                        // split can make progress. This is the exceptional
-                        // repeated-key-history case cold pages exist for.
-                        let replacement = self.block_manager.new_empty_leaf(&self.ctx);
-                        record_version_split(fence.to_string(), records.len());
-                        self.populate_leaf_history(replacement, records);
-                        return BlockSplit::ByVersion(replacement);
+                        // No non-tearing key split of the raw (garbage-
+                        // inflated) history converges. Retry against just
+                        // the write-facing subset -- shedding cold-eligible
+                        // garbage first can free up a boundary this couldn't
+                        // find (see `try_hot_key_split`).
+                        return match self.try_hot_key_split(records, capacity) {
+                            Ok(hks) => {
+                                let (left, right) = (
+                                    self.block_manager.new_empty_leaf(&self.ctx),
+                                    self.block_manager.new_empty_leaf(&self.ctx),
+                                );
+                                let fence_left = Interval::new(
+                                    fence.lower,
+                                    (self.cold.dec_key)(hks.split_key),
+                                );
+                                let fence_right = Interval::new(hks.split_key, fence.upper);
+                                self.push_hot_cold_onto(left, hks.hot_left, hks.cold_left);
+                                self.push_hot_cold_onto(right, hks.hot_right, hks.cold_right);
+                                BlockSplit::ByKey(fence_left, left, fence_right, right)
+                            }
+                            Err((hot, cold)) => {
+                                // Truly indivisible even discounting
+                                // garbage: this is the exceptional
+                                // repeated-key-history case cold pages exist
+                                // for.
+                                let replacement = self.block_manager.new_empty_leaf(&self.ctx);
+                                let hot_len = hot.len();
+                                record_version_split(fence.to_string(), hot_len);
+                                self.push_hot_cold_onto(replacement, hot, cold);
+                                BlockSplit::ByVersion(replacement)
+                            }
+                        };
                     };
                     let split_key = sorted_records[middle].key();
 
