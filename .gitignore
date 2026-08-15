@@ -4,3 +4,6 @@ Cargo.lock
 /comparison_results
 /tx_tests
 __pycache__/
+/*.csv
+.idea/workspace.xml
+.idea/vcs.xml

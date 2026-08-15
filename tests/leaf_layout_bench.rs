@@ -1,8 +1,12 @@
 //! Standalone leaf-layout microbenchmark.
 //!
-//! Compile directly so no tree, latch, WAL, GC, allocator, or transaction code enters
-//! the measurement:
-//!   rustc --edition=2024 -C opt-level=3 -C target-cpu=native tools/leaf_layout_bench.rs \
+//! Registered as a `harness = false` `[[test]]` (see Cargo.toml) rather than a normal
+//! integration test, so its own `fn main` below runs directly with no libtest harness and
+//! no tree/latch/WAL/GC/allocator/transaction code entering the measurement:
+//!   cargo test --release --test leaf_layout_bench -- --nocapture
+//!
+//! Can still be compiled standalone with plain rustc if preferred:
+//!   rustc --edition=2024 -C opt-level=3 -C target-cpu=native tests/leaf_layout_bench.rs \
 //!     -o /tmp/leaf_layout_bench
 //!   /tmp/leaf_layout_bench
 
