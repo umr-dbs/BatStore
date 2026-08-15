@@ -1,0 +1,655 @@
+diff --git a/frontend/CMakeLists.txt b/frontend/CMakeLists.txt
+--- a/frontend/CMakeLists.txt
++++ b/frontend/CMakeLists.txt
+@@ -12,6 +12,11 @@
+ target_link_libraries(ycsb leanstore Threads::Threads)
+ target_include_directories(ycsb PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+ 
++add_executable(s_htap ycsb/s_htap.cpp)
++target_compile_definitions(s_htap PRIVATE YCSB_PAYLOAD_BYTES=${YCSB_PAYLOAD_BYTES})
++target_link_libraries(s_htap leanstore Threads::Threads)
++target_include_directories(s_htap PRIVATE ${SHARED_INCLUDE_DIRECTORY})
++
+ add_executable(deterministic ycsb/deterministic.cpp)
+ target_link_libraries(deterministic leanstore Threads::Threads)
+ target_include_directories(deterministic PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+@@ -57,6 +62,11 @@
+ target_include_directories(wiredtiger_ycsb PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+ # prefer https://source.wiredtiger.com/10.0.0/build-posix.html over sudo apt-get install wiredtiger libwiredtiger-dev
+ 
++add_executable(wiredtiger_s_htap ycsb/wiredtiger_s_htap.cpp)
++target_compile_definitions(wiredtiger_s_htap PRIVATE YCSB_PAYLOAD_BYTES=${YCSB_PAYLOAD_BYTES})
++target_link_libraries(wiredtiger_s_htap leanstore wiredtiger Threads::Threads dl z libbz2.a lz4 snappy)
++target_include_directories(wiredtiger_s_htap PRIVATE ${SHARED_INCLUDE_DIRECTORY})
++
+ 
+ add_executable(lmdb_tpcc tpc-c/lmdb_tpcc.cpp)
+ target_link_libraries(lmdb_tpcc leanstore lmdb Threads::Threads)
+diff --git a/frontend/ycsb/s_htap.cpp b/frontend/ycsb/s_htap.cpp
+new file mode 100644
+index 0000000..4eba3e4
+--- /dev/null
++++ b/frontend/ycsb/s_htap.cpp
+@@ -0,0 +1,302 @@
++#include "../shared/LeanStoreAdapter.hpp"
++#include "../shared/Schema.hpp"
++#include "Units.hpp"
++#include "leanstore/Config.hpp"
++#include "leanstore/LeanStore.hpp"
++#include "leanstore/profiling/counters/WorkerCounters.hpp"
++#include "leanstore/utils/Parallelize.hpp"
++#include "leanstore/utils/RandomGenerator.hpp"
++#include "leanstore/utils/ZipfGenerator.hpp"
++// -------------------------------------------------------------------------------------
++#include <gflags/gflags.h>
++// -------------------------------------------------------------------------------------
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <cstring>
++#include <fstream>
++#include <iostream>
++#include <memory>
++#include <vector>
++// -------------------------------------------------------------------------------------
++// "S-HTAP" streaming-workload frontend - the LeanStore-native counterpart of cMVBT's
++// src/mv_bench/s_htap_driver.rs: a near-sorted arrival stream plus recency-biased hot-tail
++// updates (write threads) running concurrently with OLAP scans that straddle the cold/hot
++// boundary (OLAP threads), against one single-table B-treeVI, reusing the same
++// Relation<u64, BytesPayload<N>> layout as frontend/ycsb/ycsb.cpp.
++DEFINE_uint64(s_htap_record_count, 1000000, "cold historical corpus loaded before the timed phase");
++DEFINE_uint32(s_htap_write_threads, 0, "write-side worker threads (0 = worker_threads - s_htap_olap_threads)");
++DEFINE_uint32(s_htap_olap_threads, 1, "OLAP scanner threads");
++DEFINE_uint64(s_htap_hot_window, 10000, "width, in keys, of the recency-biased hot-update tail");
++DEFINE_double(s_htap_hot_theta, 0.99, "zipf skew of hot-tail updates");
++DEFINE_double(s_htap_arrival_ratio, 0.2, "fraction of write ops that are new arrivals vs. hot-tail updates");
++DEFINE_uint64(s_htap_max_lateness, 50, "bound on how far behind the arrival ticket a late event's key can land");
++DEFINE_uint64(s_htap_olap_lag, 0, "how far behind the current tail an OLAP scan's newest edge sits");
++DEFINE_uint64(s_htap_olap_span, 30000, "width, in keys, of each OLAP scan");
++DEFINE_bool(s_htap_read_payload, true, "consume the complete value on OLAP scans");
++// -------------------------------------------------------------------------------------
++using namespace leanstore;
++using SHtapKey = u64;
++using SHtapPayload = BytesPayload<YCSB_PAYLOAD_BYTES>;
++using SHtapTable = Relation<SHtapKey, SHtapPayload>;
++static inline void consume_payload(const SHtapPayload& payload)
++{
++   if (!FLAGS_s_htap_read_payload) return;
++   const u8* p = reinterpret_cast<const u8*>(&payload);
++   u8 checksum = 0;
++   for (u64 i = 0; i < sizeof(payload); i++) checksum += p[i];
++   asm volatile("" : : "r"(checksum) : "memory");
++}
++// -------------------------------------------------------------------------------------
++// Mints the next arrival key: a monotonic ticket with an optional bounded backward jitter -
++// same "allowed lateness" semantics as s_htap_random::mint_arrival_key on the cMVBT side. A
++// jittered key can collide with one already minted by an earlier ticket; arrival_upsert
++// below treats that as a legitimate late-arriving upsert, not an error.
++static SHtapKey mint_arrival_key(std::atomic<u64>& next_seq, u64 max_lateness)
++{
++   const u64 ticket = next_seq.fetch_add(1) + 1;
++   if (max_lateness == 0) return ticket;
++   const u64 lateness = utils::RandomGenerator::getRandU64(0, max_lateness + 1);
++   return lateness < ticket ? ticket - lateness : 1;
++}
++// -------------------------------------------------------------------------------------
++// Recency-biased "which of the `window` most recent keys" sample, anchored to the current
++// tail - mirrors HotTailSampler on the cMVBT side (a small fixed-size window, not one that
++// widens with the whole keyspace). Reuses LeanStore's own (unscrambled) ZipfGenerator, same
++// "left unscrambled on purpose" reasoning as s_htap_random.rs's doc.
++static SHtapKey sample_hot_tail(utils::ZipfGenerator& zipf, u64 window, u64 current_max_key)
++{
++   const u64 back = (zipf.rand() - 1) % window;
++   return current_max_key > back ? current_max_key - back : 1;
++}
++// -------------------------------------------------------------------------------------
++// [lo, hi] (inclusive) bounds for a straddling OLAP scan - same three region shapes as
++// s_htap_random::olap_scan_bounds on the cMVBT side (pure hot-tail / pure cold-history /
++// straddling), computed identically.
++static void olap_scan_bounds(u64 current_max_key, u64 lag, u64 span, u64& lo, u64& len)
++{
++   const u64 hi = current_max_key > lag ? current_max_key - lag : 1;
++   lo = hi > span - 1 ? hi - (span - 1) : 1;
++   len = hi - lo + 1;
++}
++// -------------------------------------------------------------------------------------
++// Inserts `key` if it has never been written, or overwrites it in place if a jittered
++// arrival collided with an already-materialized row. Returns true for a genuinely new row,
++// false for a late-arrival upsert. Bypasses LeanStoreAdapter<SHtapTable>::insert/lookup1/
++// update1 directly against `table.btree` - their own `ensure()` calls would abort the whole
++// process on DUPLICATE/NOT_FOUND, which are expected outcomes here, not bugs.
++//
++// Checks existence with a lookup *before* ever calling btree->insert() - not just to avoid
++// the adapter's own crash-on-NOT_FOUND, but to route around a real, documented gap in
++// BTreeVI::insert() itself (BTreeVI.cpp: `ensure(false); // Not implemented: maybe it has
++// been removed but no GCed`, hit whenever insert() collides with an existing key whose
++// tuple is currently visible): every prior frontend here (ycsb.cpp/tpcc.cpp) only ever
++// calls insert() on keys it mints itself as strictly-increasing and never-reused, so this
++// path was never exercised before. Late/jittered arrivals are exactly the case that hits
++// it - by checking first and going straight to update1's underlying call when the key
++// already exists, insert() is only ever invoked on a key just confirmed absent, closing
++// that path for a single write thread entirely. A narrow cross-thread race remains (two
++// late arrivals from different threads targeting the same key in between this lookup and
++// the insert) - that residual crash is this engine's own limitation, not something a
++// workload generator can fully paper over from the outside.
++static bool arrival_upsert(LeanStoreAdapter<SHtapTable>& table, SHtapKey key)
++{
++   u8 folded_key[SHtapTable::maxFoldLength()];
++   const u16 folded_key_len = SHtapTable::foldKey(folded_key, typename SHtapTable::Key{key});
++   bool existed = false;
++   const OP_RESULT lookup_res = table.btree->lookup(folded_key, folded_key_len, [&](const u8*, u16) { existed = true; });
++   if (lookup_res == OP_RESULT::ABORT_TX) {
++      cr::Worker::my().abortTX();
++   }
++   SHtapPayload payload;
++   utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(SHtapPayload));
++   if (!existed) {
++      const OP_RESULT res = table.btree->insert(folded_key, folded_key_len, reinterpret_cast<u8*>(&payload), sizeof(SHtapPayload));
++      if (res == OP_RESULT::ABORT_TX) {
++         cr::Worker::my().abortTX();
++      }
++      if (res == OP_RESULT::OK) {
++         return true;
++      }
++      ensure(res == OP_RESULT::DUPLICATE);
++      // Lost the race noted above - fall through to the update path below.
++   }
++   UpdateDescriptorGenerator1(arrival_update_descriptor, SHtapTable, my_payload);
++   const OP_RESULT upd_res = table.btree->updateSameSizeInPlace(
++       folded_key, folded_key_len,
++       [&](u8* value, u16 value_size) {
++          static_cast<void>(value_size);
++          std::memcpy(value, &payload, sizeof(SHtapPayload));
++       },
++       arrival_update_descriptor);
++   if (upd_res == OP_RESULT::ABORT_TX) {
++      cr::Worker::my().abortTX();
++   }
++   return false;
++}
++// -------------------------------------------------------------------------------------
++// Hot-tail update against an already-materialized key. Tolerates NOT_FOUND (a rare race:
++// `current_max_key` can be bumped by an in-flight arrival slightly before that arrival's
++// own row is actually inserted - see mint_arrival_key/arrival_upsert's ordering) by
++// silently skipping rather than treating it as an error.
++static void hot_update(LeanStoreAdapter<SHtapTable>& table, SHtapKey key)
++{
++   SHtapPayload payload;
++   utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(SHtapPayload));
++   u8 folded_key[SHtapTable::maxFoldLength()];
++   const u16 folded_key_len = SHtapTable::foldKey(folded_key, typename SHtapTable::Key{key});
++   UpdateDescriptorGenerator1(hot_update_descriptor, SHtapTable, my_payload);
++   const OP_RESULT res = table.btree->updateSameSizeInPlace(
++       folded_key, folded_key_len,
++       [&](u8* value, u16 value_size) {
++          static_cast<void>(value_size);
++          std::memcpy(value, &payload, sizeof(SHtapPayload));
++       },
++       hot_update_descriptor);
++   if (res == OP_RESULT::ABORT_TX) {
++      cr::Worker::my().abortTX();
++   }
++}
++// -------------------------------------------------------------------------------------
++int main(int argc, char** argv)
++{
++   gflags::SetUsageMessage("Leanstore S-HTAP");
++   gflags::ParseCommandLineFlags(&argc, &argv, true);
++   ensure(FLAGS_s_htap_hot_window >= 1);
++   ensure(FLAGS_s_htap_olap_span >= 1);
++   const u32 olap_threads = FLAGS_s_htap_olap_threads;
++   const u32 write_threads = FLAGS_s_htap_write_threads ? FLAGS_s_htap_write_threads : FLAGS_worker_threads - olap_threads;
++   ensure(write_threads + olap_threads <= FLAGS_worker_threads);
++   // -------------------------------------------------------------------------------------
++   LeanStore db;
++   auto& crm = db.getCRManager();
++   LeanStoreAdapter<SHtapTable> table;
++   crm.scheduleJobSync(0, [&]() { table = LeanStoreAdapter<SHtapTable>(db, "SHTAP"); });
++   db.registerConfigEntry("s_htap_record_count", FLAGS_s_htap_record_count);
++   db.registerConfigEntry("s_htap_hot_window", FLAGS_s_htap_hot_window);
++   db.registerConfigEntry("s_htap_arrival_ratio", FLAGS_s_htap_arrival_ratio);
++   db.registerConfigEntry("s_htap_write_threads", write_threads);
++   db.registerConfigEntry("s_htap_olap_threads", olap_threads);
++   // -------------------------------------------------------------------------------------
++   leanstore::TX_ISOLATION_LEVEL isolation_level = leanstore::parseIsolationLevel(FLAGS_isolation_level);
++   // -------------------------------------------------------------------------------------
++   cout << "Loading " << FLAGS_s_htap_record_count << " cold records..." << endl;
++   auto load_begin = chrono::high_resolution_clock::now();
++   utils::Parallelize::range(FLAGS_worker_threads, FLAGS_s_htap_record_count, [&](u64 t_i, u64 begin, u64 end) {
++      crm.scheduleJobAsync(t_i, [&, begin, end]() {
++         for (u64 i = begin; i < end; i++) {
++            SHtapPayload payload;
++            utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(SHtapPayload));
++            cr::Worker::my().startTX(TX_MODE::OLTP, leanstore::TX_ISOLATION_LEVEL::SNAPSHOT_ISOLATION);
++            table.insert({static_cast<SHtapKey>(i + 1)}, {payload});
++            cr::Worker::my().commitTX();
++         }
++      });
++   });
++   crm.joinAll();
++   cout << "Loaded " << FLAGS_s_htap_record_count << " records in "
++        << (chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - load_begin).count() / 1000000.0) << "s." << endl;
++   // -------------------------------------------------------------------------------------
++   std::atomic<u64> current_max_key = FLAGS_s_htap_record_count;
++   auto hot_zipf = std::make_unique<utils::ZipfGenerator>(FLAGS_s_htap_hot_window, FLAGS_s_htap_hot_theta);
++   atomic<bool> keep_running = true;
++   atomic<u64> running_threads_counter = 0;
++   db.startProfilingThread();
++   std::vector<std::vector<uint64_t>> scan_latencies_ns(olap_threads);
++   // -------------------------------------------------------------------------------------
++   // OLAP threads sit at the high end of the worker range (mirrors tpcc.cpp's ch_a_threads
++   // convention) and run under TX_MODE::OLAP, so their commits count toward olap_tx, not
++   // tx - the write_ops_per_sec metric this workload reports (WorkerCounters::tx, read by
++   // scripts/engines/leanstore.py off log_cr.csv's "tx" column) must stay write-only.
++   for (u32 i = 0; i < olap_threads; i++) {
++      const u64 t_i = write_threads + i;
++      crm.scheduleJobAsync(t_i, [&, i]() {
++         running_threads_counter++;
++         while (keep_running) {
++            jumpmuTry()
++            {
++               u64 lo, len;
++               olap_scan_bounds(current_max_key.load(), FLAGS_s_htap_olap_lag, FLAGS_s_htap_olap_span, lo, len);
++               cr::Worker::my().startTX(TX_MODE::OLAP, isolation_level);
++               u64 scanned = 0;
++               const auto scan_start = chrono::high_resolution_clock::now();
++               table.scan(
++                   {static_cast<SHtapKey>(lo)},
++                   [&](const SHtapTable::Key&, const SHtapTable& record) {
++                      consume_payload(record.my_payload);
++                      scanned++;
++                      return scanned < len;
++                   },
++                   [&]() {});
++               cr::Worker::my().commitTX();
++               scan_latencies_ns[i].push_back(
++                   chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - scan_start).count());
++               WorkerCounters::myCounters().olap_tx++;
++            }
++            jumpmuCatch() { WorkerCounters::myCounters().olap_tx_abort++; }
++         }
++         running_threads_counter--;
++      });
++   }
++   // -------------------------------------------------------------------------------------
++   for (u32 t_i = 0; t_i < write_threads; t_i++) {
++      crm.scheduleJobAsync(t_i, [&]() {
++         running_threads_counter++;
++         while (keep_running) {
++            jumpmuTry()
++            {
++               cr::Worker::my().startTX(TX_MODE::OLTP, isolation_level);
++               const bool is_arrival = utils::RandomGenerator::getRandU64(0, 10000) < static_cast<u64>(FLAGS_s_htap_arrival_ratio * 10000);
++               if (is_arrival) {
++                  const SHtapKey key = mint_arrival_key(current_max_key, FLAGS_s_htap_max_lateness);
++                  arrival_upsert(table, key);
++               } else {
++                  const SHtapKey key = sample_hot_tail(*hot_zipf, FLAGS_s_htap_hot_window, current_max_key.load());
++                  hot_update(table, key);
++               }
++               cr::Worker::my().commitTX();
++               WorkerCounters::myCounters().tx++;
++            }
++            jumpmuCatch() { WorkerCounters::myCounters().tx_abort++; }
++         }
++         running_threads_counter--;
++      });
++   }
++   // -------------------------------------------------------------------------------------
++   sleep(FLAGS_run_for_seconds);
++   keep_running = false;
++   while (running_threads_counter) {
++   }
++   crm.joinAll();
++   // -------------------------------------------------------------------------------------
++   // Summary (not raw per-op samples - see the matching comment in ycsb.cpp / cMVBT's
++   // s_htap_driver.rs::write_results for why). Nearest-rank percentiles, in microseconds.
++   // Written to the current working directory, matching every other engine's convention
++   // here (scripts/engines/leanstore.py always invokes this binary with cwd=output_dir).
++   {
++      std::vector<uint64_t> all_scan_latencies_ns;
++      for (auto& v : scan_latencies_ns) {
++         all_scan_latencies_ns.insert(all_scan_latencies_ns.end(), v.begin(), v.end());
++      }
++      std::sort(all_scan_latencies_ns.begin(), all_scan_latencies_ns.end());
++      auto pct = [&](double p) -> double {
++         if (all_scan_latencies_ns.empty()) return 0.0;
++         size_t idx = std::min(all_scan_latencies_ns.size() - 1,
++                                static_cast<size_t>(std::llround(p * (all_scan_latencies_ns.size() - 1))));
++         return all_scan_latencies_ns[idx] / 1000.0;
++      };
++      double avg_us = 0.0;
++      if (!all_scan_latencies_ns.empty()) {
++         uint64_t sum = 0;
++         for (auto v : all_scan_latencies_ns) sum += v;
++         avg_us = static_cast<double>(sum) / all_scan_latencies_ns.size() / 1000.0;
++      }
++      std::ofstream scan_latency_file("s_htap_scan_latency_summary.csv");
++      scan_latency_file << "p50_us,p95_us,p99_us,count,avg_us\n";
++      scan_latency_file << pct(0.50) << "," << pct(0.95) << "," << pct(0.99) << ","
++                         << all_scan_latencies_ns.size() << "," << avg_us << "\n";
++   }
++   cout << "-------------------------------------------------------------------------------------" << endl;
++   return 0;
++}
+diff --git a/frontend/ycsb/wiredtiger_s_htap.cpp b/frontend/ycsb/wiredtiger_s_htap.cpp
+new file mode 100644
+index 0000000..4d40b14
+--- /dev/null
++++ b/frontend/ycsb/wiredtiger_s_htap.cpp
+@@ -0,0 +1,314 @@
++#include <gflags/gflags.h>
++
++#include "../shared/WiredTigerAdapter.hpp"
++#include "../shared/Schema.hpp"
++#include "Units.hpp"
++#include "leanstore/Config.hpp"
++#include "leanstore/LeanStore.hpp"
++#include "leanstore/utils/RandomGenerator.hpp"
++#include "leanstore/utils/ZipfGenerator.hpp"
++// -------------------------------------------------------------------------------------
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <fstream>
++#include <iostream>
++#include <memory>
++#include <string>
++#include <thread>
++#include <vector>
++// -------------------------------------------------------------------------------------
++// WiredTiger counterpart of s_htap.cpp / cMVBT's src/mv_bench/s_htap_driver.rs - same
++// near-sorted-arrival + hot-tail-update + straddling-OLAP-scan workload, driven through
++// WiredTigerAdapter against WiredTiger's own C API (same Adapter<Record> interface
++// LeanStore's own B-tree uses - see frontend/shared/WiredTigerAdapter.hpp).
++//
++// Unlike LeanStore's native BTreeVI, `WiredTigerAdapter::insert` opens its cursor without
++// `overwrite=false`, so WT_CURSOR::insert's default (overwrite=true) already makes it an
++// unconditional upsert - no DUPLICATE error path to handle. `new_arrival` vs `late_upsert`
++// is still reported (an existence check via a raw cursor search before the write) purely
++// so this engine's result CSVs stay directly comparable to cMVBT/LeanStore/libmdbx's, not
++// because WiredTiger needs the distinction.
++// -------------------------------------------------------------------------------------
++using namespace std;
++// -------------------------------------------------------------------------------------
++DEFINE_uint64(s_htap_record_count, 1000000, "cold historical corpus loaded before the timed phase");
++DEFINE_uint32(s_htap_write_threads, 0, "write-side worker threads (0 = worker_threads - s_htap_olap_threads)");
++DEFINE_uint32(s_htap_olap_threads, 1, "OLAP scanner threads");
++DEFINE_uint64(s_htap_hot_window, 10000, "width, in keys, of the recency-biased hot-update tail");
++DEFINE_double(s_htap_hot_theta, 0.99, "zipf skew of hot-tail updates");
++DEFINE_double(s_htap_arrival_ratio, 0.2, "fraction of write ops that are new arrivals vs. hot-tail updates");
++DEFINE_uint64(s_htap_max_lateness, 50, "bound on how far behind the arrival ticket a late event's key can land");
++DEFINE_uint64(s_htap_olap_lag, 0, "how far behind the current tail an OLAP scan's newest edge sits");
++DEFINE_uint64(s_htap_olap_span, 30000, "width, in keys, of each OLAP scan");
++DEFINE_bool(s_htap_read_payload, true, "consume the complete value on OLAP scans");
++// -------------------------------------------------------------------------------------
++DEFINE_bool(print_header, true, "");
++// -------------------------------------------------------------------------------------
++thread_local WT_SESSION* WiredTigerDB::session = nullptr;
++thread_local WT_CURSOR* WiredTigerDB::cursor[20] = {nullptr};
++// -------------------------------------------------------------------------------------
++using SHtapKey = u64;
++using SHtapPayload = BytesPayload<YCSB_PAYLOAD_BYTES>;
++using SHtapTable = Relation<SHtapKey, SHtapPayload>;
++static inline void consume_payload(const SHtapPayload& payload)
++{
++   if (!FLAGS_s_htap_read_payload) return;
++   const u8* p = reinterpret_cast<const u8*>(&payload);
++   u8 checksum = 0;
++   for (u64 i = 0; i < sizeof(payload); i++) checksum += p[i];
++   asm volatile("" : : "r"(checksum) : "memory");
++}
++// -------------------------------------------------------------------------------------
++// Same "allowed lateness" ticket-minting scheme as s_htap.cpp/s_htap_random.rs.
++static SHtapKey mint_arrival_key(std::atomic<u64>& next_seq, u64 max_lateness)
++{
++   const u64 ticket = next_seq.fetch_add(1) + 1;
++   if (max_lateness == 0) return ticket;
++   const u64 lateness = leanstore::utils::RandomGenerator::getRandU64(0, max_lateness + 1);
++   return lateness < ticket ? ticket - lateness : 1;
++}
++// -------------------------------------------------------------------------------------
++static SHtapKey sample_hot_tail(leanstore::utils::ZipfGenerator& zipf, u64 window, u64 current_max_key)
++{
++   const u64 back = (zipf.rand() - 1) % window;
++   return current_max_key > back ? current_max_key - back : 1;
++}
++// -------------------------------------------------------------------------------------
++static void olap_scan_bounds(u64 current_max_key, u64 lag, u64 span, u64& lo, u64& len)
++{
++   const u64 hi = current_max_key > lag ? current_max_key - lag : 1;
++   lo = hi > span - 1 ? hi - (span - 1) : 1;
++   len = hi - lo + 1;
++}
++// -------------------------------------------------------------------------------------
++// Raw cursor existence check, bypassing WiredTigerAdapter::lookup1 - that helper's
++// error_check() raises SIGTRAP on WT_NOTFOUND, which is an expected outcome here (a
++// not-yet-arrived hot-tail key, or a brand-new arrival), not a bug.
++static bool wt_key_exists(WiredTigerAdapter<SHtapTable>& table, SHtapKey key)
++{
++   u8 folded_key[SHtapTable::maxFoldLength()];
++   const u32 folded_key_len = SHtapTable::foldKey(folded_key, typename SHtapTable::Key{key});
++   if (table.map.cursor[SHtapTable::id] == nullptr) {
++      const int ret = table.map.session->open_cursor(table.map.session, table.table_name.c_str(), NULL, "raw", &table.map.cursor[SHtapTable::id]);
++      error_check(ret);
++   }
++   WT_CURSOR* cursor = table.map.cursor[SHtapTable::id];
++   WT_ITEM key_item;
++   key_item.data = folded_key;
++   key_item.size = folded_key_len;
++   cursor->set_key(cursor, &key_item);
++   const int ret = cursor->search(cursor);
++   if (ret != 0 && ret != WT_NOTFOUND) {
++      error_check(ret);
++   }
++   cursor->reset(cursor);
++   return ret == 0;
++}
++// -------------------------------------------------------------------------------------
++// Returns true for a genuinely new row, false for a late-arrival upsert of an existing one
++// - see this file's module doc for why the write itself needs no separate insert/update
++// path here, unlike s_htap.cpp's LeanStore-native version.
++static bool arrival_upsert(WiredTigerAdapter<SHtapTable>& table, SHtapKey key)
++{
++   const bool existed = wt_key_exists(table, key);
++   SHtapPayload payload;
++   leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(SHtapPayload));
++   table.insert({key}, {payload});
++   return !existed;
++}
++// -------------------------------------------------------------------------------------
++// Hot-tail update against an already-materialized key. Tolerates a not-yet-arrived key (a
++// rare race - see mint_arrival_key/arrival_upsert's ordering note in s_htap.cpp) by
++// silently skipping rather than creating it.
++static void hot_update(WiredTigerAdapter<SHtapTable>& table, SHtapKey key)
++{
++   if (!wt_key_exists(table, key)) return;
++   SHtapPayload payload;
++   leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(SHtapPayload));
++   table.insert({key}, {payload});
++}
++// -------------------------------------------------------------------------------------
++int main(int argc, char** argv)
++{
++   gflags::SetUsageMessage("WiredTiger S-HTAP");
++   gflags::ParseCommandLineFlags(&argc, &argv, true);
++   ensure(FLAGS_s_htap_hot_window >= 1);
++   ensure(FLAGS_s_htap_olap_span >= 1);
++   const u32 olap_threads = FLAGS_s_htap_olap_threads;
++   const u32 write_threads = FLAGS_s_htap_write_threads ? FLAGS_s_htap_write_threads : FLAGS_worker_threads - olap_threads;
++   ensure(write_threads + olap_threads <= FLAGS_worker_threads);
++   // -------------------------------------------------------------------------------------
++   WiredTigerDB wiredtiger_db;
++   wiredtiger_db.prepareThread();
++   WiredTigerAdapter<SHtapTable> table(wiredtiger_db);
++   // -------------------------------------------------------------------------------------
++   cout << "Loading " << FLAGS_s_htap_record_count << " cold records..." << endl;
++   auto load_begin = chrono::high_resolution_clock::now();
++   {
++      // Real std::thread parallelism (not leanstore::utils::Parallelize::range, which just
++      // partitions and calls its callback synchronously - see wiredtiger_tpcc.cpp's own
++      // loader, which uses the same raw-thread pattern for the same reason): each thread
++      // needs its own thread_local WT_SESSION/cursor via prepareThread()/its own Adapter.
++      std::vector<thread> load_threads;
++      const u64 n = FLAGS_s_htap_record_count;
++      const u64 block_size = std::max<u64>(1, n / FLAGS_worker_threads);
++      for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
++         const u64 begin = t_i * block_size;
++         const u64 end = (t_i == FLAGS_worker_threads - 1) ? n : std::min(n, begin + block_size);
++         if (begin >= end) continue;
++         load_threads.emplace_back([&, begin, end]() {
++            // Reuses the single `table` constructed in main() - map.session/map.cursor are
++            // thread_local statics on WiredTigerDB, so each new std::thread gets its own
++            // session/cursor slots after prepareThread() regardless of which Adapter
++            // instance is used (see WiredTigerAdapter.hpp) - constructing a second Adapter
++            // per thread would just re-run `session->create()` for the same table
++            // redundantly (and concurrently) across sessions.
++            wiredtiger_db.prepareThread();
++            for (u64 i = begin; i < end; i++) {
++               SHtapPayload payload;
++               leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(SHtapPayload));
++               table.insert({static_cast<SHtapKey>(i + 1)}, {payload});
++            }
++         });
++      }
++      for (auto& t : load_threads) t.join();
++   }
++   cout << "Loaded " << FLAGS_s_htap_record_count << " records in "
++        << (chrono::duration_cast<chrono::microseconds>(chrono::high_resolution_clock::now() - load_begin).count() / 1000000.0) << "s." << endl;
++   // -------------------------------------------------------------------------------------
++   std::vector<thread> threads;
++   std::atomic<u64> current_max_key = FLAGS_s_htap_record_count;
++   auto hot_zipf = std::make_unique<leanstore::utils::ZipfGenerator>(FLAGS_s_htap_hot_window, FLAGS_s_htap_hot_theta);
++   atomic<bool> keep_running = true;
++   atomic<u64> running_threads_counter = 0;
++   std::atomic<u64> write_committed[FLAGS_worker_threads];
++   std::atomic<u64> write_aborted[FLAGS_worker_threads];
++   std::atomic<u64> olap_committed[FLAGS_worker_threads];
++   std::atomic<u64> olap_aborted[FLAGS_worker_threads];
++   std::vector<std::vector<uint64_t>> scan_latencies_ns(olap_threads);
++   for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
++      write_committed[t_i] = 0;
++      write_aborted[t_i] = 0;
++      olap_committed[t_i] = 0;
++      olap_aborted[t_i] = 0;
++   }
++   // -------------------------------------------------------------------------------------
++   // OLAP threads, at the high end of the worker range (mirrors wiredtiger_tpcc.cpp's
++   // ch_a_threads convention) - reported separately from `write_committed`, so the
++   // "s_htap_committed" column stays write-only (see scripts/engines/wiredtiger.py's
++   // metric_column).
++   for (u64 i = 0; i < olap_threads; i++) {
++      const u64 t_i = write_threads + i;
++      threads.emplace_back([&, i, t_i]() {
++         running_threads_counter++;
++         wiredtiger_db.prepareThread();
++         while (keep_running) {
++            jumpmuTry()
++            {
++               u64 lo, len;
++               olap_scan_bounds(current_max_key.load(), FLAGS_s_htap_olap_lag, FLAGS_s_htap_olap_span, lo, len);
++               wiredtiger_db.startTX();
++               u64 scanned = 0;
++               const auto scan_start = chrono::high_resolution_clock::now();
++               table.scan(
++                   {static_cast<SHtapKey>(lo)},
++                   [&](const SHtapTable::Key&, const SHtapTable& record) {
++                      consume_payload(record.my_payload);
++                      scanned++;
++                      return scanned < len;
++                   },
++                   [&]() {});
++               wiredtiger_db.commitTX();
++               scan_latencies_ns[i].push_back(
++                   chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - scan_start).count());
++               olap_committed[t_i]++;
++            }
++            jumpmuCatch() { olap_aborted[t_i]++; }
++         }
++         running_threads_counter--;
++      });
++   }
++   // -------------------------------------------------------------------------------------
++   for (u64 t_i = 0; t_i < write_threads; t_i++) {
++      threads.emplace_back([&, t_i]() {
++         running_threads_counter++;
++         wiredtiger_db.prepareThread();
++         while (keep_running) {
++            jumpmuTry()
++            {
++               wiredtiger_db.startTX();
++               const bool is_arrival = leanstore::utils::RandomGenerator::getRandU64(0, 10000) < static_cast<u64>(FLAGS_s_htap_arrival_ratio * 10000);
++               if (is_arrival) {
++                  const SHtapKey key = mint_arrival_key(current_max_key, FLAGS_s_htap_max_lateness);
++                  arrival_upsert(table, key);
++               } else {
++                  const SHtapKey key = sample_hot_tail(*hot_zipf, FLAGS_s_htap_hot_window, current_max_key.load());
++                  hot_update(table, key);
++               }
++               wiredtiger_db.commitTX();
++               write_committed[t_i]++;
++            }
++            jumpmuCatch() { write_aborted[t_i]++; }
++         }
++         running_threads_counter--;
++      });
++   }
++   // -------------------------------------------------------------------------------------
++   threads.emplace_back([&]() {
++      running_threads_counter++;
++      if (FLAGS_print_header) {
++         cout << "t,tag,s_htap_committed,s_htap_aborted,olap_scans,olap_aborted" << endl;
++      }
++      u64 time = 0;
++      while (keep_running) {
++         u64 total_committed = 0, total_aborted = 0, total_olap = 0, total_olap_aborted = 0;
++         for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
++            total_committed += write_committed[t_i].exchange(0);
++            total_aborted += write_aborted[t_i].exchange(0);
++            total_olap += olap_committed[t_i].exchange(0);
++            total_olap_aborted += olap_aborted[t_i].exchange(0);
++         }
++         cout << time++ << "," << FLAGS_tag << "," << total_committed << "," << total_aborted << ","
++              << total_olap << "," << total_olap_aborted << endl;
++         sleep(1);
++      }
++      running_threads_counter--;
++   });
++   // -------------------------------------------------------------------------------------
++   sleep(FLAGS_run_for_seconds);
++   keep_running = false;
++   while (running_threads_counter) {
++   }
++   for (auto& t : threads) {
++      t.join();
++   }
++   // Summary (not raw per-op samples - see the matching comment in wiredtiger_ycsb.cpp /
++   // cMVBT's s_htap_driver.rs::write_results for why). Nearest-rank percentiles, in
++   // microseconds. Written to the current working directory, matching every other engine's
++   // convention here (scripts/engines/wiredtiger.py always invokes this binary with
++   // cwd=output_dir).
++   std::vector<uint64_t> all_scan_latencies_ns;
++   for (auto& v : scan_latencies_ns) {
++      all_scan_latencies_ns.insert(all_scan_latencies_ns.end(), v.begin(), v.end());
++   }
++   std::sort(all_scan_latencies_ns.begin(), all_scan_latencies_ns.end());
++   auto pct = [&](double p) -> double {
++      if (all_scan_latencies_ns.empty()) return 0.0;
++      size_t idx = std::min(all_scan_latencies_ns.size() - 1,
++                             static_cast<size_t>(std::llround(p * (all_scan_latencies_ns.size() - 1))));
++      return all_scan_latencies_ns[idx] / 1000.0;
++   };
++   double avg_us = 0.0;
++   if (!all_scan_latencies_ns.empty()) {
++      uint64_t sum = 0;
++      for (auto v : all_scan_latencies_ns) sum += v;
++      avg_us = static_cast<double>(sum) / all_scan_latencies_ns.size() / 1000.0;
++   }
++   std::ofstream scan_latency_file("s_htap_scan_latency_summary.csv");
++   scan_latency_file << "p50_us,p95_us,p99_us,count,avg_us\n";
++   scan_latency_file << pct(0.50) << "," << pct(0.95) << "," << pct(0.99) << ","
++                      << all_scan_latencies_ns.size() << "," << avg_us << "\n";
++   return 0;
++}
