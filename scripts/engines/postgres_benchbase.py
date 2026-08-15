@@ -196,6 +196,50 @@ YCSB_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 """
 
 
+SHTAP_CONFIG_TEMPLATE = """<?xml version="1.0"?>
+<parameters>
+    <type>POSTGRES</type>
+    <driver>org.postgresql.Driver</driver>
+    <url>jdbc:postgresql://localhost:5432/{database}?sslmode=disable&amp;ApplicationName=s_htap&amp;reWriteBatchedInserts=true</url>
+    <username>{username}</username>
+    <password>{password}</password>
+    <reconnectOnConnectionFailure>true</reconnectOnConnectionFailure>
+    <isolation>TRANSACTION_REPEATABLE_READ</isolation>
+    <batchsize>128</batchsize>
+    <scalefactor>{scalefactor}</scalefactor>
+    <hotWindow>{hot_window}</hotWindow>
+    <hotTheta>{hot_theta}</hotTheta>
+    <arrivalRatio>{arrival_ratio}</arrivalRatio>
+    <maxLateness>{max_lateness}</maxLateness>
+    <olapThreads>{olap_threads}</olapThreads>
+    <olapLag>{olap_lag}</olapLag>
+    <olapSpan>{olap_span}</olapSpan>
+    <terminals>{terminals}</terminals>
+    <works>
+        <work>
+            <time>{duration}</time>
+            <!-- Measure saturation throughput; a numeric rate is a global BenchBase
+                 client-side request throttle and would flatten every thread sweep. -->
+            <rate>unlimited</rate>
+            <!-- These weights only matter for BenchBase's own bookkeeping (its per-
+                 transaction-type latency CSVs bucket by whichever type its global weighted
+                 dispatch assigns) - which SQL actually runs is decided by SHTAPWorker itself
+                 from its fixed write/OLAP terminal-id role (see that class's doc), not by
+                 this distribution. Proportioned to the write/OLAP terminal split (and,
+                 within the write share, to arrivalRatio) purely to keep that bookkeeping
+                 close to reality. -->
+            <weights>{weights}</weights>
+        </work>
+    </works>
+    <transactiontypes>
+        <transactiontype><name>ArrivalUpsert</name></transactiontype>
+        <transactiontype><name>HotTailUpdate</name></transactiontype>
+        <transactiontype><name>OlapScan</name></transactiontype>
+    </transactiontypes>
+</parameters>
+"""
+
+
 def _find_postmaster_pid() -> Optional[int]:
     """The oldest process matching the postmaster's own invocation - `-o` asks pgrep for
     the single oldest match, which is the postmaster itself (every backend/checkpointer/
@@ -377,6 +421,35 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         ))
         bench_type = "tpcc,chbenchmark"
         metric_name = "new_order_per_sec"
+    elif workload == "s_htap":
+        duration = scale.s_htap_duration
+        # scale.ycsb_threads holds the swept --threads value for every workload (see
+        # compare_engines.py's scale_variant construction) - split it into a fixed OLAP-scanner
+        # pool plus the remainder as write threads, matching cmvbt.py's "s_htap" branch exactly
+        # (SHTAPBenchmark.makeWorkersImpl on the Java side re-derives the same split from
+        # olapThreads/terminals independently, so this is only needed here for the <weights>
+        # bookkeeping below, not to tell the JVM anything it couldn't figure out itself).
+        threads = scale.ycsb_threads
+        olap_threads = min(scale.s_htap_olap_threads, max(1, threads - 1))
+        write_threads = max(1, threads - olap_threads)
+        write_share = write_threads / threads * 100.0
+        olap_share = olap_threads / threads * 100.0
+        weights = (
+            f"{write_share * scale.s_htap_arrival_ratio:.3f},"
+            f"{write_share * (1.0 - scale.s_htap_arrival_ratio):.3f},"
+            f"{olap_share:.3f}"
+        )
+        config_path.write_text(SHTAP_CONFIG_TEMPLATE.format(
+            scalefactor=scale.s_htap_record_count / 1000.0,
+            terminals=threads, duration=duration, weights=weights,
+            hot_window=scale.s_htap_hot_window, hot_theta=scale.s_htap_theta,
+            arrival_ratio=scale.s_htap_arrival_ratio, max_lateness=scale.s_htap_max_lateness,
+            olap_threads=scale.s_htap_olap_threads, olap_lag=scale.s_htap_olap_lag,
+            olap_span=scale.s_htap_olap_span,
+            **_template_connection_values(),
+        ))
+        bench_type = "s_htap"
+        metric_name = "write_ops_per_sec"
     else:
         letter = workload.split("_", 1)[1]
         duration = scale.ycsb_duration
@@ -445,6 +518,8 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         latency = _latency_from_results(results_dir, "ScanRecord")
     elif workload in ("htap_q1", "htap_q6"):
         latency = _latency_from_results(results_dir, "Q1" if workload == "htap_q1" else "Q6")
+    elif workload == "s_htap":
+        latency = _latency_from_results(results_dir, "OlapScan")
 
     return common.NormalizedResult(
         "postgres", workload, scale.label, duration, metric_name, value, server_peak_rss_mb,

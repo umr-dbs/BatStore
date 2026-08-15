@@ -40,9 +40,16 @@ def _sum_stdout_column(stdout_path: Path, column: str) -> float:
     csv_text = "\n".join(lines[header_idx:])
     total = 0.0
     for row in csv.DictReader(io.StringIO(csv_text)):
+        value = row.get(column)
+        # DictReader maps a short row (fewer commas than the header - e.g. a trailing
+        # non-CSV summary line some binaries print after their per-second loop, such as
+        # wiredtiger_s_htap.cpp's "new_arrival ..." counts) to None for any column past
+        # what that row actually has - skip it rather than let float(None) raise.
+        if value is None:
+            continue
         try:
-            total += float(row[column])
-        except (KeyError, ValueError):
+            total += float(value)
+        except ValueError:
             continue
     return total
 
@@ -90,6 +97,29 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
             "--isolation_level=si", "--print_header",
         ]
         metric_name, metric_column = "new_order_per_sec", "oltp_new_order_committed"
+    elif workload == "s_htap":
+        duration = scale.s_htap_duration
+        threads = scale.ycsb_threads
+        olap_threads = min(scale.s_htap_olap_threads, max(1, threads - 1))
+        write_threads = max(1, threads - olap_threads)
+        args = [
+            str(leanstore_build.binary("wiredtiger_s_htap")),
+            f"--s_htap_record_count={scale.s_htap_record_count}",
+            f"--s_htap_write_threads={write_threads}",
+            f"--s_htap_olap_threads={olap_threads}",
+            f"--s_htap_hot_window={scale.s_htap_hot_window}",
+            f"--s_htap_hot_theta={scale.s_htap_theta}",
+            f"--s_htap_arrival_ratio={scale.s_htap_arrival_ratio}",
+            f"--s_htap_max_lateness={scale.s_htap_max_lateness}",
+            f"--s_htap_olap_lag={scale.s_htap_olap_lag}",
+            f"--s_htap_olap_span={scale.s_htap_olap_span}",
+            f"--worker_threads={write_threads + olap_threads}",
+            f"--dram_gib={scale.dram_gib}",
+            f"--ssd_path={ssd_dir}",
+            f"--run_for_seconds={duration}",
+            "--isolation_level=si", "--print_header",
+        ]
+        metric_name, metric_column = "write_ops_per_sec", "s_htap_committed"
     else:
         letter = workload.split("_", 1)[1]
         duration = scale.ycsb_duration
@@ -128,6 +158,8 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if workload == "ycsb_e":
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
+    elif workload == "s_htap":
+        latency = common.read_latency_summary(output_dir / "s_htap_scan_latency_summary.csv")
     elif workload in ("htap_q1", "htap_q6"):
         latency = common.read_latency_summary(output_dir / "ch_query_latency_summary.csv")
 

@@ -20,6 +20,10 @@ pub mod ycsb_load;
 pub mod ycsb_txn;
 pub mod ycsb_driver;
 
+pub mod s_htap_random;
+pub mod s_htap_txn;
+pub mod s_htap_driver;
+
 pub mod mem_stats;
 pub mod suite;
 
@@ -27,3 +31,5 @@ pub mod suite;
 pub mod mdbx_ycsb;
 #[cfg(feature = "mdbx-backend")]
 pub mod mdbx_tpcc;
+#[cfg(feature = "mdbx-backend")]
+pub mod mdbx_s_htap;

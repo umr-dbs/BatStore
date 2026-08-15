@@ -239,6 +239,8 @@ def workload_dataset_gib(workload: str, scale: "Scale") -> float:
     """
     if workload in (["tpcc"] + HTAP_WORKLOADS):
         return scale.tpcc_warehouses * 0.1
+    if workload == "s_htap":
+        return scale.s_htap_record_count * 1024 / (1024 ** 3)
     return scale.ycsb_records * 1024 / (1024 ** 3)
 
 
@@ -304,6 +306,25 @@ class Scale:
     ycsb_threads: int = 16
     ycsb_duration: int = 30
     ycsb_theta: float = 0.99
+    # "S-HTAP" streaming workload (src/mv_bench/s_htap_driver.rs): near-sorted
+    # arrivals + recency-biased hot-tail updates running concurrently with OLAP scans
+    # that straddle the cold/hot boundary - see that module's doc. `s_htap_record_count`
+    # is the cold historical corpus loaded up front (mirrors ycsb_records); the swept
+    # --threads value (scale.ycsb_threads, set for every workload - see
+    # compare_engines.py's scale_variant construction) is split into
+    # `s_htap_olap_threads` dedicated OLAP scanners plus the remainder as write
+    # threads, not an additional independent knob here. A longer default duration than
+    # plain YCSB: this workload's whole point is slow analytical scans, which need more
+    # wall-clock time than a point-op mix to produce a meaningful latency distribution.
+    s_htap_record_count: int = 2_000_000
+    s_htap_duration: int = 60
+    s_htap_hot_window: int = 10_000
+    s_htap_theta: float = 0.99
+    s_htap_arrival_ratio: float = 0.2
+    s_htap_max_lateness: int = 50
+    s_htap_olap_threads: int = 2
+    s_htap_olap_lag: int = 0
+    s_htap_olap_span: int = 30_000
     # LeanStore/WiredTiger buffer pool / cache size; unused by cmvbt and postgres (cmvbt has
     # no comparable cap and runs fully in-memory already - see cmvbt.py's wal_enabled
     # default; postgres's shared_buffers is configured on the server directly, outside this
@@ -375,7 +396,11 @@ YCSB_WORKLOADS = ["ycsb_a", "ycsb_b", "ycsb_c", "ycsb_d", "ycsb_e", "ycsb_f"]
 # src/mv_bench/tpch_queries.rs::q1/q6, the reference implementation every engine's own port
 # (including libmdbx's and both vWeaver_ermia variants') mirrors function-for-function.
 HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
-ALL_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_WORKLOADS
+# "S-HTAP" streaming workload (see Scale's s_htap_* fields' doc) - one name, no
+# lettered variants (unlike YCSB A-F): the interesting axis here is the hot_window/
+# olap_lag/olap_span shape, not a fixed menu of op-mix presets, so it stays a single
+# workload tuned via those Scale fields / compare_engines.py flags instead.
+ALL_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_WORKLOADS + ["s_htap"]
 ENGINES = ["cmvbt", "leanstore", "wiredtiger", "postgres", "vweaver_ermia", "vweaver_ermia_frugal", "libmdbx"]
 
 

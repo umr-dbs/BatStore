@@ -92,6 +92,26 @@ def run(
         ]
         metric_name = "new_order_per_sec"
         ts_file, ts_column = "tpcc_oltp_timeseries.csv", "new_order_committed"
+    elif workload == "s_htap":
+        duration = scale.s_htap_duration
+        # scale.ycsb_threads holds the swept --threads value for every workload (see
+        # compare_engines.py's scale_variant construction) - split it into a fixed
+        # OLAP-scanner pool plus the remainder as write threads, rather than sweeping
+        # write/OLAP counts independently.
+        threads = scale.ycsb_threads
+        olap_threads = min(scale.s_htap_olap_threads, max(1, threads - 1))
+        write_threads = max(1, threads - olap_threads)
+        args = [
+            str(BINARY), "s_htap", str(scale.s_htap_record_count), str(write_threads),
+            str(olap_threads), str(duration), str(scale.s_htap_hot_window),
+            str(scale.s_htap_theta), str(scale.s_htap_arrival_ratio),
+            str(scale.s_htap_max_lateness), str(scale.s_htap_olap_lag),
+            str(scale.s_htap_olap_span), str(field_count), str(field_length),
+            "false", str(read_payload).lower(), "fg", gc_bool, "false", "true",
+            str(wal_path), "5", os.environ.get("CMVBT_YCSB_MODE", "atomic"),
+        ]
+        metric_name = "write_ops_per_sec"
+        ts_file, ts_column = "s_htap_timeseries.csv", "ops_completed"
     else:
         letter = workload.split("_", 1)[1]
         duration = scale.ycsb_duration
@@ -139,6 +159,8 @@ def run(
     # to tpcc_scan.csv. Plain TPC-C deliberately has no analytical thread.
     if workload == "ycsb_e":
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
+    elif workload == "s_htap":
+        latency = common.read_latency_summary(output_dir / "s_htap_scan_latency_summary.csv")
     elif workload in ("htap_q1", "htap_q6"):
         mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
         latency = common.percentiles_from_samples(

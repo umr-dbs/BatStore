@@ -16,7 +16,7 @@ BUILD_DIR = LEANSTORE_REPO / "build"
 WIREDTIGER_BUILD_DIR = common.WIREDTIGER_BUILD_DIR
 
 
-def ensure_built(targets=("tpcc", "ycsb", "wiredtiger_tpcc", "wiredtiger_ycsb")) -> None:
+def ensure_built(targets=("tpcc", "ycsb", "wiredtiger_tpcc", "wiredtiger_ycsb", "s_htap", "wiredtiger_s_htap")) -> None:
     common.check_release_build(WIREDTIGER_BUILD_DIR, "WiredTiger")
     common.check_release_build(BUILD_DIR, "LeanStore")
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
