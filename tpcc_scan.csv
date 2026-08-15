@@ -1,0 +1,10 @@
+mode,elapsed_secs,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary,staleness_versions
+scan_after_delay,0.001,0,9236863,88,827351,106363.56,,
+scan_after_delay,1.001,1,9236926,88,42930,2049848.59,,
+scan_after_delay,3.002,2,9821978,88,68000,1294117.65,,
+scan_after_delay,6.002,3,10853814,88,39390,2234069.56,,
+scan_after_delay,10.002,4,12224942,88,41110,2140598.39,,
+scan_after_delay,15.003,5,13921821,88,55150,1595648.23,,
+scan_after_delay,21.003,6,15936908,88,54620,1611131.45,,
+scan_after_delay,28.003,7,18266184,88,56500,1557522.12,,
+scan_after_delay,36.003,8,20913468,88,59180,1486988.85,,

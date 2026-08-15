@@ -105,6 +105,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cmvbt-ycsb-mode", choices=["atomic", "transaction"], default="atomic",
                    help="cMVBT YCSB path: commit-before-publish auto-commit (default), or ordinary transaction lifecycle")
     p.add_argument("--dram-gib", type=float)
+
+    p.add_argument("--s-htap-record-count", type=int,
+                   help="cold historical corpus loaded before the S-HTAP workload's timed phase")
+    p.add_argument("--s-htap-duration", type=int)
+    p.add_argument("--s-htap-hot-window", type=int,
+                   help="width, in keys, of the recency-biased hot-update tail")
+    p.add_argument("--s-htap-theta", type=float, help="zipf skew of hot-tail updates")
+    p.add_argument("--s-htap-arrival-ratio", type=float,
+                   help="fraction of write-thread ops that are new arrivals vs. hot-tail updates")
+    p.add_argument("--s-htap-max-lateness", type=int,
+                   help="bound on how far behind the arrival ticket a late event's key can land")
+    p.add_argument("--s-htap-olap-threads", type=int,
+                   help="OLAP scanner threads carved out of each --threads sweep point "
+                        "(the remainder are write threads)")
+    p.add_argument("--s-htap-olap-lag", type=int,
+                   help="how far behind the current tail an OLAP scan's newest edge sits")
+    p.add_argument("--s-htap-olap-span", type=int, help="width, in keys, of each OLAP scan")
     return p.parse_args()
 
 
@@ -117,6 +134,15 @@ def build_scale(args: argparse.Namespace) -> common.Scale:
         "ycsb_duration": args.ycsb_duration,
         "ycsb_theta": args.theta,
         "dram_gib": args.dram_gib,
+        "s_htap_record_count": args.s_htap_record_count,
+        "s_htap_duration": args.s_htap_duration,
+        "s_htap_hot_window": args.s_htap_hot_window,
+        "s_htap_theta": args.s_htap_theta,
+        "s_htap_arrival_ratio": args.s_htap_arrival_ratio,
+        "s_htap_max_lateness": args.s_htap_max_lateness,
+        "s_htap_olap_threads": args.s_htap_olap_threads,
+        "s_htap_olap_lag": args.s_htap_olap_lag,
+        "s_htap_olap_span": args.s_htap_olap_span,
     }
     for field, value in overrides.items():
         if value is not None:
@@ -129,6 +155,8 @@ def _workload_duration(workload: str, scale: common.Scale) -> float:
     # thread) - same duration knob as plain "tpcc", not YCSB's.
     if workload in (["tpcc"] + common.HTAP_WORKLOADS):
         return scale.tpcc_duration
+    if workload == "s_htap":
+        return scale.s_htap_duration
     return scale.ycsb_duration
 
 
@@ -167,6 +195,10 @@ def main() -> None:
         sys.exit("--warehouses and --tpcc-duration must be positive")
     if scale.ycsb_records <= 0 or scale.ycsb_duration <= 0:
         sys.exit("--ycsb-records and --ycsb-duration must be positive")
+    if scale.s_htap_record_count <= 0 or scale.s_htap_duration <= 0:
+        sys.exit("--s-htap-record-count and --s-htap-duration must be positive")
+    if scale.s_htap_hot_window <= 0 or scale.s_htap_olap_span <= 0:
+        sys.exit("--s-htap-hot-window and --s-htap-olap-span must be positive")
     if not math.isfinite(scale.ycsb_theta) or scale.ycsb_theta < 0.0:
         sys.exit("--theta must be a finite, non-negative number")
     if scale.dram_gib <= 0:

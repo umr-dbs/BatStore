@@ -67,6 +67,36 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
             "--isolation_level=si", "--print_tx_console=false",
         ]
         metric_name, metric_column = "new_order_per_sec", "new_order_tx"
+    elif workload == "s_htap":
+        duration = scale.s_htap_duration
+        # scale.ycsb_threads holds the swept --threads value for every workload (see
+        # compare_engines.py's scale_variant construction) - split it into a fixed
+        # OLAP-scanner pool plus the remainder as write threads, matching cmvbt.py's
+        # s_htap branch exactly.
+        threads = scale.ycsb_threads
+        olap_threads = min(scale.s_htap_olap_threads, max(1, threads - 1))
+        write_threads = max(1, threads - olap_threads)
+        args = [
+            str(leanstore_build.binary("s_htap")),
+            f"--s_htap_record_count={scale.s_htap_record_count}",
+            f"--s_htap_write_threads={write_threads}",
+            f"--s_htap_olap_threads={olap_threads}",
+            f"--s_htap_hot_window={scale.s_htap_hot_window}",
+            f"--s_htap_hot_theta={scale.s_htap_theta}",
+            f"--s_htap_arrival_ratio={scale.s_htap_arrival_ratio}",
+            f"--s_htap_max_lateness={scale.s_htap_max_lateness}",
+            f"--s_htap_olap_lag={scale.s_htap_olap_lag}",
+            f"--s_htap_olap_span={scale.s_htap_olap_span}",
+            f"--worker_threads={write_threads + olap_threads}",
+            f"--dram_gib={scale.dram_gib}",
+            f"--ssd_path={ssd_path}", "--trunc",
+            f"--csv_path={csv_prefix}",
+            f"--run_for_seconds={duration}",
+            "--isolation_level=si", "--print_tx_console=false",
+        ]
+        # "tx" (not an s_htap-specific counter): every write op here is one
+        # commitTX(), same generic per-commit counter YCSB uses.
+        metric_name, metric_column = "write_ops_per_sec", "tx"
     else:
         letter = workload.split("_", 1)[1]
         duration = scale.ycsb_duration
@@ -107,6 +137,8 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if workload == "ycsb_e":
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
+    elif workload == "s_htap":
+        latency = common.read_latency_summary(output_dir / "s_htap_scan_latency_summary.csv")
     elif workload in ("htap_q1", "htap_q6"):
         latency = common.read_latency_summary(output_dir / "ch_query_latency_summary.csv")
 
