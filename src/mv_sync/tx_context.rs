@@ -440,11 +440,22 @@ impl TxContext {
     /// prune the boundary that the just-starting transaction will need.
     #[inline]
     fn pruning_snapshots(&self) -> impl Iterator<Item = SnapShot> + '_ {
-        self.live_snapshots()
-            .chain(self.in_flight_bound.iter().filter_map(|slot| {
+        // Read the in-flight registration bounds before the published
+        // snapshots. A registering worker publishes its bound first, then
+        // its live snapshot, and only then clears the bound. Reading these
+        // collections in the opposite order can miss both sides of that
+        // handoff: observe an empty live slot, let the worker publish and
+        // clear its bound, then observe the cleared bound. Pruning would
+        // consequently drop the LCB required by the newly active snapshot.
+        // This is the same ordering requirement documented by
+        // `live_min_snapshot` below.
+        self.in_flight_bound
+            .iter()
+            .filter_map(|slot| {
                 let v = slot.load(Acquire);
                 (v != NOT_IN_FLIGHT).then_some(v)
-            }))
+            })
+            .chain(self.live_snapshots())
     }
 
     #[inline(always)]
