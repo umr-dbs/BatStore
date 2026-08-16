@@ -107,7 +107,7 @@ impl<
                     let next_curr_guard = next_curr_block.borrow_read();
 
                     if LOG_REORG {
-                        let r = next_curr_guard.deref().unsafe_degree();
+                        let r = next_curr_guard.deref().unsafe_degree(&self.ctx);
 
                         match r {
                             BlockUnsafeDegree::Overflow => unsafe {
@@ -119,7 +119,7 @@ impl<
                             _ => {}
                         }
                     }
-                    match next_curr_guard.deref().unsafe_degree() {
+                    match next_curr_guard.deref().unsafe_degree(&self.ctx) {
                         BlockUnsafeDegree::Overflow if curr_guard.upgrade_write_lock() => {
                             match self.on_overflow_node(curr_guard, next_curr_guard, index) {
                             Ok(guard) => curr_guard = guard,

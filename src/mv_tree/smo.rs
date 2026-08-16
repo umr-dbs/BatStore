@@ -6,6 +6,7 @@ use crate::mv_query::interval::Interval;
 use crate::mv_record_model::record_point::RecordPoint;
 use crate::mv_root::index_root::RootIndexGuard;
 use crate::mv_root::root::Root;
+use crate::mv_sync::tx_context::TxContext;
 use crate::mv_test::{DIAG, VERBOSE, record_version_split};
 use crate::mv_tree::mvbt::MVBTSt;
 use itertools::Itertools;
@@ -171,11 +172,6 @@ impl<
     //     0
     // }
 
-    #[inline]
-    fn is_overflow(&self) -> bool {
-        self.unsafe_degree().is_overflow()
-    }
-
     /// The raw "is there room for up to 2 more entries" capacity check —
     /// `active + dead >= overflow_units_count()`, the same condition
     /// `unsafe_degree()` computes internally as its own local `is_overflow`
@@ -206,8 +202,32 @@ impl<
         (active as usize) + (dead as usize) >= self.overflow_units_count()
     }
 
+    /// Whether at least one of this leaf's dead entries is still protected
+    /// by a live transaction's snapshot (`MVBTSt::record_survives_gc`'s own
+    /// condition, inlined here since `Block` has no `ctx` of its own to
+    /// call that method with) — i.e. whether a merge attempt here could
+    /// still hit the "combined footprint can't shrink while the same
+    /// transaction protects it" livelock `unsafe_degree()`'s raw-footprint
+    /// check exists to avoid (see that method's doc). Short-circuits on the
+    /// first protected entry found, so the case that check was originally
+    /// written for (substantial *protected* garbage) stays cheap; only a
+    /// leaf whose garbage is entirely unprotected pays the full scan, and
+    /// only from the one narrow caller below — not on every leaf on every
+    /// traversal.
+    #[inline]
+    fn has_protected_garbage(&self, ctx: &TxContext) -> bool {
+        self.as_records().iter().any(|r| {
+            let version = r.version();
+            !version.is_live()
+                && !version.insertion_stamp().is_invalid()
+                && version
+                    .deletion_stamp()
+                    .is_some_and(|del| ctx.is_snapshot_live(del.ts_start()))
+        })
+    }
+
     #[inline(always)]
-    pub fn unsafe_degree(&self) -> BlockUnsafeDegree {
+    pub fn unsafe_degree(&self, ctx: &TxContext) -> BlockUnsafeDegree {
         let (active, dead) = self.active_dead_count();
 
         let (active, dead) = (active as usize, dead as usize);
@@ -247,10 +267,36 @@ impl<
         // `Ok` instead -- the traversal simply descends through it (still
         // well under capacity) rather than forcing a merge attempt that
         // cannot converge until the protecting transaction finishes.
+        //
+        // That raw-footprint check is deliberately blind to *why* `dead` is
+        // large -- it can't tell "still protected by an open transaction"
+        // apart from "was protected once, but that transaction committed
+        // long ago and every one of these entries is now permanently,
+        // safely dead." A leaf built up entirely from one-shot,
+        // never-reinserted deletes (so nothing here is cold-offload
+        // eligible either — see the branch above) can accumulate enough
+        // such garbage to sit above the 20% bar forever, even at
+        // `active == 0`, leaving it permanently exempt from underflow and
+        // permanently un-mergeable — confirmed via
+        // `ascending_insert_then_random_order_delete_leaves_tree_empty`/
+        // `descending_insert_then_random_order_delete_leaves_tree_empty`
+        // (`tests/crud_persistence_tests.rs`): every leaf across a
+        // fully-deleted 5-level tree stayed `Ok`, so nothing ever merged.
+        // `has_protected_garbage` resolves the ambiguity directly: if
+        // `active` alone is already sparse and none of the "extra" raw
+        // footprint is still protected, this leaf's true, live-at-rebuild
+        // content is just its own live records (zero here) -- merging it
+        // is always genuine progress, not a repeat of the same fences,
+        // since a rebuild would simply drop every unprotected dead entry
+        // rather than carry it forward. Only reached once the cheap
+        // raw-footprint check above has already failed to classify this as
+        // underflow, so a healthy, busy leaf never pays this scan.
         if self.is_leaf() {
             return if active + dead >= self.overflow_units_count() {
                 BlockUnsafeDegree::Overflow
             } else if active + dead <= self.filling_20_percent() {
+                BlockUnsafeDegree::ActiveUnderflow
+            } else if active <= self.filling_20_percent() && !self.has_protected_garbage(ctx) {
                 BlockUnsafeDegree::ActiveUnderflow
             } else {
                 BlockUnsafeDegree::Ok
