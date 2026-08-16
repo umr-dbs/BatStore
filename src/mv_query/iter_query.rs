@@ -157,10 +157,23 @@ impl<
     /// (`mv_query::query`) for why: a cold chain is fixed for a leaf's
     /// whole lifetime, set once before that leaf is ever linked into the
     /// tree, and a cold page is likewise never mutated after construction.
+    /// `hot_keys` — every key this same leaf visit already produced a match
+    /// for from the *hot* page — is consulted before `is_visible`/`matches`
+    /// for each cold candidate: a key with a hot match already has its
+    /// current answer, so a cold entry for that same key (an older, formerly
+    /// superseded version whose own `matches` should ordinarily be mutually
+    /// exclusive with the hot version's, but isn't guaranteed to be under
+    /// every hot/cold classification path — see `mv_tree::smo`'s
+    /// `grouped_hot_cold_records`) must never be surfaced alongside it, or a
+    /// scan double-counts that key. Skipping by key here is strictly
+    /// defense in depth over fixing the classification itself, but it's the
+    /// one place that can guarantee "one visible version per key" for every
+    /// caller regardless of how the hot/cold split was decided.
     pub(crate) fn walk_cold_chain_for_range<F, V>(
         mut link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
         range: Interval<Key>,
         is_visible: &mut F,
+        hot_keys: &std::collections::HashSet<Key>,
         mut f: V,
     ) where
         F: FnMut(TxStamp) -> bool,
@@ -170,7 +183,10 @@ impl<
             let cold_guard = link.cold().borrow_read();
             let cold_leaf = cold_guard.as_leaf_page_ref();
             for r in cold_leaf.as_records() {
-                if range.contains(r.key()) && r.version().matches(is_visible) {
+                if range.contains(r.key())
+                    && !hot_keys.contains(&r.key())
+                    && r.version().matches(is_visible)
+                {
                     if !f(r) {
                         return;
                     }
@@ -186,9 +202,10 @@ impl<
         link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
         range: Interval<Key>,
         is_visible: &mut F,
+        hot_keys: &std::collections::HashSet<Key>,
         out: &mut VecDeque<RecordPointResult<Key, Payload>>,
     ) {
-        Self::walk_cold_chain_for_range(link, range, is_visible, |r| {
+        Self::walk_cold_chain_for_range(link, range, is_visible, hot_keys, |r| {
             out.push_back(RecordPointResult::from_leaf(r));
             true
         });
@@ -310,10 +327,13 @@ impl<
 
                         let cold_link = *curr_block.cold_link();
                         if !cold_link.is_none() {
+                            let hot_keys: std::collections::HashSet<Key> =
+                                self.buff.iter().skip(before).map(|r| r.key).collect();
                             Self::extend_from_cold_chain(
                                 cold_link,
                                 self.range,
                                 &mut is_visible,
+                                &hot_keys,
                                 &mut self.buff,
                             );
                         }
@@ -376,10 +396,13 @@ impl<
                     PageType::LeafRef(leaf_page) => {
                         let records = leaf_page.as_records();
                         let mut matched = 0;
+                        let mut hot_keys: std::collections::HashSet<Key> =
+                            std::collections::HashSet::new();
                         if full_key_range {
                             for record in records {
                                 if record.version().matches(&mut is_visible) {
                                     matched += 1;
+                                    hot_keys.insert(record.key());
                                     if let Err(error) = visit(record.key(), record.payload()) {
                                         visit_error = Some(error);
                                         return;
@@ -392,6 +415,7 @@ impl<
                                     && record.version().matches(&mut is_visible)
                                 {
                                     matched += 1;
+                                    hot_keys.insert(record.key());
                                     if let Err(error) = visit(record.key(), record.payload()) {
                                         visit_error = Some(error);
                                         return;
@@ -407,6 +431,7 @@ impl<
                                 cold_link,
                                 self.range,
                                 &mut is_visible,
+                                &hot_keys,
                                 |r| match visit(r.key(), r.payload()) {
                                     Ok(()) => true,
                                     Err(error) => {

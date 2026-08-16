@@ -60,6 +60,18 @@ fn scan_all(db: &TpccDatabase, table: Table) -> Vec<RecordPointResult<TpccKey, T
     let mut tx = TpccTxn::begin(db);
     let rows = many(tx.range(table, full_range(), true));
     tx.commit();
+    if matches!(table, Table::Warehouse | Table::District) {
+        let mut keys: Vec<TpccKey> = rows.iter().map(|r| r.key).collect();
+        keys.sort();
+        let before_dedup = keys.len();
+        keys.dedup();
+        if keys.len() != before_dedup {
+            eprintln!(
+                "[scan-dup-diag] table={table:?} scan returned {before_dedup} rows but only {} distinct keys!",
+                keys.len()
+            );
+        }
+    }
     rows
 }
 
@@ -196,9 +208,25 @@ fn run_stress_and_check_invariants(
     num_threads: usize,
     duration: Duration,
 ) {
+    run_stress_and_check_invariants_gc(Some(gc_update_in_place), num_threads, duration)
+}
+
+fn run_stress_and_check_invariants_no_gc(num_threads: usize, duration: Duration) {
+    run_stress_and_check_invariants_gc(None, num_threads, duration)
+}
+
+fn run_stress_and_check_invariants_gc(
+    gc_update_in_place: Option<bool>,
+    num_threads: usize,
+    duration: Duration,
+) {
+    tpcc_txn::NO_DIAG_LOG.lock().unwrap().clear();
+    tpcc_txn::PAY_DIAG_LOG.lock().unwrap().clear();
     let cfg = stress_cfg();
     let db = Arc::new(TpccDatabase::new(RootIndexType::default()));
-    db.enable_gc(gc_update_in_place);
+    if let Some(gc_update_in_place) = gc_update_in_place {
+        db.enable_gc(gc_update_in_place);
+    }
 
     populate_items(&db, &cfg);
     let history_seq = Arc::new(AtomicU64::new(0));
@@ -207,6 +235,14 @@ fn run_stress_and_check_invariants(
     }
 
     let before = snapshot(&db);
+    let before_w_ytd: std::collections::HashMap<u32, f64> = scan_all(&db, Table::Warehouse)
+        .iter()
+        .map(|r| (r.key as u32, r.payload.as_warehouse().w_ytd))
+        .collect();
+    let before_d_ytd: std::collections::HashMap<TpccKey, f64> = scan_all(&db, Table::District)
+        .iter()
+        .map(|r| (r.key, r.payload.as_district().d_ytd))
+        .collect();
 
     let stop = Arc::new(AtomicBool::new(false));
     let committed_new_order = Arc::new(AtomicU64::new(0));
@@ -254,6 +290,32 @@ fn run_stress_and_check_invariants(
 
     let after = snapshot(&db);
 
+    if after.d_next_o_id_sum - before.d_next_o_id_sum != committed_no {
+        let districts_now = scan_all(&db, Table::District);
+        let log = tpcc_txn::NO_DIAG_LOG.lock().unwrap();
+        for w in 1..=cfg.num_warehouses {
+            for d in 1..=cfg.districts_per_warehouse {
+                let mut o_ids: Vec<u32> = log
+                    .iter()
+                    .filter(|&&(lw, ld, _)| lw == w && ld == d)
+                    .map(|&(_, _, o)| o)
+                    .collect();
+                o_ids.sort();
+                let logged_count = o_ids.len();
+                let dup_before = o_ids.len();
+                o_ids.dedup();
+                let actual = districts_now
+                    .iter()
+                    .find(|r| r.key == crate::mv_bench::tpcc_schema::k_district(w, d))
+                    .map(|r| r.payload.as_district().d_next_o_id);
+                eprintln!(
+                    "[diag] w={w} d={d} actual_d_next_o_id={actual:?} max_logged_o_id={:?} logged_count={logged_count} dup_o_ids={}",
+                    o_ids.last(),
+                    dup_before - o_ids.len()
+                );
+            }
+        }
+    }
     assert_eq!(
         after.d_next_o_id_sum - before.d_next_o_id_sum,
         committed_no,
@@ -298,6 +360,48 @@ fn run_stress_and_check_invariants(
     // Float sums over many small additions accumulate a little rounding
     // error; scale the tolerance with how many payments/deliveries actually ran.
     let eps = 1e-6 * (committed_pay.max(1) as f64 + delivered.max(1) as f64);
+    if (w_delta - d_delta).abs() >= eps {
+        eprintln!(
+            "[pay-diag] SUMMARY w_delta={w_delta} d_delta={d_delta} eps={eps} before.w_ytd_sum={} after.w_ytd_sum={} before.d_ytd_sum={} after.d_ytd_sum={}",
+            before.w_ytd_sum, after.w_ytd_sum, before.d_ytd_sum, after.d_ytd_sum
+        );
+        let pay_log = tpcc_txn::PAY_DIAG_LOG.lock().unwrap();
+        let warehouses_now = scan_all(&db, Table::Warehouse);
+        let districts_now = scan_all(&db, Table::District);
+        for w in 1..=cfg.num_warehouses {
+            let logged_w: f64 = pay_log.iter().filter(|&&(lw, _, _)| lw == w).map(|&(_, _, a)| a).sum();
+            let actual_w = warehouses_now
+                .iter()
+                .find(|r| r.key as u32 == w)
+                .map(|r| r.payload.as_warehouse().w_ytd)
+                .unwrap();
+            let before_w = *before_w_ytd.get(&w).unwrap();
+            eprintln!(
+                "[pay-diag] warehouse w={w} before={before_w} actual_after={actual_w} actual_delta={} logged_delta={logged_w} match={}",
+                actual_w - before_w,
+                (actual_w - before_w - logged_w).abs() < 1e-6
+            );
+            for d in 1..=cfg.districts_per_warehouse {
+                let key = crate::mv_bench::tpcc_schema::k_district(w, d);
+                let logged_d: f64 = pay_log
+                    .iter()
+                    .filter(|&&(lw, ld, _)| lw == w && ld == d)
+                    .map(|&(_, _, a)| a)
+                    .sum();
+                let actual_d = districts_now
+                    .iter()
+                    .find(|r| r.key == key)
+                    .map(|r| r.payload.as_district().d_ytd)
+                    .unwrap();
+                let before_d = *before_d_ytd.get(&key).unwrap();
+                eprintln!(
+                    "[pay-diag]   district w={w} d={d} before={before_d} actual_after={actual_d} actual_delta={} logged_delta={logged_d} match={}",
+                    actual_d - before_d,
+                    (actual_d - before_d - logged_d).abs() < 1e-6
+                );
+            }
+        }
+    }
     assert!(
         (w_delta - d_delta).abs() < eps,
         "warehouse ytd growth ({w_delta}) must match district ytd growth ({d_delta})"
@@ -331,4 +435,176 @@ fn concurrent_workload_with_copy_on_write_gc_keeps_cross_table_invariants_under_
 #[test]
 fn concurrent_workload_with_update_in_place_gc_keeps_cross_table_invariants_under_contention() {
     run_stress_and_check_invariants(true, 5, Duration::from_millis(1000));
+}
+
+#[test]
+fn diag_single_thread_no_write_write_races_still_checks_invariants() {
+    run_stress_and_check_invariants(false, 1, Duration::from_millis(3000));
+}
+
+#[test]
+fn diag_single_thread_no_gc_still_checks_invariants() {
+    run_stress_and_check_invariants_no_gc(1, Duration::from_millis(500));
+}
+
+#[test]
+fn diag_single_thread_district_duplicate_key_check() {
+    let cfg = stress_cfg();
+    let db = Arc::new(TpccDatabase::new(RootIndexType::default()));
+    db.enable_gc(false);
+
+    populate_items(&db, &cfg);
+    let history_seq = Arc::new(AtomicU64::new(0));
+    for w in 1..=cfg.num_warehouses {
+        populate_warehouse(&db, &cfg, w, &history_seq);
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let committed_new_order = Arc::new(AtomicU64::new(0));
+    let committed_payment = Arc::new(AtomicU64::new(0));
+    let delivered_districts = Arc::new(AtomicU64::new(0));
+
+    let handle = {
+        let db = db.clone();
+        let stop = stop.clone();
+        let history_seq = history_seq.clone();
+        let committed_new_order = committed_new_order.clone();
+        let committed_payment = committed_payment.clone();
+        let delivered_districts = delivered_districts.clone();
+        thread::spawn(move || {
+            stress_worker(
+                db,
+                cfg,
+                stop,
+                history_seq,
+                committed_new_order,
+                committed_payment,
+                delivered_districts,
+            )
+        })
+    };
+    thread::sleep(Duration::from_millis(3000));
+    stop.store(true, Relaxed);
+    handle.join().expect("stress worker thread must not panic");
+
+    let districts = scan_all(&db, Table::District);
+    let mut keys: Vec<TpccKey> = districts.iter().map(|r| r.key).collect();
+    keys.sort();
+    let before_dedup = keys.len();
+    keys.dedup();
+    eprintln!(
+        "[dup-diag] district rows scanned={before_dedup} distinct_keys={} committed_no={}",
+        keys.len(),
+        committed_new_order.load(Relaxed)
+    );
+    assert_eq!(
+        before_dedup,
+        keys.len(),
+        "District range scan returned duplicate keys"
+    );
+}
+
+#[test]
+fn diag_single_thread_gc_on_max_o_id_cross_check() {
+    tpcc_txn::NO_DIAG_LOG.lock().unwrap().clear();
+
+    let cfg = stress_cfg();
+    let db = Arc::new(TpccDatabase::new(RootIndexType::default()));
+    db.enable_gc(true);
+
+    populate_items(&db, &cfg);
+    let history_seq = Arc::new(AtomicU64::new(0));
+    for w in 1..=cfg.num_warehouses {
+        populate_warehouse(&db, &cfg, w, &history_seq);
+    }
+
+    let before_d_next_o_id_sum: u64 = scan_all(&db, Table::District)
+        .iter()
+        .map(|r| r.payload.as_district().d_next_o_id as u64)
+        .sum();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let committed_new_order = Arc::new(AtomicU64::new(0));
+    let committed_payment = Arc::new(AtomicU64::new(0));
+    let delivered_districts = Arc::new(AtomicU64::new(0));
+
+    let handle = {
+        let db = db.clone();
+        let stop = stop.clone();
+        let history_seq = history_seq.clone();
+        let committed_new_order = committed_new_order.clone();
+        let committed_payment = committed_payment.clone();
+        let delivered_districts = delivered_districts.clone();
+        thread::spawn(move || {
+            stress_worker(
+                db,
+                cfg,
+                stop,
+                history_seq,
+                committed_new_order,
+                committed_payment,
+                delivered_districts,
+            )
+        })
+    };
+    thread::sleep(Duration::from_millis(3000));
+    stop.store(true, Relaxed);
+    handle.join().expect("stress worker thread must not panic");
+
+    let districts = scan_all(&db, Table::District);
+    let after_d_next_o_id_sum: u64 = districts
+        .iter()
+        .map(|r| r.payload.as_district().d_next_o_id as u64)
+        .sum();
+    let committed_no = committed_new_order.load(Relaxed);
+    let delta = after_d_next_o_id_sum - before_d_next_o_id_sum;
+    eprintln!(
+        "[delta-diag] before={before_d_next_o_id_sum} after={after_d_next_o_id_sum} delta={delta} committed_no={committed_no} delta_matches={}",
+        delta == committed_no
+    );
+    let log = tpcc_txn::NO_DIAG_LOG.lock().unwrap();
+
+    // initial_orders_per_district existing orders were seeded at load time
+    // with o_id 1..=initial_orders_per_district, so the true expected
+    // d_next_o_id for a district is (max o_id ever committed by *this run*'s
+    // New-Order calls for it), or the seeded initial value if none landed.
+    let mut mismatches = Vec::new();
+    let mut dup_o_ids_found = 0u32;
+    for w in 1..=cfg.num_warehouses {
+        for d in 1..=cfg.districts_per_warehouse {
+            let mut o_ids: Vec<u32> = log
+                .iter()
+                .filter(|&&(lw, ld, _)| lw == w && ld == d)
+                .map(|&(_, _, o)| o)
+                .collect();
+            o_ids.sort();
+            let before_dedup = o_ids.len();
+            o_ids.dedup();
+            if o_ids.len() != before_dedup {
+                dup_o_ids_found += before_dedup as u32 - o_ids.len() as u32;
+            }
+            let max_logged = o_ids.last().copied();
+            let expected_next = max_logged.map(|m| m + 1).unwrap_or(cfg.initial_orders_per_district + 1);
+            let actual = districts
+                .iter()
+                .find(|r| r.key == crate::mv_bench::tpcc_schema::k_district(w, d))
+                .map(|r| r.payload.as_district().d_next_o_id)
+                .expect("every district must be present");
+            if actual != expected_next {
+                mismatches.push((w, d, expected_next, actual, o_ids.len()));
+            }
+        }
+    }
+    eprintln!(
+        "[max-o-id-diag] committed_no={} duplicate_o_ids_within_district={dup_o_ids_found} mismatches={mismatches:?}",
+        committed_new_order.load(Relaxed)
+    );
+    assert!(
+        mismatches.is_empty(),
+        "district d_next_o_id disagrees with max committed o_id + 1: {mismatches:?}"
+    );
+    assert_eq!(
+        dup_o_ids_found, 0,
+        "same district produced the same o_id for two different committed New-Order transactions"
+    );
 }

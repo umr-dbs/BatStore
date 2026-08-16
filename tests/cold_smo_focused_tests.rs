@@ -244,10 +244,16 @@ fn generated_multi_page_chain_serves_point_and_range_reads() {
 
     let mut visible = |stamp: TxStamp| stamp == wanted;
     let mut range_payloads = Vec::new();
-    TestIter::walk_cold_chain_for_range(link, Interval::new(7, 7), &mut visible, |record| {
-        range_payloads.push(*record.payload());
-        true
-    });
+    TestIter::walk_cold_chain_for_range(
+        link,
+        Interval::new(7, 7),
+        &mut visible,
+        &std::collections::HashSet::new(),
+        |record| {
+            range_payloads.push(*record.payload());
+            true
+        },
+    );
     assert_eq!(range_payloads, vec![20]);
     tree.ctx.on_tx_completed(delete.ts_start());
 }
