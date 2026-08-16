@@ -200,31 +200,57 @@ fn hot_key_split_keeps_capacity_exact_side_when_its_cold_slice_is_empty() {
     }
 }
 
-fn make_three_page_output(tree: &Tree) -> (SmartCell<TestBlock>, TxStamp) {
+/// Builds `chain_pages` pages' worth (each holding exactly `N` retained
+/// same-key records, oldest first) of snapshot-protected history for key 7,
+/// then a final write-facing page with `N - 1` more protected records plus
+/// one live record, and runs a real `split()` over the whole thing - the
+/// same shape `make_three_page_output` (below) builds by hand, generalized
+/// so the "many cold pages" tests don't need their own hand-rolled 6-page
+/// version of this construction.
+fn make_chain_output(tree: &Tree, chain_pages: usize) -> (SmartCell<TestBlock>, TxStamp) {
+    assert!(chain_pages >= 1);
     let delete = TxStamp::new(0, 500);
     tree.ctx.on_tx_start(delete.ts_start());
 
-    let mut oldest = Node::new_leaf();
-    for ts in 1..=N as u64 {
-        push_protected(&mut oldest, 7, ts, delete, ts * 10);
+    // Every constructed page must outlive the `split()` call below (its
+    // input chain is only ever read, never retained past that call - see
+    // `retained_owned_leaf_history`'s doc - but Rust still needs the
+    // pointee alive for the duration of the call itself).
+    let mut pages: Vec<Box<TestCell>> = Vec::new();
+    let mut link = ColdLink::none();
+    for page_idx in 0..(chain_pages - 1) {
+        let mut node = Node::new_leaf();
+        let base = page_idx as u64 * N as u64;
+        for offset in 1..=N as u64 {
+            push_protected(&mut node, 7, base + offset, delete, (base + offset) * 10);
+        }
+        if !link.is_none() {
+            node.set_cold_link(link);
+        }
+        let cell = boxed_leaf(node);
+        let total = (page_idx + 1) as u32 * N as u32;
+        link = link_to(&cell, N as u32, (page_idx + 1) as u16, total);
+        pages.push(cell);
     }
-    let oldest = boxed_leaf(oldest);
 
-    let mut newer = Node::new_leaf_with_cold_link(link_to(&oldest, N as u32, 1, N as u32));
-    for ts in (N as u64 + 1)..=(2 * N) as u64 {
-        push_protected(&mut newer, 7, ts, delete, ts * 10);
+    let hot_base = (chain_pages - 1) as u64 * N as u64;
+    let mut hot = if link.is_none() {
+        Node::new_leaf()
+    } else {
+        Node::new_leaf_with_cold_link(link)
+    };
+    for offset in 1..N as u64 {
+        push_protected(&mut hot, 7, hot_base + offset, delete, (hot_base + offset) * 10);
     }
-    let newer = boxed_leaf(newer);
-
-    let mut hot = Node::new_leaf_with_cold_link(link_to(&newer, N as u32, 2, (2 * N) as u32));
-    for ts in (2 * N as u64 + 1)..(3 * N) as u64 {
-        push_protected(&mut hot, 7, ts, delete, ts * 10);
-    }
-    push_live(&mut hot, 7, (3 * N) as u64, 3000);
+    push_live(&mut hot, 7, hot_base + N as u64, (hot_base + N as u64) * 10);
     let source = boxed_leaf(hot);
     let output =
         output_of_version_split(tree.split(source.cell.get_mut(), &Interval::new(0, u64::MAX)));
     (output, delete)
+}
+
+fn make_three_page_output(tree: &Tree) -> (SmartCell<TestBlock>, TxStamp) {
+    make_chain_output(tree, 3)
 }
 
 #[test]
@@ -290,4 +316,84 @@ fn cold_chain_reclamation_respects_gc_off_and_on() {
         .map(|_| on.block_manager.new_empty_leaf(&on.ctx).0 as usize)
         .collect();
     assert_eq!(reused, expected);
+}
+
+/// Same shape as `generated_multi_page_chain_serves_point_and_range_reads`,
+/// but with a chain long enough (6 pages, not 3) to guard against a bug
+/// that only surfaces once a leaf's `cold_link` has several hops - e.g. a
+/// walk that happens to work when it terminates after one or two hops but
+/// silently drops or duplicates records once it has to keep going further.
+#[test]
+fn generated_six_page_chain_serves_point_and_range_reads_at_every_depth() {
+    const CHAIN_PAGES: usize = 6;
+    let tree = Tree::default();
+    let (output, delete) = make_chain_output(&tree, CHAIN_PAGES);
+    let hot = output.unsafe_borrow();
+    let link = *hot.cold_link();
+    assert_eq!(chain_pages(link).len(), CHAIN_PAGES);
+    assert_eq!(
+        link.chain_total_count(),
+        (CHAIN_PAGES as u32 * N as u32 - 1)
+    );
+
+    // ts=2 sits in the very first (oldest, deepest) page built - reaching
+    // it requires walking every one of the other 5 pages first.
+    let wanted = TxStamp::new(0, 2);
+    let mut visible = |stamp: TxStamp| stamp == wanted;
+    let point = Tree::scan_cold_chain_for_key(link, 7, &mut visible)
+        .expect("point lookup must reach the deepest of 6 chained cold pages");
+    assert_eq!(*point.payload, 20);
+
+    // ts=N*(CHAIN_PAGES-1)+1 sits in the newest cold page (the one the hot
+    // leaf's own `cold_link` points to directly) - the opposite extreme,
+    // confirming the walk also correctly returns a *shallow* match instead
+    // of over-walking past it.
+    let shallow_ts = (N as u64) * (CHAIN_PAGES as u64 - 1) + 1;
+    let shallow_wanted = TxStamp::new(0, shallow_ts);
+    let mut visible = |stamp: TxStamp| stamp == shallow_wanted;
+    let point = Tree::scan_cold_chain_for_key(link, 7, &mut visible)
+        .expect("point lookup must find a match on the newest (first-visited) cold page");
+    assert_eq!(*point.payload, shallow_ts * 10);
+
+    let mut visible = |stamp: TxStamp| stamp == wanted;
+    let mut range_payloads = Vec::new();
+    TestIter::walk_cold_chain_for_range(
+        link,
+        Interval::new(7, 7),
+        &mut visible,
+        &std::collections::HashSet::new(),
+        |record| {
+            range_payloads.push(*record.payload());
+            true
+        },
+    );
+    assert_eq!(range_payloads, vec![20]);
+    tree.ctx.on_tx_completed(delete.ts_start());
+}
+
+/// Long-chain analogue of `cold_chain_reclamation_respects_gc_off_and_on`:
+/// confirms GC reclamation cascades through *every* page of a 6-page chain,
+/// not just the 1-2 hops the shorter test happens to cover.
+#[test]
+fn long_chain_reclamation_cascades_every_page_into_reuse() {
+    const CHAIN_PAGES: usize = 6;
+    let on = Tree::default();
+    on.enable_gc(false);
+    let (on_hot, on_delete) = make_chain_output(&on, CHAIN_PAGES);
+    let owned = chain_pages(*on_hot.unsafe_borrow().cold_link());
+    assert_eq!(owned.len(), CHAIN_PAGES);
+    let mut expected: HashSet<usize> = owned.into_iter().map(|p| p.0 as usize).collect();
+    expected.insert(on_hot.0 as usize);
+    assert_eq!(expected.len(), CHAIN_PAGES + 1, "hot page plus all 6 cold pages, no aliasing");
+
+    on.ctx.on_tx_completed(on_delete.ts_start());
+    on.block_manager.register_dead(0, 1, on_hot);
+
+    let reused: HashSet<usize> = (0..expected.len())
+        .map(|_| on.block_manager.new_empty_leaf(&on.ctx).0 as usize)
+        .collect();
+    assert_eq!(
+        reused, expected,
+        "every page of the 6-page chain (plus the hot page) must come back through reuse"
+    );
 }

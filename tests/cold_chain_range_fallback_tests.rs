@@ -206,6 +206,98 @@ fn stops_early_when_the_callback_returns_false() {
 }
 
 #[test]
+fn walks_a_long_chain_of_many_cold_pages_collecting_from_every_one() {
+    // 6 pages, one visible in-range record each - a regression guard that
+    // the chain walk doesn't stop early or skip a page once a real
+    // multi-page chain (`ColdLink::chain_len` > 2) is involved, unlike the
+    // 2-page test above.
+    const DEPTH: u64 = 6;
+    let mut pages: Vec<Box<TestCell>> = Vec::new();
+    let deepest = build_cell(ColdLink::none(), |leaf| {
+        insert_deleted(leaf, 1, TxStamp::new(1, 1), TxStamp::new(1, 30), 100);
+    });
+    let mut link = cold_link_to(&deepest, 1, 1, 1, 1);
+    pages.push(deepest);
+
+    for level in 2..=DEPTH {
+        let cell = build_cell(link, |leaf| {
+            insert_deleted(
+                leaf,
+                level,
+                TxStamp::new(1, 1),
+                TxStamp::new(1, 30),
+                (level * 100) as u64,
+            );
+        });
+        link = cold_link_to(&cell, 1, 1, level as u16, level as u32);
+        pages.push(cell);
+    }
+
+    let mut is_visible = visible_iff_ts_start_le(10);
+    let mut found: Vec<(u64, u64)> = Vec::new();
+    TestIter::walk_cold_chain_for_range(
+        link,
+        Interval::new(0, 100),
+        &mut is_visible,
+        &std::collections::HashSet::new(),
+        |r: LeafRecordRef<'_, u64, u64>| {
+            found.push((r.key(), *r.payload()));
+            true
+        },
+    );
+    found.sort();
+    assert_eq!(
+        found,
+        (1..=DEPTH).map(|k| (k, k * 100)).collect::<Vec<_>>(),
+        "every one of the 6 chained pages must contribute its record"
+    );
+}
+
+#[test]
+fn stops_partway_through_a_long_chain_when_the_callback_returns_false() {
+    // Same 6-page chain shape as above, but the callback stops after the
+    // 3rd match - must not visit pages 4-6 at all (mirrors
+    // `stops_early_when_the_callback_returns_false`'s 2-page version, at a
+    // depth long enough to actually distinguish "stops early" from
+    // "happens to finish quickly because there's not much chain left").
+    const DEPTH: u64 = 6;
+    let mut pages: Vec<Box<TestCell>> = Vec::new();
+    let deepest = build_cell(ColdLink::none(), |leaf| {
+        insert_deleted(leaf, 1, TxStamp::new(1, 1), TxStamp::new(1, 30), 100);
+    });
+    let mut link = cold_link_to(&deepest, 1, 1, 1, 1);
+    pages.push(deepest);
+
+    for level in 2..=DEPTH {
+        let cell = build_cell(link, |leaf| {
+            insert_deleted(
+                leaf,
+                level,
+                TxStamp::new(1, 1),
+                TxStamp::new(1, 30),
+                (level * 100) as u64,
+            );
+        });
+        link = cold_link_to(&cell, 1, 1, level as u16, level as u32);
+        pages.push(cell);
+    }
+
+    let mut is_visible = visible_iff_ts_start_le(10);
+    let mut visits = 0;
+    TestIter::walk_cold_chain_for_range(
+        link,
+        Interval::new(0, 100),
+        &mut is_visible,
+        &std::collections::HashSet::new(),
+        |_r: LeafRecordRef<'_, u64, u64>| {
+            visits += 1;
+            visits < 3
+        },
+    );
+    assert_eq!(visits, 3, "must stop after the 3rd page, never reach pages 4-6");
+}
+
+#[test]
 fn nothing_visible_in_range_yields_no_calls() {
     let cold = build_cell(ColdLink::none(), |leaf| {
         insert_deleted(leaf, 5, TxStamp::new(1, 10), TxStamp::new(1, 20), 500);
