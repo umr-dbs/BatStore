@@ -88,6 +88,7 @@ fn walks_a_single_cold_page_collecting_visible_in_range_matches() {
         link,
         Interval::new(0, 100),
         &mut is_visible,
+        &std::collections::HashSet::new(),
         |r: LeafRecordRef<'_, u64, u64>| {
             found.push((r.key(), *r.payload()));
             true
@@ -115,6 +116,7 @@ fn walks_a_chain_of_two_cold_pages_collecting_from_both() {
         link_to_cold1,
         Interval::new(0, 100),
         &mut is_visible,
+        &std::collections::HashSet::new(),
         |r: LeafRecordRef<'_, u64, u64>| {
             found.push((r.key(), *r.payload()));
             true
@@ -142,6 +144,7 @@ fn stops_early_when_the_callback_returns_false() {
         link_to_cold1,
         Interval::new(0, 100),
         &mut is_visible,
+        &std::collections::HashSet::new(),
         |_r: LeafRecordRef<'_, u64, u64>| {
             visits += 1;
             false // stop after the very first match (mirrors an error in try_for_each_ref)
@@ -160,10 +163,16 @@ fn nothing_visible_in_range_yields_no_calls() {
     // threshold(5) predates the insertion -- nothing visible anywhere.
     let mut is_visible = visible_iff_ts_start_le(5);
     let mut visits = 0;
-    TestIter::walk_cold_chain_for_range(link, Interval::new(0, 100), &mut is_visible, |_| {
-        visits += 1;
-        true
-    });
+    TestIter::walk_cold_chain_for_range(
+        link,
+        Interval::new(0, 100),
+        &mut is_visible,
+        &std::collections::HashSet::new(),
+        |_| {
+            visits += 1;
+            true
+        },
+    );
     assert_eq!(visits, 0);
 }
 
@@ -175,6 +184,7 @@ fn empty_link_yields_no_calls() {
         ColdLink::none(),
         Interval::new(0, 100),
         &mut is_visible,
+        &std::collections::HashSet::new(),
         |_| {
             visits += 1;
             true

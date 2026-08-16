@@ -226,6 +226,37 @@ impl<
             };
         }
 
+        // A leaf can also be sparse on *active* alone while its *raw*
+        // footprint (active+dead) stays large, without ever having gone
+        // through a cold-offloading split yet -- e.g. a run of plain,
+        // never-updated single-version deletes under one still-open
+        // transaction, where every record is its own key's "newest" entry
+        // (see `grouped_hot_cold_records`) and so can never be shed to a
+        // cold chain in the first place, not even in principle, until that
+        // transaction resolves. Classifying that leaf `ActiveUnderflow` on
+        // active count alone routes it into `on_underflow_node`/`merge()`,
+        // which can only combine it with a sibling if their *combined* raw
+        // footprint fits one page -- if the sibling is itself substantial
+        // (e.g. untouched, still fully live), that combined footprint can
+        // never shrink below capacity while the same transaction protects
+        // it, so `merge()` falls to `KeySplit` every time and reproduces
+        // the identical two fences it just replaced: zero progress, forever
+        // (confirmed via `insert_then_delete_same_keys_leaves_tree_empty`'s
+        // single-threaded, 100%-reproducible repro). Requiring the raw
+        // footprint to also clear the underflow bar leaves such a leaf
+        // `Ok` instead -- the traversal simply descends through it (still
+        // well under capacity) rather than forcing a merge attempt that
+        // cannot converge until the protecting transaction finishes.
+        if self.is_leaf() {
+            return if active + dead >= self.overflow_units_count() {
+                BlockUnsafeDegree::Overflow
+            } else if active + dead <= self.filling_20_percent() {
+                BlockUnsafeDegree::ActiveUnderflow
+            } else {
+                BlockUnsafeDegree::Ok
+            };
+        }
+
         let one_d = self.filling_20_percent();
 
         if active <= one_d {

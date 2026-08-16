@@ -760,8 +760,18 @@ pub fn new_order(
     }
 
     tx.commit();
+    NO_DIAG_LOG
+        .lock()
+        .unwrap()
+        .push((home_w_id, d_id, o_id));
     TxnOutcome::Committed
 }
+
+// TEMPORARY diagnostic (2026-08-15): records every (w_id, d_id, o_id) a
+// New-Order transaction actually committed, so a test can cross-check the
+// final observed `d_next_o_id` against the true max assigned o_id — see
+// `tests/bench_tpcc_stress_tests.rs`'s no-gc/GC-on comparison.
+pub static NO_DIAG_LOG: std::sync::Mutex<Vec<(u32, u8, u32)>> = std::sync::Mutex::new(Vec::new());
 
 // ---------------------------------------------------------------------
 // Payment (spec §2.5): ~43% of the mix.
@@ -867,8 +877,15 @@ pub fn payment(
     ));
 
     tx.commit();
+    PAY_DIAG_LOG.lock().unwrap().push((home_w_id, d_id, amount));
     TxnOutcome::Committed
 }
+
+// TEMPORARY diagnostic (2026-08-15): records every committed Payment's
+// (home_w_id, d_id, amount), so a test can independently recompute the
+// expected warehouse/district ytd growth and cross-check it against what a
+// table scan actually observes — see `tests/bench_tpcc_stress_tests.rs`.
+pub static PAY_DIAG_LOG: std::sync::Mutex<Vec<(u32, u8, f64)>> = std::sync::Mutex::new(Vec::new());
 
 // ---------------------------------------------------------------------
 // Order-Status (spec §2.6): ~4% of the mix. Read-only.
