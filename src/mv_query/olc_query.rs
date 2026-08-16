@@ -296,7 +296,7 @@ impl<
                     }
 
                     if LOG_REORG {
-                        let r = next_curr_guard.deref().unsafe_degree();
+                        let r = next_curr_guard.deref().unsafe_degree(&self.ctx);
 
                         match r {
                             BlockUnsafeDegree::Overflow => {
@@ -313,7 +313,7 @@ impl<
                     } else {
                         0
                     };
-                    match next_curr_guard.unsafe_degree() {
+                    match next_curr_guard.unsafe_degree(&self.ctx) {
                         // `next_curr_guard` deliberately stays an
                         // unexcluded `Reader` here — `on_overflow_node`
                         // retires it itself via `try_retire()` (only ever
