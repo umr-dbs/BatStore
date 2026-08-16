@@ -194,6 +194,51 @@ fn scan_cold_chain_for_key_returns_none_when_key_is_visible_nowhere() {
 }
 
 #[test]
+fn point_read_walks_through_many_cold_pages_to_reach_the_oldest() {
+    // A 6-page chain, each of the first 5 holding one unrelated filler key
+    // so the walk can't accidentally succeed early - only the deepest
+    // (6th, oldest) page actually has key 42. Regression guard for a
+    // chain-walk that works for the 2-page case above but silently
+    // truncates (an off-by-one loop bound, an accidental early return)
+    // once a real multi-page chain (`ColdLink::chain_len` > 2) is involved.
+    const DEPTH: u64 = 6;
+    // Every page must outlive the walk below (see `build_cell`'s doc: the
+    // `SmartCell` pointers `cold_link_to` hands out are raw and don't keep
+    // their pointee alive) - kept in one `Vec` for the whole test instead
+    // of one binding per page, since `DEPTH` is a loop bound here.
+    let mut pages: Vec<Box<TestCell>> = Vec::new();
+    let deepest = build_cell(ColdLink::none(), |leaf| {
+        insert_deleted(leaf, 42, TxStamp::new(1, 1), TxStamp::new(1, 5), 4200);
+    });
+    let mut link = cold_link_to(&deepest, 1, 1, 1, 1);
+    pages.push(deepest);
+
+    // Chains newest-to-oldest, same direction `build_private_cold_chain`
+    // links pages in: each loop iteration builds a page one level *newer*
+    // than the last and points it at the previous (older) page.
+    for level in 2..=DEPTH {
+        let cell = build_cell(link, |leaf| {
+            insert(leaf, 1000 + level, TxStamp::new(1, level), level * 100);
+        });
+        link = cold_link_to(&cell, 1, level, level as u16, level as u32);
+        pages.push(cell);
+    }
+
+    let mut is_visible = visible_iff_ts_start_le(3);
+    let found = TestQuery::scan_cold_chain_for_key(link, 42, &mut is_visible);
+    assert_eq!(
+        found.map(|r| *r.payload.get()),
+        Some(4200),
+        "must walk all the way through 5 unrelated cold pages to reach the 6th"
+    );
+
+    // A key that exists nowhere in the whole 6-page chain is still a clean
+    // miss, not a false positive from matching the wrong page.
+    let mut is_visible = visible_iff_ts_start_le(3);
+    assert!(TestQuery::scan_cold_chain_for_key(link, 999_999, &mut is_visible).is_none());
+}
+
+#[test]
 fn scan_cold_chain_for_key_is_none_for_an_empty_link() {
     // Regression-safety check: a leaf with no cold chain at all must not
     // pay for (or find anything via) a chain walk.

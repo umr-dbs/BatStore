@@ -1902,6 +1902,12 @@ pub(crate) fn main_viz_demo(parms: Vec<String>) {
 // enforced via `autotests = false` in `Cargo.toml`, so cargo doesn't also try
 // to build these as their own standalone integration-test crates.
 #[cfg(test)]
+#[path = "../../tests/bench_s_htap_correctness_tests.rs"]
+mod bench_s_htap_correctness_tests;
+#[cfg(test)]
+#[path = "../../tests/bench_s_htap_stress_tests.rs"]
+mod bench_s_htap_stress_tests;
+#[cfg(test)]
 #[path = "../../tests/bench_tpcc_correctness_tests.rs"]
 mod bench_tpcc_correctness_tests;
 #[cfg(test)]
@@ -1928,6 +1934,9 @@ mod bench_ycsb_correctness_tests;
 #[cfg(test)]
 #[path = "../../tests/bench_ycsb_stress_tests.rs"]
 mod bench_ycsb_stress_tests;
+#[cfg(test)]
+#[path = "../../tests/cold_chain_abort_fallback_tests.rs"]
+mod cold_chain_abort_fallback_tests;
 #[cfg(test)]
 #[path = "../../tests/cold_chain_range_fallback_tests.rs"]
 mod cold_chain_range_fallback_tests;
