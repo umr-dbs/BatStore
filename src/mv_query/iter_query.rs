@@ -144,12 +144,10 @@ impl<
     /// match found walking the chain newest-to-oldest, stopping early the
     /// moment `f` returns `false` (mirrors `try_for_each_ref`'s own
     /// stop-on-error shape; `RangeQueryIter`'s own buffered scan below
-    /// just always returns `true`, i.e. never stops early). A key never
-    /// contributes from both hot and cold to the same reader: MVCC
-    /// guarantees exactly one version in a key's whole chain is visible to
-    /// a given snapshot, so whichever page (hot or cold) currently holds
-    /// that specific version is the only one whose filter passes for it —
-    /// no separate dedup needed here.
+    /// just always returns `true`, i.e. never stops early). Keys are tracked
+    /// across both the hot page and every cold-chain hop, so malformed or
+    /// conservatively duplicated physical records still produce at most one
+    /// logical result per key.
     ///
     /// Safe to call unconditionally whenever `link` isn't `ColdLink::none()`
     /// with no extra OLC validation beyond the traversal that already got
@@ -158,9 +156,8 @@ impl<
     /// whole lifetime, set once before that leaf is ever linked into the
     /// tree, and a cold page is likewise never mutated after construction.
     /// `hot_keys` — every key this same leaf visit already produced a match
-    /// for from the *hot* page — is consulted before `is_visible`/`matches`
-    /// for each cold candidate: a key with a hot match already has its
-    /// current answer, so a cold entry for that same key (an older, formerly
+    /// for from the *hot* page — seeds a set that is extended by every cold
+    /// match. A cold entry for an already-seen key (an older, formerly
     /// superseded version whose own `matches` should ordinarily be mutually
     /// exclusive with the hot version's, but isn't guaranteed to be under
     /// every hot/cold classification path — see `mv_tree::smo`'s
@@ -179,14 +176,16 @@ impl<
         F: FnMut(TxStamp) -> bool,
         V: FnMut(crate::mv_page_model::leaf_page::LeafRecordRef<'_, Key, Payload>) -> bool,
     {
+        let mut seen_keys = hot_keys.clone();
         while !link.is_none() {
             let cold_guard = link.cold().borrow_read();
             let cold_leaf = cold_guard.as_leaf_page_ref();
             for r in cold_leaf.as_records() {
                 if range.contains(r.key())
-                    && !hot_keys.contains(&r.key())
+                    && !seen_keys.contains(&r.key())
                     && r.version().matches(is_visible)
                 {
+                    seen_keys.insert(r.key());
                     if !f(r) {
                         return;
                     }

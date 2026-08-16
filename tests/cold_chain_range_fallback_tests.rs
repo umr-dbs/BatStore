@@ -127,6 +127,58 @@ fn walks_a_chain_of_two_cold_pages_collecting_from_both() {
 }
 
 #[test]
+fn emits_a_visible_key_only_once_across_cold_pages() {
+    let cold2 = build_cell(ColdLink::none(), |leaf| {
+        insert_deleted(leaf, 42, TxStamp::new(1, 10), TxStamp::new(1, 30), 100);
+    });
+    let link_to_cold2 = cold_link_to(&cold2, 1, 10, 1, 1);
+    let cold1 = build_cell(link_to_cold2, |leaf| {
+        insert_deleted(leaf, 42, TxStamp::new(1, 10), TxStamp::new(1, 30), 100);
+    });
+    let link = cold_link_to(&cold1, 1, 10, 2, 2);
+
+    let mut is_visible = visible_iff_ts_start_le(20);
+    let mut found = Vec::new();
+    TestIter::walk_cold_chain_for_range(
+        link,
+        Interval::new(0, 100),
+        &mut is_visible,
+        &std::collections::HashSet::new(),
+        |r| {
+            found.push(r.key());
+            true
+        },
+    );
+
+    assert_eq!(found, vec![42]);
+}
+
+#[test]
+fn skips_a_cold_key_already_emitted_from_hot() {
+    let cold = build_cell(ColdLink::none(), |leaf| {
+        insert_deleted(leaf, 42, TxStamp::new(1, 10), TxStamp::new(1, 30), 100);
+    });
+    let link = cold_link_to(&cold, 1, 10, 1, 1);
+    let mut hot_keys = std::collections::HashSet::new();
+    hot_keys.insert(42);
+
+    let mut is_visible = visible_iff_ts_start_le(20);
+    let mut visits = 0;
+    TestIter::walk_cold_chain_for_range(
+        link,
+        Interval::new(0, 100),
+        &mut is_visible,
+        &hot_keys,
+        |_| {
+            visits += 1;
+            true
+        },
+    );
+
+    assert_eq!(visits, 0);
+}
+
+#[test]
 fn stops_early_when_the_callback_returns_false() {
     let cold2 = build_cell(ColdLink::none(), |leaf| {
         insert_deleted(leaf, 1, TxStamp::new(1, 1), TxStamp::new(1, 30), 111);

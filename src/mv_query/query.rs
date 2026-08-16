@@ -418,8 +418,14 @@ impl<const FAN_OUT: usize,
         let found = self.with_snapshot_cache_and_logs(|cache, commit_logs| {
             let mut is_visible = |stamp| crate::mv_sync::visibility::is_visible(
                 commit_logs, cache, reader_worker, reader_ts_start, stamp);
-            records.as_records().iter().rev().any(|record|
-                record.key() == key && record.version().matches(&mut is_visible))
+            let leaf = records.as_leaf_page_ref();
+            if Self::scan_leaf_for_key(leaf, key, &mut is_visible).is_some() {
+                return true;
+            }
+
+            let cold_link = *records.cold_link();
+            !cold_link.is_none()
+                && Self::scan_cold_chain_for_key(cold_link, key, &mut is_visible).is_some()
         });
         self.end_snapshot(reader_ts_start);
         found

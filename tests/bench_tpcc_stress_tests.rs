@@ -220,10 +220,10 @@ fn run_stress_and_check_invariants_gc(
     num_threads: usize,
     duration: Duration,
 ) {
-    tpcc_txn::NO_DIAG_LOG.lock().unwrap().clear();
-    tpcc_txn::PAY_DIAG_LOG.lock().unwrap().clear();
     let cfg = stress_cfg();
     let db = Arc::new(TpccDatabase::new(RootIndexType::default()));
+    let db_id = db.as_ref() as *const TpccDatabase as usize;
+    tpcc_txn::set_diagnostics_enabled(&db, true);
     if let Some(gc_update_in_place) = gc_update_in_place {
         db.enable_gc(gc_update_in_place);
     }
@@ -297,8 +297,8 @@ fn run_stress_and_check_invariants_gc(
             for d in 1..=cfg.districts_per_warehouse {
                 let mut o_ids: Vec<u32> = log
                     .iter()
-                    .filter(|&&(lw, ld, _)| lw == w && ld == d)
-                    .map(|&(_, _, o)| o)
+                    .filter(|&&(id, lw, ld, _)| id == db_id && lw == w && ld == d)
+                    .map(|&(_, _, _, o)| o)
                     .collect();
                 o_ids.sort();
                 let logged_count = o_ids.len();
@@ -369,7 +369,9 @@ fn run_stress_and_check_invariants_gc(
         let warehouses_now = scan_all(&db, Table::Warehouse);
         let districts_now = scan_all(&db, Table::District);
         for w in 1..=cfg.num_warehouses {
-            let logged_w: f64 = pay_log.iter().filter(|&&(lw, _, _)| lw == w).map(|&(_, _, a)| a).sum();
+            let logged_w: f64 = pay_log.iter()
+                .filter(|&&(id, lw, _, _)| id == db_id && lw == w)
+                .map(|&(_, _, _, a)| a).sum();
             let actual_w = warehouses_now
                 .iter()
                 .find(|r| r.key as u32 == w)
@@ -385,8 +387,8 @@ fn run_stress_and_check_invariants_gc(
                 let key = crate::mv_bench::tpcc_schema::k_district(w, d);
                 let logged_d: f64 = pay_log
                     .iter()
-                    .filter(|&&(lw, ld, _)| lw == w && ld == d)
-                    .map(|&(_, _, a)| a)
+                    .filter(|&&(id, lw, ld, _)| id == db_id && lw == w && ld == d)
+                    .map(|&(_, _, _, a)| a)
                     .sum();
                 let actual_d = districts_now
                     .iter()
@@ -425,6 +427,7 @@ fn run_stress_and_check_invariants_gc(
         committed_pay,
         "one History row per committed Payment"
     );
+    tpcc_txn::clear_diagnostics(&db);
 }
 
 #[test]
@@ -506,10 +509,10 @@ fn diag_single_thread_district_duplicate_key_check() {
 
 #[test]
 fn diag_single_thread_gc_on_max_o_id_cross_check() {
-    tpcc_txn::NO_DIAG_LOG.lock().unwrap().clear();
-
     let cfg = stress_cfg();
     let db = Arc::new(TpccDatabase::new(RootIndexType::default()));
+    let db_id = db.as_ref() as *const TpccDatabase as usize;
+    tpcc_txn::set_diagnostics_enabled(&db, true);
     db.enable_gc(true);
 
     populate_items(&db, &cfg);
@@ -574,8 +577,8 @@ fn diag_single_thread_gc_on_max_o_id_cross_check() {
         for d in 1..=cfg.districts_per_warehouse {
             let mut o_ids: Vec<u32> = log
                 .iter()
-                .filter(|&&(lw, ld, _)| lw == w && ld == d)
-                .map(|&(_, _, o)| o)
+                .filter(|&&(id, lw, ld, _)| id == db_id && lw == w && ld == d)
+                .map(|&(_, _, _, o)| o)
                 .collect();
             o_ids.sort();
             let before_dedup = o_ids.len();
@@ -607,4 +610,6 @@ fn diag_single_thread_gc_on_max_o_id_cross_check() {
         dup_o_ids_found, 0,
         "same district produced the same o_id for two different committed New-Order transactions"
     );
+    drop(log);
+    tpcc_txn::clear_diagnostics(&db);
 }
