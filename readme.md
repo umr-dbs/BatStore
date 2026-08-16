@@ -43,6 +43,42 @@ the examples below are complete commands that can be copied as-is.
 cargo build --release
 ```
 
+### Full benchmark suite
+
+Run the complete experiment suite directly through the benchmark CLI:
+
+```bash
+./target/release/cMVBT benchmark
+```
+
+This runs TPC-C OLTP-only, CH-benCHmark, mixed HTAP, and YCSB workloads A-F,
+each once with garbage collection enabled and once with it disabled. Every
+variant runs in a fresh child process so its memory measurements are not
+contaminated by allocations retained from an earlier experiment. The full
+scale is intended for a 64-core/128-thread server with roughly 500 GB of RAM
+and takes approximately 30-45 minutes.
+
+Results are placed in a timestamped directory below `benchmark_results/`. To
+choose another output root, pass it as the first positional argument:
+
+```bash
+./target/release/cMVBT benchmark my_benchmark_results
+```
+
+For a local smoke test using the same experiments at a much smaller scale,
+pass `quick` as the second positional argument:
+
+```bash
+./target/release/cMVBT benchmark benchmark_results quick
+```
+
+The suite prints the exact result directory when it finishes. Plot a completed
+run with:
+
+```bash
+python3 scripts/plot_suite.py --run-dir benchmark_results/run_YYYYMMDD_HHMMSS
+```
+
 ### YCSB
 
 Run YCSB workload A with 100,000 preloaded records, 8 worker threads, and a
