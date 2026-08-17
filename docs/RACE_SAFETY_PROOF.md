@@ -1,161 +1,131 @@
-# Race Safety Proof: in_flight_bound Publication Window
+# Race Safety Analysis: in_flight_bound Publication Window
 
-## The Scenario (User's Question)
+## The Critical Question (User's Challenge)
 
-What if GC scans `in_flight_bound` and `live_tx` **before** the reader publishes its bound?
+What if GC scans `in_flight_bound` and `live_tx` **before** the reader's Release store completes?
 
 ```
-Timeline:
-T₀: Reader reads current_version() = V₀ (not yet stored)
-T₀: [GC scan happens, doesn't see V₀]
-T₀: GC reclaims blocks based on live_min_snapshot = V_old
-T₀: Reader stores V₀ to in_flight_bound[worker_id]
-T₁: Clock advances: V₀ → V₅
-T₂: Reader draws ts_start = V₅
-T₃: Reader publishes live_tx[worker_id] = V₅
+Timeline (User's Scenario):
+T₀: Reader loads current_version() = V₀ (into register, NOT yet stored)
+T₀: [Clock advances rapidly: V₀ → V₅ → V₁₀ (other threads making progress)]
+T₀: GC scans in_flight_bound[reader] → sees NOT_IN_FLIGHT (store not visible!)
+T₀: GC computes live_min_snapshot from other active readers = V_old
+T₀: GC reclaims all blocks with death_version < V_old
+T₁: Reader finally executes store: in_flight_bound[reader] = V₀ (Release)
+T₂: Reader draws ts_start = next_timestamp() = V₁₀
+T₃: Reader publishes live_tx[reader] = V₁₀
 ```
 
-**Question:** Did GC reclaim a block that the reader at ts_start = V₅ needs?
+**Question:** Can reader with `ts_start = V₁₀` need a block that GC already reclaimed?
 
-## The Answer: NO - It's Safe
+## The Critical Invariant: Reader Needs Blocks with death_version > ts_start
 
-### Invariant: Reader Needs Blocks with death_version ≥ ts_start
-
-A reader with `ts_start` needs a block only if:
+A reader with `ts_start = S` needs a block only if:
 ```
-death_version(block) ≥ ts_start
+death_version(block) > ts_start
 ```
 
-Why? Because a block with `death_version = D` is:
-- **Alive at T** if `ts_start < D` (block dies AFTER reader's snapshot)
-- **Dead at T** if `ts_start ≥ D` (block was already dead when reader started)
-
-### GC's Reclamation Rule
+Why? A block with `death_version = D`:
+- Is **alive at time S** if `D > S` (block dies AFTER reader's snapshot)
+- Is **dead at time S** if `D ≤ S` (block was already dead when reader started)
 
 GC reclaims blocks where:
 ```
 death_version < live_min_snapshot_at_gc_time
 ```
 
-This is safe because all active readers have `ts_start ≥ live_min_snapshot`, so they don't need those blocks.
+## The Potential Race Condition (User's Valid Concern)
 
-### The Race Safety Proof
+**For a correctness failure to occur:**
+- Block X has `death_version = V` 
+- `V < V_old` (GC reclaimed it: `death_version < live_min_snapshot`)
+- `V > ts_start` (Reader needs it: `death_version > ts_start`)
 
-**Theorem:** A block reclaimed by GC in the past is never needed by a reader starting now.
+**This requires:** `ts_start < V < V_old`, which means `ts_start < V_old`
 
-**Proof:**
+### The Key Question: Can `ts_start < V_old`?
 
-Let's denote:
-- `T_past`: Time when GC ran (before reader published bound)
-- `V_old`: `live_min_snapshot` at T_past
-- `T_now`: Time when reader publishes `in_flight_bound[R]`
-- `V₀`: `current_version()` at T_now (= `in_flight_bound[R]`)
-- `V₁`: `ts_start` drawn after V₀ (= value in `live_tx[R]`)
+`V_old = live_min_snapshot` at GC scan time = minimum of ALL active snapshots at that moment.
 
-**Clock Monotonicity:**
-```
-V_old < clock_at_T_past < V₀ < V₁
-```
+**Example of the concern:**
+- Long-running reader R_old has `ts_start = 100` (still active at GC scan time T₀)
+- `V_old ≤ 100`
+- New reader arrives later and draws `ts_start_new`
+- **Can `ts_start_new < 100`?** ← This is the critical question
 
-Therefore: `V₁ > V_old`
+## The Answer: NO - Monotonic Clock Prevents It
 
-**For any block X that GC reclaimed:**
-```
-death_version(X) < V_old  (GC reclaimed it)
-```
+**Why `ts_start_new ≥ V_old` always:**
 
-**For the reader to need block X:**
-```
-death_version(X) ≥ V₁  (reader's requirement)
-```
+Let's trace the timeline carefully:
 
-**Contradiction:**
-```
-If death_version(X) < V_old and V_old < V₁
-Then death_version(X) < V₁
-Which contradicts death_version(X) ≥ V₁
-```
+1. **Old reader R_old** drew `ts_start_old = 100` at some time T_old ≤ T₀
+   - The clock value was ~100 at that time
+   
+2. **At GC scan time T₀:**
+   - Current clock ≥ 100 (monotonic: clock never decreases)
+   - `live_min_snapshot = 100` (includes R_old)
+   
+3. **New reader R_new arrives at time T_now ≥ T₀:**
+   - Draws `ts_start_new` from `next_timestamp()`
+   - Current clock at T_now ≥ current clock at T₀ ≥ 100
+   - Therefore `ts_start_new ≥ 100 ≥ V_old`
 
-Therefore, **any block GC reclaimed in the past cannot be needed by the reader starting now.** ✓
+**Therefore:** `ts_start_new ≥ V_old` always
 
-## Why This Works: Monotonic Clock + Ordering
+### Consequence
 
-The system relies on three properties:
+For blocks reclaimed by GC: `death_version < V_old`
+For blocks reader needs: `death_version > ts_start_new ≥ V_old`
 
-### 1. **Clock is Strictly Monotonic**
-```rust
-let V_past = current_version();        // Some past time
-let V_now = current_version();         // Now: V_now ≥ V_past
-```
-
-The global clock only ever increases. Future reads are >= past reads.
-
-### 2. **Bound is Published Before ts_start is Drawn**
-```rust
-let bound = self.global_clock.current_version();     // V₀
-self.in_flight_bound[worker_id].store(bound, Release); // Publish V₀
-let ts_start = self.global_clock.next_timestamp();   // Draw V₁ ≥ V₀
-```
-
-Even if GC doesn't see the bound immediately, when ts_start is drawn, the clock has advanced.
-
-### 3. **GC Protects Against Older Snapshots**
-```rust
-live_min_snapshot() includes:
-  - All in_flight_bound values (being drawn right now)
-  - All live_tx values (actively reading)
-```
-
-Once a reader publishes its bound, future GC scans see it. Past GC scans don't need to because `ts_start > past_live_min_snapshot` always.
-
-## Visual Proof
+These ranges don't overlap! ✓
 
 ```
-Version Timeline:
-V_old .... V₀ .... V₁ .... V₅
-  ▲        ▲       ▲       ▲
-  |        |       |       |
-  |        |       |     ts_start drawn
-  |        |     next_timestamp()
-  |    in_flight_bound published
-  |     (read clock here)
-GC scan happened here
-(doesn't see bound yet)
+Versions reclaimed:   death_version < V_old
+                      [0 ..................... V_old)
 
-Reclaimed blocks: death_version < V_old
-Reader needs: death_version ≥ V₁
-Gap: V_old < V₁  ✓  (can't overlap)
+Reader's needs:       death_version > ts_start_new ≥ V_old
+                                              V_old ... ∞)
+
+No overlap! ✓
 ```
 
-## Why the Ordering Matters Despite the Window
+## The Role of Release/Acquire Synchronization
 
-The code looks like it should be vulnerable:
+The Release/Acquire pair (`store(Release)` / `load(Acquire)`) serves two purposes:
+
+1. **For GC scans BEFORE the store:** Safe due to monotonic clock (proven above)
+2. **For GC scans AFTER the store:** See the bound immediately (tighter protection)
 
 ```rust
 fn begin_snapshot_registration(&self) -> WorkerId {
-    let worker_id = self.worker_id();
     let conservative_bound = self.global_clock.current_version();
-    // ⚠️  GC could scan HERE (before store)
-    self.in_flight_bound[worker_id as usize].store(conservative_bound, Release);
-    worker_id
+    self.in_flight_bound[worker_id].store(conservative_bound, Release);
+    //↑ Release ensures visibility to subsequent Acquire loads
+}
+
+fn live_min_snapshot(&self) -> Option<SnapShot> {
+    for slot in &self.in_flight_bound {
+        let bound = slot.load(Acquire);  // Pairs with Release above
+        // ...
+    }
 }
 ```
 
-But it's not, because:
+The Release/Acquire is **not the primary safety mechanism**. It's an **optimization** that ensures future GC scans see the bound immediately, rather than relying only on clock monotonicity.
 
-1. Even if GC scans before the `store`, it's scanning a **past** state
-2. That past state determined `live_min_snapshot = V_old`
-3. The reader will eventually draw `ts_start >= V₀ > V_old`
-4. So the reader's future access pattern is unaffected by the past GC decision
+## Conclusion: The System Is Race-Safe
 
-The monotonic clock creates a **temporal barrier**: anything GC decided in the past is outdated by the time the reader starts, because new versions have been created.
+**The guarantee holds due to monotonic clock, not just synchronization:**
 
-## Conclusion
+✓ GC reclaims blocks with `death_version < V_old` at GC scan time  
+✓ Any new reader arriving after that GC scan will draw `ts_start ≥ V_old` (monotonic clock)  
+✓ New reader only needs blocks with `death_version > ts_start`  
+✓ Therefore no overlap: GC-reclaimed blocks are never needed  
 
-**There is no race condition.** The system is mathematically proven safe because:
+**Release/Acquire provides:**
+- Immediate visibility for subsequent GC scans (tighter bound)
+- Stronger formal guarantees
+- But is not the sole source of safety—the clock itself is the primary barrier
 
-✓ GC reclaims blocks with `death_version < V_old`  
-✓ Reader draws `ts_start > V_old`  
-✓ Therefore reader never needs reclaimed blocks  
-
-The narrow window in the code is **provably safe** even though it exists.
+The system is safe even though the window exists: **the clock's monotonicity is the true safety mechanism**.
