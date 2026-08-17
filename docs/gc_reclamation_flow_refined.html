@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GC Reclamation Control Flow - Refined</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+        }
+
+        h1 {
+            text-align: center;
+            color: #1a237e;
+            margin-bottom: 10px;
+            font-size: 32px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 14px;
+        }
+
+        .diagram-section {
+            margin-bottom: 50px;
+        }
+
+        .section-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #1a237e;
+            margin-bottom: 20px;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 12px;
+        }
+
+        svg {
+            width: 100%;
+            height: auto;
+            display: block;
+            margin: 0 auto;
+        }
+
+        .note {
+            background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%);
+            border-left: 5px solid #3498db;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #37474f;
+            line-height: 1.6;
+        }
+
+        .note strong {
+            color: #1a237e;
+        }
+
+        code {
+            background: #f0f0f0;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            color: #d32f2f;
+        }
+
+        .legend {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+            margin-top: 25px;
+            padding: 20px;
+            background: #fafafa;
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .legend-color {
+            width: 35px;
+            height: 35px;
+            border-radius: 4px;
+            flex-shrink: 0;
+            border: 2px solid rgba(0,0,0,0.1);
+        }
+
+        .legend-item span {
+            font-size: 12px;
+            color: #455a64;
+        }
+
+        .highlight-box {
+            background: #fff3e0;
+            border: 2px solid #ff9800;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .correctness-section {
+            background: linear-gradient(135deg, #e8f5e9 0%, #f1f8e9 100%);
+            border: 2px solid #4caf50;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .correctness-section h3 {
+            color: #1b5e20;
+            margin-top: 0;
+        }
+
+        .proof-step {
+            background: white;
+            padding: 12px;
+            margin: 8px 0;
+            border-left: 4px solid #4caf50;
+            border-radius: 4px;
+        }
+
+        .proof-step .step-num {
+            display: inline-block;
+            background: #4caf50;
+            color: white;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 24px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>GC Reclamation Control Flow</h1>
+        <p class="subtitle">Snapshots, Reader Protection, and Block Reuse with Correctness Proof</p>
+
+        <!-- Part 1: Snapshot Registration -->
+        <div class="diagram-section">
+            <div class="section-title">Part 1: Snapshot Registration & GC-Safe Control Flow</div>
+
+            <svg viewBox="0 0 1400 800" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" style="stop-color:#e3f2fd;stop-opacity:1" />
+                        <stop offset="100%" style="stop-color:#bbdefb;stop-opacity:1" />
+                    </linearGradient>
+                    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" style="stop-color:#fff3e0;stop-opacity:1" />
+                        <stop offset="100%" style="stop-color:#ffe0b2;stop-opacity:1" />
+                    </linearGradient>
+                    <linearGradient id="grad3" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" style="stop-color:#f3e5f5;stop-opacity:1" />
+                        <stop offset="100%" style="stop-color:#e1bee7;stop-opacity:1" />
+                    </linearGradient>
+                    <linearGradient id="grad4" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" style="stop-color:#f0f4c3;stop-opacity:1" />
+                        <stop offset="100%" style="stop-color:#dcedc8;stop-opacity:1" />
+                    </linearGradient>
+                </defs>
+
+                <!-- Main Title -->
+                <text x="700" y="35" text-anchor="middle" font-size="20" font-weight="bold" fill="#1a237e">
+                    Snapshot Registration: GC-Safe Gap-Free Sequence
+                </text>
+
+                <!-- Subtitle -->
+                <text x="700" y="60" text-anchor="middle" font-size="12" fill="#666">
+                    How the reader protects itself during registration while GC remains safe
+                </text>
+
+                <!-- Control flow steps with state visualization -->
+                <!-- STEP 1: Publish in_flight_bound -->
+                <g>
+                    <rect x="30" y="85" width="310" height="140" fill="url(#grad2)" stroke="#f57c00" stroke-width="3" rx="8"/>
+                    <circle cx="85" cy="110" r="20" fill="#f57c00" stroke="white" stroke-width="2"/>
+                    <text x="85" y="118" text-anchor="middle" font-weight="bold" fill="white" font-size="16">1</text>
+
+                    <text x="150" y="110" font-weight="bold" fill="#1a237e" font-size="13">Publish Bound</text>
+                    <text x="150" y="130" font-size="11" fill="#37474f">in_flight_bound[id] =</text>
+                    <text x="150" y="147" font-size="11" fill="#37474f">current_version()</text>
+                    <text x="150" y="167" font-size="10" fill="#666" font-style="italic">Read clock BEFORE drawing ts</text>
+                    <text x="150" y="185" font-size="10" fill="#c62828" font-weight="bold">⚠ Critical: publish first</text>
+                    <text x="150" y="202" font-size="9" fill="#666">(GC must see this before clock advances)</text>
+                </g>
+
+                <!-- Arrow with label -->
+                <path d="M 340 155 L 390 155" stroke="#333" stroke-width="3" fill="none" marker-end="url(#arrowhead)"/>
+                <text x="365" y="145" text-anchor="middle" font-size="10" fill="#666" font-weight="bold">Release</text>
+
+                <!-- STEP 2: Draw ts_start -->
+                <g>
+                    <rect x="390" y="85" width="310" height="140" fill="url(#grad1)" stroke="#1976d2" stroke-width="3" rx="8"/>
+                    <circle cx="445" cy="110" r="20" fill="#1976d2" stroke="white" stroke-width="2"/>
+                    <text x="445" y="118" text-anchor="middle" font-weight="bold" fill="white" font-size="16">2</text>
+
+                    <text x="510" y="110" font-weight="bold" fill="#1a237e" font-size="13">Draw Timestamp</text>
+                    <text x="510" y="130" font-size="11" fill="#37474f">ts_start =</text>
+                    <text x="510" y="147" font-size="11" fill="#37474f">global_clock.next_timestamp()</text>
+                    <text x="510" y="167" font-size="10" fill="#666" font-style="italic">Guaranteed: ts_start ≥ bound</text>
+                    <text x="510" y="185" font-size="10" fill="#c62828" font-weight="bold">⚠ Critical: after bound publish</text>
+                    <text x="510" y="202" font-size="9" fill="#666">(clock only increases monotonically)</text>
+                </g>
+
+                <!-- Arrow with label -->
+                <path d="M 700 155 L 750 155" stroke="#333" stroke-width="3" fill="none" marker-end="url(#arrowhead)"/>
+                <text x="725" y="145" text-anchor="middle" font-size="10" fill="#666" font-weight="bold">Seq</text>
+
+                <!-- STEP 3: Publish live_tx -->
+                <g>
+                    <rect x="750" y="85" width="310" height="140" fill="url(#grad1)" stroke="#1976d2" stroke-width="3" rx="8"/>
+                    <circle cx="805" cy="110" r="20" fill="#1976d2" stroke="white" stroke-width="2"/>
+                    <text x="805" y="118" text-anchor="middle" font-weight="bold" fill="white" font-size="16">3</text>
+
+                    <text x="870" y="110" font-weight="bold" fill="#1a237e" font-size="13">Publish in live_tx</text>
+                    <text x="870" y="130" font-size="11" fill="#37474f">live_tx[id] = ts_start</text>
+                    <text x="870" y="147" font-size="11" fill="#37474f">(Release ordering)</text>
+                    <text x="870" y="167" font-size="10" fill="#666" font-style="italic">Snapshot now officially live</text>
+                    <text x="870" y="185" font-size="10" fill="#c62828" font-weight="bold">⚠ Critical: before clearing bound</text>
+                    <text x="870" y="202" font-size="9" fill="#666">(creates full protection)</text>
+                </g>
+
+                <!-- Arrow with label -->
+                <path d="M 1060 155 L 1110 155" stroke="#333" stroke-width="3" fill="none" marker-end="url(#arrowhead)"/>
+                <text x="1085" y="145" text-anchor="middle" font-size="10" fill="#666" font-weight="bold">Release</text>
+
+                <!-- STEP 4: Clear in_flight_bound -->
+                <g>
+                    <rect x="1110" y="85" width="260" height="140" fill="url(#grad3)" stroke="#7b1fa2" stroke-width="3" rx="8"/>
+                    <circle cx="1160" cy="110" r="20" fill="#7b1fa2" stroke="white" stroke-width="2"/>
+                    <text x="1160" y="118" text-anchor="middle" font-weight="bold" fill="white" font-size="16">4</text>
+
+                    <text x="1220" y="110" font-weight="bold" fill="#1a237e" font-size="13">Handoff Complete</text>
+                    <text x="1220" y="130" font-size="11" fill="#37474f">in_flight_bound[id] =</text>
+                    <text x="1220" y="147" font-size="11" fill="#37474f">NOT_IN_FLIGHT</text>
+                    <text x="1220" y="167" font-size="10" fill="#666" font-style="italic">Protection passes to live_tx</text>
+                </g>
+
+                <!-- Reader lifecycle section -->
+                <rect x="30" y="260" width="1340" height="250" fill="#f5f5f5" stroke="#bbb" stroke-width="1" rx="6"/>
+                <text x="50" y="285" font-size="13" font-weight="bold" fill="#1a237e">Reader Lifecycle & GC Interaction</text>
+
+                <!-- Active reader box -->
+                <g>
+                    <rect x="50" y="310" width="300" height="180" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2" rx="6"/>
+                    <text x="200" y="335" text-anchor="middle" font-weight="bold" fill="#1b5e20" font-size="13">
+                        Active Reader State
+                    </text>
+                    <line x1="60" y1="345" x2="290" y2="345" stroke="#2e7d32" stroke-width="1"/>
+
+                    <text x="70" y="365" font-size="11" fill="#37474f">📖 ts_start = V₁</text>
+                    <text x="70" y="385" font-size="11" fill="#37474f">📖 Reads consistent view of V₁</text>
+                    <text x="70" y="405" font-size="11" fill="#37474f">📖 Cannot see blocks born after V₁</text>
+                    <text x="70" y="425" font-size="11" fill="#37474f">📖 Needs blocks modified before V₁</text>
+                    <text x="70" y="445" font-size="11" fill="#37474f">📖 Readers clear live_tx on exit</text>
+                    <text x="70" y="465" font-size="11" fill="#37474f">📖 Then GC can reclaim V₁ blocks</text>
+                </g>
+
+                <!-- GC Protection Window -->
+                <g>
+                    <rect x="380" y="310" width="300" height="180" fill="#fff3e0" stroke="#f57c00" stroke-width="2" rx="6"/>
+                    <text x="530" y="335" text-anchor="middle" font-weight="bold" fill="#e65100" font-size="13">
+                        GC Protection Window
+                    </text>
+                    <line x1="390" y1="345" x2="620" y2="345" stroke="#f57c00" stroke-width="1"/>
+
+                    <text x="400" y="365" font-size="11" fill="#37474f">⏱️ in_flight_bound guards until live_tx insert</text>
+                    <text x="400" y="385" font-size="11" fill="#37474f">⏱️ live_tx guards the active lifetime</text>
+                    <text x="400" y="405" font-size="11" fill="#37474f">⏱️ Overlapping: cannot create gap</text>
+                    <text x="400" y="425" font-size="11" fill="#37474f">⏱️ Read order: in_flight BEFORE live_tx</text>
+                    <text x="400" y="445" font-size="11" fill="#37474f">⏱️ Monotonic: clock never decreases</text>
+                    <text x="400" y="465" font-size="11" fill="#37474f">⏱️ No race: one always visible</text>
+                </g>
+
+                <!-- GC Verification Sequence -->
+                <g>
+                    <rect x="710" y="310" width="360" height="180" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" rx="6"/>
+                    <text x="890" y="335" text-anchor="middle" font-weight="bold" fill="#4a148c" font-size="13">
+                        GC Reclamation Check
+                    </text>
+                    <line x1="720" y1="345" x2="1050" y2="345" stroke="#7b1fa2" stroke-width="1"/>
+
+                    <text x="730" y="365" font-size="10" fill="#37474f"><tspan font-weight="bold">live_min_snapshot()</tspan> scans:</text>
+                    <text x="730" y="383" font-size="11" fill="#37474f">  1️⃣ in_flight_bound[*] (Acquire)</text>
+                    <text x="730" y="401" font-size="11" fill="#37474f">  2️⃣ live_tx[*] (Acquire)</text>
+                    <text x="730" y="419" font-size="10" fill="#666" font-style="italic">  Returns min of all active snapshots</text>
+                    <text x="730" y="440" font-size="11" fill="#37474f"><tspan font-weight="bold">Block is safe if:</tspan></text>
+                    <text x="730" y="458" font-size="11" fill="#c62828" font-weight="bold">  death_version &lt; live_min_snapshot()</text>
+                    <text x="730" y="475" font-size="10" fill="#666">  → No reader can reach this block</text>
+                </g>
+
+                <!-- System state evolution -->
+                <text x="50" y="580" font-size="13" font-weight="bold" fill="#1a237e">System State Evolution During Registration:</text>
+
+                <!-- State timeline -->
+                <g id="state-timeline">
+                    <!-- Before Step 1 -->
+                    <rect x="50" y="610" width="140" height="130" fill="#f0f0f0" stroke="#999" stroke-width="1" rx="4"/>
+                    <text x="120" y="630" text-anchor="middle" font-size="10" font-weight="bold" fill="#1a237e">Before Step 1</text>
+                    <text x="60" y="655" font-size="9" fill="#37474f">in_flight[id] = ∞</text>
+                    <text x="60" y="670" font-size="9" fill="#37474f">live_tx[id] = ∞</text>
+                    <text x="60" y="685" font-size="9" fill="#37474f">Reader: idle</text>
+                    <text x="60" y="700" font-size="9" fill="#37474f">GC: no reader</text>
+                    <text x="60" y="715" font-size="9" fill="#37474f">to protect</text>
+                </g>
+
+                <path d="M 190 675 L 220 675" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+
+                <!-- After Step 1 -->
+                <g>
+                    <rect x="220" y="610" width="140" height="130" fill="#fff3e0" stroke="#f57c00" stroke-width="2" rx="4"/>
+                    <text x="290" y="630" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">After Step 1</text>
+                    <text x="230" y="655" font-size="9" fill="#37474f">in_flight[id] = V₀</text>
+                    <text x="230" y="670" font-size="9" fill="#37474f">live_tx[id] = ∞</text>
+                    <text x="230" y="685" font-size="9" fill="#37474f">Reader: bound set</text>
+                    <text x="230" y="700" font-size="9" fill="#37474f">GC: sees ≥V₀</text>
+                    <text x="230" y="715" font-size="9" fill="#37474f">cannot reclaim</text>
+                </g>
+
+                <path d="M 360 675 L 390 675" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+
+                <!-- After Step 2 -->
+                <g>
+                    <rect x="390" y="610" width="140" height="130" fill="#e3f2fd" stroke="#1976d2" stroke-width="2" rx="4"/>
+                    <text x="460" y="630" text-anchor="middle" font-size="10" font-weight="bold" fill="#0d47a1">After Step 2</text>
+                    <text x="400" y="655" font-size="9" fill="#37474f">in_flight[id] = V₀</text>
+                    <text x="400" y="670" font-size="9" fill="#37474f">live_tx[id] = ∞</text>
+                    <text x="400" y="685" font-size="9" fill="#37474f">Reader: ts = V₁</text>
+                    <text x="400" y="700" font-size="9" fill="#37474f">GC: sees V₀ or</text>
+                    <text x="400" y="715" font-size="9" fill="#37474f">waiting for V₁</text>
+                </g>
+
+                <path d="M 530 675 L 560 675" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+
+                <!-- After Step 3 -->
+                <g>
+                    <rect x="560" y="610" width="140" height="130" fill="#e3f2fd" stroke="#1976d2" stroke-width="2" rx="4"/>
+                    <text x="630" y="630" text-anchor="middle" font-size="10" font-weight="bold" fill="#0d47a1">After Step 3</text>
+                    <text x="570" y="655" font-size="9" fill="#37474f">in_flight[id] = V₀</text>
+                    <text x="570" y="670" font-size="9" fill="#37474f">live_tx[id] = V₁</text>
+                    <text x="570" y="685" font-size="9" fill="#37474f">Reader: ts = V₁</text>
+                    <text x="570" y="700" font-size="9" fill="#37474f">GC: sees min(V₀,V₁)</text>
+                    <text x="570" y="715" font-size="9" fill="#37474f">= V₀ ✓ safe</text>
+                </g>
+
+                <path d="M 700 675 L 730 675" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+
+                <!-- After Step 4 -->
+                <g>
+                    <rect x="730" y="610" width="140" height="130" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2" rx="4"/>
+                    <text x="800" y="630" text-anchor="middle" font-size="10" font-weight="bold" fill="#1b5e20">After Step 4</text>
+                    <text x="740" y="655" font-size="9" fill="#37474f">in_flight[id] = ∞</text>
+                    <text x="740" y="670" font-size="9" fill="#37474f">live_tx[id] = V₁</text>
+                    <text x="740" y="685" font-size="9" fill="#37474f">Reader: ts = V₁</text>
+                    <text x="740" y="700" font-size="9" fill="#37474f">GC: sees V₁</text>
+                    <text x="740" y="715" font-size="9" fill="#37474f">fully protected ✓</text>
+                </g>
+            </svg>
+
+            <div class="note">
+                <strong>The Protective Envelope:</strong> At every moment during registration, GC sees at least one protection mechanism.
+                Steps 1–3 overlap in a carefully choreographed sequence: bound publishes first (catches mid-registration readers),
+                live_tx publishes next (catches newly-drawing readers), then bound clears (hands off protection). The order is
+                <strong>critical</strong> and enforced by Release/Acquire semantics.
+            </div>
+
+            <div class="highlight-box">
+                <strong>Why Ordering Matters:</strong> If live_tx were published BEFORE the bound, a concurrent GC scan could read
+                live_tx before the write, then read in_flight_bound after it cleared—missing the reader entirely. But because the
+                reader publishes the bound first, GC scanning in_flight_bound first ALWAYS sees mid-registration readers.
+                This is the fundamental guarantee that prevents races.
+            </div>
+        </div>
+
+        <!-- Part 2: Dead Blocks Queue -->
+        <div class="diagram-section">
+            <div class="section-title">Part 2: Dead Blocks Queue Structure</div>
+            <svg viewBox="0 0 1200 600" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <linearGradient id="deadGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" style="stop-color:#ffebee;stop-opacity:1" />
+                        <stop offset="100%" style="stop-color:#ffcdd2;stop-opacity:1" />
+                    </linearGradient>
+                </defs>
+
+                <!-- Title -->
+                <text x="600" y="30" text-anchor="middle" font-size="18" font-weight="bold" fill="#1a237e">
+                    Dead Blocks Queue: From Death to Reclamation
+                </text>
+
+                <!-- SMO Event -->
+                <g>
+                    <rect x="50" y="70" width="220" height="100" fill="#ffcdd2" stroke="#c62828" stroke-width="2" rx="6"/>
+                    <text x="160" y="105" text-anchor="middle" font-weight="bold" fill="#1a237e" font-size="14">
+                        SMO Split/Merge
+                    </text>
+                    <text x="160" y="130" text-anchor="middle" font-size="11" fill="#37474f">
+                        Block dies with
+                    </text>
+                    <text x="160" y="150" text-anchor="middle" font-size="11" fill="#37474f">
+                        death_version = Vd
+                    </text>
+                </g>
+
+                <!-- Arrow -->
+                <path d="M 270 120 L 320 120" stroke="#c62828" stroke-width="3" fill="none" marker-end="url(#arrowhead-red)"/>
+
+                <!-- Register -->
+                <g>
+                    <rect x="320" y="70" width="220" height="100" fill="#ffcdd2" stroke="#c62828" stroke-width="2" rx="6"/>
+                    <text x="430" y="105" text-anchor="middle" font-weight="bold" fill="#1a237e" font-size="14">
+                        register_died_page()
+                    </text>
+                    <text x="430" y="130" text-anchor="middle" font-size="11" fill="#37474f">
+                        Mark retired
+                    </text>
+                    <text x="430" y="150" text-anchor="middle" font-size="11" fill="#37474f">
+                        (Vd, block_addr)
+                    </text>
+                </g>
+
+                <!-- Arrow -->
+                <path d="M 540 120 L 590 120" stroke="#c62828" stroke-width="3" fill="none" marker-end="url(#arrowhead-red)"/>
+
+                <!-- Dead blocks queue visualization -->
+                <g>
+                    <text x="600" y="60" font-size="13" font-weight="bold" fill="#1a237e">dead_blocks Queues (Sharded by worker_id)</text>
+
+                    <!-- Queue 1 -->
+                    <text x="80" y="230" font-size="12" font-weight="bold" fill="#1a237e">Worker 0:</text>
+                    <g id="queue1">
+                        <rect x="50" y="250" width="80" height="70" fill="url(#deadGrad)" stroke="#d32f2f" stroke-width="2" rx="4"/>
+                        <text x="90" y="280" text-anchor="middle" font-size="10" fill="#1a237e">V₁</text>
+                        <text x="90" y="298" text-anchor="middle" font-size="9" fill="#666">addr_1</text>
+
+                        <rect x="135" y="250" width="80" height="70" fill="url(#deadGrad)" stroke="#d32f2f" stroke-width="2" rx="4"/>
+                        <text x="175" y="280" text-anchor="middle" font-size="10" fill="#1a237e">V₃</text>
+                        <text x="175" y="298" text-anchor="middle" font-size="9" fill="#666">addr_3</text>
+
+                        <rect x="220" y="250" width="80" height="70" fill="url(#deadGrad)" stroke="#d32f2f" stroke-width="2" rx="4"/>
+                        <text x="260" y="280" text-anchor="middle" font-size="10" fill="#1a237e">V₅</text>
+                        <text x="260" y="298" text-anchor="middle" font-size="9" fill="#666">addr_5</text>
+
+                        <path d="M 300 285 L 320 285" stroke="#d32f2f" stroke-width="2" fill="none" marker-end="url(#arrowhead-red)"/>
+                        <text x="330" y="290" font-size="10" fill="#666">...</text>
+                    </g>
+
+                    <!-- Queue 2 -->
+                    <text x="500" y="230" font-size="12" font-weight="bold" fill="#1a237e">Worker 1:</text>
+                    <g id="queue2">
+                        <rect x="470" y="250" width="80" height="70" fill="url(#deadGrad)" stroke="#d32f2f" stroke-width="2" rx="4"/>
+                        <text x="510" y="280" text-anchor="middle" font-size="10" fill="#1a237e">V₂</text>
+                        <text x="510" y="298" text-anchor="middle" font-size="9" fill="#666">addr_2</text>
+
+                        <rect x="555" y="250" width="80" height="70" fill="url(#deadGrad)" stroke="#d32f2f" stroke-width="2" rx="4"/>
+                        <text x="595" y="280" text-anchor="middle" font-size="10" fill="#1a237e">V₄</text>
+                        <text x="595" y="298" text-anchor="middle" font-size="9" fill="#666">addr_4</text>
+
+                        <rect x="640" y="250" width="80" height="70" fill="url(#deadGrad)" stroke="#d32f2f" stroke-width="2" rx="4"/>
+                        <text x="680" y="280" text-anchor="middle" font-size="10" fill="#1a237e">V₆</text>
+                        <text x="680" y="298" text-anchor="middle" font-size="9" fill="#666">addr_6</text>
+
+                        <path d="M 720 285 L 740 285" stroke="#d32f2f" stroke-width="2" fill="none" marker-end="url(#arrowhead-red)"/>
+                        <text x="750" y="290" font-size="10" fill="#666">...</text>
+                    </g>
+
+                    <!-- Queue 3 (cold chains) -->
+                    <text x="900" y="230" font-size="12" font-weight="bold" fill="#1a237e">Reusable Cache:</text>
+                    <g id="cache">
+                        <rect x="870" y="250" width="80" height="70" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2" rx="4"/>
+                        <text x="910" y="280" text-anchor="middle" font-size="10" fill="#1a237e">Cold</text>
+                        <text x="910" y="298" text-anchor="middle" font-size="9" fill="#666">chain</text>
+
+                        <rect x="955" y="250" width="80" height="70" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2" rx="4"/>
+                        <text x="995" y="280" text-anchor="middle" font-size="10" fill="#1a237e">Cold</text>
+                        <text x="995" y="298" text-anchor="middle" font-size="9" fill="#666">chain</text>
+
+                        <path d="M 1035 285 L 1055 285" stroke="#2e7d32" stroke-width="2" fill="none" marker-end="url(#arrowhead-green)"/>
+                        <text x="1065" y="290" font-size="10" fill="#666">...</text>
+                    </g>
+                </g>
+
+                <!-- Queue properties -->
+                <g>
+                    <rect x="50" y="370" width="1100" height="190" fill="#f5f5f5" stroke="#999" stroke-width="1" rx="4"/>
+
+                    <text x="70" y="390" font-size="13" font-weight="bold" fill="#1a237e">Queue Properties & Invariants:</text>
+
+                    <g id="prop1">
+                        <text x="70" y="415" font-size="12" font-weight="bold" fill="#1a237e">1. Sharded by worker_id</text>
+                        <text x="90" y="433" font-size="11" fill="#37474f">One VecDeque per CPU shard → reduces lock contention</text>
+                        <text x="90" y="450" font-size="11" fill="#37474f">Worker steals from own shard first, then rotates through others</text>
+                    </g>
+
+                    <g id="prop2">
+                        <text x="70" y="470" font-size="12" font-weight="bold" fill="#1a237e">2. Ordered by (death_version, address)</text>
+                        <text x="90" y="488" font-size="11" fill="#37474f">Ordered insertion ensures O(log n) drain → can stop at first non-eligible block</text>
+                        <text x="90" y="505" font-size="11" fill="#37474f">Monotonic append is common case; late arrival uses binary search</text>
+                    </g>
+
+                    <g id="prop3">
+                        <text x="70" y="525" font-size="12" font-weight="bold" fill="#1a237e">3. Cold chains pre-cached</text>
+                        <text x="90" y="543" font-size="11" fill="#37474f">When hot leaf dies, entire cold chain appended to reusable cache</text>
+                    </g>
+                </g>
+            </svg>
+
+            <div class="note">
+                <strong>Why ordering matters:</strong> Blocks are ordered by death version, so the GC can drain from the front without
+                scanning the entire queue. Once a block fails the eligibility check, all remaining blocks in that queue are also ineligible.
+            </div>
+        </div>
+
+        <!-- Part 3: Reclamation Decision -->
+        <div class="diagram-section">
+            <div class="section-title">Part 3: Block Reclamation Decision Logic</div>
+            <svg viewBox="0 0 1200 680" xmlns="http://www.w3.org/2000/svg">
+                <!-- Title -->
+                <text x="600" y="30" text-anchor="middle" font-size="18" font-weight="bold" fill="#1a237e">
+                    free_block(): When is a Block Safe to Reuse?
+                </text>
+
+                <!-- Entry point -->
+                <g>
+                    <rect x="420" y="60" width="360" height="70" fill="#bbdefb" stroke="#1976d2" stroke-width="3" rx="6"/>
+                    <text x="600" y="92" text-anchor="middle" font-weight="bold" fill="#1a237e" font-size="14">
+                        Allocator calls free_block()
+                    </text>
+                </g>
+
+                <path d="M 600 130 L 600 170" stroke="#1976d2" stroke-width="2" fill="none" marker-end="url(#arrowhead-blue)"/>
+
+                <!-- Step 1: Check cache -->
+                <g>
+                    <rect x="370" y="170" width="460" height="80" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2" rx="6"/>
+                    <text x="600" y="200" text-anchor="middle" font-weight="bold" fill="#1a237e" font-size="13">
+                        Step 1: Check Per-Worker Reusable Cache
+                    </text>
+                    <text x="600" y="225" text-anchor="middle" font-size="11" fill="#37474f">
+                        Pre-populated batch from previous reclamation
+                    </text>
+                </g>
+
+                <path d="M 600 250 L 600 290" stroke="#2e7d32" stroke-width="2" fill="none" marker-end="url(#arrowhead-green)"/>
+
+                <!-- Decision: cache found -->
+                <polygon points="650,290 700,330 650,370 600,330" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+                <text x="650" y="335" text-anchor="middle" font-size="11" font-weight="bold" fill="#1a237e">
+                    Found?
+                </text>
+
+                <!-- Yes path: return immediately -->
+                <path d="M 700 330 L 800 330" stroke="#2e7d32" stroke-width="2" fill="none" marker-end="url(#arrowhead-green)"/>
+                <text x="745" y="320" font-size="10" fill="#2e7d32" font-weight="bold">Yes</text>
+                <rect x="800" y="295" width="160" height="70" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2" rx="6"/>
+                <text x="880" y="323" text-anchor="middle" font-weight="bold" fill="#1a237e">Return Block</text>
+                <text x="880" y="345" text-anchor="middle" font-size="10" fill="#37474f">Ready for reuse</text>
+
+                <!-- No path: compute bound -->
+                <path d="M 600 370 L 600 410" stroke="#f57c00" stroke-width="2" fill="none" marker-end="url(#arrowhead-orange)"/>
+                <text x="570" y="390" font-size="10" fill="#f57c00" font-weight="bold">No</text>
+
+                <!-- Compute bound -->
+                <g>
+                    <rect x="280" y="410" width="640" height="100" fill="#fff3e0" stroke="#f57c00" stroke-width="2" rx="6"/>
+                    <text x="600" y="435" text-anchor="middle" font-weight="bold" fill="#1a237e" font-size="13">
+                        Step 2: Compute Safe Reclamation Bound
+                    </text>
+                    <text x="600" y="460" text-anchor="middle" font-size="11" fill="#37474f">
+                        live_min_snapshot() = min(in_flight_bound[*], live_tx[*])
+                    </text>
+                    <text x="600" y="480" text-anchor="middle" font-size="10" fill="#666" font-style="italic">
+                        "Oldest active snapshot across all workers"
+                    </text>
+                </g>
+
+                <path d="M 600 510 L 600 550" stroke="#f57c00" stroke-width="2" fill="none" marker-end="url(#arrowhead-orange)"/>
+
+                <!-- Drain eligible -->
+                <g>
+                    <rect x="250" y="550" width="700" height="95" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2" rx="6"/>
+                    <text x="600" y="575" text-anchor="middle" font-weight="bold" fill="#1a237e" font-size="13">
+                        Step 3: Drain Eligible Dead Blocks
+                    </text>
+                    <text x="600" y="600" text-anchor="middle" font-size="11" fill="#37474f">
+                        For each block in dead_blocks: if block.death_version &lt; live_min_snapshot
+                    </text>
+                    <text x="600" y="618" text-anchor="middle" font-size="11" fill="#e74c3c" font-weight="bold">
+                        → Eligible for reuse (no reader can access it)
+                    </text>
+                </g>
+            </svg>
+
+            <div class="highlight-box">
+                <strong>Critical Safety Check:</strong> A block is only eligible if its death version is <strong>strictly less than</strong>
+                every active or in-flight snapshot. This ensures no reader—current or mid-registration—can ever access that block.
+            </div>
+        </div>
+
+        <!-- Part 4: Correctness & Race-Free Guarantee -->
+        <div class="diagram-section">
+            <div class="section-title">Part 4: Correctness & Race-Freedom Proof</div>
+
+            <div class="correctness-section">
+                <h3>Why Block Reclamation is Safe During Reader Registration</h3>
+
+                <p style="color: #37474f; line-height: 1.7; margin-bottom: 15px;">
+                    The system guarantees that no block a reader needs can be reclaimed before or during its snapshot registration.
+                    This is proven by the careful ordering of <code>in_flight_bound</code> and <code>live_tx</code> publication.
+                </p>
+
+                <div class="proof-step">
+                    <span class="step-num">1</span>
+                    <strong>Reader draws ts_start at version V1</strong><br/>
+                    <span style="color: #666; font-size: 12px;">
+                        The global clock's next_timestamp() returns V1. Any block with death_version < V1 was dead before the reader started.
+                    </span>
+                </div>
+
+                <div class="proof-step">
+                    <span class="step-num">2</span>
+                    <strong>in_flight_bound is published BEFORE ts_start is drawn</strong><br/>
+                    <span style="color: #666; font-size: 12px;">
+                        The bound = current_version() is read and stored in in_flight_bound[worker] BEFORE calling next_timestamp().
+                        Since the clock only increases, bound ≤ ts_start always.
+                    </span>
+                </div>
+
+                <div class="proof-step">
+                    <span class="step-num">3</span>
+                    <strong>live_min_snapshot() reads in_flight_bound BEFORE live_tx</strong><br/>
+                    <span style="color: #666; font-size: 12px;">
+                        This ordering is critical. The reader publishes to live_tx AFTER publishing the bound, and clears the bound
+                        AFTER live_tx insert. GC scanning in_flight_bound first guarantees it sees the registration in progress.
+                    </span>
+                </div>
+
+                <div class="proof-step">
+                    <span class="step-num">4</span>
+                    <strong>GC cannot reclaim blocks the reader might need</strong><br/>
+                    <span style="color: #666; font-size: 12px;">
+                        Since in_flight_bound[worker] ≤ ts_start (from step 2), and GC only reclaims blocks with death_version < live_min_snapshot
+                        (which includes in_flight_bound), a block needed by the reader (death_version ≥ ts_start) is never reclaimed.
+                    </span>
+                </div>
+
+                <div class="proof-step">
+                    <span class="step-num">5</span>
+                    <strong>No gap between bounds and live_tx</strong><br/>
+                    <span style="color: #666; font-size: 12px;">
+                        The sequence is: publish bound → draw ts_start → publish live_tx → clear bound.
+                        Even if cleared prematurely (which doesn't happen), live_tx insert happened before clearing, so GC sees
+                        one mechanism or the other at any moment.
+                    </span>
+                </div>
+
+                <svg viewBox="0 0 1000 280" xmlns="http://www.w3.org/2000/svg" style="margin-top: 20px;">
+                    <text x="500" y="25" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a237e">
+                        Timeline: Race-Free Snapshot Registration
+                    </text>
+
+                    <!-- Timeline axis -->
+                    <line x1="100" y1="60" x2="900" y2="60" stroke="#333" stroke-width="2"/>
+
+                    <!-- Reader -->
+                    <g id="reader">
+                        <circle cx="150" cy="60" r="5" fill="#2e7d32"/>
+                        <line x1="150" y1="65" x2="150" y2="110" stroke="#2e7d32" stroke-width="2"/>
+                        <text x="150" y="130" text-anchor="middle" font-size="10" fill="#1a237e">T1: Publish</text>
+                        <text x="150" y="145" text-anchor="middle" font-size="9" fill="#666">in_flight_bound</text>
+                    </g>
+
+                    <!-- Draw -->
+                    <g id="draw">
+                        <circle cx="350" cy="60" r="5" fill="#1976d2"/>
+                        <line x1="350" y1="65" x2="350" y2="110" stroke="#1976d2" stroke-width="2"/>
+                        <text x="350" y="130" text-anchor="middle" font-size="10" fill="#1a237e">T2: Draw</text>
+                        <text x="350" y="145" text-anchor="middle" font-size="9" fill="#666">ts_start=V1</text>
+                    </g>
+
+                    <!-- Publish -->
+                    <g id="pub">
+                        <circle cx="550" cy="60" r="5" fill="#7b1fa2"/>
+                        <line x1="550" y1="65" x2="550" y2="110" stroke="#7b1fa2" stroke-width="2"/>
+                        <text x="550" y="130" text-anchor="middle" font-size="10" fill="#1a237e">T3: Publish</text>
+                        <text x="550" y="145" text-anchor="middle" font-size="9" fill="#666">live_tx=V1</text>
+                    </g>
+
+                    <!-- Clear -->
+                    <g id="clear">
+                        <circle cx="750" cy="60" r="5" fill="#f57c00"/>
+                        <line x1="750" y1="65" x2="750" y2="110" stroke="#f57c00" stroke-width="2"/>
+                        <text x="750" y="130" text-anchor="middle" font-size="10" fill="#1a237e">T4: Clear</text>
+                        <text x="750" y="145" text-anchor="middle" font-size="9" fill="#666">in_flight_bound</text>
+                    </g>
+
+                    <!-- GC scan windows -->
+                    <g id="gc-scan">
+                        <line x1="200" y1="190" x2="700" y2="190" stroke="#c62828" stroke-width="1" stroke-dasharray="5,5"/>
+                        <rect x="200" y="185" width="500" height="30" fill="none" stroke="#c62828" stroke-width="2" stroke-dasharray="3,3"/>
+                        <text x="450" y="210" text-anchor="middle" font-size="10" fill="#c62828" font-weight="bold">
+                            GC can scan anytime during this window
+                        </text>
+                    </g>
+
+                    <!-- Safety annotations -->
+                    <text x="100" y="240" font-size="11" fill="#1a237e" font-weight="bold">Guaranteed:</text>
+                    <text x="100" y="255" font-size="10" fill="#37474f">
+                        • in_flight_bound ≤ V1 (published before next_timestamp)
+                    </text>
+                    <text x="500" y="255" font-size="10" fill="#37474f">
+                        • live_tx = V1 (published after draw)
+                    </text>
+                </svg>
+
+                <p style="color: #1b5e20; background: #f1f8e9; padding: 12px; border-radius: 4px; margin-top: 15px; font-weight: 500;">
+                    ✓ Result: GC sees at least one of (in_flight_bound, live_tx) always protects the reader.
+                    No block the reader needs can be reclaimed.
+                </p>
+            </div>
+
+            <div class="note">
+                <strong>The Key Insight:</strong> The system uses two overlapping protection mechanisms. During registration, neither
+                disappears before the other is published. This creates a "protective envelope" around the reader that GC cannot penetrate.
+            </div>
+        </div>
+
+        <!-- Part 5: Complete Timeline -->
+        <div class="diagram-section">
+            <div class="section-title">Part 5: Complete Block Lifecycle Timeline</div>
+            <svg viewBox="0 0 1200 480" xmlns="http://www.w3.org/2000/svg">
+                <!-- Title -->
+                <text x="600" y="30" text-anchor="middle" font-size="18" font-weight="bold" fill="#1a237e">
+                    Block State Transitions: From Death to Reuse
+                </text>
+
+                <!-- Timeline -->
+                <line x1="100" y1="100" x2="1100" y2="100" stroke="#333" stroke-width="3"/>
+                <text x="600" y="75" text-anchor="middle" font-size="12" fill="#666" font-weight="bold">Time →</text>
+
+                <!-- T0: Block dies -->
+                <circle cx="200" cy="100" r="8" fill="#c62828"/>
+                <line x1="200" y1="108" x2="200" y2="160" stroke="#c62828" stroke-width="2"/>
+                <rect x="120" y="160" width="160" height="90" fill="#ffcdd2" stroke="#c62828" stroke-width="2" rx="6"/>
+                <text x="200" y="185" text-anchor="middle" font-weight="bold" fill="#1a237e" font-size="12">
+                    T₀: Block Dies
+                </text>
+                <text x="200" y="205" text-anchor="middle" font-size="10" fill="#37474f">
+                    SMO split/merge
+                </text>
+                <text x="200" y="222" text-anchor="middle" font-size="10" fill="#37474f">
+                    death_v = V_dead
+                </text>
+
+                <!-- T1: Reader active -->
+                <circle cx="450" cy="100" r="8" fill="#f57c00"/>
+                <line x1="450" y1="108" x2="450" y2="160" stroke="#f57c00" stroke-width="2"/>
+                <rect x="370" y="160" width="160" height="90" fill="#fff3e0" stroke="#f57c00" stroke-width="2" rx="6"/>
+                <text x="450" y="185" text-anchor="middle" font-weight="bold" fill="#1a237e" font-size="12">
+                    T₁: Reader Active
+                </text>
+                <text x="450" y="205" text-anchor="middle" font-size="10" fill="#37474f">
+                    live_min_snapshot
+                </text>
+                <text x="450" y="222" text-anchor="middle" font-size="10" fill="#37474f">
+                    = V_dead (holds)
+                </text>
+
+                <!-- T2: GC checks -->
+                <circle cx="700" cy="100" r="8" fill="#1976d2"/>
+                <line x1="700" y1="108" x2="700" y2="160" stroke="#1976d2" stroke-width="2"/>
+                <rect x="620" y="160" width="160" height="90" fill="#bbdefb" stroke="#1976d2" stroke-width="2" rx="6"/>
+                <text x="700" y="185" text-anchor="middle" font-weight="bold" fill="#1a237e" font-size="12">
+                    T₂: GC Checks
+                </text>
+                <text x="700" y="205" text-anchor="middle" font-size="10" fill="#37474f">
+                    V_dead < live_min?
+                </text>
+                <text x="700" y="222" text-anchor="middle" font-size="10" fill="#c62828" font-weight="bold">
+                    No → Skip block
+                </text>
+
+                <!-- T3: Reader finishes -->
+                <circle cx="950" cy="100" r="8" fill="#2e7d32"/>
+                <line x1="950" y1="108" x2="950" y2="160" stroke="#2e7d32" stroke-width="2"/>
+                <rect x="870" y="160" width="160" height="90" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2" rx="6"/>
+                <text x="950" y="185" text-anchor="middle" font-weight="bold" fill="#1a237e" font-size="12">
+                    T₃: Reader Done
+                </text>
+                <text x="950" y="205" text-anchor="middle" font-size="10" fill="#37474f">
+                    end_snapshot()
+                </text>
+                <text x="950" y="222" text-anchor="middle" font-size="10" fill="#37474f">
+                    live_tx cleared
+                </text>
+
+                <!-- Conditions below timeline -->
+                <g id="conditions">
+                    <text x="80" y="310" font-size="12" font-weight="bold" fill="#1a237e">Reclamation Safety Conditions:</text>
+
+                    <rect x="50" y="330" width="1100" height="150" fill="#f5f5f5" stroke="#999" stroke-width="1" rx="4"/>
+
+                    <text x="70" y="350" font-size="11" fill="#37474f">
+                        <tspan font-weight="bold" fill="#1a237e">Invariant 1:</tspan> Block with V_dead never reclaimed while any reader has ts ≥ V_dead
+                    </text>
+
+                    <text x="70" y="375" font-size="11" fill="#37474f">
+                        <tspan font-weight="bold" fill="#1a237e">Invariant 2:</tspan> live_min_snapshot() always includes in_flight_bound (read first)
+                    </text>
+
+                    <text x="70" y="400" font-size="11" fill="#37474f">
+                        <tspan font-weight="bold" fill="#1a237e">Invariant 3:</tspan> Reader can only reach blocks it acquired snapshot for (ts_start)
+                    </text>
+
+                    <text x="70" y="425" font-size="11" fill="#37474f">
+                        <tspan font-weight="bold" fill="#1a237e">Invariant 4:</tspan> Blocks born after reader's snapshot (V > ts_start) are never
+                        reached by that reader
+                    </text>
+
+                    <text x="70" y="450" font-size="11" fill="#37474f">
+                        <tspan font-weight="bold" fill="#1a237e">Result:</tspan> Any block reclaimed (V_dead &lt; live_min_snapshot) could not be reached by any reader
+                    </text>
+                </g>
+            </svg>
+
+            <div class="highlight-box">
+                <strong>The Safety Guarantee:</strong> Because <code>live_min_snapshot()</code> reads <code>in_flight_bound</code> before
+                <code>live_tx</code>, and the reader publishes to <code>live_tx</code> before clearing <code>in_flight_bound</code>,
+                GC sees at least one protection mechanism. Blocks are only reclaimed when no reader—active or registering—can access them.
+            </div>
+        </div>
+
+        <!-- Legend -->
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #bbdefb 0%, #e3f2fd 100%); border-color: #1976d2;"></div>
+                <span><strong>Query/Snapshot:</strong> Reader operations and snapshot state</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%); border-color: #f57c00;"></div>
+                <span><strong>Registration:</strong> In-flight bounds protecting readers</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #c8e6c9 0%, #f1f8e9 100%); border-color: #2e7d32;"></div>
+                <span><strong>Safe/Eligible:</strong> Can proceed or reclaim safely</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #ffcdd2 0%, #ffebee 100%); border-color: #c62828;"></div>
+                <span><strong>Dead/Unsafe:</strong> Block dead, not yet reclaimable</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #e1bee7 0%, #f3e5f5 100%); border-color: #7b1fa2;"></div>
+                <span><strong>Published:</strong> Visible to all workers for coordination</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #fff9c4; border-color: #f57f17;"></div>
+                <span><strong>Checkpoint Detail:</strong> Specific mechanism or guarantee</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- SVG arrowhead markers -->
+    <svg style="display: none">
+        <defs>
+            <marker id="arrowhead-blue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                <polygon points="0 0, 10 3, 0 6" fill="#1976d2"/>
+            </marker>
+            <marker id="arrowhead-orange" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                <polygon points="0 0, 10 3, 0 6" fill="#f57c00"/>
+            </marker>
+            <marker id="arrowhead-red" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                <polygon points="0 0, 10 3, 0 6" fill="#c62828"/>
+            </marker>
+            <marker id="arrowhead-green" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                <polygon points="0 0, 10 3, 0 6" fill="#2e7d32"/>
+            </marker>
+        </defs>
+    </svg>
+</body>
+</html>
