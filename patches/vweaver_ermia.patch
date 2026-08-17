@@ -10,3 +10,46 @@ index 1b5adc0..1b09380 100755
  #include <unistd.h>
  
  #include "bench.h"
+diff --git a/benchmarks/bench.h b/benchmarks/bench.h
+index adf08a6..202ce00 100755
+--- a/benchmarks/bench.h
++++ b/benchmarks/bench.h
+@@ -218,7 +218,6 @@ class bench_runner {
+   bench_runner(ermia::Engine *db)
+       : db(db),
+-        barrier_a(ermia::config::worker_threads +
+-                  1),  // default worker_threads (+1)
++        barrier_a(ermia::config::worker_threads),
+         barrier_b(ermia::config::worker_threads > 0 ? 1 : 0) {}
+   virtual ~bench_runner() {}
+   virtual void prepare(char *) = 0;
+diff --git a/benchmarks/tpcc.cc b/benchmarks/tpcc.cc
+index e31c4b7..c5fdd69 100755
+--- a/benchmarks/tpcc.cc
++++ b/benchmarks/tpcc.cc
+@@ -3504,20 +3504,15 @@ class tpcc_bench_runner : public bench_runner {
+     util::fast_random r(23984543);
+     std::vector<bench_worker *> ret;
+     if (NumWarehouses() < ermia::config::worker_threads) {
+-      for (size_t i = 0; i <= ermia::config::worker_threads; i++)  // default <
++      for (size_t i = 0; i < ermia::config::worker_threads; i++)
+         ret.push_back(new tpcc_worker(i, r.next(), db, open_tables, partitions,
+                                       &barrier_a, &barrier_b,
+                                       (i % NumWarehouses()) + 1));
+     } else {
+-      for (size_t i = 0; i <= ermia::config::worker_threads; i++) {  // default
+-                                                                     // <
+-        if (i == ermia::config::worker_threads)
+-          ret.push_back(new tpcc_worker(i, r.next(), db, open_tables,
+-                                        partitions, &barrier_a, &barrier_b, 1));
+-        else
+-          ret.push_back(new tpcc_worker(i, r.next(), db, open_tables,
+-                                        partitions, &barrier_a, &barrier_b,
+-                                        i + 1));
++      for (size_t i = 0; i < ermia::config::worker_threads; i++) {
++        ret.push_back(new tpcc_worker(i, r.next(), db, open_tables,
++                                      partitions, &barrier_a, &barrier_b,
++                                      i + 1));
+       }
+     }
+     return ret;

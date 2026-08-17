@@ -66,8 +66,10 @@ BENCHBASE_URL = "https://github.com/cmu-db/benchbase.git"
 BENCHBASE_PATCH_COMMIT = "33c00473807ebd49304d114a6d769d2d2b2bbb34"
 BENCHBASE_YCSB_PAYLOAD_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_payload_benchbase.patch"
 VWEAVER_URL = "https://github.com/SNU-DBXLab-papers/vWeaver_ermia.git"
-# Pinned so patches/vweaver_ermia.patch (one fix: a dead `#include <sys/vtimes.h>`, removed
-# from modern glibc) always applies cleanly. This is the SNU-DBXLab-papers repo's own
+# Pinned so patches/vweaver_ermia.patch (removal of `sys/vtimes.h`, which is absent from
+# modern glibc, plus benchmark start-barrier and TPC-C extra-worker fixes) always applies
+# cleanly.
+# This is the SNU-DBXLab-papers repo's own
 # default branch ("vweaver") HEAD at the time this was verified - NOT the same commit or
 # even the same repo as an earlier, mistaken pin against a divergent fork (Rudeus/
 # vWeaver_ermia) that doesn't share this history at all.
@@ -297,7 +299,8 @@ def step_vweaver_ermia() -> None:
     if not VWEAVER_REPO.exists():
         run(["git", "clone", VWEAVER_URL, str(VWEAVER_REPO)])
         run(["git", "checkout", VWEAVER_PATCH_COMMIT], cwd=VWEAVER_REPO)
-        log(f"Applying {VWEAVER_PATCH_PATH.name} (dead sys/vtimes.h include)")
+        log(f"Applying {VWEAVER_PATCH_PATH.name} (dead sys/vtimes.h include + "
+            f"benchmark start-barrier/TPC-C worker-count fixes)")
         run(["git", "apply", str(VWEAVER_PATCH_PATH)], cwd=VWEAVER_REPO)
         log(f"Applying {VWEAVER_FRUGAL_PATCH_PATH.name} (missing deallocate_skiplist() "
             f"definition + disabled HYU_SKIPLIST GC branch - no-op for this Vweaver build, "

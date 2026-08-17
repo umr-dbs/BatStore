@@ -33,8 +33,10 @@ out-of-memory error at the actual overflow site. Fixed by aggregating directly i
 scan callback (streaming, O(1) memory) instead of buffering first - see the patch.
 
 Builds cleanly against https://github.com/SNU-DBXLab-papers/vWeaver_ermia's own default
-("vweaver") branch with two fixes: a dead `#include <sys/vtimes.h>` (removed from modern
-glibc, see patches/vweaver_ermia.patch), and generating dbcore/burt-hash.cpp - a gitignored
+("vweaver") branch with fixes for a dead `#include <sys/vtimes.h>` (removed from modern
+glibc), an off-by-one benchmark start barrier that otherwise waits forever, and TPC-C
+creating one unrequested extra worker, all in patches/vweaver_ermia.patch, plus generation
+of dbcore/burt-hash.cpp - a gitignored
 build artifact upstream normally produces via `python2 dbcore/burt-hash.py`, but no
 python2 exists here, so setup_environment.py runs a Python 3 port instead (see
 patches/vweaver_burt_hash_gen.py). An EARLIER version of this pin/patch was generated
