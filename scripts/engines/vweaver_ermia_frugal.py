@@ -27,10 +27,16 @@ working. Root-caused here to two independent things:
    doesn't define), so it's applied unconditionally onto the one shared checkout
    regardless of which variant(s) get built from it.
 
-Same YCSB A-F / TPC-C / htap_q1-htap_q6 support as vweaver_ermia.py - see that module's
+Same YCSB A-F / TPC-C / htap_q1-htap_q6 interface as vweaver_ermia.py - see that module's
 docstring (including patches/vweaver_ermia_chbenchmark.patch, which - like
 vweaver_ermia_frugal.patch - applies identically to both variants); this one only
 duplicates what differs (build dir, binary, CMAKE_BUILD_PARAM, engine name).
+
+The shared benchmark barrier/TPC-C worker-count fixes in patches/vweaver_ermia.patch apply
+to this build too. They make read-only YCSB-C run normally, but do not repair the separate
+HYU_SKIPLIST runtime defect: TPC-C with GC enabled still SIGSEGVs even with one worker;
+with GC disabled one worker completes, while two workers can hang after loading. Treat
+write-heavy/concurrent use of this experimental variant as unreliable.
 """
 from __future__ import annotations
 

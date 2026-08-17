@@ -1,9 +1,9 @@
 [package]
 name = "cMVBT"
-version = "0.0.129"
+version = "0.0.130"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
-description = "cMVBT Research Implementation"
+description = "BatStore Research Implementation"
 repository = "https://github.com/umr-dbs/cMVBT-OSIC"
 # `tests/` holds unit-test files pulled into the bin crate via `#[path]` mods
 # (this crate has no `[lib]` target, so they can't be real integration

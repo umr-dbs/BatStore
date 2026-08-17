@@ -369,8 +369,10 @@ this rather than papering over it:
   original TPC-C code has (which would indicate a genuine data/scale bug, not a race).
 
 - vWeaver_ermia (ERMIA) build status: BUILDS AND RUNS. After fixing missing
-  libgoogle-glog-dev/libibverbs-dev packages and a dead `#include <sys/vtimes.h>` (the
-  only fix in patches/vweaver_ermia.patch), and generating dbcore/burt-hash.cpp - a
+  libgoogle-glog-dev/libibverbs-dev packages, a dead `#include <sys/vtimes.h>`, and an
+  off-by-one start barrier that otherwise waits forever, and TPC-C creating one extra
+  unrequested worker (the source fixes in patches/vweaver_ermia.patch), and generating
+  dbcore/burt-hash.cpp - a
   gitignored build artifact upstream normally produces via `python2 dbcore/burt-hash.py`
   (no python2 on this system; setup_environment.py runs a Python 3 port instead, see
   patches/vweaver_burt_hash_gen.py) - `-DCMAKE_BUILD_PARAM=Vweaver` builds `ermia_SI`
@@ -409,7 +411,7 @@ this rather than papering over it:
   Builds cleanly via setup_environment.py's step_vweaver_ermia_frugal().
   KNOWN ISSUE (found once this machine had enough hugepages to actually sustain a real
   multi-second run, not just start one - see vweaver_ermia's own hugepages note above):
-  this build reliably SIGSEGVs a few seconds into ANY real concurrent TPC-C workload
+  this build reliably SIGSEGVs a few seconds into ANY real TPC-C workload with GC enabled
   (reproduces on plain "tpcc", not specific to htap_q1/htap_q6), consistently inside
   `MM::gc_version_chain` -> `sm_oid_mgr::oid_get_version_skiplist_from_ver` during a normal
   New-Order/Payment update (a near-null pointer read off `Object::GetSentinel()`, i.e. some
@@ -420,8 +422,9 @@ this rather than papering over it:
   dbcore/sm-oid.cpp, not yet root-caused) - not something patches/
   vweaver_ermia_chbenchmark.patch's Q1/Q6 additions touch or introduced (confirmed: crashes
   identically with --enable-chbenchmark on or off). Until this is root-caused, this engine
-  variant should be treated as NOT reliably usable for anything beyond a very short smoke
-  test - real comparison runs will very likely end in "FAILED exit=-11, see stdout.log".
+  variant should be treated as NOT reliably usable for write-heavy/concurrent comparison
+  runs. Disabling GC lets a one-worker smoke test complete, but a two-worker test can hang
+  after loading, so `--gc off` is not a general repair.
 
 - Peak memory (peak_rss_mb): tracks PostgreSQL's actual SERVER process tree now
   (postmaster + checkpointer + bgwriter + walwriter + every per-connection backend -

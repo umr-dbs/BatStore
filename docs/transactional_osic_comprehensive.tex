@@ -1011,25 +1011,85 @@ read-only ones.
 \subsection{Garbage Collection and Allocation Sharding}
 \label{sec:gc_optimizations}
 
-\subsubsection{Optimization 14: Sharded Retired-Block Reuse Pool}
+\subsubsection{Optimization 14: Snapshot-Aware, Sharded Page Reclamation}
 
-\textbf{Problem:}
-A single global free list was a contention hotspot: every allocation and retirement
-touched the same lock/list, particularly under high concurrency.
+BatStore uses snapshot-aware garbage collection to reclaim obsolete records and retired
+tree pages without a dedicated background collector. Reclamation is allocation-driven:
+when a worker requires a page, it first attempts to reuse pages that have already become
+safe to reclaim.
 
-\textbf{Solution:}
-Partition the reuse pool by worker: each worker's retired blocks go to its own shard,
-which is checked first on allocation. If a shard is depleted, the worker steals from
-another shard round-robin, avoiding immediate allocator calls. The identity of each
-retired block includes its address (in case death versions collide), allowing shards
-to disambiguate blocks.
+Each transaction publishes its snapshot timestamp in a cache-line-padded, per-worker
+slot. A second per-worker slot contains a conservative bound while a transaction is in
+the short interval between beginning snapshot registration and publishing its actual
+snapshot. Let $L$ be the set of published live snapshots and $I$ the set of published
+in-flight bounds. The reclamation horizon is
+\begin{equation}
+  S_{\min} = \min(L \cup I).
+  \label{eq:gc-horizon}
+\end{equation}
+If both sets are empty, there is no active reader and all retired pages are eligible.
+A page with death version $V_d$ may otherwise be reused only when
+\begin{equation}
+  V_d < S_{\min}.
+  \label{eq:gc-rule}
+\end{equation}
+The strict inequality retains the page for every transaction whose snapshot may still
+reach that historical tree generation.
+
+Retired pages are kept in CPU-count, worker-indexed shards. Each shard is a
+mutex-protected \code{VecDeque} ordered by $(V_d,\mathit{address})$; the address
+distinguishes pages that receive the same death version, as happens when one structural
+modification retires two siblings. Registration normally appends to the worker's local
+shard. Reclamation drains the caller's shard first and, if necessary, scans other shards
+from a rotating start position. Up to 16 eligible root pages are selected using one
+snapshot-horizon scan and placed in a per-worker reuse cache, amortizing the
+$O(W)$ scan of the $W$ worker slots over several allocations. A reclaimed hot leaf also
+owns its cold-page chain, so the same safety proof permits the entire chain to enter the
+reuse cache without independent retirement entries.
+
+Garbage collection acts at both the record and page levels. During structural
+compaction, obsolete record versions are omitted from the replacement page. A record
+deleted by a transaction that can still abort is retained until that transaction
+finishes, because abort processing may need to restore it. Historical readers need not
+have their visible versions copied into the replacement page: they continue through the
+retired source generation, and Equation~\ref{eq:gc-rule} prevents that generation from
+being reused until those readers complete.
+
+For a multi-table database, retired-page shards remain local to each table because each
+table owns a separate allocator. Snapshot liveness and the logical clock reside in the
+shared transaction context. Thus reclamation by one table respects a transaction that
+has registered once but may subsequently access any table in the database.
+
+\paragraph{Correctness.}
+For a snapshot $S$, a page with death version $D$ can be required only if $D \geq S$;
+if $D < S$, the page was already obsolete at that snapshot. By
+Equation~\ref{eq:gc-rule}, a reclaimed page satisfies $D < S_{\min}$. Every published
+active or registering reader has a bound $S \geq S_{\min}$, hence $D < S$ and cannot
+require the reclaimed page.
+
+It remains to consider a reader that has read the logical clock but has not yet
+published its in-flight bound when the collector scans the slots. Let $S_{\mathrm{old}}$
+be the horizon observed by that earlier collection, let $B$ be the reader's subsequently
+published conservative bound, and let $S_{\mathrm{new}}$ be the snapshot drawn after
+publishing $B$. Monotonicity of the global logical clock and the publication order give
+\begin{equation}
+  S_{\mathrm{old}} \leq B \leq S_{\mathrm{new}}.
+\end{equation}
+Every page reclaimed by the earlier scan has $D < S_{\mathrm{old}}$, and therefore
+$D < S_{\mathrm{new}}$. This contradicts the necessary condition
+$D \geq S_{\mathrm{new}}$ for the new reader to require the page. Consequently, an
+earlier collector may safely miss a reader that has not yet published its bound; later
+collectors observe either its in-flight bound or its published snapshot. The handoff is
+ordered by release stores and acquire loads, with in-flight slots scanned before live
+snapshot slots, so a collector cannot miss both sides of a completed handoff.
 
 \textbf{Measured Impact:}
+Sharding localizes synchronization and reduces allocator contention. Batching further
+reduces the cost of snapshot-liveness scans. Their combined effect is included in the
+reported transaction-throughput and memory-consumption measurements.
 
-Sharding reduces global lock contention. The impact is present in contention-heavy
-benchmarks and is subsumed in transaction throughput measurements.
-
-\textbf{Decision:} Adopted. Reduces allocator contention; per-shard overhead is minimal.
+\textbf{Decision:} Adopted. The design safely bounds page reuse by the oldest possible
+reader while avoiding a global retirement-list bottleneck.
 
 \subsubsection{Optimization 15: Conservative Update-In-Place}
 
