@@ -52,25 +52,6 @@ impl<
     Payload: Clone + Default,
 > TrackerHandleSt<P_F, P_N, Key, Payload>
 {
-    /// A reclaimed hot leaf exclusively owns its cold chain. Once the hot
-    /// page's death version is older than every active structural snapshot,
-    /// that same proof covers the complete chain; cold pages therefore go
-    /// straight to the reusable cache and are never independently entered
-    /// in `dead_blocks` (which also prevents double registration).
-    fn append_owned_cold_chain(
-        page: BlockRef<P_F, P_N, Key, Payload>,
-        out: &mut Vec<BlockRef<P_F, P_N, Key, Payload>>,
-    ) {
-        let mut link = *page.unsafe_borrow().cold_link();
-        while !link.is_none() {
-            let cold = link.cold();
-            let next = *cold.unsafe_borrow().cold_link();
-            cold.mark_retired();
-            out.push(cold);
-            link = next;
-        }
-    }
-
     pub fn new() -> Self {
         Self {
             dead_blocks: BlockTrace::new(),
@@ -165,11 +146,7 @@ impl<
             Some(live_min_snapshot) => dead_v.lt_self_any(live_min_snapshot),
                     },
                 );
-        let mut reclaimed = Vec::new();
-        for page in reclaimed_roots {
-            reclaimed.push(page);
-            Self::append_owned_cold_chain(page, &mut reclaimed);
-        }
+        let mut reclaimed = reclaimed_roots;
         let result = reclaimed.pop();
         if !reclaimed.is_empty() {
             self.reusable[cache_index].lock().extend(reclaimed);

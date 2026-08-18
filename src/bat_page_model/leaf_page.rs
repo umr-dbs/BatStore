@@ -609,11 +609,12 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
     /// page. A plain `Insert`'s abort looks identical from here (both "no
     /// predecessor found locally") — that ambiguity is fine, see
     /// `apply_invalidate`'s doc for why a further, empty search for the
-    /// pending stamp is a harmless no-op in that case. A cold-chain-aware
-    /// caller (`bat_sync::version_handle`) uses this to keep searching a
-    /// leaf's cold chain (`bat_page_model::node::ColdLink`) for that exact
-    /// `deletion_stamp`; a caller that doesn't care (e.g. this file's own
-    /// tests, which only ever exercise a single page) can ignore it.
+    /// pending stamp is a harmless no-op in that case. `bat_sync::
+    /// version_handle::abort_writes` treats a leftover `Some` here as a
+    /// genuine miss (logged, not retried elsewhere) since there is no
+    /// separate historical page left to keep searching; a caller that
+    /// doesn't care (e.g. this file's own tests, which only ever exercise
+    /// a single page) can ignore it.
     pub(crate) fn abort_write(
         &mut self,
         key: Key,
@@ -639,12 +640,10 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
         n
     }
     /// Finds an entry for `key` — physically before index `before` if
-    /// given (bounds the search to `0..before`, exactly `apply_invalidate`'s
-    /// own local predecessor search), else searches this whole page — whose
-    /// own `deletion_stamp` exactly matches `stamp`, and undeletes it.
-    /// Shared by `apply_invalidate` (local, bounded) and a cold-chain-aware
-    /// caller (`bat_sync::version_handle`; whole-page, unbounded, one call
-    /// per cold page walked — see `abort_write`'s doc).
+    /// given (bounds the search to `0..before`), else searches this whole
+    /// page — whose own `deletion_stamp` exactly matches `stamp`, and
+    /// undeletes it. Used by `apply_invalidate`'s own local, bounded
+    /// predecessor search.
     pub(crate) fn undelete_matching_deletion_stamp(
         &mut self,
         key: Key,
