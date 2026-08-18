@@ -23,7 +23,7 @@ type TestTree = MVBTSt<8, 8, u64, u64>;
 #[test]
 fn replay_database_routes_writes_to_correct_table() {
     let path =
-        std::env::temp_dir().join(format!("cmvbt_replay_db_test_{}.log", std::process::id()));
+        std::env::temp_dir().join(format!("batstore_replay_db_test_{}.log", std::process::id()));
     let _ = fs::remove_file(&path);
 
     const TABLE_A: record::TableId = 0;

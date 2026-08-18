@@ -478,7 +478,7 @@ fn explicit_abort_reverts_every_self_written_version_of_a_repeatedly_written_key
 #[test]
 fn explicit_abort_write_does_not_resurface_after_recovery() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_tx_explicit_abort_wal_test_{}.log",
+        "batstore_tx_explicit_abort_wal_test_{}.log",
         std::process::id()
     ));
     let meta_path = format!("{}.meta", path.display());

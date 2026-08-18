@@ -355,7 +355,7 @@ fn write_system_info(run_dir: &Path, scale: Scale) {
         .unwrap_or_else(|| "MemTotal: unknown".to_string());
 
     let info = format!(
-        "cMVBT benchmark suite\n\
+        "BatStore benchmark suite\n\
          package version   = {}\n\
          scale             = {}\n\
          logical CPUs      = {}\n\
@@ -429,7 +429,7 @@ pub fn main_benchmark(parms: Vec<String>) {
     write_system_info(&run_dir, scale);
     let manifest = Manifest::create(&run_dir);
 
-    println!("\n########## cMVBT benchmark suite ##########");
+    println!("\n########## BatStore benchmark suite ##########");
     println!("run directory : {}", run_dir.display());
     println!("scale         : {}", scale.label());
     println!("#############################################");

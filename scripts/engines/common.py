@@ -1,6 +1,6 @@
 """Shared types and helpers for the cross-engine benchmark harness.
 
-Normalizes cMVBT/LeanStore/WiredTiger/PostgreSQL onto one comparable schema (see
+Normalizes BatStore/LeanStore/WiredTiger/PostgreSQL onto one comparable schema (see
 MANIFEST_HEADER below) so a single manifest.csv + plotting script can overlay all four.
 See manual.txt (repo root) for the full usage guide.
 """
@@ -24,17 +24,20 @@ from typing import Optional
 # checkouts somewhere other than <invocation-dir>/tx_tests.
 WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT", str(Path.cwd() / "tx_tests")))
 
-# CMVBT_REPO: setup_environment.py always attempts to clone cMVBT-OSIC into
-# WORKSPACE_ROOT/cmvbt (see its step_cmvbt). If that succeeded (Cargo.toml present -
+# BATSTORE_REPO: setup_environment.py always attempts to clone BatStore into
+# WORKSPACE_ROOT/batstore (see its step_batstore). If that succeeded (Cargo.toml present -
 # distinguishes a real clone from a stray empty directory), use it; otherwise fall back to
 # this file's own grandparent directory - the checkout this script is already part of,
-# self-referential so it's always correct without a clone (the case that actually engages
-# on this workstation, since cMVBT-OSIC is currently private and can't be cloned here).
-_workspace_cmvbt = WORKSPACE_ROOT / "cmvbt"
-_self_referential_cmvbt = Path(__file__).resolve().parent.parent.parent
-CMVBT_REPO = Path(os.environ.get(
-    "CMVBT_REPO",
-    str(_workspace_cmvbt) if (_workspace_cmvbt / "Cargo.toml").exists() else str(_self_referential_cmvbt),
+# self-referential so it remains correct whenever the remote clone is unavailable or this
+# checkout should be used directly.
+_workspace_batstore = WORKSPACE_ROOT / "batstore"
+_self_referential_batstore = Path(__file__).resolve().parent.parent.parent
+BATSTORE_REPO = Path(os.environ.get(
+    "BATSTORE_REPO",
+    os.environ.get(
+        "CMVBT_REPO",
+        str(_workspace_batstore) if (_workspace_batstore / "Cargo.toml").exists() else str(_self_referential_batstore),
+    ),
 ))
 LEANSTORE_REPO = Path(os.environ.get("LEANSTORE_REPO", str(WORKSPACE_ROOT / "leanstore")))
 # Directory name is a misleading holdover from an old CLion default - it's actually
@@ -58,25 +61,25 @@ PG_DATABASE = os.environ.get("PG_DATABASE", "benchbase")
 NUMA_NODE = 0
 
 # Every engine's on-disk DATA directory (LeanStore/WiredTiger's ssd image, libmdbx's
-# environment, ERMIA's log dir, cMVBT's WAL file - see fresh_scratch_dir below) is created
+# environment, ERMIA's log dir, BatStore's WAL file - see fresh_scratch_dir below) is created
 # under here, not under WORKSPACE_ROOT/scratch on real disk - this harness is
 # in-memory-only: every one of those engines still does real file I/O (page eviction, WAL
 # flush, mmap writeback), and the only way to guarantee none of it ever reaches a physical
 # disk, regardless of how --dram-gib/buffer-pool sizing is set, is to back that I/O with
 # tmpfs (RAM) instead of a real filesystem. /dev/shm is tmpfs on every mainstream Linux
 # distro by default.
-SCRATCH_ROOT = Path(os.environ.get("SCRATCH_ROOT", "/dev/shm/cmvbt_bench_scratch"))
+SCRATCH_ROOT = Path(os.environ.get("SCRATCH_ROOT", "/dev/shm/batstore_bench_scratch"))
 
-# Global allocator cMVBT's own binary is built with - see Cargo.toml's `mimalloc`
+# Global allocator BatStore's own binary is built with - see Cargo.toml's `mimalloc`
 # feature and src/main.rs's global-allocator cfg (jemalloc is the crate's own default;
 # mimalloc measured a few % *worse* on TPC-C despite winning a few % on YCSB's WAL path,
 # so it stays opt-in rather than becoming the default there too). Read fresh from the
 # environment on every call (not cached at import time) so compare_engines.py's
-# --cmvbt-allocator flag can set it right before either cmvbt.py's or libmdbx.py's
+# --batstore-allocator flag can set it right before either batstore.py's or libmdbx.py's
 # ensure_built() runs - both build the exact same binary (see their own module docs),
 # so this one helper is the single place that decides the cargo invocation for either.
-def cmvbt_cargo_build_args(*extra_features: str) -> list[str]:
-    allocator = os.environ.get("CMVBT_ALLOCATOR", "jemalloc")
+def batstore_cargo_build_args(*extra_features: str) -> list[str]:
+    allocator = os.environ.get("BATSTORE_ALLOCATOR", os.environ.get("CMVBT_ALLOCATOR", "jemalloc"))
     args = ["cargo", "build", "--release"]
     if allocator == "mimalloc":
         args.append("--features")
@@ -85,7 +88,7 @@ def cmvbt_cargo_build_args(*extra_features: str) -> list[str]:
         if extra_features:
             args += ["--features", ",".join(extra_features)]
     else:
-        raise ValueError(f"unknown CMVBT_ALLOCATOR={allocator!r} (expected 'jemalloc' or 'mimalloc')")
+        raise ValueError(f"unknown BATSTORE_ALLOCATOR={allocator!r} (expected 'jemalloc' or 'mimalloc')")
     return args
 
 
@@ -325,8 +328,8 @@ class Scale:
     s_htap_olap_threads: int = 2
     s_htap_olap_lag: int = 0
     s_htap_olap_span: int = 30_000
-    # LeanStore/WiredTiger buffer pool / cache size; unused by cmvbt and postgres (cmvbt has
-    # no comparable cap and runs fully in-memory already - see cmvbt.py's wal_enabled
+    # LeanStore/WiredTiger buffer pool / cache size; unused by batstore and postgres (batstore has
+    # no comparable cap and runs fully in-memory already - see batstore.py's wal_enabled
     # default; postgres's shared_buffers is configured on the server directly, outside this
     # harness). Computed from the ACTUAL machine's own NUMA-node-local memory (see
     # default_dram_gib) rather than a number hardcoded for one specific box - this Scale is
@@ -364,7 +367,7 @@ class NormalizedResult:
     # wiredtiger.py's SUPPORTS_GC_TOGGLE = False and the plan's Context section for why).
     gc_enabled: str = "n/a"
     # Scan/OLAP-scan latency (microseconds), populated only for workload == "ycsb_e" (all
-    # engines) or workload == "tpcc" and engine == "cmvbt" (its existing HTAP scan-sweep
+    # engines) or workload == "tpcc" and engine == "batstore" (its existing HTAP scan-sweep
     # mode) - 0 elsewhere.
     scan_p50_us: float = 0.0
     scan_p95_us: float = 0.0
@@ -384,7 +387,7 @@ YCSB_WORKLOADS = ["ycsb_a", "ycsb_b", "ycsb_c", "ycsb_d", "ycsb_e", "ycsb_f"]
 # HTAP/CH-benCHmark (TPC-C OLTP running concurrently with one CH-benCHmark/TPC-H-style
 # analytical query): restricted to Q1 ("Pricing Summary Report") and Q6 ("Forecasting
 # Revenue Change") - the only 2 of CH-benCHmark's 22 queries genuinely implemented across
-# every engine that supports this at all: cMVBT and LeanStore/WiredTiger's hand-written
+# every engine that supports this at all: BatStore and LeanStore/WiredTiger's hand-written
 # scans, BenchBase's real SQL for PostgreSQL, and libmdbx's own hand-written scans
 # (src/mv_bench/mdbx_tpcc.rs::mdbx_q1/mdbx_q6) - see the plan's Context section for why the
 # other queries aren't comparable everywhere. Both vWeaver_ermia variants got it too, via
@@ -401,7 +404,7 @@ HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
 # olap_lag/olap_span shape, not a fixed menu of op-mix presets, so it stays a single
 # workload tuned via those Scale fields / compare_engines.py flags instead.
 ALL_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_WORKLOADS + ["s_htap"]
-ENGINES = ["cmvbt", "leanstore", "wiredtiger", "postgres", "vweaver_ermia", "vweaver_ermia_frugal", "libmdbx"]
+ENGINES = ["batstore", "leanstore", "wiredtiger", "postgres", "vweaver_ermia", "vweaver_ermia_frugal", "libmdbx"]
 
 
 def _read_vmhwm_kb(pid: int) -> float:
@@ -580,7 +583,7 @@ def max_csv_column(csv_path: Path, column: str) -> float:
 
 def read_latency_summary(csv_path: Path) -> dict:
     """Reads a pre-computed one-row `p50_us,p95_us,p99_us,count,avg_us` summary (the format
-    cMVBT/LeanStore/WiredTiger's YCSB-E scan-latency instrumentation writes directly, since
+    BatStore/LeanStore/WiredTiger's YCSB-E scan-latency instrumentation writes directly, since
     a raw-per-op-sample CSV would blow up to tens of millions of rows at full sweep scale -
     see ycsb_driver.rs::write_results). All-zero if the file doesn't exist (e.g. a non-scan
     workload, or an older binary predating this instrumentation).
@@ -626,7 +629,7 @@ def percentiles_from_samples(csv_path: Path, column: str, filter_column: str = N
     same way - no numpy/pandas dependency needed just for this.
 
     `filter_column`/`filter_value`, if given, restrict to rows where that column equals
-    that value first - e.g. cMVBT's tpcc_scan.csv mixes several OLAP modes/queries in one
+    that value first - e.g. BatStore's tpcc_scan.csv mixes several OLAP modes/queries in one
     file (its `mode` column), and htap_q1/htap_q6 each need only their own query's rows.
 
     Returns all-zero if the file doesn't exist or has no valid rows (e.g. a workload that

@@ -9,7 +9,7 @@ multi-table TPC-C (benchmarks/tpcc.cc).
 
 htap_q1/htap_q6: upstream had no CH-benCHmark/HTAP support at all - added in
 patches/vweaver_ermia_chbenchmark.patch (`RunChQ1`/`RunChQ6` in benchmarks/tpcc.cc, ported
-from `mv_bench::tpch_queries::q1`/`q6` in the sibling cMVBT-OSIC harness - a full
+from `mv_bench::tpch_queries::q1`/`q6` in the sibling BatStore harness - a full
 `ORDER_LINE` table scan, pure aggregation, no joins, see that patch's inline comments for
 why only these 2 of CH-benCHmark's 22 queries). Passing `--enable-chbenchmark` in
 `-benchmark_options` spawns one dedicated thread (`tpcc_bench_runner::StartHtapThread`)
@@ -17,7 +17,7 @@ repeating only the requested query concurrently with the normal OLTP `tpcc_worke
 "N OLTP threads + 1 always-on OLAP thread" convention every other engine here already uses
 for htap_q1/htap_q6 - and prints one `HTAP_SCAN,<mode>,<elapsed_secs>,<scanned_tuples>,
 <latency_ns>,<summary>` line per completed query to stdout (parsed by `_parse_htap_scan`
-below into the same tpcc_scan.csv shape cmvbt.py/libmdbx.py already produce - ERMIA has no
+below into the same tpcc_scan.csv shape batstore.py/libmdbx.py already produce - ERMIA has no
 separate result-file mechanism the way those two do, everything comes out over stdout, see
 `_parse_throughput`'s own doc).
 
@@ -64,7 +64,7 @@ BUILD_DIR = REPO / "build"
 BINARY = BUILD_DIR / "ermia_SI"
 
 # -enable_gc gates real version-chain reclamation (dbcore/sm-alloc.cpp:441,
-# dbcore/sm-oid.cpp:1049) - a genuine on/off toggle, same as cMVBT's own --gc, unlike
+# dbcore/sm-oid.cpp:1049) - a genuine on/off toggle, same as BatStore's own --gc, unlike
 # LeanStore/WiredTiger which have no equivalent at all.
 SUPPORTS_GC_TOGGLE = True
 
@@ -220,7 +220,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
 def _write_htap_scan_csv(stdout_path: Path, output_dir: Path) -> Path:
     """Extracts every `HTAP_SCAN,...` line `_HTAP_SCAN_RE` matches in `stdout_path` (see
     tpcc_bench_runner::HtapThreadMain, patches/vweaver_ermia_chbenchmark.patch) and writes
-    them into the same tpcc_scan.csv column shape cmvbt.py/libmdbx.py's own tpcc_scan.csv
+    them into the same tpcc_scan.csv column shape batstore.py/libmdbx.py's own tpcc_scan.csv
     already use, so common.percentiles_from_samples reads all three identically.
     `snapshot`/`staleness_versions`/`delay_secs` are always blank/0 here - ERMIA's
     transaction id isn't threaded through the stdout line (unlike libmdbx's

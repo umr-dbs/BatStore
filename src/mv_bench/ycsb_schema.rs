@@ -1,4 +1,4 @@
-//! YCSB-style key-value schema for the cMVBT tree (Cooper et al., "Benchmarking
+//! YCSB-style key-value schema for the BatStore tree (Cooper et al., "Benchmarking
 //! Cloud Serving Systems with YCSB", SoCC 2010). Unlike TPC-C's multi-table
 //! schema (`tpcc_schema`), YCSB has exactly one table ("usertable"): a flat
 //! key -> N-field row, so no key tagging/encoding scheme is needed — the raw

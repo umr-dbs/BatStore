@@ -1045,7 +1045,7 @@ pub fn main_load_ycsb(parms: Vec<String>) {
             true,\
             {oltp_threads},\
             {num_olaps},\
-            cMVBT({root_star_index}),\
+            BatStore({root_star_index}),\
             {skew},\
             {gc},\
             {update_in_place},\
@@ -1259,7 +1259,7 @@ pub(crate) fn main_load(parms: Vec<String>) {
             true,\
             {oltp_threads},\
             {num_olaps},\
-            cMVBT({root_star_index}),\
+            BatStore({root_star_index}),\
             {skew},\
             {gc},\
             {update_in_place},\
@@ -1392,7 +1392,7 @@ pub(crate) fn main_load(parms: Vec<String>) {
             false,\
             1,\
             {num_olaps},\
-            cMVBT({root_star_index}),\
+            BatStore({root_star_index}),\
             {skew},\
             {gc},\
             {update_in_place},\

@@ -1,40 +1,143 @@
-# cMVBT-OSIC
-> Original MVBT and cMVBT Papers:
-```bibtex
-@article{becker1996asymptotically,
-  title={An asymptotically optimal multiversion B-tree},
-  author={Becker, Bruno and Gschwind, Stephan and Ohler, Thomas and Seeger, Bernhard and Widmayer, Peter},
-  journal={The VLDB Journal},
-  volume={5},
-  number={4},
-  pages={264--275},
-  year={1996},
-  publisher={Springer}
-}
-@article{tonta2026multiversion,
-  title={Multiversion Concurrency Control for Multiversion B-Trees},
-  author={Tonta, Amir and Seeger, Bernhard and Soisalon-Soininen, Eljas},
-  journal={arXiv preprint arXiv:2606.09133},
-  year={2026}
-}
-```
-> Ordered Snapshot Instant Commit from Paper (LeanStore):
-```bibtex
-@article{alhomssi2023scalable,
-  title     = {Scalable and Robust Snapshot Isolation for High-Performance Storage Engines},
-  author    = {Alhomssi, Adnan and Leis, Viktor},
-  journal   = {Proceedings of the VLDB Endowment},
-  volume    = {16},
-  number    = {6},
-  pages     = {1426--1438},
-  year      = {2023},
-  publisher = {VLDB Endowment},
-  doi       = {10.14778/3583140.3583157}
-}
-```
----------------------------------------
+# BatStore
 
-## Running the benchmarks
+BatStore is a storage engine built around the concurrent multiversion B-tree
+(cMVBT) with Ordered Snapshot Instant Commit. The main reproducibility entry points are the Python setup and
+cross-engine comparison scripts described below. The Rust binary can also run
+BatStore-only benchmarks directly.
+
+## Quick start: cross-engine tests
+
+The comparison workflow has three steps: prepare the engines, run a comparison
+matrix, and plot its normalized results. Run all commands from the repository
+root.
+
+### 1. Prepare Python and the benchmark engines
+
+For plotting only, create a small Python environment manually:
+
+```bash
+python3 -m venv scripts/.venv
+source scripts/.venv/bin/activate
+python3 -m pip install -r scripts/requirements.txt
+```
+
+For cross-engine tests, the setup script performs that Python setup and also
+prepares BatStore, LeanStore, WiredTiger, PostgreSQL/BenchBase, and their system
+dependencies:
+
+```bash
+python3 scripts/setup_environment.py
+source scripts/.venv/bin/activate
+```
+
+By default, setup-managed checkouts are freshly cloned below `tx_tests/` (or
+`$WORKSPACE_ROOT`), external engines are patched and built, PostgreSQL is
+configured, benchmark storage is placed on tmpfs, and the plotting virtual
+environment is created at `scripts/.venv`. The script invokes `sudo` for system
+package and PostgreSQL steps and may stop or reconfigure the local PostgreSQL
+service. Read [the comparison manual](manual.txt) before running it on a machine
+with an existing PostgreSQL installation or benchmark data you need to retain.
+
+Useful setup variants are:
+
+```bash
+# Keep and incrementally reuse existing engine checkouts.
+python3 scripts/setup_environment.py --reuse-checkouts
+
+# Also build both experimental vWeaver/ERMIA variants and configure hugepages.
+python3 scripts/setup_environment.py --full
+
+# Prepare a subset; all setup stages have corresponding --skip-* options.
+python3 scripts/setup_environment.py --skip-postgres --skip-benchbase
+
+# Place setup-managed engine checkouts somewhere else.
+WORKSPACE_ROOT=/data/tx_tests python3 scripts/setup_environment.py
+```
+
+Run `python3 scripts/setup_environment.py --help` for the complete interface.
+
+### 2. Run the comparison harness
+
+Start with a small smoke test:
+
+```bash
+python3 scripts/compare_engines.py \
+  --tiny \
+  --engines batstore,leanstore \
+  --workloads tpcc,ycsb_a \
+  --threads 2,4
+```
+
+The default invocation runs the full configured matrix:
+
+```bash
+python3 scripts/compare_engines.py
+```
+
+`compare_engines.py` provides a common driver for these engines:
+
+- `batstore`
+- `leanstore`
+- `wiredtiger` through LeanStore's adapter
+- `postgres` through BenchBase
+- `libmdbx`
+- `vweaver_ermia` and `vweaver_ermia_frugal` when their optional setup succeeds
+
+It can run TPC-C, YCSB A-F, two portable HTAP workloads that mix TPC-C with
+one CH-benCHmark query (`htap_q1` or `htap_q6`), and the synthetic streaming
+`s_htap` workload. Q1 and Q6 are the common analytical subset implemented by
+every comparison engine. BatStore's native full CH-benCHmark mode additionally
+runs Q4 and Q5.
+
+The implemented queries are:
+
+| Query | Name | Compact description | Comparison scope |
+| --- | --- | --- | --- |
+| Q1 | Pricing Summary Report | Scan delivered order lines and aggregate count, quantity, and amount by order-line position. | Cross-engine `htap_q1`; native BatStore full mode |
+| Q6 | Forecasting Revenue Change | Sum order-line revenue in a delivery-date range for quantities below a threshold. | Cross-engine `htap_q6`; native BatStore full mode |
+| Q4 | Order Priority Checking | Count orders with a late or undelivered order line, grouped by the order's line count. | Native BatStore full mode |
+| Q5 | Local Supplier Volume | Join orders, order lines, stock, suppliers, nations, and regions; aggregate revenue by supplier nation. | Native BatStore full mode |
+
+Every engine is launched through its adapter in `scripts/engines/`, pinned to
+one NUMA node, and measured through the same matrix of workload, thread count,
+and supported GC modes. Engines without a working GC toggle run once with
+`gc_enabled=n/a`.
+
+Each invocation creates a timestamped directory below `comparison_results/`.
+Raw engine output is retained there and normalized into one `manifest.csv`, so
+throughput, memory consumption, scan latency, and HTAP interference can be
+plotted consistently. Individual engine failures are recorded in the manifest
+without discarding the rest of the matrix.
+
+Common focused invocations include:
+
+```bash
+# Selected engines and workloads.
+python3 scripts/compare_engines.py \
+  --engines batstore,leanstore,libmdbx \
+  --workloads tpcc,ycsb_e,s_htap
+
+# Explicit concurrency and GC sweep.
+python3 scripts/compare_engines.py --threads 1,4,16,64 --gc on,off
+
+# Reuse binaries already built by setup.
+python3 scripts/compare_engines.py --skip-build --tiny
+```
+
+Run `python3 scripts/compare_engines.py --help` for scale, payload, allocator,
+workload, and output options. The methodology and engine-specific constraints
+are documented in detail in [manual.txt](manual.txt).
+
+### 3. Plot a comparison run
+
+The harness prints the exact run directory when it finishes. Plot it with:
+
+```bash
+python3 scripts/plot_compare.py \
+  --run-dir comparison_results/run_YYYYMMDD_HHMMSS
+```
+
+## Running BatStore benchmarks directly
 
 Build and run benchmarks with the release profile. Arguments are positional;
 the examples below are complete commands that can be copied as-is.
@@ -48,12 +151,18 @@ cargo build --release
 Run the complete experiment suite directly through the benchmark CLI:
 
 ```bash
-./target/release/cMVBT benchmark
+./target/release/batstore benchmark
 ```
 
-This runs TPC-C OLTP-only, CH-benCHmark, mixed HTAP, and YCSB workloads A-F,
-each once with garbage collection enabled and once with it disabled. Every
-variant runs in a fresh child process so its memory measurements are not
+This runs TPC-C OLTP-only, two measurements of the CH-benCHmark HTAP workload,
+and YCSB workloads A-F, each once with garbage collection enabled and once with
+it disabled. The suite's `ch_benchmark` entry is the mixed phase alone: TPC-C
+transactions and CH-benCHmark analytical queries run concurrently. Its `htap`
+entry runs an OLTP-only baseline first and then the same mixed phase, allowing
+the report to calculate OLTP interference. `ch_benchmark` is therefore not an
+analytical-only workload separate from HTAP.
+
+Every variant runs in a fresh child process so its memory measurements are not
 contaminated by allocations retained from an earlier experiment. The full
 scale is intended for a 64-core/128-thread server with roughly 500 GB of RAM
 and takes approximately 30-45 minutes.
@@ -62,14 +171,14 @@ Results are placed in a timestamped directory below `benchmark_results/`. To
 choose another output root, pass it as the first positional argument:
 
 ```bash
-./target/release/cMVBT benchmark my_benchmark_results
+./target/release/batstore benchmark my_benchmark_results
 ```
 
 For a local smoke test using the same experiments at a much smaller scale,
 pass `quick` as the second positional argument:
 
 ```bash
-./target/release/cMVBT benchmark benchmark_results quick
+./target/release/batstore benchmark benchmark_results quick
 ```
 
 The suite prints the exact result directory when it finishes. Plot a completed
@@ -148,10 +257,28 @@ This is intentionally different from `htap`: `htap` executes real
 CH-benCHmark queries, whereas `sleep` removes query computation and focuses
 on OSIC/MVCC behavior under a pinned historical snapshot.
 
-### HTAP (TPC-C plus CH-benCHmark queries)
+### CH-benCHmark HTAP (TPC-C plus analytical queries)
 
-Run four TPC-C warehouses and one analytical thread for 60 seconds, preceded
-by a 15-second OLTP-only baseline:
+CH-benCHmark is an HTAP benchmark: it runs a TPC-C transactional workload and
+TPC-H-derived analytical queries concurrently against the same live schema. It
+is not a standalone TPC-H/OLAP workload in this project.
+
+The historical `tpch` CLI name runs only that mixed phase. For example, run
+four warehouses and one analytical thread for 60 seconds with:
+
+```bash
+cargo run --release -- tpch 4 60 1 EUROPE
+```
+
+```text
+tpch [warehouses=4] [seconds=60] [olap_threads=1] [region=EUROPE]
+```
+
+The `htap` command runs an OLTP-only baseline immediately before the same
+CH-benCHmark mixed phase. This is the preferred command when measuring how
+much concurrent analytics reduces transactional throughput. Run four TPC-C
+warehouses and one analytical thread for 60 seconds, preceded by a 15-second
+OLTP-only baseline:
 
 ```bash
 cargo run --release -- htap 4 60 1 15 EUROPE
@@ -162,11 +289,19 @@ htap [warehouses=4] [seconds=60] [olap_threads=1]
      [baseline_seconds=15] [region=EUROPE]
 ```
 
-The analytical workers rotate through the implemented CH-benCHmark queries on
-the live TPC-C schema while OLTP terminals continue processing transactions.
-The baseline phase lets the report quantify OLTP interference caused by the
-concurrent analytical workload, in addition to OLAP throughput and snapshot
-freshness/staleness.
+In both native BatStore commands, analytical workers rotate through Q1 (Pricing
+Summary Report), Q6 (Forecasting Revenue Change), Q4 (Order Priority
+Checking), and Q5 (Local Supplier Volume) while OLTP terminals continue
+processing transactions. Only `htap` adds the baseline needed to quantify
+OLTP interference; both commands report analytical throughput and snapshot
+freshness/staleness for their mixed phase.
+
+This query set is intentionally broader than the cross-engine comparison
+harness: `compare_engines.py` uses the isolated `htap_q1` and `htap_q6`
+workloads because Q1 and Q6 are implemented across every engine, while the
+native BatStore CH-benCHmark runner also exercises Q4 and Q5. Here, “HTAP” names
+the concurrent OLTP+OLAP execution pattern; it does not imply one fixed query
+set.
 
 ### S-HTAP (streaming HTAP)
 
@@ -225,15 +360,13 @@ throughput, completed scans, and scanned tuples. It also writes:
 For all commands, run the binary from a dedicated output directory if you
 want to keep CSV files from different runs separate.
 
-## Python scripts
+## Plotting standalone BatStore results
 
-The scripts require Python 3. Plotting additionally needs the packages in
-`scripts/requirements.txt`:
+Activate the Python environment created in the quick start before running the
+plotting scripts:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r scripts/requirements.txt
+source scripts/.venv/bin/activate
 ```
 
 Plot all recognized CSV files produced by a benchmark in the current
@@ -257,35 +390,57 @@ python3 scripts/plot_results.py interference \
   oltp_baseline.csv oltp_mixed.csv -o interference.png
 ```
 
-For a quick cross-engine smoke test, use the comparison harness's tiny scale:
+Every script exposes its full interface through
+`python3 scripts/<name>.py --help`.
 
-```bash
-python3 scripts/compare_engines.py \
-  --tiny --engines cmvbt,leanstore --workloads tpcc,ycsb_a --threads 2,4
-python3 scripts/plot_compare.py
+## Papers and citation
+
+Original MVBT and cMVBT papers:
+
+```bibtex
+@article{becker1996asymptotically,
+  title={An asymptotically optimal multiversion B-tree},
+  author={Becker, Bruno and Gschwind, Stephan and Ohler, Thomas and Seeger, Bernhard and Widmayer, Peter},
+  journal={The VLDB Journal},
+  volume={5},
+  number={4},
+  pages={264--275},
+  year={1996},
+  publisher={Springer}
+}
+@article{tonta2026multiversion,
+  title={Multiversion Concurrency Control for Multiversion B-Trees},
+  author={Tonta, Amir and Seeger, Bernhard and Soisalon-Soininen, Eljas},
+  journal={arXiv preprint arXiv:2606.09133},
+  year={2026}
+}
 ```
 
-The comparison harness writes timestamped runs below `comparison_results/`
-and normalizes their measurements into `manifest.csv`. It assumes the
-selected external engines are already installed. `scripts/setup_environment.py`
-can prepare the full comparison environment, but it installs system packages,
-clones/builds engines, configures tmpfs, and may reconfigure PostgreSQL; read
-[`manual.txt`](manual.txt) before running it. Every script exposes its full
-interface through `python3 scripts/<name>.py --help`.
+Ordered Snapshot Instant Commit paper (LeanStore):
 
-CROSS-ENGINE BENCHMARK HARNESS - MANUAL
-========================================
-    Read manual.txt
+```bibtex
+@article{alhomssi2023scalable,
+  title     = {Scalable and Robust Snapshot Isolation for High-Performance Storage Engines},
+  author    = {Alhomssi, Adnan and Leis, Viktor},
+  journal   = {Proceedings of the VLDB Endowment},
+  volume    = {16},
+  number    = {6},
+  pages     = {1426--1438},
+  year      = {2023},
+  publisher = {VLDB Endowment},
+  doi       = {10.14778/3583140.3583157}
+}
+```
 
 ## Engineering notes
 
-- **[Transactional Support via OSIC on cMVBT: System Design, Datastructure Changes, and Optimizations](docs/transactional_osic_comprehensive.tex)** ([PDF](docs/transactional_osic_comprehensive.pdf)) --
+- **[Transactional Support via OSIC on BatStore: System Design, Datastructure Changes, and Optimizations](docs/transactional_osic_comprehensive.tex)** ([PDF](docs/transactional_osic_comprehensive.pdf)) --
   comprehensive synthesis of system design, all datastructure modifications, and every optimization tested or applied, with measured performance numbers and adoption decisions.
 
 - [Unified optimization report](docs/optimization_report.tex) ([PDF](docs/optimization_report.pdf)) --
   the implementation's optimizations organized bottom-up by architectural dependency, with fresh measurements and known open issues.
 
-- [Index optimization guide](docs/index_optimizations.md) -- compact guide to the optimizations used by the current cMVBT index
+- [Index optimization guide](docs/index_optimizations.md) -- compact guide to the cMVBT index used by BatStore
 
 - Supporting documentation:
   - [Range-scan iteration: ordered routing and zero-copy streaming](docs/range_scan_iteration.md)
@@ -293,6 +448,8 @@ CROSS-ENGINE BENCHMARK HARNESS - MANUAL
   - [Big-tree leaf-size benchmark](docs/bigtree_size_benchmark.md)
   - [OLTP/WAL optimization](docs/oltp_wal_optimization.md)
 
-# Contact
-    Name:               Amir Tonta
-    E-Mail:             amir.tonta@mathematik.uni-marburg.de
+## Contact
+
+Name: Amir Tonta
+
+Email: amir.tonta@mathematik.uni-marburg.de

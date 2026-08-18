@@ -1,10 +1,10 @@
 [package]
-name = "cMVBT"
-version = "0.0.130"
+name = "BatStore"
+version = "0.0.131"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
 description = "BatStore Research Implementation"
-repository = "https://github.com/umr-dbs/cMVBT-OSIC"
+repository = "https://github.com/umr-dbs/BatStore"
 # `tests/` holds unit-test files pulled into the bin crate via `#[path]` mods
 # (this crate has no `[lib]` target, so they can't be real integration
 # tests) alongside genuine standalone integration tests. Autodiscovery would
@@ -54,8 +54,12 @@ tree-viz = ["dep:serde", "dep:serde_json"]
 # column instead.
 mimalloc = ["dep:mimalloc"]
 
+[[bin]]
+name = "batstore"
+path = "src/main.rs"
+
 #[lib]
-#name = "cmvbt"
+#name = "batstore"
 #path = "src/lib.rs"
 #crate-type = ["cdylib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

@@ -162,7 +162,7 @@ fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
 #[test]
 fn repeated_delete_reinsert_round_trips_through_wal_recovery() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_db_reinsert_recovery_test_{}.log",
+        "batstore_db_reinsert_recovery_test_{}.log",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
@@ -331,7 +331,7 @@ fn db_dropped_transaction_reverts_writes_across_tables_on_conflict() {
 /// `enable_wal` creates one file per table via `table_wal_path`).
 #[test]
 fn db_crash_recovery_round_trip_across_tables() {
-    let path = std::env::temp_dir().join(format!("cmvbt_db_crash_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!("batstore_db_crash_test_{}.log", std::process::id()));
     let _ = std::fs::remove_file(&path);
 
     {
@@ -406,7 +406,7 @@ fn db_crash_recovery_round_trip_across_tables() {
 #[test]
 fn db_single_commit_marker_per_cross_table_transaction() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_db_commit_marker_test_{}.log",
+        "batstore_db_commit_marker_test_{}.log",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
@@ -469,7 +469,7 @@ fn db_single_commit_marker_per_cross_table_transaction() {
 #[test]
 fn dynamic_table_created_after_wal_and_gc_enabled_inherits_both() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_db_dynamic_table_test_{}.log",
+        "batstore_db_dynamic_table_test_{}.log",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
@@ -570,7 +570,7 @@ fn table_ids_are_assigned_sequentially_by_creation_order() {
 #[test]
 fn catalog_file_records_tables_in_creation_order_and_survives_recovery() {
     let path =
-        std::env::temp_dir().join(format!("cmvbt_db_catalog_test_{}.log", std::process::id()));
+        std::env::temp_dir().join(format!("batstore_db_catalog_test_{}.log", std::process::id()));
     let meta_path = format!("{}.meta", path.display());
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&meta_path);

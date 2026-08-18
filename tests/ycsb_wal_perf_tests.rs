@@ -46,7 +46,7 @@ fn config(num_threads: usize, wal_path: PathBuf, batch_size: Option<usize>) -> D
         root_star_index: RootIndexType::FrugalList,
         wal: Some((wal_path, Duration::from_millis(5))),
         wal_lockfree_batch_size: batch_size,
-        output_dir: std::env::temp_dir().join("cmvbt_ycsb_wal_perf_test_out"),
+        output_dir: std::env::temp_dir().join("batstore_ycsb_wal_perf_test_out"),
     }
 }
 
@@ -61,7 +61,7 @@ fn wal_backend_perf_sweep_ycsb() {
     for &threads in THREAD_COUNTS {
         for &(label, batch_size) in BACKENDS {
             let wal_path = dir.join(format!(
-                "cmvbt_ycsb_wal_perf_{label}_{threads}_{}.log",
+                "batstore_ycsb_wal_perf_{label}_{threads}_{}.log",
                 std::process::id()
             ));
             let _ = std::fs::remove_file(&wal_path);

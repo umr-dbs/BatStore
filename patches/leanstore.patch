@@ -103,7 +103,7 @@ index 575cc43..33a31eb 100644
     void analyticalQuery(s32 query_no = 0)
     {
 +      // query_no 101/106 are this harness's real CH-benCHmark Q1/Q6 (see
-+      // cMVBT's src/mv_bench/tpch_queries.rs::q1/q6, the reference implementation this
++      // BatStore's src/mv_bench/tpch_queries.rs::q1/q6, the reference implementation this
 +      // ports) - deliberately not "1"/"6" to avoid colliding with the pre-existing debug
 +      // sanity-check scans below (query_no 0-4/44/99), which predate any real CH
 +      // integration and are left untouched for backward compatibility.
@@ -171,7 +171,7 @@ index 575cc43..33a31eb 100644
  };
 +// -------------------------------------------------------------------------------------
 +// Shared by tpcc.cpp/wiredtiger_tpcc.cpp - writes the same percentile-summary CSV format
-+// as cMVBT's ycsb_driver.rs / this repo's own ycsb.cpp/wiredtiger_ycsb.cpp scan-latency
++// as BatStore's ycsb_driver.rs / this repo's own ycsb.cpp/wiredtiger_ycsb.cpp scan-latency
 +// instrumentation (nearest-rank percentiles, microseconds, one summary row - not raw
 +// samples, since a long CH-analytics run can accumulate many samples). Call once after
 +// the OLAP thread(s) have joined, passing TPCCWorkload::takeCHQueryLatencies()'s result.
@@ -383,7 +383,7 @@ index 2b7e79a..28139c0 100644
     for (auto& thread : threads) {
        thread.join();
     }
-+   // Summary (not raw per-op samples - see the matching comment in ycsb.cpp / cMVBT's
++   // Summary (not raw per-op samples - see the matching comment in ycsb.cpp / BatStore's
 +   // ycsb_driver.rs::write_results for why). Nearest-rank percentiles, in microseconds -
 +   // empty (all-zero) row for every non-scan workload. Written to the current working
 +   // directory, matching every other engine's convention here (the Python wrapper always
@@ -505,7 +505,7 @@ index d42a32f..4e336f6 100644
        crm.joinAll();
     }
 +   // Summary (not raw per-op samples - see the matching comment in wiredtiger_ycsb.cpp /
-+   // cMVBT's ycsb_driver.rs::write_results for why). Nearest-rank percentiles, in
++   // BatStore's ycsb_driver.rs::write_results for why). Nearest-rank percentiles, in
 +   // microseconds - empty (all-zero) row for every non-scan workload. Written to the
 +   // current working directory, matching every other engine's convention here (the Python
 +   // wrapper always invokes this binary with cwd=output_dir).

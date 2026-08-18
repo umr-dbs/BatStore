@@ -4,12 +4,12 @@
 //! path-copying MVCC comparison. Mirrors `mdbx_ycsb.rs`'s structure and
 //! conventions (own `open_db`/read/write/scan reimplementations against
 //! `libmdbx::Transaction<RO|RW>`, since there's no shared trait boundary in
-//! this codebase between cMVBT's tree and its transaction logic - see that
+//! this codebase between BatStore's tree and its transaction logic - see that
 //! file's module doc) while reusing every storage-engine-agnostic piece of
 //! `s_htap_random` (key minting, hot-tail sampling, OLAP scan bounds) and
 //! `ycsb_random`/`ycsb_schema` (row generation, config) as-is.
 //!
-//! Unlike cMVBT's tree, libmdbx's `put(..., WriteFlags::UPSERT)` doesn't
+//! Unlike BatStore's tree, libmdbx's `put(..., WriteFlags::UPSERT)` doesn't
 //! distinguish "insert" from "update" at all - a late/duplicate arrival that
 //! collides with an already-materialized key is handled by the exact same
 //! call as a brand-new one, with no separate conflict path to reason about.
@@ -134,7 +134,7 @@ fn mdbx_hot_update(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> b
 
 /// Returns `(rows_scanned, txn_id)` - `txn_id` (libmdbx's own monotonic
 /// commit counter, `Transaction::id()`) is this workload's proxy for
-/// `cMVBT::current_version()`: there's no version-chain concept in a
+/// `BatStore::current_version()`: there's no version-chain concept in a
 /// copy-on-write engine, but the txn id a read snapshot was opened at is
 /// the same kind of logical clock, so `staleness` can still be reported as
 /// "how many commits happened while this scan was in flight."
@@ -394,7 +394,7 @@ fn write_results(
         ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
     }
 
-    // Same format as cMVBT's own s_htap_driver.rs::write_results - see
+    // Same format as BatStore's own s_htap_driver.rs::write_results - see
     // that function's comment.
     let pct = |samples: &[u64], p: f64| -> f64 {
         if samples.is_empty() {

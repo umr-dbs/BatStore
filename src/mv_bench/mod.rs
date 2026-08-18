@@ -1,4 +1,4 @@
-//! TPC-C (+ OLAP scan) benchmark harness for the cMVBT tree, modeled after
+//! TPC-C (+ OLAP scan) benchmark harness for the BatStore tree, modeled after
 //! the mixed-workload methodology used to evaluate MVCC storage engines in
 //! practice (standard TPC-C transactions running concurrently with
 //! long-running/periodic analytical scans), e.g. Alhomssi & Leis,

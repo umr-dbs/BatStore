@@ -14,7 +14,7 @@ const FAN: usize = 8;
 type TestTree = MVBTSt<FAN, FAN, u64, u64>;
 
 fn temp_log_path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("cmvbt_wal_{name}_{}.log", std::process::id()))
+    std::env::temp_dir().join(format!("batstore_wal_{name}_{}.log", std::process::id()))
 }
 
 fn point(tree: &TestTree, key: u64, version: Version) -> Option<u64> {

@@ -1,4 +1,4 @@
-//! TPC-C schema for the cMVBT benchmark harness.
+//! TPC-C schema for the BatStore benchmark harness.
 //!
 //! Each of the nine TPC-C tables (plus two maintained secondary indexes) gets
 //! its own [`MVBTSt`] tree/index — a [`TpccDatabase`] is a thin, domain-named

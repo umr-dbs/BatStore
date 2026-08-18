@@ -40,7 +40,7 @@
 
 \section*{Purpose and evidence rules}
 
-This document is the compact index of optimizations found in the cMVBT repository and
+This document is the compact index of optimizations found in the BatStore repository and
 its Git history. It covers the current tree, earlier optimizations that shaped it, and
 important attempted optimizations that were rejected or reverted. Correctness fixes are
 included when they remove retry, livelock, overflow, leak, or unbounded-growth behaviour;
@@ -526,7 +526,7 @@ Q1/Q6 benchmark points from paying for the unrelated Q4/Q5 joins in the old rota
 four-query \code{ch} runs. & \stateactive \\
 
 Working-tree benchmark scaling & Run TPC-C/YCSB/WAL comparisons as ordinary smoke tests;
-restore full scale with \code{CMVBT\_FULL\_BENCH=1} & Previously ignored/full benchmarks
+restore full scale with \code{BATSTORE\_FULL\_BENCH=1} & Previously ignored/full benchmarks
 did not run on normal developer machines. & \gainenabling: complete suite now runs 138 tests,
 zero ignored, in 8.23 seconds on the development machine. & Smoke scale catches hangs and
 gross regressions, not production throughput or long-duration memory growth. & \stateactive \\

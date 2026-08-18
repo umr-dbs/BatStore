@@ -427,8 +427,8 @@ distribution, operation mix, payload-read policy, GC, or WAL settings:
 The cross-engine harness option is:
 
 ```bash
---cmvbt-ycsb-mode atomic
---cmvbt-ycsb-mode transaction
+--batstore-ycsb-mode atomic
+--batstore-ycsb-mode transaction
 ```
 
 This switch is intended to measure the cost of the transaction machinery and different

@@ -7,11 +7,11 @@
 //! row structs, `TpccConfig`, every key-builder function (`k_warehouse`,
 //! `k_customer`, ...), and `TpccRow`'s `WalPayload` byte codec are all
 //! storage-engine-agnostic (confirmed: nothing in that layer touches
-//! cMVBT's own tree types). Only the transaction logic
+//! BatStore's own tree types). Only the transaction logic
 //! (`new_order`/`payment`/`order_status`/`delivery`/`stock_level`, mirroring
 //! `tpcc_txn.rs` function-for-function) and the driver loop are
 //! reimplemented against libmdbx's `Transaction<RO|RW>` API - there's no
-//! trait boundary in this codebase between cMVBT's tree and its business
+//! trait boundary in this codebase between BatStore's tree and its business
 //! logic (see `mdbx_ycsb.rs`'s docs for why this is a parallel file, not a
 //! generic backend swapped into `tpcc_driver.rs`).
 //!
@@ -27,7 +27,7 @@
 //! ported here, matching every other engine's own htap_q1/htap_q6-only scope
 //! (see scripts/engines/libmdbx.py and `common.HTAP_WORKLOADS`'s doc).
 //!
-//! Conflict handling differs fundamentally from cMVBT's OSIC: libmdbx (like
+//! Conflict handling differs fundamentally from BatStore's OSIC: libmdbx (like
 //! LMDB) allows only one read-write transaction active process-wide at a
 //! time, so two New-Order transactions can never race on the same write -
 //! the writer lock itself is the concurrency control. There is no
@@ -712,10 +712,10 @@ fn stock_level(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32, thresh
 
 /// One row of `tpcc_scan.csv` - same column shape as `olap_scan::ScanResult`
 /// (see `tpcc_driver.rs::write_results`) so `scripts/engines/libmdbx.py`
-/// reads it exactly the way `scripts/engines/cmvbt.py` already reads
-/// cMVBT's own. `snapshot`/`staleness_versions` use libmdbx's own
+/// reads it exactly the way `scripts/engines/batstore.py` already reads
+/// BatStore's own. `snapshot`/`staleness_versions` use libmdbx's own
 /// transaction id (`Transaction::id()`, a real MDBX-internal monotonic
-/// counter) in place of cMVBT's logical `Version` - same idea (a
+/// counter) in place of BatStore's logical `Version` - same idea (a
 /// snapshot's position on the timeline of committed writes), different
 /// engine's native counter.
 struct MdbxScanResult {
@@ -729,7 +729,7 @@ struct MdbxScanResult {
 }
 
 /// Runs one selected analytical query and reports an [`MdbxScanResult`]. `staleness`
-/// is computed the same way `olap_scan.rs` computes it for cMVBT: a fresh
+/// is computed the same way `olap_scan.rs` computes it for BatStore: a fresh
 /// read-only transaction opened immediately after the query finishes, diffed
 /// against the query's own transaction id - "how many committed writer
 /// transactions happened while this analytical answer was being computed."

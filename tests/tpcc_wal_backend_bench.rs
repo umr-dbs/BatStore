@@ -8,7 +8,7 @@
 //! latch contention, GC), not just in isolation.
 //!
 //! The normal test uses a small smoke configuration. Set
-//! `CMVBT_FULL_BENCH=1` to restore the original 16-warehouse, 8-second,
+//! `BATSTORE_FULL_BENCH=1` to restore the original 16-warehouse, 8-second,
 //! 8/16-terminal comparison; use `--release -- --nocapture --test-threads=1`
 //! for meaningful full-scale numbers.
 
@@ -37,7 +37,7 @@ const BACKENDS: &[(&str, Option<usize>)] = &[
 ];
 
 fn full_scale() -> bool {
-    std::env::var_os("CMVBT_FULL_BENCH").is_some()
+    std::env::var_os("BATSTORE_FULL_BENCH").is_some()
 }
 
 fn config(
@@ -79,7 +79,7 @@ fn config(
         wal: Some((wal_path, Duration::from_millis(5))),
         wal_lockfree_batch_size: batch_size,
         htap_baseline: None,
-        output_dir: std::env::temp_dir().join("cmvbt_tpcc_wal_bench_out"),
+        output_dir: std::env::temp_dir().join("batstore_tpcc_wal_bench_out"),
     }
 }
 
@@ -95,7 +95,7 @@ fn compare_wal_backends_tpcc() {
     for &threads in thread_counts {
         for &(label, batch_size) in BACKENDS {
             let wal_path = dir.join(format!(
-                "cmvbt_tpcc_wal_bench_{label}_{threads}_{}.log",
+                "batstore_tpcc_wal_bench_{label}_{threads}_{}.log",
                 std::process::id()
             ));
             let _ = std::fs::remove_file(&wal_path);

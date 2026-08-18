@@ -289,7 +289,7 @@ completes with 135 passed and zero ignored tests (8.23 seconds on the developmen
 machine used for the final run). The default TPC-C comparison uses two warehouses and
 two terminals for one second per WAL backend; YCSB uses 20,000 records, two threads,
 and one second per backend. The WAL writer microbenchmark retains its original workload
-because it already completes in roughly two seconds. Set `CMVBT_FULL_BENCH=1` to
+because it already completes in roughly two seconds. Set `BATSTORE_FULL_BENCH=1` to
 restore the original large TPC-C/YCSB configurations for dedicated release-mode
 measurements; those full configurations are performance runs, not required correctness
 tests for an ordinary development machine.

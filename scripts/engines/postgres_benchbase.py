@@ -95,7 +95,7 @@ TPCC_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 # BenchBase's chbenchmark plugin mixes a TPC-C work phase with the standard CH-benCHmark
 # Q1-Q22 analytical queries (real SQL - see src/main/java/.../chbenchmark/queries/Q*.java);
 # here only Q1/Q6 ever get nonzero weight, matching HTAP_WORKLOADS (common.py) and the
-# LeanStore/WiredTiger/cMVBT side of this same restriction.
+# LeanStore/WiredTiger/BatStore side of this same restriction.
 CHBENCHMARK_WEIGHTS = {
     "htap_q1": "100," + ",".join(["0"] * 21),
     "htap_q6": ",".join(["0"] * 5) + ",100," + ",".join(["0"] * 16),
@@ -114,7 +114,7 @@ CHBENCHMARK_CONFIG_TEMPLATE = """<?xml version="1.0"?>
     <scalefactor>{warehouses}</scalefactor>
     <!-- Default (no @bench) applies to tpcc; chbenchmark gets its own fixed 1 dedicated
          analytics terminal, matching the "N OLTP threads + 1 OLAP thread" convention used
-         for cMVBT/LeanStore/WiredTiger's htap_q1/htap_q6 (see their engines/*.py). -->
+         for BatStore/LeanStore/WiredTiger's htap_q1/htap_q6 (see their engines/*.py). -->
     <terminals>{terminals}</terminals>
     <terminals bench="chbenchmark">1</terminals>
     <works>
@@ -425,7 +425,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         duration = scale.s_htap_duration
         # scale.ycsb_threads holds the swept --threads value for every workload (see
         # compare_engines.py's scale_variant construction) - split it into a fixed OLAP-scanner
-        # pool plus the remainder as write threads, matching cmvbt.py's "s_htap" branch exactly
+        # pool plus the remainder as write threads, matching batstore.py's "s_htap" branch exactly
         # (SHTAPBenchmark.makeWorkersImpl on the Java side re-derives the same split from
         # olapThreads/terminals independently, so this is only needed here for the <weights>
         # bookkeeping below, not to tell the JVM anything it couldn't figure out itself).

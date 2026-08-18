@@ -23,9 +23,9 @@ The YCSB flag is the final positional value; use `true` for historical
 full-row update semantics:
 
 ```text
-cMVBT ycsb a 200000 4 3 default 0.99 10 100 100 fg true false false ycsb_wal.log 5 false
-cMVBT tpcc 1 4 10 false true false fg ch_q1 1
-cMVBT tpcc 1 4 10 false true false fg ch_q6 1
+batstore ycsb a 200000 4 3 default 0.99 10 100 100 fg true false false ycsb_wal.log 5 false
+batstore tpcc 1 4 10 false true false fg ch_q1 1
+batstore tpcc 1 4 10 false true false fg ch_q6 1
 ```
 
 ## Correctness coverage

@@ -8,7 +8,7 @@
 //! generation, `YcsbRow`'s `WalPayload` byte codec as the value encoding) -
 //! only the actual read/write/scan operations are reimplemented against
 //! libmdbx's `Transaction<RO|RW>` API, since there's no trait boundary in
-//! this codebase between cMVBT's own tree and its transaction/business logic
+//! this codebase between BatStore's own tree and its transaction/business logic
 //! (a fresh `mdbx_tpcc.rs`/this file, not a generic backend swapped into the
 //! existing drivers).
 //!
@@ -346,7 +346,7 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
         ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
     }
 
-    // Summary (not raw per-op samples), same format/reasoning as cMVBT's own
+    // Summary (not raw per-op samples), same format/reasoning as BatStore's own
     // ycsb_driver.rs::write_results - see that file's comment on why.
     scan_latencies_ns.sort_unstable();
     let scan_latency_path = out_dir.join("ycsb_scan_latency_summary.csv");

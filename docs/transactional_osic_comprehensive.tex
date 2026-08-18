@@ -38,7 +38,7 @@
 \newcommand{\class}[1]{\texttt{#1}}
 \newcommand{\gain}[1]{\textbf{#1}}
 
-\title{Transactional Support via OSIC on the cMVBT: \\
+\title{Transactional Support via OSIC in BatStore: \\
   System Design, Datastructure Changes, and Optimizations}
 \author{Amir Tonta}
 \date{August 2026}
@@ -47,7 +47,7 @@
 \maketitle
 
 \begin{abstract}
-This document describes the cMVBT-OSIC system from first principles: what it is, what it supports,
+This document describes the BatStore system from first principles: what it is, what it supports,
 and how every change to the underlying multiversion B-tree datastructure and every optimization was
 measured. The system provides Transactional Support with Snapshot Isolation and Ordered Snapshot
 Instant Commit (OSIC) semantics on top of a cache-friendly multiversion B-tree. The document
@@ -66,7 +66,7 @@ numbers where available, or describes the isolated tests used to measure them.
 
 \subsection{Purpose and Capabilities}
 
-The cMVBT-OSIC system implements a high-performance, in-memory multiversion B-tree supporting
+The BatStore system implements a high-performance, in-memory multiversion B-tree supporting
 snapshot isolation transactions. Its primary design goal is to achieve competitive transaction
 throughput while maintaining cache efficiency across both transactional (OLTP) and analytical
 (OLAP) workloads.
@@ -1275,7 +1275,7 @@ multi-statement snapshot-isolated transactions. The old harness did not expose t
 choice clearly, making it hard to isolate transaction overhead.
 
 \textbf{Solution:}
-Add explicit \code{--cmvbt-ycsb-mode atomic} vs. \code{--cmvbt-ycsb-mode transaction}
+Add explicit \code{--batstore-ycsb-mode atomic} vs. \code{--batstore-ycsb-mode transaction}
 CLI flags. \code{atomic} uses the auto-commit path (no \code{begin\_snapshot}, short
 reclamation pin, publish-before-commit). \code{transaction} uses full transactional
 semantics (registered snapshot, explicit commit, conflict retry).
@@ -1567,7 +1567,7 @@ Several issues remain open:
 
 \section{Conclusion}
 
-The cMVBT-OSIC system demonstrates that a cache-conscious multiversion B-tree with
+The BatStore system demonstrates that a cache-conscious multiversion B-tree with
 careful attention to allocation, contention, and compilation can achieve competitive
 transaction throughput. The combination of datastructure changes (split leaf layout,
 inline masks, exact page sizing) and targeted optimizations (WAL sharding, zero-copy

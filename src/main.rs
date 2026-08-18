@@ -253,10 +253,10 @@ fn make_splash() {
     println!(" |               # E-Mail: amir.tonta@mathematik.uni-marburg.de          |");
     println!(" |               # Written by: Amir Tonta                                |");
     println!(" |               # First released: 02-01-2024                            |");
-    println!(" |               # Repository: https://github.com/umr-dbs/cMVBT          |");
+    println!(" |               # BatStore storage engine                               |");
     println!(" |               -----------------------------------------------------   |");
     println!(" |                                                                       |");
-    println!(" |               ...cMVBT Application Launching...                       |");
+    println!(" |               ...BatStore Application Launching...                    |");
     println!(" +-------------+                                           +-------------+");
     println!("                \\_______                           _______/");
     println!("                        \\_________________________/");
@@ -330,4 +330,3 @@ pub fn hle() -> &'static str {
         "OFF   "
     }
 }
-
