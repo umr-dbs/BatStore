@@ -1,7 +1,7 @@
 //! Concurrent HTAP-style stress test: the standard TPC-C OLTP mix (New-Order/
 //! Payment, cross-warehouse remote enabled) running on several threads at
 //! the same time as several threads repeatedly executing the CH-benCHmark
-//! analytical queries (`mv_bench::tpch_queries` q1/q4/q5/q6) - the same
+//! analytical queries (`bat_bench::tpch_queries` q1/q4/q5/q6) - the same
 //! mixed-workload shape `tpcc_driver::run_tpcc`'s `OlapMode::ChBenchmark`
 //! exercises in real benchmark runs, at test scale (~2s).
 //!
@@ -28,14 +28,14 @@ use std::time::Duration;
 
 use rand::prelude::*;
 
-use crate::mv_bench::tpcc_load::{
+use crate::bat_bench::tpcc_load::{
     populate_items, populate_regions_and_nations, populate_suppliers, populate_warehouse,
 };
-use crate::mv_bench::tpcc_schema::TpccConfig;
-use crate::mv_bench::tpcc_schema::TpccDatabase;
-use crate::mv_bench::tpcc_txn::{self, TxnOutcome};
-use crate::mv_bench::tpch_queries;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::tpcc_schema::TpccConfig;
+use crate::bat_bench::tpcc_schema::TpccDatabase;
+use crate::bat_bench::tpcc_txn::{self, TxnOutcome};
+use crate::bat_bench::tpch_queries;
+use crate::bat_root::index_root::RootIndexType;
 
 // Keep enough items for representative Stock-key contention without making
 // test population expensive.

@@ -2,7 +2,7 @@
 """Plot BatStore benchmark results (TPC-C, CH-benCHmark/TPC-H, HTAP, YCSB).
 
 Reads the CSV files written by the Rust benchmark drivers
-(mv_bench::tpcc_driver, mv_bench::ycsb_driver) and renders them with
+(bat_bench::tpcc_driver, bat_bench::ycsb_driver) and renders them with
 matplotlib. Each driver run overwrites its CSV(s) in the current directory,
 so to compare multiple runs, copy each run's CSV to a distinct name before
 running the next one, e.g.:
@@ -30,8 +30,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-# The 4 CH-benCHmark queries implemented in mv_bench::tpch_queries, and the
-# order they're always run in (mv_bench::olap_scan::ch_benchmark_queries_once).
+# The 4 CH-benCHmark queries implemented in bat_bench::tpch_queries, and the
+# order they're always run in (bat_bench::olap_scan::ch_benchmark_queries_once).
 CH_QUERY_ORDER = [
     "ch_q1_pricing_summary",
     "ch_q6_forecast_revenue",

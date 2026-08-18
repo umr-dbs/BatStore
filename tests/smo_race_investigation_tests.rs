@@ -1,11 +1,11 @@
 //! Investigates whether the intermittent `debug_assert!` failure at
-//! `mv_tree::smo::split` (around line 803: "Active records = N, required
+//! `bat_tree::smo::split` (around line 803: "Active records = N, required
 //! >= M") genuinely requires two threads' writes to physically overlap in
 //! time on the same leaf, or whether something else is responsible.
 //!
 //! Established so far (see conversation history): reaching the version-split
-//! branch at all requires `unsafe_degree()` (`mv_tree/smo.rs`, called on the
-//! leaf via `next_curr_guard` at `mv_query/olc_query.rs:161`) to have read
+//! branch at all requires `unsafe_degree()` (`bat_tree/smo.rs`, called on the
+//! leaf via `next_curr_guard` at `bat_query/olc_query.rs:161`) to have read
 //! `active > 2 * filling_20_percent(n)` on *that exact leaf* — for `n=8`,
 //! `active >= 5`. The assertion later wants that same leaf's active count,
 //! rescanned independently inside `split()` (`smo.rs:797-801`), to still be
@@ -49,11 +49,11 @@
 
 use std::sync::Mutex;
 
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_root::index_root::RootIndexType;
-use crate::mv_tree::mvbt::MVBTSt;
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_root::index_root::RootIndexType;
+use crate::bat_tree::mvbt::MVBTSt;
 
 const FAN: usize = 8;
 type TestTree = MVBTSt<FAN, FAN, u64, u64>;

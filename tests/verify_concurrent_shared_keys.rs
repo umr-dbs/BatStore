@@ -13,10 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_db::{Database, DbTransaction};
-use crate::mv_query::interval::Interval;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_db::{Database, DbTransaction};
+use crate::bat_query::interval::Interval;
+use crate::bat_root::index_root::RootIndexType;
 
 const FAN: usize = 16;
 type TestDb = Database<FAN, FAN, u64, u64>;

@@ -1,12 +1,12 @@
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_db::{Database, DbTransaction};
-use crate::mv_record_model::tx_stamp::{TxStamp, WorkerId};
-use crate::mv_root::index_root::RootIndexType;
-use crate::mv_sync::clock::GlobalClock;
-use crate::mv_sync::commit_log::CommitLog;
-use crate::mv_sync::visibility::{SnapshotCache, is_visible};
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_db::{Database, DbTransaction};
+use crate::bat_record_model::tx_stamp::{TxStamp, WorkerId};
+use crate::bat_root::index_root::RootIndexType;
+use crate::bat_sync::clock::GlobalClock;
+use crate::bat_sync::commit_log::CommitLog;
+use crate::bat_sync::visibility::{SnapshotCache, is_visible};
 
 const FAN: usize = 8;
 type TestDb = Database<FAN, FAN, u64, u64>;
@@ -67,7 +67,7 @@ fn transaction_resolves_each_tables_read_root_only_once() {
         "a repeated point read must reuse the root"
     );
     assert_eq!(
-        tx.range_count(first, crate::mv_query::interval::Interval::new(0, 10)),
+        tx.range_count(first, crate::bat_query::interval::Interval::new(0, 10)),
         1
     );
     assert_eq!(
@@ -275,7 +275,7 @@ fn multi_op_transaction_writes_are_durable_across_recovery() {
         assert!(matches!(tx.delete(t, 2), CRUDOperationResult::Deleted(_)));
         tx.commit();
         // `wait_wal_hardened` tracks the highest flushed *ts_start*, not
-        // ts_commit — see the note in the mv_db integration tests.
+        // ts_commit — see the note in the bat_db integration tests.
         db.table_named("t").unwrap().wait_wal_hardened(ts_start);
         // db drops here: commit() already waited for durability, so
         // this isn't relied on for correctness, just cleanup ordering.
@@ -307,8 +307,8 @@ fn multi_op_transaction_writes_are_durable_across_recovery() {
     let _ = std::fs::remove_file(&meta_path);
 }
 
-/// The motivating gap from `mv_db::transaction`'s type doc: before this
-/// feature, `mv_sync::visibility::is_visible`'s same-worker fast path
+/// The motivating gap from `bat_db::transaction`'s type doc: before this
+/// feature, `bat_sync::visibility::is_visible`'s same-worker fast path
 /// treated a transaction's own writes as visible forever, regardless of
 /// whether it ever committed. A transaction that writes a key, then hits a
 /// `Conflict` on a later op in the *same* transaction and drops without

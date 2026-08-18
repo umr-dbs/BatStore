@@ -1,12 +1,12 @@
-use crate::mv_bench::tpcc_schema::TpccRow;
-use crate::mv_bench::tpcc_schema::{
+use crate::bat_bench::tpcc_schema::TpccRow;
+use crate::bat_bench::tpcc_schema::{
     District, Table, TpccDatabase, Warehouse, k_district, k_warehouse,
 };
-use crate::mv_bench::tpcc_txn::TpccTxn;
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::tpcc_txn::TpccTxn;
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_root::index_root::RootIndexType;
 
 fn sample_warehouse() -> TpccRow {
     TpccRow::Warehouse(Box::new(Warehouse {
@@ -35,7 +35,7 @@ fn sample_district() -> TpccRow {
     }))
 }
 
-/// The cross-table analogue of `mv_test::query_transaction_tests::
+/// The cross-table analogue of `bat_test::query_transaction_tests::
 /// multi_op_transaction_sees_own_writes_and_isolates_others`: one
 /// `TpccTxn` writes to *two different tables* (Warehouse, District) —
 /// exactly the shared-snapshot-registration fix the multi-table refactor
@@ -104,7 +104,7 @@ fn first_writer_wins_conflict_holds_per_table_under_shared_ctx() {
     let db = TpccDatabase::new(RootIndexType::default());
     let d_key = k_district(1, 1);
     assert!(matches!(
-        crate::mv_bench::tpcc_schema::dispatch_crud_big(
+        crate::bat_bench::tpcc_schema::dispatch_crud_big(
             &db,
             Table::District,
             CRUDOperation::Insert(d_key, sample_district())
@@ -135,7 +135,7 @@ fn first_writer_wins_conflict_holds_per_table_under_shared_ctx() {
     ));
 }
 
-/// The cross-table analogue of `mv_test::query_transaction_tests::
+/// The cross-table analogue of `bat_test::query_transaction_tests::
 /// dropped_transaction_reverts_its_earlier_writes_on_conflict`: one
 /// `TpccTxn` writes to *two different tables*, then loses a
 /// first-writer-wins race on a later op and drops without `commit()` —

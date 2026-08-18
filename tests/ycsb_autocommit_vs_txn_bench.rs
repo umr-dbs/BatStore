@@ -10,12 +10,12 @@
 
 use std::time::Duration;
 
-use crate::mv_bench::mem_stats::read_vm_rss_kb;
-use crate::mv_bench::ycsb_driver::{DriverConfig, run_ycsb};
-use crate::mv_bench::ycsb_random::{RequestDistribution, YcsbMix};
-use crate::mv_bench::ycsb_schema::YcsbConfig;
-use crate::mv_bench::ycsb_txn::YcsbExecutionMode;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::mem_stats::read_vm_rss_kb;
+use crate::bat_bench::ycsb_driver::{DriverConfig, run_ycsb};
+use crate::bat_bench::ycsb_random::{RequestDistribution, YcsbMix};
+use crate::bat_bench::ycsb_schema::YcsbConfig;
+use crate::bat_bench::ycsb_txn::YcsbExecutionMode;
+use crate::bat_root::index_root::RootIndexType;
 
 const RECORD_COUNT: u64 = 2_000;
 const DURATION: Duration = Duration::from_millis(300);

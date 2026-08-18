@@ -5,11 +5,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::mv_bench::mem_stats::read_vm_rss_kb;
-use crate::mv_bench::ycsb_driver::{DriverConfig, run_ycsb};
-use crate::mv_bench::ycsb_random::{RequestDistribution, YcsbMix};
-use crate::mv_bench::ycsb_schema::YcsbConfig;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::mem_stats::read_vm_rss_kb;
+use crate::bat_bench::ycsb_driver::{DriverConfig, run_ycsb};
+use crate::bat_bench::ycsb_random::{RequestDistribution, YcsbMix};
+use crate::bat_bench::ycsb_schema::YcsbConfig;
+use crate::bat_root::index_root::RootIndexType;
 
 const RECORD_COUNT: u64 = 2_000;
 const DURATION: Duration = Duration::from_millis(300);
@@ -40,7 +40,7 @@ fn config(num_threads: usize, wal_path: PathBuf, batch_size: Option<usize>) -> D
         max_scan_length: 100,
         write_all_fields: false,
         read_payload: true,
-        execution_mode: crate::mv_bench::ycsb_txn::YcsbExecutionMode::Atomic,
+        execution_mode: crate::bat_bench::ycsb_txn::YcsbExecutionMode::Atomic,
         gc: true,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,

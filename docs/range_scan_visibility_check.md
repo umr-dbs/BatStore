@@ -13,15 +13,15 @@ only the per-record visibility hot loop once routing has reached a leaf.
 
 ## What was found
 
-`RangeQueryIter::refill` (`src/mv_query/iter_query.rs`) and
-`MVBTSt::key_range_read_from_root` (`src/mv_query/query.rs`) both filter each physical
+`RangeQueryIter::refill` (`src/bat_query/iter_query.rs`) and
+`MVBTSt::key_range_read_from_root` (`src/bat_query/query.rs`) both filter each physical
 record with:
 
 ```rust
 r.version().matches(is_visible) && range.contains(r.key())
 ```
 
-`VersionInfo::matches` (`src/mv_record_model/version_info.rs`) calls `is_visible` up to
+`VersionInfo::matches` (`src/bat_record_model/version_info.rs`) calls `is_visible` up to
 twice per record (once for the insertion stamp, once more for the deletion stamp if
 present) — i.e. on *every* dead/superseded record a leaf holds, which per the linked doc
 is the majority of a garbage-heavy leaf's contents. Before this fix, `is_visible` was a

@@ -341,8 +341,8 @@ this rather than papering over it:
   own output). LeanStore/WiredTiger's analyticalQuery() was a literal "TODO: implement CH
   analytical queries" stub before this harness added real Q1/Q6 bodies to it (see
   frontend/tpc-c/TPCCWorkload.hpp in the LeanStore checkout). libmdbx got the same
-  treatment in src/mv_bench/mdbx_tpcc.rs (`mdbx_q1`/`mdbx_q6`, a libmdbx port of
-  `mv_bench::tpch_queries::q1`/`q6` against its own `Transaction<RO>`/cursor API, plus one
+  treatment in src/bat_bench/mdbx_tpcc.rs (`mdbx_q1`/`mdbx_q6`, a libmdbx port of
+  `bat_bench::tpch_queries::q1`/`q6` against its own `Transaction<RO>`/cursor API, plus one
   OLAP thread rotating them - see that module's docs). Both vWeaver_ermia variants got it
   too, via patches/vweaver_ermia_chbenchmark.patch (`RunChQ1`/`RunChQ6` in ERMIA's own
   benchmarks/tpcc.cc, a real `ORDER_LINE` table scan against ERMIA's own transaction/Scan
@@ -461,7 +461,7 @@ this rather than papering over it:
   one at the same tiny scale).
 
 
-6. HOW LIBMDBX WAS ADDED (src/mv_bench/mdbx_ycsb.rs, mdbx_tpcc.rs)
+6. HOW LIBMDBX WAS ADDED (src/bat_bench/mdbx_ycsb.rs, mdbx_tpcc.rs)
 ------------------------------------------------------------------------
 
 A second, independent storage backend inside BatStore itself, using the `libmdbx` Rust crate

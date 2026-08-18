@@ -1,10 +1,10 @@
 use std::fs;
 use std::time::Duration;
 
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_sync::clock::GlobalClock;
-use crate::mv_wal::record::{self, WalEntry, WalRecord};
-use crate::mv_wal::writer::WalWriter;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_sync::clock::GlobalClock;
+use crate::bat_wal::record::{self, WalEntry, WalRecord};
+use crate::bat_wal::writer::WalWriter;
 
 #[test]
 fn group_commit_flushes_and_wait_unblocks() {

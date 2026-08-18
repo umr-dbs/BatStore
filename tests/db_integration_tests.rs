@@ -1,14 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_root::index_root::RootIndexType;
-use crate::mv_wal::record::{self, WalEntry};
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_root::index_root::RootIndexType;
+use crate::bat_wal::record::{self, WalEntry};
 
-use crate::mv_db::Database;
-use crate::mv_db::DbTransaction;
+use crate::bat_db::Database;
+use crate::bat_db::DbTransaction;
 
 type TestDb = Database<8, 8, u64, u64>;
 
@@ -63,7 +63,7 @@ fn db_transaction_zero_copy_range_terminals_share_its_snapshot() {
     load.commit();
 
     let mut tx = DbTransaction::begin(&db);
-    let range = crate::mv_query::interval::Interval::new(5, 14);
+    let range = crate::bat_query::interval::Interval::new(5, 14);
     assert_eq!(tx.range_count(table, range), 10);
     assert_eq!(
         tx.range_fold(table, range, 0u64, |sum, _, payload| sum + *payload),
@@ -138,7 +138,7 @@ fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
     assert_eq!(
         old.range_count(
             table,
-            crate::mv_query::interval::Interval::new(u64::MIN, u64::MAX)
+            crate::bat_query::interval::Interval::new(u64::MIN, u64::MAX)
         ),
         1
     );
@@ -152,7 +152,7 @@ fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
     assert_eq!(
         current.range_count(
             table,
-            crate::mv_query::interval::Interval::new(u64::MIN, u64::MAX)
+            crate::bat_query::interval::Interval::new(u64::MIN, u64::MAX)
         ),
         512
     );
@@ -214,7 +214,7 @@ fn repeated_delete_reinsert_round_trips_through_wal_recovery() {
     let _ = std::fs::remove_file(format!("{}.meta", path.display()));
 }
 
-/// The cross-table analogue of `mv_bench::tpcc_txn::tests::
+/// The cross-table analogue of `bat_bench::tpcc_txn::tests::
 /// cross_table_transaction_is_atomic_across_tables`: one `DbTransaction`
 /// writes to two different tables, and both writes must become visible to
 /// other transactions atomically, as one unit, not one table at a time.
@@ -264,7 +264,7 @@ fn db_cross_table_transaction_is_atomic_across_tables() {
     });
 }
 
-/// The cross-table analogue of `mv_bench::tpcc_txn::tests::
+/// The cross-table analogue of `bat_bench::tpcc_txn::tests::
 /// dropped_tpcc_txn_reverts_writes_across_tables_on_conflict`: one
 /// `DbTransaction` writes two different tables, then loses a
 /// first-writer-wins race on a later op and drops without `commit()` — both
@@ -324,7 +324,7 @@ fn db_dropped_transaction_reverts_writes_across_tables_on_conflict() {
     tx3.commit();
 }
 
-/// The `Database` counterpart to `mv_bench::tpcc_wal_codec::tests::
+/// The `Database` counterpart to `bat_bench::tpcc_wal_codec::tests::
 /// tpcc_database_crash_recovery_round_trip_across_tables`, but additionally
 /// asserting only **one** file exists on disk — the concrete proof of "one
 /// shared log," not per-table siblings (unlike `TpccDatabase`, whose
@@ -484,7 +484,7 @@ fn dynamic_table_created_after_wal_and_gc_enabled_inherits_both() {
 
     // GC inheritance: many single-op writes through "late" must keep its
     // (shared) commit log pruned near max_workers — same property
-    // `mv_query::dispatch::tests::commit_log_stays_bounded_with_gc_enabled`
+    // `bat_query::dispatch::tests::commit_log_stays_bounded_with_gc_enabled`
     // proves for a tree that had GC on from construction.
     for k in 0..10_000u64 {
         assert!(matches!(

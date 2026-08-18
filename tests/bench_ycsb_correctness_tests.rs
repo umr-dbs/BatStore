@@ -1,15 +1,15 @@
-//! Correctness checks for the YCSB benchmark harness (`mv_bench::ycsb_load`/
+//! Correctness checks for the YCSB benchmark harness (`bat_bench::ycsb_load`/
 //! `ycsb_txn`): a tiny table, exercising each of the five Core Workload ops
 //! (Read/Update/Insert/Scan/Read-Modify-Write) and checking the actual row
 //! content/counts they produce, not just that the call returned `Ok`.
 
-use crate::mv_bench::ycsb_load::populate;
-use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbTree};
-use crate::mv_bench::ycsb_txn;
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::ycsb_load::populate;
+use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbTree};
+use crate::bat_bench::ycsb_txn;
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_root::index_root::RootIndexType;
 
 /// Small enough that loading + a handful of ops finishes in well under a
 /// second.

@@ -1,26 +1,26 @@
 //! Correctness checks for the "S-HTAP" (streaming HTAP) benchmark harness
-//! (`mv_bench::s_htap_random`/`s_htap_txn`): a tiny table, exercising the
+//! (`bat_bench::s_htap_random`/`s_htap_txn`): a tiny table, exercising the
 //! workload's two write-side behaviors (a genuinely new arrival vs. a
 //! late-arrival upsert colliding with an already-materialized key) and its
 //! OLAP scan path against real row content, not just `Ok`/`Err`.
 //!
 //! The last test below is a direct regression test for the hot/cold
-//! double-counting bug found and fixed in `mv_query::iter_query`'s cold-chain
+//! double-counting bug found and fixed in `bat_query::iter_query`'s cold-chain
 //! range-scan path (2026-08-15/16, see `RangeQueryIter::walk_cold_chain_for_range`):
 //! it forces enough hot-tail churn to build real cold chains via
 //! `VERSION_SPLIT`, then asserts a straddling scan returns exactly one row
 //! per live key — a regression would show up here as a scan count exceeding
 //! the range's live-key count.
 
-use crate::mv_bench::s_htap_random::{HotTailSampler, olap_scan_bounds};
-use crate::mv_bench::s_htap_txn::arrival_upsert;
-use crate::mv_bench::ycsb_load::populate;
-use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbTree};
-use crate::mv_bench::ycsb_txn::{self, YcsbExecutionMode};
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::s_htap_random::{HotTailSampler, olap_scan_bounds};
+use crate::bat_bench::s_htap_txn::arrival_upsert;
+use crate::bat_bench::ycsb_load::populate;
+use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbTree};
+use crate::bat_bench::ycsb_txn::{self, YcsbExecutionMode};
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_root::index_root::RootIndexType;
 
 fn tiny_cfg() -> YcsbConfig {
     YcsbConfig {

@@ -1,7 +1,7 @@
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_record_model::tx_stamp::TxStamp;
-use crate::mv_record_model::version_info::Version;
-use crate::mv_wal::record::{
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_record_model::tx_stamp::TxStamp;
+use crate::bat_record_model::version_info::Version;
+use crate::bat_wal::record::{
     TABLE_ID_COMMIT_SENTINEL, WalEntry, WalRecord, decode, decode_entry, decode_entry_for_table,
     encode, encode_entry, encode_entry_for_table_framed, encode_entry_framed, frame, read_frame,
     resync_next,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Plot figures for a full BatStore `benchmark` suite run (see `benchmark` at the
-repo root / `src/mv_bench/suite.rs`): TPC-C OLTP-only, CH-benCHmark ("TPC-H"),
+repo root / `src/bat_bench/suite.rs`): TPC-C OLTP-only, CH-benCHmark ("TPC-H"),
 HTAP, and YCSB A-F, each run once with GC on and once with GC off, with
 per-run memory-usage logging.
 
@@ -32,8 +32,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-# The 4 CH-benCHmark queries implemented in mv_bench::tpch_queries, and the
-# order they're always run in (mv_bench::olap_scan::ch_benchmark_queries_once)
+# The 4 CH-benCHmark queries implemented in bat_bench::tpch_queries, and the
+# order they're always run in (bat_bench::olap_scan::ch_benchmark_queries_once)
 # — mirrors scripts/plot_results.py's CH_QUERY_ORDER/LABELS.
 CH_QUERY_ORDER = [
     "ch_q1_pricing_summary",

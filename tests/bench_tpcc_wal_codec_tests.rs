@@ -1,5 +1,5 @@
-use crate::mv_bench::tpcc_schema::*;
-use crate::mv_wal::record::WalPayload;
+use crate::bat_bench::tpcc_schema::*;
+use crate::bat_wal::record::WalPayload;
 
 fn round_trip(row: TpccRow) {
     let mut bytes = Vec::new();
@@ -184,11 +184,11 @@ fn decode_rejects_truncated_bytes() {
 /// manifest as wrong data, a panic, or a crash here.
 #[test]
 fn crash_recovery_round_trip_for_boxed_rows() {
-    use crate::mv_bench::tpcc_schema::TpccTree;
-    use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-    use crate::mv_crud_model::crud_operation::CRUDOperation;
-    use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-    use crate::mv_root::index_root::RootIndexType;
+    use crate::bat_bench::tpcc_schema::TpccTree;
+    use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+    use crate::bat_crud_model::crud_operation::CRUDOperation;
+    use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+    use crate::bat_root::index_root::RootIndexType;
 
     let path = std::env::temp_dir().join(format!("batstore_tpcc_wal_test_{}.log", std::process::id()));
     let _ = std::fs::remove_file(&path);
@@ -305,18 +305,18 @@ fn crash_recovery_round_trip_for_boxed_rows() {
 
 /// `TpccDatabase` counterpart to `crash_recovery_round_trip_for_boxed_rows`:
 /// every table now shares one `WalWriter`/one file (see
-/// `mv_db::Database`'s doc) as well as one `TxContext` — this confirms
+/// `bat_db::Database`'s doc) as well as one `TxContext` — this confirms
 /// `TpccDatabase::open_recovered` correctly replays that single shared
 /// file back into the right tables and that a write to one table
 /// (Warehouse) survives recovery alongside a write to a different table
 /// (Customer), even though they're still physically separate trees.
 #[test]
 fn tpcc_database_crash_recovery_round_trip_across_tables() {
-    use crate::mv_bench::tpcc_schema::{Table, TpccDatabase};
-    use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-    use crate::mv_crud_model::crud_operation::CRUDOperation;
-    use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-    use crate::mv_root::index_root::RootIndexType;
+    use crate::bat_bench::tpcc_schema::{Table, TpccDatabase};
+    use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+    use crate::bat_crud_model::crud_operation::CRUDOperation;
+    use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+    use crate::bat_root::index_root::RootIndexType;
 
     let base_path =
         std::env::temp_dir().join(format!("batstore_tpcc_db_wal_test_{}.log", std::process::id()));
@@ -336,7 +336,7 @@ fn tpcc_database_crash_recovery_round_trip_across_tables() {
         .unwrap();
 
         assert!(matches!(
-            crate::mv_bench::tpcc_schema::dispatch_crud_big(
+            crate::bat_bench::tpcc_schema::dispatch_crud_big(
                 &db,
                 Table::Warehouse,
                 CRUDOperation::Insert(
@@ -393,7 +393,7 @@ fn tpcc_database_crash_recovery_round_trip_across_tables() {
     .unwrap();
     let version = recovered.current_version();
 
-    match crate::mv_bench::tpcc_schema::dispatch_crud_big(
+    match crate::bat_bench::tpcc_schema::dispatch_crud_big(
         &recovered,
         Table::Warehouse,
         CRUDOperation::Point(warehouse_key, version),

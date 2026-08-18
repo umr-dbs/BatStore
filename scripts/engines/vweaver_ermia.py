@@ -9,7 +9,7 @@ multi-table TPC-C (benchmarks/tpcc.cc).
 
 htap_q1/htap_q6: upstream had no CH-benCHmark/HTAP support at all - added in
 patches/vweaver_ermia_chbenchmark.patch (`RunChQ1`/`RunChQ6` in benchmarks/tpcc.cc, ported
-from `mv_bench::tpch_queries::q1`/`q6` in the sibling BatStore harness - a full
+from `bat_bench::tpch_queries::q1`/`q6` in the sibling BatStore harness - a full
 `ORDER_LINE` table scan, pure aggregation, no joins, see that patch's inline comments for
 why only these 2 of CH-benCHmark's 22 queries). Passing `--enable-chbenchmark` in
 `-benchmark_options` spawns one dedicated thread (`tpcc_bench_runner::StartHtapThread`)

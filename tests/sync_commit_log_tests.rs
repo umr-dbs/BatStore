@@ -1,5 +1,5 @@
-use crate::mv_sync::clock::GlobalClock;
-use crate::mv_sync::commit_log::CommitLog;
+use crate::bat_sync::clock::GlobalClock;
+use crate::bat_sync::commit_log::CommitLog;
 
 /// The bug this whole file's `commit_pruned` vs. plain `commit` split
 /// exists to let callers avoid: with no snapshots ever registered as

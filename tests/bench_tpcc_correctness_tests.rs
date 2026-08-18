@@ -1,5 +1,5 @@
 //! End-to-end correctness checks for the TPC-C benchmark harness
-//! (`mv_bench::tpcc_load`/`tpcc_txn`): load a tiny (single-warehouse,
+//! (`bat_bench::tpcc_load`/`tpcc_txn`): load a tiny (single-warehouse,
 //! single-district) data set, run a handful of the standard transaction
 //! profiles through the same driver functions the real benchmark uses, and
 //! verify the resulting data is actually correct — not just "didn't panic".
@@ -23,15 +23,15 @@
 
 use std::sync::atomic::AtomicU64;
 
-use crate::mv_bench::tpcc_load::{populate_items, populate_warehouse};
-use crate::mv_bench::tpcc_schema::{
+use crate::bat_bench::tpcc_load::{populate_items, populate_warehouse};
+use crate::bat_bench::tpcc_schema::{
     Table, TpccConfig, TpccDatabase, TpccKey, TpccRow, k_customer, k_district,
     k_new_order_district_bounds, k_order, k_order_line_bounds, k_warehouse,
 };
-use crate::mv_bench::tpcc_txn::{self, TpccTxn, TxnOutcome, many, one};
-use crate::mv_query::interval::Interval;
-use crate::mv_record_model::record_point::RecordPointResult;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::tpcc_txn::{self, TpccTxn, TxnOutcome, many, one};
+use crate::bat_query::interval::Interval;
+use crate::bat_record_model::record_point::RecordPointResult;
+use crate::bat_root::index_root::RootIndexType;
 
 /// Small enough that loading + a dozen transactions finishes in well under a
 /// second, large enough that every transaction profile has real rows to

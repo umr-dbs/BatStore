@@ -9,10 +9,10 @@
 //! accessors round-trip correctly in isolation, since nothing else
 //! exercises them yet.
 
-use crate::mv_page_model::internal_page::InternalPage;
-use crate::mv_page_model::leaf_page::LeafPage;
-use crate::mv_page_model::node::{COLD_LINK_SIZE, ColdLink, Node, PADDING};
-use crate::mv_sync::smart_cell::OptCell;
+use crate::bat_page_model::internal_page::InternalPage;
+use crate::bat_page_model::leaf_page::LeafPage;
+use crate::bat_page_model::node::{COLD_LINK_SIZE, ColdLink, Node, PADDING};
+use crate::bat_sync::smart_cell::OptCell;
 
 type ProdKey = u64;
 type ProdPayload = u64;
@@ -130,10 +130,10 @@ fn cold_link_accessors_round_trip() {
     // unused, never dereferenced here) `OptCell<Block<..>>` -- the actual
     // pointee type `BlockRef`/`SmartCell` expects -- so this test's pointer
     // isn't a lie about the type nothing downstream should copy.
-    let cell: crate::mv_sync::smart_cell::OptCell<
-        crate::mv_block::block::Block<TEST_FAN, TEST_RECORDS, ProdKey, ProdPayload>,
+    let cell: crate::bat_sync::smart_cell::OptCell<
+        crate::bat_block::block::Block<TEST_FAN, TEST_RECORDS, ProdKey, ProdPayload>,
     > = Default::default();
-    let cold = crate::mv_sync::smart_cell::SmartCell(std::ptr::addr_of!(cell));
+    let cold = crate::bat_sync::smart_cell::SmartCell(std::ptr::addr_of!(cell));
 
     let populated = Link::new(cold, 7, 42, 2, 11);
     assert!(!populated.is_none());
@@ -152,10 +152,10 @@ fn on_reuse_clears_a_populated_cold_link() {
     // silently inherit a stale (and eventually dangling, once the old
     // owner's cold page is itself retired) pointer it never wrote and has
     // no way to detect.
-    let cell: crate::mv_sync::smart_cell::OptCell<
-        crate::mv_block::block::Block<TEST_FAN, TEST_RECORDS, ProdKey, ProdPayload>,
+    let cell: crate::bat_sync::smart_cell::OptCell<
+        crate::bat_block::block::Block<TEST_FAN, TEST_RECORDS, ProdKey, ProdPayload>,
     > = Default::default();
-    let cold = crate::mv_sync::smart_cell::SmartCell(std::ptr::addr_of!(cell));
+    let cold = crate::bat_sync::smart_cell::SmartCell(std::ptr::addr_of!(cell));
     let link = ColdLink::<TEST_FAN, TEST_RECORDS, ProdKey, ProdPayload>::new(cold, 1, 1, 1, 1);
 
     let mut node =

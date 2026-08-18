@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_sync::clock::GlobalClock;
-use crate::mv_wal::lockfree_writer::{LocalBatch, LockFreeWalWriter};
-use crate::mv_wal::record::{self, WalEntry};
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_sync::clock::GlobalClock;
+use crate::bat_wal::lockfree_writer::{LocalBatch, LockFreeWalWriter};
+use crate::bat_wal::record::{self, WalEntry};
 
 #[test]
 fn group_fsync_flushes_and_wait_unblocks() {
@@ -164,7 +164,7 @@ fn concurrent_local_batches_each_land_intact_and_distinct() {
                 let mut stamps = Vec::with_capacity(PER_THREAD);
                 for i in 0..PER_THREAD {
                     let key = (t * PER_THREAD + i) as u64;
-                    let stamp = crate::mv_record_model::tx_stamp::TxStamp::new(
+                    let stamp = crate::bat_record_model::tx_stamp::TxStamp::new(
                         t as u16,
                         clock.next_timestamp(),
                     );

@@ -8,7 +8,7 @@
 //!
 //! Historical note: this modeled `TxContext::begin_snapshot_registration`/
 //! `end_snapshot_registration`/`registrations_in_flight`
-//! (src/mv_sync/tx_context.rs) as they existed when this test was written —
+//! (src/bat_sync/tx_context.rs) as they existed when this test was written —
 //! a single global `AtomicUsize` counter every worker incremented/decremented,
 //! checked via a separate `Acquire` load from `live_tx`'s `SkipMap` state.
 //! That design was replaced by `TxContext::in_flight_bound` (see that field's

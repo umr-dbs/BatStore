@@ -1,6 +1,6 @@
 """BatStore engine wrapper: invokes the release binary directly (cwd = output_dir,
 since `cargo run -- tpcc|ycsb ...` always writes its CSVs to the current
-working directory — see src/mv_bench/tpcc_driver.rs::main_tpcc /
+working directory — see src/bat_bench/tpcc_driver.rs::main_tpcc /
 ycsb_driver.rs::main_ycsb, both hardcode `output_dir: PathBuf::from(".")`).
 
 WAL is forced on, unconditionally, for every run here (see the wal_path/args wiring

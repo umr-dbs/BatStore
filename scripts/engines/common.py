@@ -309,7 +309,7 @@ class Scale:
     ycsb_threads: int = 16
     ycsb_duration: int = 30
     ycsb_theta: float = 0.99
-    # "S-HTAP" streaming workload (src/mv_bench/s_htap_driver.rs): near-sorted
+    # "S-HTAP" streaming workload (src/bat_bench/s_htap_driver.rs): near-sorted
     # arrivals + recency-biased hot-tail updates running concurrently with OLAP scans
     # that straddle the cold/hot boundary - see that module's doc. `s_htap_record_count`
     # is the cold historical corpus loaded up front (mirrors ycsb_records); the swept
@@ -389,14 +389,14 @@ YCSB_WORKLOADS = ["ycsb_a", "ycsb_b", "ycsb_c", "ycsb_d", "ycsb_e", "ycsb_f"]
 # Revenue Change") - the only 2 of CH-benCHmark's 22 queries genuinely implemented across
 # every engine that supports this at all: BatStore and LeanStore/WiredTiger's hand-written
 # scans, BenchBase's real SQL for PostgreSQL, and libmdbx's own hand-written scans
-# (src/mv_bench/mdbx_tpcc.rs::mdbx_q1/mdbx_q6) - see the plan's Context section for why the
+# (src/bat_bench/mdbx_tpcc.rs::mdbx_q1/mdbx_q6) - see the plan's Context section for why the
 # other queries aren't comparable everywhere. Both vWeaver_ermia variants got it too, via
 # patches/vweaver_ermia_chbenchmark.patch's RunChQ1/RunChQ6 in ERMIA's own
 # benchmarks/tpcc.cc (see manual.txt section 5) - though vweaver_ermia_frugal has a
 # separate, pre-existing KNOWN ISSUE (also section 5) that crashes it on any sustained
 # workload, htap_q1/htap_q6 included. Each is one full ORDER_LINE table scan (pure
 # aggregation for Q1, filtered aggregation for Q6), no joins - see
-# src/mv_bench/tpch_queries.rs::q1/q6, the reference implementation every engine's own port
+# src/bat_bench/tpch_queries.rs::q1/q6, the reference implementation every engine's own port
 # (including libmdbx's and both vWeaver_ermia variants') mirrors function-for-function.
 HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
 # "S-HTAP" streaming workload (see Scale's s_htap_* fields' doc) - one name, no

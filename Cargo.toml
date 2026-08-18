@@ -35,11 +35,11 @@ strip = false
 
 [features]
 hardware-lock-elision = []
-# Gates the libmdbx-backed comparison engine (src/mv_bench/mdbx_ycsb.rs/mdbx_tpcc.rs) -
+# Gates the libmdbx-backed comparison engine (src/bat_bench/mdbx_ycsb.rs/mdbx_tpcc.rs) -
 # optional since it's a second, independent storage backend (path-copying/copy-on-write
 # B+Tree via libmdbx) alongside this crate's own MVBTree, not something every build needs.
 mdbx-backend = ["dep:libmdbx"]
-# Gates `src/mv_viz` (structural tree/root* dump -> JSON for the standalone
+# Gates `src/bat_viz` (structural tree/root* dump -> JSON for the standalone
 # `tools/tree_visualizer.html` viewer) - a debug/inspection tool, not
 # anything the benchmark/paper path needs, so its `serde`/`serde_json` deps
 # stay out of the default build.
@@ -49,7 +49,7 @@ tree-viz = ["dep:serde", "dep:serde_json"]
 # allocated on a worker thread, freed on the flush thread): mimalloc's
 # per-page lock-free "thread free list" targets exactly that producer-
 # consumer pattern, unlike jemalloc's cross-arena free. When this is on,
-# `mv_bench::mem_stats`'s jemalloc-specific stats columns read as zero (no
+# `bat_bench::mem_stats`'s jemalloc-specific stats columns read as zero (no
 # real jemalloc arena is active) - use the allocator-independent VmRSS
 # column instead.
 mimalloc = ["dep:mimalloc"]

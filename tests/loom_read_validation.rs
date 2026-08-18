@@ -1,7 +1,7 @@
 #![cfg(loom)]
 
 //! Loom model of `SmartCell`/`OptCell`'s optimistic read-validation scheme
-//! (src/mv_sync/smart_cell.rs): a `cell_version` atomic carries a write-lock
+//! (src/bat_sync/smart_cell.rs): a `cell_version` atomic carries a write-lock
 //! flag bit plus a monotonic counter. A writer CASes the flag on, mutates
 //! plain (genuinely non-atomic, `UnsafeCell`-backed — like the real
 //! `SafeCell`/`key_interval_region`/`version_region`) fields, then releases
@@ -14,8 +14,8 @@
 //! after the fact.
 //!
 //! This models the fix applied to `traversal_write_internal_olc`
-//! (src/mv_query/olc_query.rs) and `SmartGuard::is_write_locked`/
-//! `live_version` (src/mv_sync/smart_cell.rs): bracket the read with (a) a
+//! (src/bat_query/olc_query.rs) and `SmartGuard::is_write_locked`/
+//! `live_version` (src/bat_sync/smart_cell.rs): bracket the read with (a) a
 //! check that the lock is *not already held* before touching anything, and
 //! (b) a check that the version is *unchanged* after — retry unless both
 //! hold. `part_a`/`part_b` stand in for two fields a writer updates in
@@ -166,7 +166,7 @@ fn before_after_only_is_unsound() {
 /// runs of the real fix in `tests/tree_wal_consistency_tests.rs`, on real
 /// hardware, with zero reproductions). Contrast this with `simba`/
 /// `root_guard` in `on_overflow_node`/`on_underflow_node`/`split_root`/
-/// `merge_root` (`src/mv_tree/smo.rs`): those got genuine exclusive
+/// `merge_root` (`src/bat_tree/smo.rs`): those got genuine exclusive
 /// locking (`upgrade_write_lock`), not a version check, so there's no
 /// equivalent gap for them — real mutual exclusion, not an optimistic
 /// read, is what actually closes a race like this. `#[should_panic]`

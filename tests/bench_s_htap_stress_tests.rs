@@ -1,5 +1,5 @@
 //! Concurrent stress tests for the "S-HTAP" (streaming HTAP) benchmark
-//! harness (`mv_bench::s_htap_random`/`s_htap_txn`): several real OS threads
+//! harness (`bat_bench::s_htap_random`/`s_htap_txn`): several real OS threads
 //! run the workload's actual shape - near-sorted arrivals plus recency-biased
 //! hot-tail updates on one side, long OLAP scans straddling the cold/hot
 //! boundary on the other - concurrently, with GC enabled, for a second or
@@ -37,17 +37,17 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::mv_bench::s_htap_random::{
+use crate::bat_bench::s_htap_random::{
     HotTailSampler, SHtapMix, SHtapWriteOp, mint_arrival_key, olap_scan_bounds, pick_write_op,
 };
-use crate::mv_bench::s_htap_txn::arrival_upsert;
-use crate::mv_bench::ycsb_load::populate;
-use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbTree};
-use crate::mv_bench::ycsb_txn::{self, YcsbExecutionMode};
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::s_htap_txn::arrival_upsert;
+use crate::bat_bench::ycsb_load::populate;
+use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbTree};
+use crate::bat_bench::ycsb_txn::{self, YcsbExecutionMode};
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_root::index_root::RootIndexType;
 
 fn stress_cfg() -> YcsbConfig {
     YcsbConfig {
