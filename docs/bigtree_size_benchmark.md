@@ -83,8 +83,8 @@ per-leaf memory cost or Tiny's higher restart rate.
 **Caveat:** this benchmark only measures throughput/latency, which commit `1f6d666`
 already noted is flat across sizes - it does not distinguish the sizes on the actual
 metric that motivated `BigTreeSize` in the first place (per-table root-restart count,
-`mv_test::dump_root_restarts_by_table`), which requires rebuilding with
-`mv_test::RESTART_TRACE = true` (off by default - it adds per-attempt tracing overhead).
+`bat_test::dump_root_restarts_by_table`), which requires rebuilding with
+`bat_test::RESTART_TRACE = true` (off by default - it adds per-attempt tracing overhead).
 That rebuild+measurement was out of scope here.
 
 ## Addendum (2026-08-11): the "flat scan latency" finding above was a duration artifact
@@ -92,7 +92,7 @@ That rebuild+measurement was out of scope here.
 Re-investigated as part of a broader OLAP-performance pass. The "Scan p50/p99 flat
 across all five sizes" finding above does **not** hold at a longer time horizon, and the
 mechanism `tpcc_schema.rs`'s doc comment describes (bigger leaf -> deferred compaction ->
-more dead-version garbage per scan, since `mv_query::iter_query::RangeQueryIter` scans a
+more dead-version garbage per scan, since `bat_query::iter_query::RangeQueryIter` scans a
 leaf's whole physical record array, live and dead alike) reproduces cleanly once the OLAP
 thread's `scan_after_delay_once` snapshot is actually given time to age:
 
@@ -122,10 +122,10 @@ p50/p99 flat" finding above was an artifact of too-short aging, not a real absen
 effect, and the "Medium ties for best-or-tied-for-best on every metric measured here"
 recommendation is only reliable for tpmC/RSS, not for scan cost under sustained load.
 
-Also added (this session): `mv_test::SCAN_TRACE` (off by default, same dead-code-
+Also added (this session): `bat_test::SCAN_TRACE` (off by default, same dead-code-
 eliminated-when-off idiom as `RESTART_TRACE`) - counts records-visited vs.
 records-matched per leaf across every `RangeQueryIter` scan in the process
-(`mv_test::record_leaf_scan`/`dump_scan_trace`). Enabling it for the same 30s run
+(`bat_test::record_leaf_scan`/`dump_scan_trace`). Enabling it for the same 30s run
 (system-wide, not isolated to the OLAP thread - it also counts every OLTP transaction's
 own point/range reads) showed **5.74x records visited per record matched**, identical at
 both leaf sizes - expected, since the other 12 (default-sized) tables' aggregate read

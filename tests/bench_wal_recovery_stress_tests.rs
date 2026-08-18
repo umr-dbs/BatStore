@@ -2,13 +2,13 @@
 //! threads against a WAL-logged database (the same `enable_wal` +
 //! concurrent-writer combination `tpcc_driver::run_tpcc`'s `wal` option
 //! exercises in real runs), then drops the live database (flushing and
-//! joining the WAL writer - see `mv_wal::writer::WalWriter`'s `Drop`) and
+//! joining the WAL writer - see `bat_wal::writer::WalWriter`'s `Drop`) and
 //! rebuilds a fresh one from the log via `TpccDatabase::open_recovered`.
 //!
 //! Unlike `wal_recovery_tests.rs` (single-threaded, hand-picked ops), this
 //! recovers a log that several racing threads wrote concurrently across 14
 //! tables, one shared Commit marker per (possibly multi-table) transaction
-//! (see `mv_db::DbTransaction::commit`'s doc). Every aggregate captured from
+//! (see `bat_db::DbTransaction::commit`'s doc). Every aggregate captured from
 //! the live database right before it's dropped must come back identical
 //! (exactly, for row counts/counters; within float rounding, for ytd/balance
 //! sums) after recovery - any mismatch would mean the WAL lost, duplicated,
@@ -22,12 +22,12 @@ use std::time::Duration;
 
 use rand::prelude::*;
 
-use crate::mv_bench::tpcc_load::{populate_items, populate_warehouse};
-use crate::mv_bench::tpcc_schema::{Table, TpccConfig, TpccDatabase, TpccKey, TpccRow};
-use crate::mv_bench::tpcc_txn::{self, TpccTxn, many};
-use crate::mv_query::interval::Interval;
-use crate::mv_record_model::record_point::RecordPointResult;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::tpcc_load::{populate_items, populate_warehouse};
+use crate::bat_bench::tpcc_schema::{Table, TpccConfig, TpccDatabase, TpccKey, TpccRow};
+use crate::bat_bench::tpcc_txn::{self, TpccTxn, many};
+use crate::bat_query::interval::Interval;
+use crate::bat_record_model::record_point::RecordPointResult;
+use crate::bat_root::index_root::RootIndexType;
 
 // Keep enough items for representative Stock-key contention without making
 // test population expensive.

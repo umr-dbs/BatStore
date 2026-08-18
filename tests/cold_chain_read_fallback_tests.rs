@@ -1,7 +1,7 @@
 //! Stage 2 of the cold-page-chain design (see `ColdLink`'s doc in
-//! `mv_page_model::node`, and the SMO livelock investigation this follows
+//! `bat_page_model::node`, and the SMO livelock investigation this follows
 //! from): tests for the read-path fallback (`MVBTSt::scan_leaf_for_key`/
-//! `scan_cold_chain_for_key` in `mv_query::query`) against hand-built cold
+//! `scan_cold_chain_for_key` in `bat_query::query`) against hand-built cold
 //! chains. Nothing in `split()`/`merge()` writes a real cold chain yet
 //! (that's Stage 3) -- these tests build one directly the same low-level
 //! way `leaf_page_abort_tests.rs` builds leaf content, bypassing the whole
@@ -10,17 +10,17 @@
 //! mechanism work" from "does the real OSIC visibility system work" (the
 //! latter is already covered extensively elsewhere) -- so `is_visible`
 //! here is a small, fully-controlled test closure, not the real
-//! `mv_sync::visibility::is_visible`.
+//! `bat_sync::visibility::is_visible`.
 
-use crate::mv_block::block::Block;
-use crate::mv_page_model::leaf_page::LeafPage;
-use crate::mv_page_model::node::{ColdLink, Node, PageType};
-use crate::mv_record_model::record_point::RecordPoint;
-use crate::mv_record_model::tx_stamp::TxStamp;
-use crate::mv_record_model::version_info::VersionInfo;
-use crate::mv_sync::safe_cell::SafeCell;
-use crate::mv_sync::smart_cell::{OptCell, SmartCell};
-use crate::mv_tree::mvbt::MVBTSt as Query;
+use crate::bat_block::block::Block;
+use crate::bat_page_model::leaf_page::LeafPage;
+use crate::bat_page_model::node::{ColdLink, Node, PageType};
+use crate::bat_record_model::record_point::RecordPoint;
+use crate::bat_record_model::tx_stamp::TxStamp;
+use crate::bat_record_model::version_info::VersionInfo;
+use crate::bat_sync::safe_cell::SafeCell;
+use crate::bat_sync::smart_cell::{OptCell, SmartCell};
+use crate::bat_tree::mvbt::MVBTSt as Query;
 
 const FAN: usize = 8;
 type TestQuery = Query<FAN, FAN, u64, u64>;

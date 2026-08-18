@@ -1,16 +1,16 @@
-use crate::mv_page_model::leaf_page::{AbortOutcome, LeafPage};
-use crate::mv_record_model::record_point::RecordPoint;
-use crate::mv_record_model::tx_stamp::TxStamp;
-use crate::mv_record_model::version_info::VersionInfo;
+use crate::bat_page_model::leaf_page::{AbortOutcome, LeafPage};
+use crate::bat_record_model::record_point::RecordPoint;
+use crate::bat_record_model::tx_stamp::TxStamp;
+use crate::bat_record_model::version_info::VersionInfo;
 
 const NUM_RECORDS: usize = 8;
 type TestLeaf = LeafPage<NUM_RECORDS, u64, u64>;
 
 #[test]
 fn production_soa_capacity_still_fits_one_4k_cell() {
-    use crate::mv_block::block::Block;
-    use crate::mv_sync::smart_cell::OptCell;
-    use crate::mv_tree::mvbt::{FAN_OUT, NUM_RECORDS};
+    use crate::bat_block::block::Block;
+    use crate::bat_sync::smart_cell::OptCell;
+    use crate::bat_tree::mvbt::{FAN_OUT, NUM_RECORDS};
 
     type ProductionCell = OptCell<Block<FAN_OUT, NUM_RECORDS, u64, u64>>;
     type OneMoreCell = OptCell<Block<FAN_OUT, 124, u64, u64>>;

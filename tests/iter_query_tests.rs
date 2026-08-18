@@ -14,14 +14,14 @@
 
 use std::collections::HashMap;
 
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_query::interval::Interval;
-use crate::mv_query::iter_query::RangeQueryIter;
-use crate::mv_record_model::version_info::Version;
-use crate::mv_root::index_root::RootIndexType;
-use crate::mv_tree::mvbt::MVBTSt;
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_query::interval::Interval;
+use crate::bat_query::iter_query::RangeQueryIter;
+use crate::bat_record_model::version_info::Version;
+use crate::bat_root::index_root::RootIndexType;
+use crate::bat_tree::mvbt::MVBTSt;
 use rand::prelude::SliceRandom;
 
 const FAN: usize = 8;
@@ -264,7 +264,7 @@ fn range_query_respects_snapshot_isolation_across_concurrent_inserts() {
 /// Inserting keys in *descending* order specifically catches a naive "just
 /// take next()" implementation, which would return the first-inserted
 /// (largest, physically-first) key instead of the true minimum — exactly
-/// the bug this test guards against regressing (it's what `mv_bench::
+/// the bug this test guards against regressing (it's what `bat_bench::
 /// tpcc_txn::deliver_one_district` relies on `range_min` for: finding the
 /// oldest — smallest-key — queued new-order).
 #[test]

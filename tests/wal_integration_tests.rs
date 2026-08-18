@@ -1,11 +1,11 @@
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_record_model::tx_stamp::TxStamp;
-use crate::mv_record_model::version_info::Version;
-use crate::mv_root::index_root::RootIndexType;
-use crate::mv_tree::mvbt::MVBTSt;
-use crate::mv_wal::record::{self, WalEntry, WalRecord};
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_record_model::tx_stamp::TxStamp;
+use crate::bat_record_model::version_info::Version;
+use crate::bat_root::index_root::RootIndexType;
+use crate::bat_tree::mvbt::MVBTSt;
+use crate::bat_wal::record::{self, WalEntry, WalRecord};
 use std::collections::HashMap;
 use std::fs;
 use std::time::Duration;
@@ -37,7 +37,7 @@ fn point(tree: &TestTree, key: u64, version: Version) -> Option<u64> {
 /// Deliberately *not* checked: historical snapshots at specific version
 /// numbers from before the crash. Recovery mints fresh version numbers for
 /// everything it replays rather than preserving the originals (see
-/// `mv_wal::recovery`'s doc comment for why) — only the *final* logical
+/// `bat_wal::recovery`'s doc comment for why) — only the *final* logical
 /// state is a guaranteed match, not "the same version number means the same
 /// thing it did before the crash."
 #[test]
@@ -276,7 +276,7 @@ fn wait_wal_hardened_reflects_real_on_disk_durability() {
     let bytes = fs::read(&path).unwrap();
     let mut offset = 0;
     let mut count = 0;
-    while let Some((_, consumed)) = crate::mv_wal::record::read_frame(&bytes[offset..]) {
+    while let Some((_, consumed)) = crate::bat_wal::record::read_frame(&bytes[offset..]) {
         count += 1;
         offset += consumed;
     }
@@ -399,7 +399,7 @@ fn logged_but_never_committed_write_does_not_resurface_after_recovery() {
     let _ = fs::remove_file(&path);
 }
 
-/// `mv_wal::lockfree_writer::LockFreeWalWriter` can, in principle, leave an
+/// `bat_wal::lockfree_writer::LockFreeWalWriter` can, in principle, leave an
 /// *interior* hole (a byte range some thread reserved via `fetch_add` but
 /// never got to `pwrite` before the whole process died, while a
 /// later-offset write already landed and reached disk) — see that type's
@@ -458,7 +458,7 @@ fn replay_recovers_records_after_an_interior_hole() {
     let tree = TestTree::make_standard(RootIndexType::default())
         .with_wal_lockfree(&path, Duration::from_millis(500), 3)
         .unwrap();
-    let valid_len = crate::mv_wal::recovery::replay(&tree, &path).unwrap();
+    let valid_len = crate::bat_wal::recovery::replay(&tree, &path).unwrap();
     assert_eq!(
         valid_len,
         bytes.len() as u64,
@@ -482,7 +482,7 @@ fn replay_recovers_records_after_an_interior_hole() {
 
 /// `concurrent_writers_crash_recovery_round_trip`'s counterpart for the
 /// lock-free + per-thread-batched backend (`enable_wal_lockfree`/
-/// `open_recovered_lockfree`, via `mv_wal::backend::WalBackend::LockFree`) —
+/// `open_recovered_lockfree`, via `bat_wal::backend::WalBackend::LockFree`) —
 /// proves the two pieces added on top of `LockFreeWalWriter` actually work
 /// together through the real production dispatch path, not just in
 /// isolation:

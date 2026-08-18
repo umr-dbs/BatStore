@@ -1,5 +1,5 @@
 //! Correctness checks for the CH-benCHmark-style analytical queries in
-//! `mv_bench::tpch_queries` (q1/q4/q5/q6).
+//! `bat_bench::tpch_queries` (q1/q4/q5/q6).
 //!
 //! Unlike the transaction-profile tests (`bench_tpcc_correctness_tests.rs`),
 //! these queries have no internal randomness at all — they're pure scans
@@ -10,15 +10,15 @@
 //! the strongest correctness check available when the input is fully under
 //! the test's control.
 
-use crate::mv_bench::tpcc_load::populate_regions_and_nations;
-use crate::mv_bench::tpcc_schema::{
+use crate::bat_bench::tpcc_load::populate_regions_and_nations;
+use crate::bat_bench::tpcc_schema::{
     Order, OrderLine, Stock, Supplier, Table, TpccDatabase, TpccRow, k_order, k_order_line, k_stock,
 };
-use crate::mv_bench::tpch_queries::{q1, q4, q5, q6};
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::tpch_queries::{q1, q4, q5, q6};
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_root::index_root::RootIndexType;
 
 fn insert(db: &TpccDatabase, table: Table, key: u64, row: TpccRow) {
     match db
@@ -330,15 +330,15 @@ fn region_and_nation_reference_data_has_the_expected_fixed_mapping() {
     let db = TpccDatabase::new(RootIndexType::default());
     populate_regions_and_nations(&db);
 
-    let mut tx = crate::mv_bench::tpcc_txn::TpccTxn::begin(&db);
-    let regions = crate::mv_bench::tpcc_txn::many(tx.range(
+    let mut tx = crate::bat_bench::tpcc_txn::TpccTxn::begin(&db);
+    let regions = crate::bat_bench::tpcc_txn::many(tx.range(
         Table::Region,
-        crate::mv_bench::tpcc_schema::region_table_range(),
+        crate::bat_bench::tpcc_schema::region_table_range(),
         true,
     ));
-    let nations = crate::mv_bench::tpcc_txn::many(tx.range(
+    let nations = crate::bat_bench::tpcc_txn::many(tx.range(
         Table::Nation,
-        crate::mv_bench::tpcc_schema::nation_table_range(),
+        crate::bat_bench::tpcc_schema::nation_table_range(),
         true,
     ));
     tx.commit();
@@ -349,7 +349,7 @@ fn region_and_nation_reference_data_has_the_expected_fixed_mapping() {
     let region_name_at = |id: u8| -> String {
         regions
             .iter()
-            .find(|r| crate::mv_bench::tpcc_schema::decode_region_id(r.key) == id)
+            .find(|r| crate::bat_bench::tpcc_schema::decode_region_id(r.key) == id)
             .unwrap()
             .payload
             .as_region()
@@ -359,7 +359,7 @@ fn region_and_nation_reference_data_has_the_expected_fixed_mapping() {
     let nation_at = |id: u8| -> (String, u8) {
         let n = nations
             .iter()
-            .find(|n| crate::mv_bench::tpcc_schema::decode_nation_id(n.key) == id)
+            .find(|n| crate::bat_bench::tpcc_schema::decode_nation_id(n.key) == id)
             .unwrap();
         (
             n.payload.as_nation().n_name.clone(),

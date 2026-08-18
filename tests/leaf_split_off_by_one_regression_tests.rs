@@ -1,4 +1,4 @@
-//! Regression test for a fixed bug in `mv_tree::smo::split`'s `KEY_SPLIT`-
+//! Regression test for a fixed bug in `bat_tree::smo::split`'s `KEY_SPLIT`-
 //! vs-`VERSION_SPLIT` decision: it used `survivor_count > capacity` (strict),
 //! so a page whose still-needed ("surviving" - see `record_survives_gc`)
 //! entries landed at *exactly* capacity took the `VERSION_SPLIT` ("just
@@ -37,9 +37,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_db::{Database, DbTransaction};
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_db::{Database, DbTransaction};
+use crate::bat_root::index_root::RootIndexType;
 
 const FAN: usize = 16;
 type TestDb = Database<FAN, FAN, u64, u64>;

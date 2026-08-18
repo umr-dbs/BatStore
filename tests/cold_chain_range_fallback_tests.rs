@@ -7,16 +7,16 @@
 //! buffered `Iterator` path) and `try_for_each_ref` (the zero-copy
 //! streaming path) build on.
 
-use crate::mv_block::block::Block;
-use crate::mv_page_model::leaf_page::{LeafPage, LeafRecordRef};
-use crate::mv_page_model::node::{ColdLink, Node, PageType};
-use crate::mv_query::interval::Interval;
-use crate::mv_query::iter_query::RangeQueryIter;
-use crate::mv_record_model::record_point::RecordPoint;
-use crate::mv_record_model::tx_stamp::TxStamp;
-use crate::mv_record_model::version_info::VersionInfo;
-use crate::mv_sync::safe_cell::SafeCell;
-use crate::mv_sync::smart_cell::{OptCell, SmartCell};
+use crate::bat_block::block::Block;
+use crate::bat_page_model::leaf_page::{LeafPage, LeafRecordRef};
+use crate::bat_page_model::node::{ColdLink, Node, PageType};
+use crate::bat_query::interval::Interval;
+use crate::bat_query::iter_query::RangeQueryIter;
+use crate::bat_record_model::record_point::RecordPoint;
+use crate::bat_record_model::tx_stamp::TxStamp;
+use crate::bat_record_model::version_info::VersionInfo;
+use crate::bat_sync::safe_cell::SafeCell;
+use crate::bat_sync::smart_cell::{OptCell, SmartCell};
 
 const FAN: usize = 8;
 type TestIter<'a> = RangeQueryIter<'a, FAN, FAN, u64, u64>;

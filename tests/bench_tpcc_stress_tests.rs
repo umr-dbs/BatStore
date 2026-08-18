@@ -1,5 +1,5 @@
 //! Concurrent stress tests for the TPC-C benchmark harness
-//! (`mv_bench::tpcc_txn`/`tpcc_load`): unlike `bench_tpcc_correctness_tests.rs`
+//! (`bat_bench::tpcc_txn`/`tpcc_load`): unlike `bench_tpcc_correctness_tests.rs`
 //! (single-threaded, single-warehouse, `allow_remote: false` — deliberately
 //! chosen there so every outcome is predictable), these tests hammer a small
 //! multi-warehouse database with several real OS threads, cross-warehouse
@@ -24,12 +24,12 @@ use std::time::Duration;
 
 use rand::prelude::*;
 
-use crate::mv_bench::tpcc_load::{populate_items, populate_warehouse};
-use crate::mv_bench::tpcc_schema::{Table, TpccConfig, TpccDatabase, TpccKey, TpccRow};
-use crate::mv_bench::tpcc_txn::{self, TpccTxn, TxnOutcome, many};
-use crate::mv_query::interval::Interval;
-use crate::mv_record_model::record_point::RecordPointResult;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::tpcc_load::{populate_items, populate_warehouse};
+use crate::bat_bench::tpcc_schema::{Table, TpccConfig, TpccDatabase, TpccKey, TpccRow};
+use crate::bat_bench::tpcc_txn::{self, TpccTxn, TxnOutcome, many};
+use crate::bat_query::interval::Interval;
+use crate::bat_record_model::record_point::RecordPointResult;
+use crate::bat_root::index_root::RootIndexType;
 
 /// Several warehouses/districts (so cross-warehouse remote ops and
 /// same-district counter contention both actually happen), still small
@@ -306,7 +306,7 @@ fn run_stress_and_check_invariants_gc(
                 o_ids.dedup();
                 let actual = districts_now
                     .iter()
-                    .find(|r| r.key == crate::mv_bench::tpcc_schema::k_district(w, d))
+                    .find(|r| r.key == crate::bat_bench::tpcc_schema::k_district(w, d))
                     .map(|r| r.payload.as_district().d_next_o_id);
                 eprintln!(
                     "[diag] w={w} d={d} actual_d_next_o_id={actual:?} max_logged_o_id={:?} logged_count={logged_count} dup_o_ids={}",
@@ -384,7 +384,7 @@ fn run_stress_and_check_invariants_gc(
                 (actual_w - before_w - logged_w).abs() < 1e-6
             );
             for d in 1..=cfg.districts_per_warehouse {
-                let key = crate::mv_bench::tpcc_schema::k_district(w, d);
+                let key = crate::bat_bench::tpcc_schema::k_district(w, d);
                 let logged_d: f64 = pay_log
                     .iter()
                     .filter(|&&(id, lw, ld, _)| id == db_id && lw == w && ld == d)
@@ -590,7 +590,7 @@ fn diag_single_thread_gc_on_max_o_id_cross_check() {
             let expected_next = max_logged.map(|m| m + 1).unwrap_or(cfg.initial_orders_per_district + 1);
             let actual = districts
                 .iter()
-                .find(|r| r.key == crate::mv_bench::tpcc_schema::k_district(w, d))
+                .find(|r| r.key == crate::bat_bench::tpcc_schema::k_district(w, d))
                 .map(|r| r.payload.as_district().d_next_o_id)
                 .expect("every district must be present");
             if actual != expected_next {

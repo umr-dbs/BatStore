@@ -1,8 +1,8 @@
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_db::{Database, DbTransaction};
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_db::{Database, DbTransaction};
+use crate::bat_root::index_root::RootIndexType;
 
 const FAN: usize = 8;
 type TestDb = Database<FAN, FAN, u64, u64>;
@@ -393,7 +393,7 @@ fn explicit_abort_after_delete_conflict_reverts_earlier_writes() {
 }
 
 /// A transaction that writes the *same* key more than once (e.g.
-/// `mv_bench::tpcc_txn::new_order` pricing two order-lines for the same
+/// `bat_bench::tpcc_txn::new_order` pricing two order-lines for the same
 /// item, both landing on the same Stock key) before losing a conflict on a
 /// later, different key must still fully unwind - every physical version it
 /// wrote for that key reverted, all the way back to the pre-transaction
@@ -454,7 +454,7 @@ fn explicit_abort_reverts_every_self_written_version_of_a_repeatedly_written_key
     assert!(tx1.abort());
 
     // Same OS thread as `tx1` (this test never spawned another one for it),
-    // so `WorkerId` caching (`mv_sync::worker`) hands this the very same
+    // so `WorkerId` caching (`bat_sync::worker`) hands this the very same
     // worker id - exactly the "same-worker fast path never re-checks the
     // commit log" case that would let a leftover un-invalidated self-write
     // stay visible forever if `abort_write` only unwound the last of two
@@ -550,7 +550,7 @@ fn explicit_abort_write_does_not_resurface_after_recovery() {
 /// after an aborted transaction's `ts_start`, a slow leak that would only
 /// show up under long-running block-reclaim workloads. Checked via
 /// `TxContext::live_min_snapshot` (`pub(crate)`, reachable here since this
-/// file is compiled as an in-crate module — see `mv_test::mod`'s doc),
+/// file is compiled as an in-crate module — see `bat_test::mod`'s doc),
 /// with GC's active-snapshot tracking turned on via `enable_gc`.
 #[test]
 fn explicit_abort_releases_the_snapshot_for_gc() {

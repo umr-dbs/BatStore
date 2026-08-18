@@ -1,5 +1,5 @@
 """libmdbx engine wrapper - drives BatStore's own binary (same as batstore.py), but its
-`mdbx_ycsb`/`mdbx_tpcc` subcommands (src/mv_bench/mdbx_ycsb.rs / mdbx_tpcc.rs), a second,
+`mdbx_ycsb`/`mdbx_tpcc` subcommands (src/bat_bench/mdbx_ycsb.rs / mdbx_tpcc.rs), a second,
 independent storage backend built on the `libmdbx` crate (path-copying/copy-on-write
 B+Tree) instead of BatStore's own version-chain MVBTree - only compiled in behind the
 `mdbx-backend` Cargo feature, since it's an optional comparison point, not part of every
@@ -7,7 +7,7 @@ build.
 
 TPC-C + YCSB A-F + htap_q1/htap_q6 - the latter two run mdbx_tpcc.rs's own Q1 ("Pricing
 Summary Report")/Q6 ("Forecasting Revenue Change") queries (mdbx_q1/mdbx_q6, a libmdbx
-port of `mv_bench::tpch_queries::q1`/`q6`) concurrently with the OLTP terminals, same
+port of `bat_bench::tpch_queries::q1`/`q6`) concurrently with the OLTP terminals, same
 mechanism as batstore.py's "ch" olap_mode. Unlike BatStore/LeanStore/WiredTiger, only Q1/Q6 are
 implemented (not the full 4-query CH-benCHmark rotation) - libmdbx's own TPC-C schema
 (mdbx_tpcc.rs) only has the 11 core tables, not CH-benCHmark's SUPPLIER/NATION/REGION

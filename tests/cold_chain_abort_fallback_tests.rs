@@ -2,7 +2,7 @@
 //! `cold_chain_read_fallback_tests.rs`/`cold_chain_range_fallback_tests.rs`
 //! for the point-read/range-read halves and the shared rationale for
 //! testing against hand-built chains). Covers the one part of the
-//! cold-chain design those two files don't: `mv_sync::version_handle`'s
+//! cold-chain design those two files don't: `bat_sync::version_handle`'s
 //! `abort_write_in_cold_chain`/`undelete_in_cold_chain`/
 //! `clone_predecessor_from_cold_chain` - the machinery an aborted
 //! transaction's writes fall back to once the record being reverted (or an
@@ -24,14 +24,14 @@
 //! mis-locates a match once real multi-page chains are involved - the
 //! specific property this codebase had zero prior coverage for.
 
-use crate::mv_block::block::Block;
-use crate::mv_page_model::leaf_page::{AbortOutcome, LeafPage};
-use crate::mv_page_model::node::{ColdLink, Node, PageType};
-use crate::mv_record_model::record_point::RecordPoint;
-use crate::mv_record_model::tx_stamp::TxStamp;
-use crate::mv_record_model::version_info::VersionInfo;
-use crate::mv_sync::safe_cell::SafeCell;
-use crate::mv_sync::smart_cell::{OptCell, SmartCell};
+use crate::bat_block::block::Block;
+use crate::bat_page_model::leaf_page::{AbortOutcome, LeafPage};
+use crate::bat_page_model::node::{ColdLink, Node, PageType};
+use crate::bat_record_model::record_point::RecordPoint;
+use crate::bat_record_model::tx_stamp::TxStamp;
+use crate::bat_record_model::version_info::VersionInfo;
+use crate::bat_sync::safe_cell::SafeCell;
+use crate::bat_sync::smart_cell::{OptCell, SmartCell};
 
 const FAN: usize = 8;
 type TestLeaf = LeafPage<FAN, u64, u64>;
@@ -74,7 +74,7 @@ fn cold_link_to(cell: &TestCell, count: u32, chain_len: u16, chain_total: u32) -
     ColdLink::new(SmartCell(cell as *const _), count, 500, chain_len, chain_total)
 }
 
-/// Mirrors `mv_sync::version_handle::MVBTSt::abort_write_in_cold_chain`
+/// Mirrors `bat_sync::version_handle::MVBTSt::abort_write_in_cold_chain`
 /// exactly (see this file's module doc): walk the chain newest-to-oldest,
 /// upgrade each page's read guard to a write lock, and try
 /// `LeafPage::abort_write` on it - stop at the first page that isn't a

@@ -1,7 +1,7 @@
 # Range-scan iteration: ordered routing and zero-copy streaming
 
 This document describes the range-iteration changes in
-`src/mv_query/iter_query.rs` and their TPC-C/CH-benCHmark call sites. It is
+`src/bat_query/iter_query.rs` and their TPC-C/CH-benCHmark call sites. It is
 separate from [`range_scan_visibility_check.md`](range_scan_visibility_check.md),
 which covers the per-record visibility filter after a leaf has been reached.
 
@@ -23,13 +23,13 @@ GC stress tests proved their shared child-list premise incorrect:
 
 The implementation touches these primary files:
 
-- `src/mv_query/iter_query.rs`: cursor-based routing and iterator terminal
+- `src/bat_query/iter_query.rs`: cursor-based routing and iterator terminal
   operations;
-- `src/mv_db/transaction.rs`: generic database transaction terminals;
-- `src/mv_bench/tpcc_txn.rs`: TPC-C transaction fold/count wrappers;
-- `src/mv_bench/olap_scan.rs`: full-scan counting through `range_count`;
-- `src/mv_bench/ycsb_txn.rs`: count-only YCSB Scan through `count_ref`;
-- `src/mv_bench/tpch_queries.rs`: streaming Q1/Q6 aggregation; and
+- `src/bat_db/transaction.rs`: generic database transaction terminals;
+- `src/bat_bench/tpcc_txn.rs`: TPC-C transaction fold/count wrappers;
+- `src/bat_bench/olap_scan.rs`: full-scan counting through `range_count`;
+- `src/bat_bench/ycsb_txn.rs`: count-only YCSB Scan through `count_ref`;
+- `src/bat_bench/tpch_queries.rs`: streaming Q1/Q6 aggregation; and
 - `tests/iter_query_tests.rs` and `tests/db_integration_tests.rs`: terminal,
   early-exit, snapshot, and routing coverage.
 

@@ -6,12 +6,12 @@
 use std::sync::Arc;
 use std::thread;
 
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_db::Database;
-use crate::mv_db::DbTransaction;
-use crate::mv_query::interval::Interval;
-use crate::mv_root::index_root::RootIndexType;
-use crate::mv_tree::mvbt::INIT_TREE_HEIGHT;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_db::Database;
+use crate::bat_db::DbTransaction;
+use crate::bat_query::interval::Interval;
+use crate::bat_root::index_root::RootIndexType;
+use crate::bat_tree::mvbt::INIT_TREE_HEIGHT;
 use rand::prelude::SliceRandom;
 
 type TestDb = Database<16, 16, u64, u64>;
@@ -195,7 +195,7 @@ fn insert_then_delete_same_keys_leaves_tree_empty() {
 /// tests elsewhere in this file cover.
 const SPLIT_MERGE_KEY_COUNT: u64 = 5_000;
 
-/// Root/leaf underflow classification (`mv_tree::smo::unsafe_degree`) is
+/// Root/leaf underflow classification (`bat_tree::smo::unsafe_degree`) is
 /// checked reactively, at the *start* of a write's own traversal - it can
 /// never react to that same write's own consequences (a leaf's last record
 /// going dead, a parent's child count dropping to 1) until some *later*
@@ -220,7 +220,7 @@ const SPLIT_MERGE_KEY_COUNT: u64 = 5_000;
 /// converge; with it, one).
 fn settle_pending_collapse<const FAN_OUT: usize, const NUM_RECORDS: usize>(
     db: &Database<FAN_OUT, NUM_RECORDS, u64, u64>,
-    table: crate::mv_wal::record::TableId,
+    table: crate::bat_wal::record::TableId,
     settle_key: u64,
 ) {
     let mut tx = DbTransaction::begin(db);
@@ -236,7 +236,7 @@ fn settle_pending_collapse<const FAN_OUT: usize, const NUM_RECORDS: usize>(
 /// an independent random shuffle - regression coverage, at a different
 /// deletion order and at a scale that genuinely exercises multi-level root
 /// splits and merges, for the single-threaded delete livelock fixed in
-/// `mv_tree::smo::unsafe_degree()` (originally found via `insert_then_
+/// `bat_tree::smo::unsafe_degree()` (originally found via `insert_then_
 /// delete_same_keys_leaves_tree_empty` below, whose delete order is plain
 /// ascending too, at a one-leaf scale).
 #[test]
@@ -362,7 +362,7 @@ fn keys_for_thread(t: u64) -> std::ops::Range<u64> {
 #[test]
 fn concurrent_insert_update_delete_lands_in_tree() {
     // Workers are handed out once per (tree, thread) and never returned (see
-    // `mv_sync::worker::WorkerRegistry`'s doc), and each of the 3 phases below
+    // `bat_sync::worker::WorkerRegistry`'s doc), and each of the 3 phases below
     // spawns a fresh batch of `CONCURRENT_THREADS` threads plus the checking
     // thread in between - budget generously so registration never runs out.
     let db = Arc::new(TestDb::new_with_max_workers(

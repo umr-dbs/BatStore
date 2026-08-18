@@ -1,6 +1,6 @@
-//! Verifies, under real concurrent load, that (a) an `MVBTSt`/`mv_db::Database`
+//! Verifies, under real concurrent load, that (a) an `MVBTSt`/`bat_db::Database`
 //! tree's live data is exactly what was written to it, and (b) the raw WAL
-//! file on disk — decoded independently of `mv_wal::recovery::replay`, not
+//! file on disk — decoded independently of `bat_wal::recovery::replay`, not
 //! by calling it — contains that same committed data, byte for byte.
 //! `reconstruct_from_wal`/`reconstruct_from_table_wal` deliberately duplicate
 //! (rather than reuse) the commit-gating + sort-by-`(ts_commit, seq)` logic
@@ -11,15 +11,15 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_db::{Database, DbTransaction, TableId};
-use crate::mv_record_model::tx_stamp::WorkerId;
-use crate::mv_record_model::version_info::Version;
-use crate::mv_root::index_root::RootIndexType;
-use crate::mv_tree::mvbt::MVBTSt;
-use crate::mv_wal::record::{self, WalEntry};
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_db::{Database, DbTransaction, TableId};
+use crate::bat_record_model::tx_stamp::WorkerId;
+use crate::bat_record_model::version_info::Version;
+use crate::bat_root::index_root::RootIndexType;
+use crate::bat_tree::mvbt::MVBTSt;
+use crate::bat_wal::record::{self, WalEntry};
 
 const FAN: usize = 8;
 type TestTree = MVBTSt<FAN, FAN, u64, u64>;
@@ -88,7 +88,7 @@ fn reconstruct_from_wal(path: &std::path::Path) -> HashMap<u64, u64> {
     state
 }
 
-/// Same idea, for a `mv_db::Database`'s single shared, table-tagged WAL:
+/// Same idea, for a `bat_db::Database`'s single shared, table-tagged WAL:
 /// reconstructs "(table, key) -> final committed payload" from the raw
 /// bytes, demultiplexing by the leading `TableId` on each `Write` entry.
 fn reconstruct_from_table_wal(path: &std::path::Path) -> HashMap<(TableId, u64), u64> {
@@ -342,7 +342,7 @@ fn concurrent_insert_update_delete_matches_wal_and_recovery() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The `mv_db::Database` counterpart: many threads run concurrent
+/// The `bat_db::Database` counterpart: many threads run concurrent
 /// `DbTransaction`s, each writing its own key to three different tables at
 /// once, against one shared WAL. Once durable, every table's live data and
 /// the shared WAL's table-demultiplexed reconstruction must agree exactly.
@@ -409,7 +409,7 @@ fn concurrent_db_transactions_across_tables_match_shared_wal_exactly() {
     });
 
     // `wait_wal_hardened` tracks the highest flushed *ts_start*, not
-    // ts_commit — see the note on this in the mv_db integration tests.
+    // ts_commit — see the note on this in the bat_db integration tests.
     db.table(t_a).unwrap().wait_wal_hardened(max_ts);
 
     let version = db.current_version();
@@ -539,7 +539,7 @@ fn contended_concurrent_transactions_tree_and_wal_agree_despite_conflicts() {
                                 // `wait_wal_hardened` tracks the highest
                                 // flushed *ts_start*, not ts_commit — fold
                                 // only `ts` in here, or this spins forever
-                                // (see the note in the mv_db tests).
+                                // (see the note in the bat_db tests).
                                 tx.commit();
                                 local_max = local_max.max(ts);
                                 committed += 1;
@@ -608,12 +608,12 @@ const REPRO_ITERATIONS: usize = 20;
 // falls into a genuine gap between siblings' fences (an unreachable leaf).
 fn dump_tree(
     tree: &TestTree,
-    version: crate::mv_record_model::version_info::Version,
+    version: crate::bat_record_model::version_info::Version,
     target_key: u64,
 ) {
-    use crate::mv_page_model::BlockRef;
-    use crate::mv_page_model::node::PageType;
-    use crate::mv_page_model::time_matcher::TimeMatcher;
+    use crate::bat_page_model::BlockRef;
+    use crate::bat_page_model::node::PageType;
+    use crate::bat_page_model::time_matcher::TimeMatcher;
     use std::fmt::Write as _;
 
     fn walk(node: &BlockRef<8, 8, u64, u64>, depth: usize, target_key: u64, out: &mut String) {
@@ -722,8 +722,8 @@ fn repro_run_range(tree: &TestTree, t: u64) {
                 let point = tree.dispatch_crud(CRUDOperation::Point(key, v));
                 let retry = tree.dispatch_crud(CRUDOperation::Update(key, key * 3 + 2));
                 dump_tree(tree, v, key);
-                if crate::mv_tree::smo::TRACE_KEY_DEBUG {
-                    let log = crate::mv_tree::smo::drain_trace_log().join("\n");
+                if crate::bat_tree::smo::TRACE_KEY_DEBUG {
+                    let log = crate::bat_tree::smo::drain_trace_log().join("\n");
                     let _ = std::fs::write(
                         "/tmp/claude-1000/-home-amir-RustroverProjects-BatStore/f3d9fdfb-aec9-4964-9963-71106541c3dd/scratchpad/trace_log_dump.txt",
                         &log,
@@ -763,8 +763,8 @@ fn repro_sequential_insert_update_delete() {
 #[test]
 fn repro_concurrent_insert_update_delete() {
     for _ in 0..REPRO_ITERATIONS {
-        if crate::mv_tree::smo::TRACE_KEY_DEBUG {
-            let _ = crate::mv_tree::smo::drain_trace_log();
+        if crate::bat_tree::smo::TRACE_KEY_DEBUG {
+            let _ = crate::bat_tree::smo::drain_trace_log();
         }
         let tree = TestTree::make_standard(RootIndexType::default());
         std::thread::scope(|scope| {
@@ -1124,7 +1124,7 @@ fn repro_concurrent_insert_update_delete_reports_all_failures() {
 /// the same handful of internal pages per run, maximizing the chance some
 /// other thread's ordinary traversal is mid-index-lookup on that same page
 /// at the same time — exactly the window `is_reader`/`is_write_locked`/
-/// `live_version` (`src/mv_query/olc_query.rs`) now brackets.
+/// `live_version` (`src/bat_query/olc_query.rs`) now brackets.
 const HIGH_CONTENTION_THREADS: u64 = 16;
 const HIGH_CONTENTION_KEYS_PER_THREAD: u64 = 120;
 const HIGH_CONTENTION_ITERATIONS: usize = 10;

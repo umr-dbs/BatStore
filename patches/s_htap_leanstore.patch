@@ -54,7 +54,7 @@ index 0000000..4eba3e4
 +#include <vector>
 +// -------------------------------------------------------------------------------------
 +// "S-HTAP" streaming-workload frontend - the LeanStore-native counterpart of BatStore's
-+// src/mv_bench/s_htap_driver.rs: a near-sorted arrival stream plus recency-biased hot-tail
++// src/bat_bench/s_htap_driver.rs: a near-sorted arrival stream plus recency-biased hot-tail
 +// updates (write threads) running concurrently with OLAP scans that straddle the cold/hot
 +// boundary (OLAP threads), against one single-table B-treeVI, reusing the same
 +// Relation<u64, BytesPayload<N>> layout as frontend/ycsb/ycsb.cpp.
@@ -360,7 +360,7 @@ index 0000000..4d40b14
 +#include <thread>
 +#include <vector>
 +// -------------------------------------------------------------------------------------
-+// WiredTiger counterpart of s_htap.cpp / BatStore's src/mv_bench/s_htap_driver.rs - same
++// WiredTiger counterpart of s_htap.cpp / BatStore's src/bat_bench/s_htap_driver.rs - same
 +// near-sorted-arrival + hot-tail-update + straddling-OLAP-scan workload, driven through
 +// WiredTigerAdapter against WiredTiger's own C API (same Adapter<Record> interface
 +// LeanStore's own B-tree uses - see frontend/shared/WiredTigerAdapter.hpp).

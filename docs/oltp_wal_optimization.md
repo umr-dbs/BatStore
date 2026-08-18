@@ -45,27 +45,27 @@ x86-64 baseline (no AVX2/BMI2/POPCNT) despite this setting's presence. **Fix:** 
 block into a new `.cargo/config.toml`; verified `target-cpu=native` now actually appears
 in the `rustc` invocation and the warning is gone.
 
-**2. Hand-rolled CRC32 was the single biggest hotspot.** `mv_wal::record::crc32` was a
+**2. Hand-rolled CRC32 was the single biggest hotspot.** `bat_wal::record::crc32` was a
 byte-at-a-time, 8-shifts-per-byte bit-loop, inlined into `encode_entry_framed` - which
 `perf annotate` showed as **22.6% of all CPU cycles** (self time) on YCSB-A at 64 threads,
 almost entirely that loop. It runs on every single WAL record's body, on the same thread
 that's committing the transaction, so it's a direct tax on every write. **Fix:** replaced
-it with a 256-entry lookup-table CRC32 in `src/mv_wal/record.rs` - same algorithm/output
+it with a 256-entry lookup-table CRC32 in `src/bat_wal/record.rs` - same algorithm/output
 (same IEEE polynomial, same on-disk format), no new dependency, pinned with a test against
 the standard `"123456789"` -> `0xCBF43926` check value. `encode_entry_framed`'s self-time
 dropped to 11.3% on the same workload.
 
 **3. The single shared WAL channel was a real contention point.** Every worker on a tree
-enqueues into *one* `WalWriter` (`mv_tree/mvbt.rs`: "One unified `WalWriter` for this tree
+enqueues into *one* `WalWriter` (`bat_tree/mvbt.rs`: "One unified `WalWriter` for this tree
 - every worker enqueues into"), backed by one unbounded `crossbeam-channel` and one
 background flush thread. `perf annotate` on `Sender::send` showed 86% of its own samples
 sitting in a `pause` instruction - crossbeam's internal segment-allocation spin-wait -
 worth ~8% of *all* CPU cycles on TPC-C at 64 threads. **Fix:** `WalWriter` now splits
 committers across 4 independent (channel, background-flush-thread) shards, keyed by
-`worker_id % 4` (`src/mv_wal/writer.rs`). All 4 shards still write through one shared
+`worker_id % 4` (`src/bat_wal/writer.rs`). All 4 shards still write through one shared
 `Arc<Mutex<File>>` and one shared `hardened` watermark (updated via `fetch_max` instead of
 `store`, since multiple flush threads can now complete out of order) - so the on-disk WAL
-format, `mv_wal::recovery`, the table catalog, and every existing WAL/recovery test are
+format, `bat_wal::recovery`, the table catalog, and every existing WAL/recovery test are
 completely unaffected. This deliberately targets the *enqueue*-side contention perf found,
 not raw I/O throughput - matches the concern that this is a 64-core box, not a reason to
 spawn one flush thread per worker.
@@ -146,7 +146,7 @@ Raw manifests: `comparison_results/run_20260809_184829` (before),
 A separate, concurrent line of work pursued the same "WAL append path" contention this
 doc's fix #3 targets, but via a different mechanism: instead of splitting the *shared*
 channel into shards, `LockFreeWalWriter`/`LockFreeWalBackend`
-(`src/mv_wal/lockfree_writer.rs`/`backend.rs`) removes the channel and the dedicated
+(`src/bat_wal/lockfree_writer.rs`/`backend.rs`) removes the channel and the dedicated
 writer thread entirely - every worker reserves its own byte range in the file via
 `tail.fetch_add` and calls `pwrite` itself, directly, optionally batching its own records
 locally (`LocalBatch`) before flushing. `WalBackend` wraps both `WalWriter` (this doc's
@@ -172,7 +172,7 @@ a different way (batching *within* a group-commit window instead of *across* thr
 **Bug #1 (memory, not WAL): `RESTART_TRACE` OOM'd the real-workload comparison.**
 Running `tests/tpcc_wal_backend_bench.rs`'s full-scale `compare_wal_backends_tpcc` (16
 warehouses, 16 terminals, `lockfree-batch64`) got OOM-killed at **12GB+ RSS**, taking the
-whole terminal session with it. Cause: `mv_test::RESTART_TRACE` (a write-restart diagnostic,
+whole terminal session with it. Cause: `bat_test::RESTART_TRACE` (a write-restart diagnostic,
 documented "off by default") had been left `true` in checked-in code. Every OCC restart
 records a `String` key into a process-lifetime global map that nothing ever clears; the
 comparison loop calls `run_tpcc()` 6 times in one process, so this accumulates across every
@@ -181,7 +181,7 @@ exactly the backend this section is benchmarking) generates restarts fast enough
 through available memory before the run even finishes. Reproduced at a *tiny* scale (1
 warehouse, 200ms runs) in well under a second: footprint grew from 214 to 877 entries across
 4 in-process `run_tpcc()` calls with tracing left on. **Fix:** restored the documented
-default (`false`); added `mv_test::reset_restart_trace()`, called at the start of every
+default (`false`); added `bat_test::reset_restart_trace()`, called at the start of every
 `run_tpcc()`, so repeated in-process runs never cross-contaminate even if tracing is
 deliberately turned back on for an investigation.
 
@@ -230,7 +230,7 @@ fix #3 removed.
 **Hotspot #1: a flush ticket built on every write, and discarded on every write.**
 `WalWriter::enqueue` constructed a fresh `crossbeam_channel::bounded(1)` on *every* call to
 return a "flush ticket" (`Receiver<()>`). Checked every production call site
-(`mv_sync::version_handle`): the ticket is always discarded - nothing in production ever
+(`bat_sync::version_handle`): the ticket is always discarded - nothing in production ever
 calls `wait_flushed`. This showed up directly: `crossbeam_channel::channel::bounded` at
 1.7% self-time on the TPC-C profile, plus its own `RawVecInner::finish_grow`/allocator
 churn. **Fix:** split each logging method (`log_with_stamp`/`log_commit`/the `_for_table`
@@ -292,7 +292,7 @@ thread, so a plain `thread_local! { RefCell<Vec<u8>> }`, cleared and reused per 
 be a strict win with none of the cross-thread-ownership complexity. Implemented and
 verified correct (55/55 WAL tests pass), but tracing the actual call graph found it
 **dead weight**: every real caller of `LockFreeWalWriter` goes through `LockFreeWalBackend`
-(`mv_wal/backend.rs`), whose `log_with_stamp`/`log_commit` always call
+(`bat_wal/backend.rs`), whose `log_with_stamp`/`log_commit` always call
 `LocalBatch::push_write`/`push_commit` first - appending into `LocalBatch`'s own
 persistent `bytes: Vec<u8>` (cleared, not dropped, on every `flush_batch`) - before ever
 reaching the raw method that was patched. That's true even at `batch_size: 1`. So the only
@@ -308,7 +308,7 @@ arena, which needs locking that arena's bin; mimalloc instead gives every page a
 "thread-free list" a foreign thread's `free()` can push onto without any lock - a design
 its own benchmarks call out for exactly this producer-consumer shape. Added an opt-in
 `mimalloc` Cargo feature (`Cargo.toml`, `src/main.rs`) that swaps `MiMalloc` in as
-`#[global_allocator]`; `mv_bench::mem_stats::read_jemalloc_stats` now returns `None` under
+`#[global_allocator]`; `bat_bench::mem_stats::read_jemalloc_stats` now returns `None` under
 that feature instead of reporting stats from an idle jemalloc arena (the allocator-
 independent `VmRSS` column, and `scripts/plot_suite.py`'s RSS-over-time plots, are
 unaffected either way).

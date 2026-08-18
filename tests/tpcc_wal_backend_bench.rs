@@ -15,10 +15,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::mv_bench::olap_scan::OlapMode;
-use crate::mv_bench::tpcc_driver::{DriverConfig, run_tpcc};
-use crate::mv_bench::tpcc_schema::TpccConfig;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::olap_scan::OlapMode;
+use crate::bat_bench::tpcc_driver::{DriverConfig, run_tpcc};
+use crate::bat_bench::tpcc_schema::TpccConfig;
+use crate::bat_root::index_root::RootIndexType;
 
 // >= max(THREAD_COUNTS): `run_tpcc` clamps `num_terminals` down to
 // `num_warehouses` under `affinity: true` (each terminal needs >= 1 owned
@@ -29,7 +29,7 @@ const FULL_DURATION_SECS: u64 = 8;
 const FULL_THREAD_COUNTS: &[usize] = &[8, 16];
 /// `(label, wal_lockfree_batch_size)` — `None` is the existing batched
 /// `WalWriter`; `Some(n)` is `LockFreeWalBackend` with that per-worker
-/// local-batch size (see `mv_wal::lockfree_writer::LocalBatch`).
+/// local-batch size (see `bat_wal::lockfree_writer::LocalBatch`).
 const BACKENDS: &[(&str, Option<usize>)] = &[
     ("batched", None),
     ("lockfree-batch16", Some(16)),

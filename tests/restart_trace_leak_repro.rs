@@ -1,5 +1,5 @@
 //! Regression coverage for the OOM seen while running
-//! `compare_wal_backends_tpcc`: `mv_test::RESTART_GLOBAL`/
+//! `compare_wal_backends_tpcc`: `bat_test::RESTART_GLOBAL`/
 //! `ROOT_RESTARTS_BY_TABLE` are process-lifetime `static`s that
 //! `record_restart`/`record_root_restart_for_table` only ever insert into,
 //! never clear on their own — so a driver calling `run_tpcc` more than once
@@ -9,7 +9,7 @@
 //! are checked here, both deliberately cheap (no full benchmark run/data
 //! population) so this stays fast in every `cargo test`.
 
-use crate::mv_test;
+use crate::bat_test;
 
 /// The actual bug: `RESTART_TRACE`'s own doc says "Off by default", but the
 /// `const` had been left `true` in checked-in code, so every write-traversal
@@ -21,7 +21,7 @@ use crate::mv_test;
 #[test]
 fn restart_trace_defaults_to_off() {
     assert!(
-        !mv_test::RESTART_TRACE,
+        !bat_test::RESTART_TRACE,
         "RESTART_TRACE must default to false - leaving it true makes every \
          write-traversal restart record itself into a process-lifetime \
          global map that's never cleared, which OOM'd a real benchmark run"
@@ -35,9 +35,9 @@ fn record_some_restarts() {
     // and reading `restart_trace_footprint()` back immediately would just
     // see zero, without exercising the merge at all.
     std::thread::spawn(|| {
-        mv_test::record_restart(0xAAAA, &"custkey-1", "leaf_write_lock");
-        mv_test::record_restart(0xAAAA, &"custkey-2", "leaf_write_lock");
-        mv_test::record_root_restart_for_table(0xBEEF);
+        bat_test::record_restart(0xAAAA, &"custkey-1", "leaf_write_lock");
+        bat_test::record_restart(0xAAAA, &"custkey-2", "leaf_write_lock");
+        bat_test::record_root_restart_for_table(0xBEEF);
     })
     .join()
     .unwrap();
@@ -51,21 +51,21 @@ fn record_some_restarts() {
 /// `record_restart` itself is a no-op then, so there's nothing to reset.
 #[test]
 fn restart_trace_reset_clears_previous_run_data() {
-    if !mv_test::RESTART_TRACE {
+    if !bat_test::RESTART_TRACE {
         return;
     }
 
-    mv_test::reset_restart_trace();
+    bat_test::reset_restart_trace();
     record_some_restarts();
-    let after_first = mv_test::restart_trace_footprint();
+    let after_first = bat_test::restart_trace_footprint();
     assert!(
         after_first > 0,
         "expected recorded restarts to show up in the global footprint"
     );
 
-    mv_test::reset_restart_trace();
+    bat_test::reset_restart_trace();
     record_some_restarts();
-    let after_second = mv_test::restart_trace_footprint();
+    let after_second = bat_test::restart_trace_footprint();
 
     assert_eq!(
         after_second, after_first,

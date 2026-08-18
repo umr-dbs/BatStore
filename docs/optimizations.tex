@@ -112,7 +112,7 @@ building on the one before it:
 \section{Physical layer: pages and multiversion records}
 \label{sec:physical}
 
-Every leaf page (\path{src/mv_page_model/leaf_page.rs}) is a fixed-capacity,
+Every leaf page (\path{src/bat_page_model/leaf_page.rs}) is a fixed-capacity,
 \emph{append-only} array:
 \begin{lstlisting}
 record_data: [MaybeUninit<RecordPoint<Key, Payload>>; NUM_RECORDS]
@@ -122,7 +122,7 @@ plus a packed \path{len} counter tracking active vs.\ dead slots
 only ever writes at the next free slot and asserts \path{index < NUM_RECORDS}. Crucially,
 \textbf{there is no in-place removal}: an obsolete, aborted, or deleted entry is only ever
 \emph{marked} dead/invalid via \path{VersionInfo::delete}/\path{invalidate}
-(\path{src/mv_record_model/version_info.rs:147-164}); it is never physically dropped until
+(\path{src/bat_record_model/version_info.rs:147-164}); it is never physically dropped until
 the next structural-maintenance operation (\S\ref{sec:smo}) rebuilds the page from
 scratch.
 
@@ -138,7 +138,7 @@ later makes ``was this the newest version, and did I, this very transaction, wri
 a single equality check rather than a heuristic.
 
 Structural maintenance (\S\ref{sec:smo}) decides what to keep during a rebuild via
-\path{record_survives_gc} (\path{src/mv_tree/smo.rs:736-744}): a record survives if it is
+\path{record_survives_gc} (\path{src/bat_tree/smo.rs:736-744}): a record survives if it is
 live, \emph{or} if its deleting transaction is still unresolved and may therefore abort,
 which requires the predecessor to remain available for undelete
 (\path{ctx.is_snapshot_live}). Older readers are not the reason for copying that record:
@@ -181,8 +181,8 @@ six variants:
 \end{itemize}
 
 Only \textbf{OLC} survives in the current codebase: the write/read fast paths
-(\path{src/mv_query/olc_query.rs}, \path{src/mv_query/query.rs},
-\path{src/mv_query/rand_query.rs}) are hard-wired to OLC-style traversal
+(\path{src/bat_query/olc_query.rs}, \path{src/bat_query/query.rs},
+\path{src/bat_query/rand_query.rs}) are hard-wired to OLC-style traversal
 (\path{traversal_write_olc}, \path{traverse_read_key}, \path{try_retire},
 \path{upgrade_write_lock}). MonoWriter, LockCoupling, LHL and HL were prototyped in
 early 2024 (\commit{dcf3b2b}) but never carried into the multiversion rewrite.
@@ -229,7 +229,7 @@ keeping.
 
 \subsection{The SmartCell latch}
 
-\path{src/mv_sync/smart_cell.rs} implements the versioned latch (``SmartCell'') that
+\path{src/bat_sync/smart_cell.rs} implements the versioned latch (``SmartCell'') that
 every node uses:
 
 \begin{itemize}
@@ -321,7 +321,7 @@ story:
 \section{Structural maintenance: splits, merges, and page capacity}
 \label{sec:smo}
 
-Structure-modification operations (SMOs) live in \path{src/mv_tree/smo.rs} and decide,
+Structure-modification operations (SMOs) live in \path{src/bat_tree/smo.rs} and decide,
 on the cold path, whether a page needs to split (overflow) or merge (underflow), and how.
 
 \subsection{Capacity tuning}
@@ -441,7 +441,7 @@ two updates on the very same \texttt{Stock} row inside one transaction.
 
 \subsection{The fix}
 
-Current code, \path{src/mv_db/transaction.rs:251-311} (\path{DbTransaction::update},
+Current code, \path{src/bat_db/transaction.rs:251-311} (\path{DbTransaction::update},
 lightly abridged):
 
 \begin{lstlisting}
@@ -517,7 +517,7 @@ section is about.
 \paragraph{An older, unrelated mechanism: GC-driven update-in-place (2025--2026).}
 \commit{bea1117} (2025-06-05) added an \emph{update-in-place} optimization to the
 single-operation (non-transactional) CRUD dispatch path
-(\path{src/mv_query/dispatch.rs}): if a record's insert version predates every live
+(\path{src/bat_query/dispatch.rs}): if a record's insert version predates every live
 snapshot --- i.e., GC has already determined nobody can still need the old
 \emph{committed} value --- its payload is overwritten in place rather than versioned
 again. \commit{16d1402}, \commit{7b1c466}, \commit{fad58a6}, \commit{7623f41}
@@ -601,8 +601,8 @@ support attributing it to same-key splitting or reader snapshot retention.
         leak fixes in the reuse/dead-page path.
 \end{itemize}
 
-\textbf{Current end state} (\path{src/mv_gc/block_tracer.rs},
-\path{src/mv_gc/tracker_handle.rs}): liveness is driven directly off
+\textbf{Current end state} (\path{src/bat_gc/block_tracer.rs},
+\path{src/bat_gc/tracker_handle.rs}): liveness is driven directly off
 \path{TxContext::live_min_snapshot()} (\S\ref{sec:sharding}) rather than a separate
 active-tx tree, and reclaim is driven off a \emph{worker-sharded} \path{SkipMap} rather
 than a single list or B-tree --- both changes are part of the sharding story in
@@ -669,7 +669,7 @@ structurally impossible.''
 \label{sec:root}
 
 A reader must first find ``the root as of snapshot $S$'' before it can traverse anything.
-\path{RootIndexType} (\path{src/mv_root/index_root.rs:28-55}) selects one of four
+\path{RootIndexType} (\path{src/bat_root/index_root.rs:28-55}) selects one of four
 structures for this, all keyed by version (Table~\ref{tab:root}).
 
 \begin{table}[h]
@@ -713,7 +713,7 @@ case, splits the index space itself by table).
 
 \commit{5f92e9f} (2026-07-15) --- \emph{``Introduce Tables per indexes, not encoded into
 a single tree.''} Before this commit, multiple logical tables were multiplexed into a
-single tree. \path{Database} (\path{src/mv_db/database.rs:89-115}) now holds
+single tree. \path{Database} (\path{src/bat_db/database.rs:89-115}) now holds
 \path{tables: ArcSwap<TableList<..>>}, a list of \path{TableEntry\{name, tree:
 Arc<MVBTSt<..>>\}}: each table gets its own physically separate tree, its own root
 index, and --- importantly for \S\ref{sec:gc} --- its own dead-block tracker
@@ -725,7 +725,7 @@ shared, non-generic \path{TxContext} introduced in the same commit.
 
 \subsection{GC dead-block tracker: own-shard-first, round-robin steal}
 
-\path{src/mv_gc/block_tracer.rs:49-62} --- \path{BlockTrace} holds one \path{SkipMap}
+\path{src/bat_gc/block_tracer.rs:49-62} --- \path{BlockTrace} holds one \path{SkipMap}
 shard per CPU (\path{shard\_for(worker\_id) = worker\_id \% shards.len()}). Registration
 of a died page (\path{register_died_page}) only ever inserts into the dying worker's own
 shard. Reclaim (\path{try_reclaim}) pops from the caller's own shard first; only if that
@@ -741,7 +741,7 @@ precision for per-worker insert locality is a sound tradeoff. \commit{f9fc960}
 it, \path{try_reclaim} always scanned round-robin from a shared cursor even when the
 calling worker's own shard already had a usable entry).
 
-A subtlety worth flagging precisely: \path{mv_wal/writer.rs}'s documentation uses
+A subtlety worth flagging precisely: \path{bat_wal/writer.rs}'s documentation uses
 ``shard'' language for its \path{hardened} watermark field, and \path{block_tracer.rs}
 cites it as design precedent. In the current code, however, there is exactly \emph{one}
 \path{WalWriter} per \path{Database} with a single \path{hardened: Arc<AtomicVersion>}
@@ -751,7 +751,7 @@ design, not a live mechanism.
 
 \subsection{\texttt{TxContext}: cache-padded, per-worker atomic slots}
 
-\path{src/mv_sync/tx_context.rs:44-163} holds three parallel vectors, one slot per
+\path{src/bat_sync/tx_context.rs:44-163} holds three parallel vectors, one slot per
 \path{WorkerId}: \path{live_tx} (each worker's currently published outermost snapshot),
 \path{live_tx_depth} (reentrancy depth, so only the outermost \path{begin_snapshot} call
 touches \path{live_tx}), and \path{in_flight_bound} (a conservative lower bound published
@@ -782,7 +782,7 @@ is a pure layout change (\path{CachePadded<T>} derefs transparently) targeted at
 
 \subsection{Thread-local worker identity and snapshot cache}
 
-\path{src/mv_sync/worker.rs} hands out a \path{WorkerId} once per (tree, thread),
+\path{src/bat_sync/worker.rs} hands out a \path{WorkerId} once per (tree, thread),
 cached in a thread-local keyed by a process-wide \path{tree\_uid}. A second thread-local,
 \path{SNAPSHOT\_CACHE}, gives each worker its own \path{SnapshotCache} --- the OSIC
 paper's ``thread-local snapshot cache'' (\S\ref{sec:osic}) --- rather than a
@@ -813,23 +813,23 @@ durability guarantee.
 \subsection{How cMVBT's commit path works today}
 
 \begin{itemize}
-  \item \path{src/mv_sync/clock.rs} --- \path{GlobalClock}: a single
+  \item \path{src/bat_sync/clock.rs} --- \path{GlobalClock}: a single
         \path{AtomicVersion}, \path{fetch\_add(1, SeqCst)} mints both \path{ts\_start}
         and \path{ts\_commit}. There is no separate ``publish'' step: a drawn timestamp
         is immediately comparable.
-  \item \path{src/mv_sync/commit_log.rs} --- \path{CommitLog}, one per worker, a
+  \item \path{src/bat_sync/commit_log.rs} --- \path{CommitLog}, one per worker, a
         \path{Mutex<Vec<Version>>}. \path{commit()} draws \path{ts\_commit} then pushes
         it under the lock; this ordering (the mutex serializes the append against any
         concurrent reader) is exactly what prevents a reader from observing a
         reserved-but-not-yet-inserted commit stamp. \path{commit\_pruned} additionally
         trims the log once it exceeds \path{max\_workers} entries still needed as
         \emph{some} live snapshot's lower commit bound (LCB).
-  \item \path{src/mv_sync/visibility.rs} --- \path{is_visible}: a direct port of the
+  \item \path{src/bat_sync/visibility.rs} --- \path{is_visible}: a direct port of the
         paper's core visibility check. An invalid (aborted) stamp is never visible;
         same-worker writes are visible if \path{stamp.ts\_start() <= reader\_ts\_start};
         otherwise visibility is \path{LCB(stamp.worker\_id, reader\_ts\_start) >
         stamp.ts\_start()}, computed via each thread's own \path{SnapshotCache} memo.
-  \item \path{src/mv_wal/writer.rs} --- \path{WalWriter}: a lock-free MPSC channel to one
+  \item \path{src/bat_wal/writer.rs} --- \path{WalWriter}: a lock-free MPSC channel to one
         background flush thread. \path{log\_with\_stamp}/\path{log\_commit} just encode
         and enqueue, returning immediately (fire-and-forget, no per-op fsync wait).
         \path{flush\_loop} sleeps a short \path{GROUP\_COMMIT\_LINGER} (200\,$\mu$s)
@@ -837,15 +837,15 @@ durability guarantee.
         into one \path{write\_all} + \path{sync\_data()}, and advances the
         \path{hardened} watermark to the maximum \path{ts\_start} of any \emph{Commit}
         message in that batch --- never based on a bare write.
-  \item \path{src/mv_wal/record.rs} --- the wire format distinguishes
+  \item \path{src/bat_wal/record.rs} --- the wire format distinguishes
         \path{WalEntry::Write} from \path{WalEntry::Commit\{stamp, ts\_commit\}}: a
         commit marker is a separate append-only entry because a write is logged
         optimistically \emph{before} its transaction's fate is known.
-  \item \path{src/mv_wal/recovery.rs} --- replay keeps only \path{Write}s with a matching
+  \item \path{src/bat_wal/recovery.rs} --- replay keeps only \path{Write}s with a matching
         \path{Commit} marker (commit-gated replay), and replays sorted by
         \path{(ts\_commit, file order)}, not by \path{ts\_start}, since commit order can
         differ from log order across concurrent workers.
-  \item \path{src/mv_db/transaction.rs} --- \path{DbTransaction::commit}: appends to the
+  \item \path{src/bat_db/transaction.rs} --- \path{DbTransaction::commit}: appends to the
         committing worker's \path{CommitLog} (making every write from every table this
         transaction touched visible everywhere, instantly), then logs exactly one
         fire-and-forget WAL commit marker. \emph{This is the whole ``instant commit'':}

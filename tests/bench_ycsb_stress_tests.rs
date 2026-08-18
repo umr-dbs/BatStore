@@ -1,4 +1,4 @@
-//! Concurrent stress tests for the YCSB benchmark harness (`mv_bench::
+//! Concurrent stress tests for the YCSB benchmark harness (`bat_bench::
 //! ycsb_txn`/`ycsb_load`): unlike `bench_ycsb_correctness_tests.rs`
 //! (single-threaded), these tests run several real OS threads issuing a live
 //! mix of Read/Update/Insert/Scan/Read-Modify-Write concurrently, with GC
@@ -20,16 +20,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
-use crate::mv_bench::ycsb_load::populate;
-use crate::mv_bench::ycsb_random::{
+use crate::bat_bench::ycsb_load::populate;
+use crate::bat_bench::ycsb_random::{
     KeySampler, RequestDistribution, YcsbMix, YcsbOpType, pick_op, random_scan_length,
 };
-use crate::mv_bench::ycsb_schema::{YcsbConfig, YcsbTree};
-use crate::mv_bench::ycsb_txn;
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbTree};
+use crate::bat_bench::ycsb_txn;
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use crate::bat_root::index_root::RootIndexType;
 
 fn stress_cfg() -> YcsbConfig {
     YcsbConfig {

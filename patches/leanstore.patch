@@ -103,7 +103,7 @@ index 575cc43..33a31eb 100644
     void analyticalQuery(s32 query_no = 0)
     {
 +      // query_no 101/106 are this harness's real CH-benCHmark Q1/Q6 (see
-+      // BatStore's src/mv_bench/tpch_queries.rs::q1/q6, the reference implementation this
++      // BatStore's src/bat_bench/tpch_queries.rs::q1/q6, the reference implementation this
 +      // ports) - deliberately not "1"/"6" to avoid colliding with the pre-existing debug
 +      // sanity-check scans below (query_no 0-4/44/99), which predate any real CH
 +      // integration and are left untouched for backward compatibility.

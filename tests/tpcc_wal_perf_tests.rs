@@ -18,11 +18,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::mv_bench::mem_stats::read_vm_rss_kb;
-use crate::mv_bench::olap_scan::OlapMode;
-use crate::mv_bench::tpcc_driver::{DriverConfig, run_tpcc};
-use crate::mv_bench::tpcc_schema::TpccConfig;
-use crate::mv_root::index_root::RootIndexType;
+use crate::bat_bench::mem_stats::read_vm_rss_kb;
+use crate::bat_bench::olap_scan::OlapMode;
+use crate::bat_bench::tpcc_driver::{DriverConfig, run_tpcc};
+use crate::bat_bench::tpcc_schema::TpccConfig;
+use crate::bat_root::index_root::RootIndexType;
 
 const WAREHOUSES: u32 = 4;
 const DURATION: Duration = Duration::from_millis(300);

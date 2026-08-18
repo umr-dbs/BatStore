@@ -1,42 +1,42 @@
-use crate::mv_block::block::Block;
-use crate::mv_test::{main_append, main_generate, main_load, main_load_ycsb};
+use crate::bat_block::block::Block;
+use crate::bat_test::{main_append, main_generate, main_load, main_load_ycsb};
 use chrono::{DateTime, Local};
 use itertools::Itertools;
 use std::{env, fs};
 
-use crate::mv_crud_model::crud_api::AtomicTxDispatcher;
-use crate::mv_crud_model::crud_operation::{CRUDOperation, TxAtomicOperation};
-use crate::mv_crud_model::crud_operation_result::{AtomicTxResult, CRUDOperationResult};
-use crate::mv_tree::mvbt::Key;
-use crate::mv_tree::mvbt::NUM_RECORDS;
-use crate::mv_tree::mvbt::Payload;
-use crate::mv_tree::mvbt::{FAN_OUT, MVBT};
-use crate::mv_bench::tpcc_schema::TPCC_FAN_OUT;
-use crate::mv_bench::tpcc_schema::TPCC_NUM_RECORDS;
-use crate::mv_bench::ycsb_schema::{YcsbKey, YcsbRow, YCSB_FAN_OUT, YCSB_NUM_RECORDS};
+use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
+use crate::bat_crud_model::crud_operation::{CRUDOperation, TxAtomicOperation};
+use crate::bat_crud_model::crud_operation_result::{AtomicTxResult, CRUDOperationResult};
+use crate::bat_tree::mvbt::Key;
+use crate::bat_tree::mvbt::NUM_RECORDS;
+use crate::bat_tree::mvbt::Payload;
+use crate::bat_tree::mvbt::{FAN_OUT, MVBT};
+use crate::bat_bench::tpcc_schema::TPCC_FAN_OUT;
+use crate::bat_bench::tpcc_schema::TPCC_NUM_RECORDS;
+use crate::bat_bench::ycsb_schema::{YcsbKey, YcsbRow, YCSB_FAN_OUT, YCSB_NUM_RECORDS};
 
-mod mv_bench;
-mod mv_block;
-mod mv_crud_model;
-mod mv_gc;
-mod mv_page_model;
-mod mv_query;
-mod mv_record_model;
-mod mv_test;
-mod mv_tree;
-mod mv_root;
-mod mv_sync;
-mod mv_wal;
-mod mv_db;
+mod bat_bench;
+mod bat_block;
+mod bat_crud_model;
+mod bat_gc;
+mod bat_page_model;
+mod bat_query;
+mod bat_record_model;
+mod bat_test;
+mod bat_tree;
+mod bat_root;
+mod bat_sync;
+mod bat_wal;
+mod bat_db;
 #[cfg(feature = "tree-viz")]
-mod mv_viz;
+mod bat_viz;
 
-use crate::mv_sync::smart_cell::OptCell;
+use crate::bat_sync::smart_cell::OptCell;
 #[cfg(all(not(miri), not(feature = "mimalloc")))]
 use jemallocator::Jemalloc;
 #[cfg(feature = "mimalloc")]
 use mimalloc::MiMalloc;
-use crate::mv_bench::tpcc_schema::{TpccKey, TpccRow};
+use crate::bat_bench::tpcc_schema::{TpccKey, TpccRow};
 
 // Miri interprets pure Rust/LLVM IR only — it can't run either allocator's
 // FFI'd C, so this swaps in the default (System) allocator under `cargo
@@ -64,21 +64,21 @@ fn main() {
             "append" => main_append(parms),
             "load" => main_load(parms),
             "load2" => main_load_ycsb(parms),
-            "tpcc" => mv_bench::tpcc_driver::main_tpcc(parms),
-            "tpch" => mv_bench::tpcc_driver::main_tpch(parms),
-            "htap" => mv_bench::tpcc_driver::main_htap(parms),
-            "ycsb" => mv_bench::ycsb_driver::main_ycsb(parms),
-            "s_htap" => mv_bench::s_htap_driver::main_s_htap(parms),
+            "tpcc" => bat_bench::tpcc_driver::main_tpcc(parms),
+            "tpch" => bat_bench::tpcc_driver::main_tpch(parms),
+            "htap" => bat_bench::tpcc_driver::main_htap(parms),
+            "ycsb" => bat_bench::ycsb_driver::main_ycsb(parms),
+            "s_htap" => bat_bench::s_htap_driver::main_s_htap(parms),
             #[cfg(feature = "mdbx-backend")]
-            "mdbx_ycsb" => mv_bench::mdbx_ycsb::main_mdbx_ycsb(parms),
+            "mdbx_ycsb" => bat_bench::mdbx_ycsb::main_mdbx_ycsb(parms),
             #[cfg(feature = "mdbx-backend")]
-            "mdbx_tpcc" => mv_bench::mdbx_tpcc::main_mdbx_tpcc(parms),
+            "mdbx_tpcc" => bat_bench::mdbx_tpcc::main_mdbx_tpcc(parms),
             #[cfg(feature = "mdbx-backend")]
-            "mdbx_s_htap" => mv_bench::mdbx_s_htap::main_mdbx_s_htap(parms),
-            "benchmark" => mv_bench::suite::main_benchmark(parms),
-            "_bench_one" => mv_bench::suite::main_bench_one(parms),
+            "mdbx_s_htap" => bat_bench::mdbx_s_htap::main_mdbx_s_htap(parms),
+            "benchmark" => bat_bench::suite::main_benchmark(parms),
+            "_bench_one" => bat_bench::suite::main_bench_one(parms),
             #[cfg(feature = "tree-viz")]
-            "viz_demo" => mv_test::main_viz_demo(parms),
+            "viz_demo" => bat_test::main_viz_demo(parms),
             // "load_cc_new" => main_load_cc_new(parms),
             // "sorted_insert" => main_sorted_insert(parms),
             s => println!("Unknown Command '{s}'")
@@ -119,10 +119,10 @@ fn main() {
 /// exposing a torn/never-written record slot) within seconds; after the
 /// fix it should run clean for the full duration.
 fn minimal_repro() {
-    use crate::mv_bench::tpcc_schema::{OrderLine, TpccRow, TpccTree};
-    use crate::mv_crud_model::crud_operation::TxAtomicOperation;
-    use crate::mv_crud_model::crud_operation_result::AtomicTxResult;
-    use crate::mv_query::interval::Interval;
+    use crate::bat_bench::tpcc_schema::{OrderLine, TpccRow, TpccTree};
+    use crate::bat_crud_model::crud_operation::TxAtomicOperation;
+    use crate::bat_crud_model::crud_operation_result::AtomicTxResult;
+    use crate::bat_query::interval::Interval;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
     use std::sync::Arc;
     use std::time::Duration;

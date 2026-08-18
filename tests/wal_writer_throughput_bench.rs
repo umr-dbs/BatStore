@@ -3,7 +3,7 @@
 //! coalesces whatever piled up into a single `write_all` + `sync_data` per
 //! group-commit window) versus `LockFreeWalWriter` (every worker thread
 //! reserves its own byte range via `fetch_add` and calls `pwrite` itself,
-//! no channel, no dedicated writer thread — see `mv_wal::lockfree_writer`'s
+//! no channel, no dedicated writer thread — see `bat_wal::lockfree_writer`'s
 //! doc for the full design and its correctness trade-off).
 //!
 //! This remains small enough to run in the normal suite (roughly two
@@ -15,11 +15,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::mv_crud_model::crud_operation::CRUDOperation;
-use crate::mv_record_model::tx_stamp::TxStamp;
-use crate::mv_sync::clock::GlobalClock;
-use crate::mv_wal::lockfree_writer::{LocalBatch, LockFreeWalWriter};
-use crate::mv_wal::writer::WalWriter;
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_record_model::tx_stamp::TxStamp;
+use crate::bat_sync::clock::GlobalClock;
+use crate::bat_wal::lockfree_writer::{LocalBatch, LockFreeWalWriter};
+use crate::bat_wal::writer::WalWriter;
 
 const OPS_PER_THREAD: usize = 20_000;
 const THREAD_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
@@ -28,7 +28,7 @@ const THREAD_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
 /// directly), included so the batched code path's own overhead is visible
 /// against the plain one.
 const BATCH_SIZES: &[usize] = &[1, 4, 16, 64, 256];
-/// Matches `mv_wal::writer::GROUP_COMMIT_LINGER`/typical bench configs —
+/// Matches `bat_wal::writer::GROUP_COMMIT_LINGER`/typical bench configs —
 /// same fsync cadence for both writers so the comparison isolates the
 /// append-path design, not a difference in how often either one fsyncs.
 const FLUSH_INTERVAL: Duration = Duration::from_micros(200);
@@ -161,7 +161,7 @@ fn bench_lockfree_writer(threads: usize, path: &std::path::Path) -> RunStats {
 /// Same shape as `bench_lockfree_writer`, but each thread groups its own
 /// records into a `LocalBatch` of `batch_size` and flushes with one
 /// `pwrite` per group instead of one per record (see
-/// `mv_wal::lockfree_writer::LocalBatch`'s doc). Per-op latency is measured
+/// `bat_wal::lockfree_writer::LocalBatch`'s doc). Per-op latency is measured
 /// around `push_write` + the conditional `flush_batch` — most ops just hit
 /// the cheap local accumulate; every `batch_size`-th one also pays that
 /// group's `pwrite`, so the latency distribution below has a "usually

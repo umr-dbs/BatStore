@@ -114,7 +114,7 @@ fn in_flight_registration_is_immediately_visible_to_live_min_snapshot() {
     });
 }
 
-/// `live_tx`'s replacement for the old `mv_gc::query_tracer::TransactionTrace`
+/// `live_tx`'s replacement for the old `bat_gc::query_tracer::TransactionTrace`
 /// (a shared, contended `SkipMap`) is one slot per worker: a plain start/end
 /// pair must publish while live and clear once completed.
 #[test]
