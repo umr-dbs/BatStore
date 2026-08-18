@@ -4,13 +4,11 @@
 //! late-arrival upsert colliding with an already-materialized key) and its
 //! OLAP scan path against real row content, not just `Ok`/`Err`.
 //!
-//! The last test below is a direct regression test for the hot/cold
-//! double-counting bug found and fixed in `bat_query::iter_query`'s cold-chain
-//! range-scan path (2026-08-15/16, see `RangeQueryIter::walk_cold_chain_for_range`):
-//! it forces enough hot-tail churn to build real cold chains via
-//! `VERSION_SPLIT`, then asserts a straddling scan returns exactly one row
-//! per live key — a regression would show up here as a scan count exceeding
-//! the range's live-key count.
+//! The last test below is a regression test for double-counting in
+//! `bat_query::iter_query`'s range-scan path: it forces enough hot-tail
+//! churn to drive real `VERSION_SPLIT`s, then asserts a straddling scan
+//! returns exactly one row per live key — a regression would show up here
+//! as a scan count exceeding the range's live-key count.
 
 use crate::bat_bench::s_htap_random::{HotTailSampler, olap_scan_bounds};
 use crate::bat_bench::s_htap_txn::arrival_upsert;
@@ -149,14 +147,13 @@ fn hot_tail_sample_targets_the_window_and_the_update_changes_content() {
     assert_ne!(before, after);
 }
 
-/// Regression test for the hot/cold double-counting bug in
-/// `RangeQueryIter::walk_cold_chain_for_range` (fixed 2026-08-15/16): forces
-/// real cold-chain creation by hammering a narrow hot-tail window with far
-/// more updates than one leaf's capacity, under GC, then scans a range that
-/// straddles the cold/hot boundary. Every key in `1..=record_count` is live
+/// Regression test guarding against double-counting in `RangeQueryIter`:
+/// hammers a narrow hot-tail window with far more updates than one leaf's
+/// capacity, under GC, forcing repeated `VERSION_SPLIT`s, then scans a range
+/// spanning that churned window. Every key in `1..=record_count` is live
 /// (never deleted) throughout, so a correct scan must return exactly
-/// `record_count` rows — a hot/cold dedup regression would instead
-/// over-count by returning two rows for some hot-and-cold-linked key.
+/// `record_count` rows — a dedup regression would instead over-count by
+/// returning more than one row for some key.
 #[test]
 fn olap_scan_over_a_hot_cold_straddling_range_counts_each_live_key_exactly_once() {
     let cfg = YcsbConfig {
@@ -173,8 +170,7 @@ fn olap_scan_over_a_hot_cold_straddling_range_counts_each_live_key_exactly_once(
 
     // Far more updates than a single leaf's capacity, concentrated on the
     // last `hot_window` keys - enough to force repeated VERSION_SPLIT
-    // compactions (and, per the 08-14 cold-page-chain work, real cold-chain
-    // construction) on those leaves specifically.
+    // compactions on those leaves specifically.
     for _ in 0..2_000 {
         let key = sampler.sample(cfg.record_count);
         assert!(ycsb_txn::update_with_execution_mode(

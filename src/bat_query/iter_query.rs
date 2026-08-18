@@ -5,13 +5,13 @@ use std::hash::Hash;
 
 use crate::bat_page_model::BlockRef;
 
-use crate::bat_page_model::node::{ColdLink, PageType};
+use crate::bat_page_model::node::PageType;
 use crate::bat_page_model::time_matcher::TimeMatcher;
 use crate::bat_query::SnapShot;
 use crate::bat_query::interval::Interval;
 use crate::bat_query::snapshot::ReaderIsolatedSnapShot;
 use crate::bat_record_model::record_point::RecordPointResult;
-use crate::bat_record_model::tx_stamp::{TxStamp, WorkerId};
+use crate::bat_record_model::tx_stamp::WorkerId;
 use crate::bat_record_model::version_info::Version;
 use crate::bat_tree::mvbt::MVBTSt;
 
@@ -135,81 +135,6 @@ impl<
     Payload: Display + Clone + Default + Sync + 'static,
 > RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
 {
-    /// Continues a leaf's range scan down its cold chain (see `ColdLink`'s
-    /// doc in `bat_page_model::node` for the whole design): a reader whose
-    /// snapshot needs a version already offloaded to a cold page won't
-    /// find it in the hot leaf's own records at all, so a plain scan of
-    /// `leaf_page.as_records()` alone would silently drop that key from
-    /// the range result. Calls `f` with every additional visible, in-range
-    /// match found walking the chain newest-to-oldest, stopping early the
-    /// moment `f` returns `false` (mirrors `try_for_each_ref`'s own
-    /// stop-on-error shape; `RangeQueryIter`'s own buffered scan below
-    /// just always returns `true`, i.e. never stops early). Keys are tracked
-    /// across both the hot page and every cold-chain hop, so malformed or
-    /// conservatively duplicated physical records still produce at most one
-    /// logical result per key.
-    ///
-    /// Safe to call unconditionally whenever `link` isn't `ColdLink::none()`
-    /// with no extra OLC validation beyond the traversal that already got
-    /// to this leaf — see `MVBTSt::scan_cold_chain_for_key`'s doc
-    /// (`bat_query::query`) for why: a cold chain is fixed for a leaf's
-    /// whole lifetime, set once before that leaf is ever linked into the
-    /// tree, and a cold page is likewise never mutated after construction.
-    /// `seen_keys` takes ownership of every key this same leaf visit already
-    /// produced a match for from the *hot* page, and is extended by every
-    /// cold match without cloning or rehashing the seed set. A cold entry for
-    /// an already-seen key (an older, formerly
-    /// superseded version whose own `matches` should ordinarily be mutually
-    /// exclusive with the hot version's, but isn't guaranteed to be under
-    /// every hot/cold classification path — see `bat_tree::smo`'s
-    /// `grouped_hot_cold_records`) must never be surfaced alongside it, or a
-    /// scan double-counts that key. Skipping by key here is strictly
-    /// defense in depth over fixing the classification itself, but it's the
-    /// one place that can guarantee "one visible version per key" for every
-    /// caller regardless of how the hot/cold split was decided.
-    pub(crate) fn walk_cold_chain_for_range<F, V>(
-        mut link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
-        range: Interval<Key>,
-        is_visible: &mut F,
-        mut seen_keys: std::collections::HashSet<Key>,
-        mut f: V,
-    ) where
-        F: FnMut(TxStamp) -> bool,
-        V: FnMut(crate::bat_page_model::leaf_page::LeafRecordRef<'_, Key, Payload>) -> bool,
-    {
-        while !link.is_none() {
-            let cold_guard = link.cold().borrow_read();
-            let cold_leaf = cold_guard.as_leaf_page_ref();
-            for r in cold_leaf.as_records() {
-                if range.contains(r.key())
-                    && !seen_keys.contains(&r.key())
-                    && r.version().matches(is_visible)
-                {
-                    seen_keys.insert(r.key());
-                    if !f(r) {
-                        return;
-                    }
-                }
-            }
-            link = *cold_guard.cold_link();
-        }
-    }
-
-    /// `walk_cold_chain_for_range`, collecting into `out` the same way the
-    /// hot leaf's own matches get collected into `self.buff` below.
-    fn extend_from_cold_chain<F: FnMut(TxStamp) -> bool>(
-        link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
-        range: Interval<Key>,
-        is_visible: &mut F,
-        seen_keys: std::collections::HashSet<Key>,
-        out: &mut VecDeque<RecordPointResult<Key, Payload>>,
-    ) {
-        Self::walk_cold_chain_for_range(link, range, is_visible, seen_keys, |r| {
-            out.push_back(RecordPointResult::from_leaf(r));
-            true
-        });
-    }
-
     /// Advances the scan until `self.buff` holds at least one more match —
     /// always a whole leaf's worth at once, since a leaf's live/visible
     /// records are filtered into `buff` together in one `extend` call
@@ -324,23 +249,6 @@ impl<
                         );
                         crate::bat_test::record_leaf_scan(records.len(), self.buff.len() - before);
 
-                        let cold_link = *curr_block.cold_link();
-                        if !cold_link.is_none() {
-                            let seen_capacity = records
-                                .len()
-                                .saturating_add(cold_link.chain_total_count() as usize);
-                            let mut hot_keys =
-                                std::collections::HashSet::with_capacity(seen_capacity);
-                            hot_keys.extend(self.buff.iter().skip(before).map(|r| r.key));
-                            Self::extend_from_cold_chain(
-                                cold_link,
-                                self.range,
-                                &mut is_visible,
-                                hot_keys,
-                                &mut self.buff,
-                            );
-                        }
-
                         self.path.pop();
                         let reached_end = curr_fence.upper >= self.range.upper
                             || curr_fence.upper == tree.cold.max_key;
@@ -399,20 +307,10 @@ impl<
                     PageType::LeafRef(leaf_page) => {
                         let records = leaf_page.as_records();
                         let mut matched = 0;
-                        let cold_link = *curr_block.cold_link();
-                        let mut hot_keys = (!cold_link.is_none()).then(|| {
-                            let seen_capacity = records
-                                .len()
-                                .saturating_add(cold_link.chain_total_count() as usize);
-                            std::collections::HashSet::<Key>::with_capacity(seen_capacity)
-                        });
                         if full_key_range {
                             for record in records {
                                 if record.version().matches(&mut is_visible) {
                                     matched += 1;
-                                    if let Some(hot_keys) = &mut hot_keys {
-                                        hot_keys.insert(record.key());
-                                    }
                                     if let Err(error) = visit(record.key(), record.payload()) {
                                         visit_error = Some(error);
                                         return;
@@ -425,9 +323,6 @@ impl<
                                     && record.version().matches(&mut is_visible)
                                 {
                                     matched += 1;
-                                    if let Some(hot_keys) = &mut hot_keys {
-                                        hot_keys.insert(record.key());
-                                    }
                                     if let Err(error) = visit(record.key(), record.payload()) {
                                         visit_error = Some(error);
                                         return;
@@ -436,25 +331,6 @@ impl<
                             }
                         }
                         crate::bat_test::record_leaf_scan(records.len(), matched);
-
-                        if let Some(hot_keys) = hot_keys {
-                            Self::walk_cold_chain_for_range(
-                                cold_link,
-                                self.range,
-                                &mut is_visible,
-                                hot_keys,
-                                |r| match visit(r.key(), r.payload()) {
-                                    Ok(()) => true,
-                                    Err(error) => {
-                                        visit_error = Some(error);
-                                        false
-                                    }
-                                },
-                            );
-                            if visit_error.is_some() {
-                                return;
-                            }
-                        }
 
                         self.path.pop();
                         if curr_fence.upper >= self.range.upper

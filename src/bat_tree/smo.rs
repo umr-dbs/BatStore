@@ -1,6 +1,6 @@
 use crate::bat_block::block::{Block, BlockGuard};
 use crate::bat_block::block_handle::BlockAllocManager;
-use crate::bat_page_model::node::{ColdLink, PageType};
+use crate::bat_page_model::node::PageType;
 use crate::bat_page_model::{BlockRef, Height};
 use crate::bat_query::interval::Interval;
 use crate::bat_record_model::record_point::RecordPoint;
@@ -137,13 +137,13 @@ fn fitting_key_boundary<T, K: PartialEq>(
 }
 
 /// A real two-key-range split recovered from an otherwise-indivisible batch
-/// by first shedding cold-eligible garbage (see `try_hot_key_split`).
+/// by finding its boundary against the write-facing (hot) subset only (see
+/// `try_hot_key_split`). `left`/`right` carry every record on their side of
+/// `split_key`, hot or not -- nothing is dropped.
 struct HotKeySplit<Key: Ord + Copy + Hash + Default, Payload: Clone + Default> {
     split_key: Key,
-    hot_left: Vec<RecordPoint<Key, Payload>>,
-    cold_left: Vec<RecordPoint<Key, Payload>>,
-    hot_right: Vec<RecordPoint<Key, Payload>>,
-    cold_right: Vec<RecordPoint<Key, Payload>>,
+    left: Vec<RecordPoint<Key, Payload>>,
+    right: Vec<RecordPoint<Key, Payload>>,
 }
 
 #[repr(u8)]
@@ -231,20 +231,6 @@ impl<
         let (active, dead) = self.active_dead_count();
 
         let (active, dead) = (active as usize, dead as usize);
-
-        // A leaf with private cold history is intentionally sparse on its
-        // hot side. Treating that as an underflow immediately merges the
-        // freshly compacted leaf and rebuilds the same chain again, causing
-        // split/merge oscillation. It still overflows normally when its hot
-        // physical slots fill; otherwise the cold chain makes underflow a
-        // meaningless structural signal.
-        if self.is_leaf() && !self.cold_link().is_none() {
-            return if active + dead >= self.overflow_units_count() {
-                BlockUnsafeDegree::Overflow
-            } else {
-                BlockUnsafeDegree::Ok
-            };
-        }
 
         // A leaf can also be sparse on *active* alone while its *raw*
         // footprint (active+dead) stays large, without ever having gone
@@ -904,35 +890,13 @@ impl<
         self.ctx.live_snapshots_set()
     }
 
-    /// Returns all records owned by this leaf generation in per-key physical
-    /// order, oldest to newest. Cold links point newest-to-oldest, while the
-    /// hot leaf contains the newest portion, hence the page-order reversal.
+    /// Returns all records owned by this leaf generation, in physical order.
     fn retained_owned_leaf_history(
         &self,
         block: &Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
     ) -> Vec<RecordPoint<Key, Payload>> {
         let live_snapshots = self.live_snapshots();
-        let initial_link = *block.cold_link();
-        let mut cold_pages = Vec::with_capacity(initial_link.chain_len() as usize);
-        let mut link = *block.cold_link();
-        while !link.is_none() {
-            let guard = link.cold().borrow_read();
-            let cold = guard.deref();
-            cold_pages.push(link.cold());
-            link = *cold.cold_link();
-        }
-
-        let mut history = Vec::with_capacity(
-            initial_link.chain_total_count() as usize + block.as_records().len(),
-        );
-        for page in cold_pages.into_iter().rev() {
-            let guard = page.borrow_read();
-            for record in guard.deref().as_records().iter() {
-                if self.record_survives_gc(record.version(), &live_snapshots) {
-                    history.push(RecordPoint::clone_from_leaf(record));
-                }
-            }
-        }
+        let mut history = Vec::with_capacity(block.as_records().len());
         for record in block.as_records().iter() {
             if self.record_survives_gc(record.version(), &live_snapshots) {
                 history.push(RecordPoint::clone_from_leaf(record));
@@ -941,15 +905,22 @@ impl<
         history
     }
 
-    /// Divides retained history into write-facing hot state and historical
-    /// cold state without changing the relative order of either set.
-    fn grouped_hot_cold_records(
+    /// Identifies, per key, its write-facing "hot" record: the live record
+    /// for a key, or (if no live record exists) that key's most recent
+    /// version. Used only to *find* a real key-boundary below -- unlike the
+    /// old cold-chain design, every input record is still written back onto
+    /// a page somewhere by this method's callers; nothing here is a filter
+    /// that drops records outright. A dead-but-still-protected non-newest
+    /// record (e.g. a delete-after-update's own predecessor while its
+    /// transaction remains uncommitted -- see `record_survives_gc`) has no
+    /// copy anywhere else: it was born within this leaf's current
+    /// generation, so it isn't reachable via any earlier, untouched page,
+    /// and must stay physically present for `version_handle::abort_writes`
+    /// to still find it.
+    fn hot_records_only(
         &self,
-        records: Vec<RecordPoint<Key, Payload>>,
-    ) -> (
-        Vec<RecordPoint<Key, Payload>>,
-        Vec<RecordPoint<Key, Payload>>,
-    ) {
+        records: &[RecordPoint<Key, Payload>],
+    ) -> Vec<usize> {
         let mut newest_valid = vec![false; records.len()];
         let mut group_start = 0;
         while group_start < records.len() {
@@ -967,52 +938,9 @@ impl<
             group_start = group_end;
         }
 
-        let hot_count = records
-            .iter()
-            .enumerate()
-            .filter(|(i, record)| record.version().is_live() || newest_valid[*i])
-            .count();
-        let mut hot = Vec::with_capacity(hot_count);
-        let mut cold = Vec::with_capacity(records.len() - hot_count);
-        for (i, record) in records.into_iter().enumerate() {
-            if record.version().is_live() || newest_valid[i] {
-                hot.push(record);
-            } else {
-                cold.push(record);
-            }
-        }
-        (hot, cold)
-    }
-
-    /// Constructs a private newest-to-oldest chain. No page is shared with
-    /// another hot generation, so its owning hot leaf is its sole GC owner.
-    fn build_private_cold_chain(
-        &self,
-        records: Vec<RecordPoint<Key, Payload>>,
-    ) -> ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let mut link = ColdLink::none();
-        let mut total = 0u32;
-        let mut chain_len = 0u16;
-        let mut records = records.into_iter();
-        while records.len() != 0 {
-            let count = records.len().min(NUM_RECORDS);
-            let page = self.block_manager.new_empty_leaf(&self.ctx);
-            let node = page.unsafe_borrow_mut();
-            node.as_leaf_page()
-                .bulk_push_owned(records.by_ref().take(count));
-            node.set_cold_link(link);
-            total += count as u32;
-            chain_len = chain_len.saturating_add(1);
-            let min_ts = node
-                .as_records()
-                .iter()
-                .filter_map(|r| r.version().deletion_stamp())
-                .map(|stamp| stamp.ts_start())
-                .min()
-                .unwrap_or(0);
-            link = ColdLink::new(page, count as u32, min_ts, chain_len, total);
-        }
-        link
+        (0..records.len())
+            .filter(|&i| records[i].version().is_live() || newest_valid[i])
+            .collect()
     }
 
     fn populate_leaf_history(
@@ -1021,103 +949,65 @@ impl<
         mut records: Vec<RecordPoint<Key, Payload>>,
     ) -> usize {
         records.sort_by_key(|record| record.key());
-        let (hot, cold) = self.grouped_hot_cold_records(records);
-        self.push_hot_cold_onto(page, hot, cold)
+        self.push_records_onto(page, records)
     }
 
-    /// Writes an already-classified hot/cold split onto one page: `hot`
-    /// stays resident (the ordinary write path only ever looks here), `cold`
-    /// (if any) becomes a private chain hanging off it. `hot` must leave
-    /// room for the write that triggered the surrounding SMO -- callers that
-    /// can't already guarantee `hot.len() < NUM_RECORDS` should route
-    /// through `try_hot_key_split` first (see its doc) rather than land
-    /// here directly with an oversized `hot`.
-    fn push_hot_cold_onto(
+    /// Writes `records` (already in the physical order they should land in)
+    /// onto `page`.
+    fn push_records_onto(
         &self,
         page: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
-        hot: Vec<RecordPoint<Key, Payload>>,
-        cold: Vec<RecordPoint<Key, Payload>>,
+        records: Vec<RecordPoint<Key, Payload>>,
     ) -> usize {
-        let hot_count = hot.len();
-        if cold.is_empty() {
-            page.unsafe_borrow_mut().as_leaf_page().bulk_push_owned(hot);
-            return hot_count;
-        }
-        assert!(
-            hot.len() < NUM_RECORDS,
-            "cold offload must leave room for the write that triggered the SMO: \
-             {} write-facing records, page capacity {NUM_RECORDS} -- a single key must \
-             hold more concurrently-live versions than one page can fit",
-            hot.len(),
-        );
-        let link = self.build_private_cold_chain(cold);
-        let node = page.unsafe_borrow_mut();
-        node.set_cold_link(link);
-        node.as_leaf_page().bulk_push_owned(hot);
-        hot_count
+        let count = records.len();
+        page.unsafe_borrow_mut()
+            .as_leaf_page()
+            .bulk_push_owned(records);
+        count
     }
 
     /// Retries a real key-boundary split using only the write-facing (`hot`)
     /// subset of a batch `fitting_key_boundary` already rejected outright
-    /// against the raw, garbage-inflated `records`. Shedding cold-eligible
-    /// history first can free up a boundary that didn't exist before: it
-    /// shrinks a key's version run without ever removing the key itself, so
-    /// a batch that looked like one indivisible run of records can resolve
-    /// into a real two-key-range split once its garbage is out of the way.
-    /// `Err` means even the fully-reduced write-facing set has no such
-    /// boundary -- true only when a single key alone needs more
-    /// concurrently-live versions than one page can hold, in which case the
-    /// caller's only remaining option is a single cold-chained leaf.
+    /// against the raw, garbage-inflated `records`. Finding a boundary
+    /// against the reduced hot-key set first can locate a split point that
+    /// didn't exist before: it shrinks a key's version run down to at most
+    /// one hot entry (for boundary-search purposes only) without ever
+    /// removing the key itself, so a batch that looked like one indivisible
+    /// run of records can resolve into a real two-key-range split once its
+    /// non-hot entries are set aside from the search. Every record --
+    /// hot or not -- is still written back to one side or the other of the
+    /// split below; nothing here decides what physically survives.
+    ///
+    /// `Err` means even the fully-reduced hot-key set has no such boundary
+    /// -- either the whole batch is a single key's own history, or the
+    /// boundary found doesn't leave enough physical room on one side once
+    /// that side's non-hot entries are added back -- in which case the
+    /// caller's only remaining option is a single combined leaf.
     fn try_hot_key_split(
         &self,
         mut records: Vec<RecordPoint<Key, Payload>>,
         capacity: usize,
-    ) -> Result<HotKeySplit<Key, Payload>, (Vec<RecordPoint<Key, Payload>>, Vec<RecordPoint<Key, Payload>>)>
-    {
+    ) -> Result<HotKeySplit<Key, Payload>, Vec<RecordPoint<Key, Payload>>> {
         records.sort_by_key(|record| record.key());
-        let (hot, cold) = self.grouped_hot_cold_records(records);
-        match fitting_key_boundary(&hot, hot.len() / 2, capacity, |r| r.key()) {
+        let hot_indices = self.hot_records_only(&records);
+        let hot_keys: Vec<Key> = hot_indices.iter().map(|&i| records[i].key()).collect();
+        match fitting_key_boundary(&hot_keys, hot_keys.len() / 2, capacity, |k| *k) {
             Some(mid) => {
-                let split_key = hot[mid].key();
-                let (hot_left, hot_right): (Vec<_>, Vec<_>) =
-                    hot.into_iter().partition(|r| r.key() < split_key);
-                let (cold_left, cold_right): (Vec<_>, Vec<_>) =
-                    cold.into_iter().partition(|r| r.key() < split_key);
-                // `cold_left`/`cold_right` are sliced by the same
-                // `split_key` independently of how full `hot_left`/
-                // `hot_right` came out, so nothing above stops a boundary
-                // that fills one side of `hot` all the way to `capacity`
-                // while that same side also gets a non-empty cold slice --
-                // violating `push_hot_cold_onto`'s "leave a slot for the
-                // triggering write" invariant (every other caller gets that
-                // invariant for free: their `hot`/`cold` are a partition of
-                // one already-bounded vec, so non-empty `cold` there
-                // automatically means a strictly smaller `hot`). Rather than
-                // reserve a slot in the search itself -- which would reject
-                // plenty of boundaries that are perfectly safe because the
-                // full side's cold slice is empty -- check the actual
-                // condition after partitioning and only give up on this
-                // boundary (falling back to the caller's indivisible-history
-                // handling, same as `None`) when a side genuinely can't
-                // carry the cold slice it was just handed.
-                let side_overflows =
-                    |hot_side: &[_], cold_side: &[_]| !cold_side.is_empty() && hot_side.len() >= capacity;
-                if side_overflows(&hot_left, &cold_left) || side_overflows(&hot_right, &cold_right) {
-                    let mut hot = hot_left;
-                    hot.extend(hot_right);
-                    let mut cold = cold_left;
-                    cold.extend(cold_right);
-                    return Err((hot, cold));
+                let split_key = hot_keys[mid];
+                let (left, right): (Vec<_>, Vec<_>) =
+                    records.into_iter().partition(|r| r.key() < split_key);
+                if left.len() > capacity || right.len() > capacity {
+                    let mut all = left;
+                    all.extend(right);
+                    return Err(all);
                 }
                 Ok(HotKeySplit {
                     split_key,
-                    hot_left,
-                    cold_left,
-                    hot_right,
-                    cold_right,
+                    left,
+                    right,
                 })
             }
-            None => Err((hot, cold)),
+            None => Err(records),
         }
     }
 
@@ -1416,8 +1306,8 @@ impl<
                                 );
                                 let combined_block_0 = self.block_manager.new_empty_leaf(&self.ctx);
                                 let combined_block_1 = self.block_manager.new_empty_leaf(&self.ctx);
-                                self.push_hot_cold_onto(combined_block_0, hks.hot_left, hks.cold_left);
-                                self.push_hot_cold_onto(combined_block_1, hks.hot_right, hks.cold_right);
+                                self.push_records_onto(combined_block_0, hks.left);
+                                self.push_records_onto(combined_block_1, hks.right);
                                 MergeResult::KeySplit(
                                     candidate_index,
                                     BlockSplit::ByKey(
@@ -1429,12 +1319,13 @@ impl<
                                     candidate_cell,
                                 )
                             }
-                            Err((hot, cold)) => {
+                            Err(records) => {
                                 // Truly indivisible even discounting
-                                // garbage. A private cold chain is the only
-                                // converging one-child merge.
+                                // non-hot entries: the whole batch is one
+                                // key's own history. A single combined leaf
+                                // is the only converging one-child merge.
                                 let combined = self.block_manager.new_empty_leaf(&self.ctx);
-                                self.push_hot_cold_onto(combined, hot, cold);
+                                self.push_records_onto(combined, records);
                                 MergeResult::Merged(
                                     candidate_index,
                                     candidate_fence.clone(),
@@ -1744,19 +1635,19 @@ impl<
                                     (self.cold.dec_key)(hks.split_key),
                                 );
                                 let fence_right = Interval::new(hks.split_key, fence.upper);
-                                self.push_hot_cold_onto(left, hks.hot_left, hks.cold_left);
-                                self.push_hot_cold_onto(right, hks.hot_right, hks.cold_right);
+                                self.push_records_onto(left, hks.left);
+                                self.push_records_onto(right, hks.right);
                                 BlockSplit::ByKey(fence_left, left, fence_right, right)
                             }
-                            Err((hot, cold)) => {
+                            Err(records) => {
                                 // Truly indivisible even discounting
-                                // garbage: this is the exceptional
-                                // repeated-key-history case cold pages exist
-                                // for.
+                                // non-hot entries: this is the exceptional
+                                // repeated-key-history case (the whole batch
+                                // is one key's own history).
                                 let replacement = self.block_manager.new_empty_leaf(&self.ctx);
-                                let hot_len = hot.len();
-                                record_version_split(fence.to_string(), hot_len);
-                                self.push_hot_cold_onto(replacement, hot, cold);
+                                let count = records.len();
+                                record_version_split(fence.to_string(), count);
+                                self.push_records_onto(replacement, records);
                                 BlockSplit::ByVersion(replacement)
                             }
                         };

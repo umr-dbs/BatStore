@@ -1,8 +1,6 @@
 use crate::bat_crud_model::crud_operation::CRUDOperation;
 use crate::bat_page_model::leaf_page::AbortOutcome;
-use crate::bat_page_model::node::ColdLink;
 use crate::bat_query::SnapShot;
-use crate::bat_record_model::record_point::RecordPoint;
 use crate::bat_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::bat_record_model::version_info::Version;
 use crate::bat_tree::mvbt::MVBTSt;
@@ -17,8 +15,6 @@ pub(crate) const START_VERSION: Version = 1;
 pub(crate) static ABORT_TERMINAL_WITH_REMAINING: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub(crate) static ABORT_PREDECESSOR_MISSING_HOT: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-pub(crate) static ABORT_PREDECESSOR_MISSING_COLD: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 impl<
@@ -277,139 +273,26 @@ impl<
         self.abort_writes(key, stamp, 1);
     }
 
-    /// Walks `link`'s cold chain looking for `key`'s own latest entry —
-    /// mirrors `LeafPage::abort_write`'s own `latest_position`-based
-    /// search, just applied to a cold page instead of the hot leaf. Used
-    /// when the hot leaf's own search comes up `NotFound`, meaning the
-    /// record being reverted was itself moved to cold (see
-    /// `bat_page_model::node::ColdLink`'s doc). Returns the same
-    /// `(AbortOutcome, Option<TxStamp>)` shape `LeafPage::abort_write`
-    /// does, plus the specific cold page's *own* `cold_link` — so a caller
-    /// handling a pending predecessor continues searching from the page
-    /// that actually did the invalidating, not back from the top of the
-    /// chain.
-    ///
-    /// No new synchronization is needed to reach in and mutate a cold
-    /// page here: `abort_writes` (the only caller) already holds the
-    /// owning hot leaf's own write lock for this call's entire duration,
-    /// and a cold page is only ever reachable through that leaf's
-    /// `cold_link` — nothing else can be concurrently retiring or
-    /// rebuilding this exact chain while that lock is held. Each cold
-    /// page still gets its own proper write-lock upgrade
-    /// (`SmartGuard::upgrade_write_lock`) before being mutated, matching
-    /// every other writer in this codebase, even though no *external*
-    /// race is actually possible here — if it somehow ever fails anyway,
-    /// this reports `NotFound` and lets the outer retry loop in
-    /// `abort_writes` re-traverse from the top and try again.
-    fn abort_write_in_cold_chain(
-        &self,
-        mut link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
-        key: Key,
-        stamp: TxStamp,
-    ) -> (
-        AbortOutcome,
-        Option<TxStamp>,
-        ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
-    ) {
-        while !link.is_none() {
-            let mut cold_guard = link.cold().borrow_read();
-            if !cold_guard.upgrade_write_lock() {
-                return (AbortOutcome::NotFound, None, ColdLink::none());
-            }
-            let cold_deref_mut = cold_guard.deref_mut();
-            let next_link = *cold_deref_mut.cold_link();
-            let (outcome, pending) = cold_deref_mut.as_leaf_page().abort_write(key, stamp);
-            if outcome != AbortOutcome::NotFound {
-                return (outcome, pending, next_link);
-            }
-            link = next_link;
-        }
-        (AbortOutcome::NotFound, None, ColdLink::none())
-    }
-
-    /// Walks `link`'s cold chain searching (whole-page, unbounded) for an
-    /// entry matching `key` whose own `deletion_stamp` equals `stamp` —
-    /// resolving an `Update`-abort's linked predecessor once it's known
-    /// not to be on the page that did the invalidating. See
-    /// `LeafPage::undelete_matching_deletion_stamp`'s doc. Same
-    /// synchronization reasoning as `abort_write_in_cold_chain`.
-    fn undelete_in_cold_chain(
-        &self,
-        mut link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
-        key: Key,
-        stamp: TxStamp,
-    ) -> bool {
-        while !link.is_none() {
-            let mut cold_guard = link.cold().borrow_read();
-            if !cold_guard.upgrade_write_lock() {
-                return false;
-            }
-            let cold_deref_mut = cold_guard.deref_mut();
-            let next_link = *cold_deref_mut.cold_link();
-            if cold_deref_mut
-                .as_leaf_page()
-                .undelete_matching_deletion_stamp(key, stamp, None)
-            {
-                return true;
-            }
-            link = next_link;
-        }
-        false
-    }
-
-    fn clone_predecessor_from_cold_chain(
-        &self,
-        mut link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
-        key: Key,
-        stamp: TxStamp,
-    ) -> Option<RecordPoint<Key, Payload>> {
-        while !link.is_none() {
-            let cold_cell = link.cold();
-            let cold_guard = cold_cell.borrow_read();
-            let cold = &*cold_guard;
-            let next = *cold.cold_link();
-            if let Some(record) = cold
-                .as_leaf_page_ref()
-                .clone_undeleted_matching(key, stamp)
-            {
-                return Some(record);
-            }
-            link = next;
-        }
-        None
-    }
-
     /// Reverts a consecutive run of writes to one key. Normally all of its
     /// versions reside in one leaf and therefore require one traversal and
     /// one latch. The defensive retry preserves the old one-call-per-entry
     /// behavior if a run is ever distributed across leaves.
     ///
-    /// Extended (see `bat_page_model::node::ColdLink`'s doc) to also search
-    /// the leaf's cold chain when the hot leaf's own search doesn't have
-    /// what's needed: either the record being reverted was itself
-    /// offloaded to cold (hot leaf reports `NotFound`), or an
-    /// `Update`-abort's own linked predecessor was (`LeafPage::abort_write`'s
-    /// `Option<TxStamp>`) — see `abort_write_in_cold_chain`'s doc for why
-    /// both searches are safe with no new synchronization primitive.
+    /// A pending predecessor (`LeafPage::abort_write`'s `Option<TxStamp>`)
+    /// is resolved purely against this same hot leaf now that there is no
+    /// separate cold-chain page to search: `apply_invalidate` already
+    /// performs a bounded, same-page search for it before returning
+    /// `Some`, so a leftover `Some` here means the predecessor genuinely
+    /// isn't on this page (logged via the `ABORT_PREDECESSOR_MISSING_*`
+    /// counters below rather than treated as an error).
     #[inline]
     pub(crate) fn abort_writes(&self, key: Key, stamp: TxStamp, count: usize) {
         let mut remaining = count;
         while remaining != 0 {
             let leaf_guard = self.traversal_write_olc_registered(key);
             let leaf_deref_mut = leaf_guard.deref_mut();
-            let hot_cold_link = *leaf_deref_mut.cold_link();
             let leaf_page = leaf_deref_mut.as_leaf_page();
-            let (mut outcome, mut pending_predecessor) = leaf_page.abort_write(key, stamp);
-            let invalidated_hot = outcome == AbortOutcome::Invalidated;
-            let mut predecessor_search_start = hot_cold_link;
-
-            if outcome == AbortOutcome::NotFound {
-                let (cold_outcome, cold_pending, cold_next) =
-                    self.abort_write_in_cold_chain(hot_cold_link, key, stamp);
-                outcome = cold_outcome;
-                pending_predecessor = cold_pending;
-                predecessor_search_start = cold_next;
-            }
+            let (outcome, pending_predecessor) = leaf_page.abort_write(key, stamp);
 
             if outcome == AbortOutcome::NotFound {
                 // Genuinely nothing anywhere -- matches today's terminal
@@ -424,32 +307,10 @@ impl<
             }
 
             if let Some(pred_stamp) = pending_predecessor {
-                if invalidated_hot {
-                    if let Some(predecessor) = self.clone_predecessor_from_cold_chain(
-                        predecessor_search_start,
-                        key,
-                        pred_stamp,
-                    ) {
-                        let index = leaf_page.len();
-                        leaf_page.push_uncommitted(predecessor, index);
-                        leaf_page.commit_delta(1, 0);
-                    } else {
-                        ABORT_PREDECESSOR_MISSING_HOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        eprintln!(
-                            "[abort-diag] predecessor MISSING (hot invalidate) key={key} stamp={stamp} pred_stamp={pred_stamp}"
-                        );
-                    }
-                } else {
-                    // The invalidated record itself was cold, so restoring
-                    // its still-older predecessor within the historical
-                    // chain does not change the hot current-state invariant.
-                    if !self.undelete_in_cold_chain(predecessor_search_start, key, pred_stamp) {
-                        ABORT_PREDECESSOR_MISSING_COLD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        eprintln!(
-                            "[abort-diag] predecessor MISSING (cold invalidate) key={key} stamp={stamp} pred_stamp={pred_stamp}"
-                        );
-                    }
-                }
+                ABORT_PREDECESSOR_MISSING_HOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!(
+                    "[abort-diag] predecessor MISSING (hot invalidate) key={key} stamp={stamp} pred_stamp={pred_stamp}"
+                );
             }
 
             remaining -= 1;

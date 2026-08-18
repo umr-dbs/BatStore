@@ -25,11 +25,8 @@
 //!   assuming ticket-contiguous coverage.
 //! - Every OLAP scan completed during the run must return at most as many
 //!   rows as its own requested span - a direct, always-on regression guard
-//!   for the hot/cold double-counting bug fixed in
-//!   `RangeQueryIter::walk_cold_chain_for_range` (2026-08-15/16): that bug
-//!   let a single key be counted once from the hot leaf and again from its
-//!   cold chain, which always manifests as a scan returning more rows than
-//!   the span it was given.
+//!   against `RangeQueryIter` double-counting a key, which would manifest
+//!   as a scan returning more rows than the span it was given.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
