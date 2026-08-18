@@ -53,6 +53,12 @@ tree-viz = ["dep:serde", "dep:serde_json"]
 # real jemalloc arena is active) - use the allocator-independent VmRSS
 # column instead.
 mimalloc = ["dep:mimalloc"]
+# Use lightweight (conservative) GC mode: check only live_min_snapshot
+# instead of collecting all live snapshots. Keeps slightly more dead records
+# (those with deletion_ts >= min but actually committed) but avoids HashSet
+# allocation and O(M) snapshot collection. Good for testing or memory-constrained
+# deployments; default (off) uses precise tracking for better GC efficiency.
+lightweight-gc = []
 
 [[bin]]
 name = "batstore"

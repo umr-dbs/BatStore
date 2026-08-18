@@ -493,6 +493,13 @@ impl TxContext {
             .any(|slot| slot.load(Acquire) == ts_start)
     }
 
+    /// Collect all currently-live transaction snapshot IDs into a HashSet for
+    /// efficient batch membership checking (e.g., in `record_survives_gc`).
+    #[inline]
+    pub(crate) fn live_snapshots_set(&self) -> std::collections::HashSet<u64> {
+        self.live_snapshots().collect()
+    }
+
     /// The oldest currently-active-or-in-flight snapshot across every table
     /// sharing this context, or `None` if there are none — the "safe to
     /// reclaim anything dead strictly before this" bound
