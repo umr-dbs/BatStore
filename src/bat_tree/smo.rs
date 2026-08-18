@@ -856,9 +856,14 @@ impl<
     /// predecessor for abort safety and for readers born against that new
     /// structural version. Once deletion commits, future readers see it.
     #[inline]
+    #[cfg(not(feature = "lightweight-gc"))]
+    /// Precise GC: keep record if its deletion's snapshot ID is one of the
+    /// currently-active snapshots. Uses pre-computed HashSet for O(1) lookups.
+    /// Avoids keeping unnecessarily old deletions.
     pub(crate) fn record_survives_gc(
         &self,
         version: &crate::bat_record_model::version_info::VersionInfo,
+        live_snapshots: &std::collections::HashSet<u64>,
     ) -> bool {
         if version.is_live() {
             return true;
@@ -867,7 +872,36 @@ impl<
         !version.insertion_stamp().is_invalid()
             && version
                 .deletion_stamp()
-                .is_some_and(|del| self.ctx.is_snapshot_live(del.ts_start()))
+                .is_some_and(|del| live_snapshots.contains(&del.ts_start()))
+    }
+
+    #[cfg(feature = "lightweight-gc")]
+    /// Lightweight GC: keep record if its deletion happened at or after the
+    /// oldest live snapshot (conservative but O(1): just compares against min).
+    /// May keep some dead records but avoids HashSet collection overhead.
+    #[allow(unused_variables)]
+    pub(crate) fn record_survives_gc(
+        &self,
+        version: &crate::bat_record_model::version_info::VersionInfo,
+        live_snapshots: &std::collections::HashSet<u64>,
+    ) -> bool {
+        if version.is_live() {
+            return true;
+        }
+
+        !version.insertion_stamp().is_invalid()
+            && version
+                .deletion_stamp()
+                .is_some_and(|del| {
+                    self.ctx
+                        .live_min_snapshot()
+                        .map_or(false, |min| del.ts_start() >= min)
+                })
+    }
+
+    /// Collect all currently-live transaction snapshot IDs for efficient GC filtering.
+    fn live_snapshots(&self) -> std::collections::HashSet<u64> {
+        self.ctx.live_snapshots_set()
     }
 
     /// Returns all records owned by this leaf generation in per-key physical
@@ -877,6 +911,7 @@ impl<
         &self,
         block: &Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
     ) -> Vec<RecordPoint<Key, Payload>> {
+        let live_snapshots = self.live_snapshots();
         let initial_link = *block.cold_link();
         let mut cold_pages = Vec::with_capacity(initial_link.chain_len() as usize);
         let mut link = *block.cold_link();
@@ -893,13 +928,13 @@ impl<
         for page in cold_pages.into_iter().rev() {
             let guard = page.borrow_read();
             for record in guard.deref().as_records().iter() {
-                if self.record_survives_gc(record.version()) {
+                if self.record_survives_gc(record.version(), &live_snapshots) {
                     history.push(RecordPoint::clone_from_leaf(record));
                 }
             }
         }
         for record in block.as_records().iter() {
-            if self.record_survives_gc(record.version()) {
+            if self.record_survives_gc(record.version(), &live_snapshots) {
                 history.push(RecordPoint::clone_from_leaf(record));
             }
         }
