@@ -2,14 +2,14 @@
 
 Investigation into whether there was still headroom in cMVBT's OLTP (and, by extension,
 OLAP-under-load) performance. Short TPC-C/YCSB tests were run through
-`scripts/compare_engines.py` (restricted to `--engines cmvbt`) to see where throughput
+`scripts/compare_engines.py` (restricted to `--engines batstore`) to see where throughput
 stood, then `perf record`/`perf annotate` on a debug-symbol build (`cargo build --profile
 profiling`) to see where the CPU time actually went. Three concrete issues turned up and
 were fixed; this doc has the before/after numbers.
 
 ## What was tested, and why
 
-- **`compare_engines.py --engines cmvbt --workloads tpcc,ycsb_a..ycsb_f --threads 16,64`** -
+- **`compare_engines.py --engines batstore --workloads tpcc,ycsb_a..ycsb_f --threads 16,64`** -
   the harness's own driver (see `manual.txt`), not a one-off script, so the numbers are
   directly comparable to every other benchmark doc in this repo. Two thread counts (16, 64)
   rather than the full default sweep (2..128) to keep each pass short while still showing
@@ -19,20 +19,20 @@ were fixed; this doc has the before/after numbers.
   read-only/read-mostly access patterns from write-touching ones - this is what makes it
   possible to say *which* code paths a fix actually helps, rather than just "throughput went
   up."
-- **`perf record -F 999 -g --call-graph fp` on `target/profiling/cMVBT`** (the `[profile.
+- **`perf record -F 999 -g --call-graph fp` on `target/profiling/batstore`** (the `[profile.
   profiling]` in `Cargo.toml`: release optimizations + debug symbols + frame pointers, via
   `RUSTFLAGS="-C force-frame-pointers=yes"`) directly on the same CLI invocations
-  `cmvbt.py` builds, for TPC-C and YCSB-A specifically - YCSB-A (50% read / 50% update,
+  `batstore.py` builds, for TPC-C and YCSB-A specifically - YCSB-A (50% read / 50% update,
   Zipfian theta=0.99) is the harness's most write-heavy, most contended point, so it's
   where a CPU-cost-per-write problem shows up loudest. `perf annotate` on the resulting
   hotspots (not just `perf report`'s function-level view) is what actually pinned the CRC32
   cost down to specific instructions, and the channel contention down to a specific `pause`
   spin-loop.
-- **Setup gotcha worth knowing:** `scripts/engines/common.py`'s `CMVBT_REPO`
-  auto-detection prefers `<workspace>/cmvbt` over this checkout if that directory exists
-  and has a `Cargo.toml` - documented in `manual.txt`'s "CMVBT_REPO RESOLUTION" section. A
+- **Setup gotcha worth knowing:** `scripts/engines/common.py`'s `BATSTORE_REPO`
+  auto-detection prefers `<workspace>/batstore` over this checkout if that directory exists
+  and has a `Cargo.toml` - documented in `manual.txt`'s "BATSTORE_REPO RESOLUTION" section. A
   stale clone was sitting there from an earlier `setup_environment.py` run, so every
-  invocation below pins it explicitly: `CMVBT_REPO=$(pwd) python3 scripts/compare_engines.py
+  invocation below pins it explicitly: `BATSTORE_REPO=$(pwd) python3 scripts/compare_engines.py
   ...`. Skipping this silently benchmarks the wrong checkout.
 
 ## What was found, and fixed
@@ -77,7 +77,7 @@ the table-driven CRC32.
 
 ## Results
 
-Same harness invocation, same scale, before vs. after all three fixes - `--engines cmvbt
+Same harness invocation, same scale, before vs. after all three fixes - `--engines batstore
 --workloads tpcc,ycsb_a,ycsb_b,ycsb_c,ycsb_d,ycsb_e,ycsb_f --threads 16,64 --gc on
 --warehouses 8 --tpcc-duration 20 --ycsb-records 1000000 --ycsb-duration 15`.
 
@@ -138,8 +138,8 @@ Raw manifests: `comparison_results/run_20260809_184829` (before),
   ~47%) - pure wasted `traversal_write_olc`/`smo::split` work, unrelated to the WAL. The
   B-tree's own optimistic-lock-coupling backoff (`__sched_yield`, ~8-9% of cycles on
   contended writes) is also unchanged - neither was in scope for this pass.
-- Only cMVBT was benchmarked (`--engines cmvbt`), not the other six engines this harness
-  can drive - this doc is about cMVBT's own headroom, not a cross-engine comparison.
+- Only BatStore was benchmarked (`--engines batstore`), not the other six engines this harness
+  can drive - this doc is about BatStore's own headroom, not a cross-engine comparison.
 
 ## Follow-up: a lock-free WAL backend, an OOM in its own benchmark, and a cross-shard durability race found merging the two
 
@@ -333,8 +333,8 @@ that have nothing to do with this allocation pattern, all 6 (backend x terminal-
 combinations moving the same direction (a ~1.6% chance of that being pure noise). Net:
 mimalloc trades a small, mechanism-specific YCSB win for a broader, workload-level TPC-C
 loss - **not** adopted as the default allocator (jemalloc stays `#[global_allocator]`),
-kept as an opt-in feature. `scripts/engines/common.py::cmvbt_cargo_build_args()` (read from
-`CMVBT_ALLOCATOR`) plus `compare_engines.py --cmvbt-allocator {jemalloc,mimalloc}` let a
+kept as an opt-in feature. `scripts/engines/common.py::batstore_cargo_build_args()` (read from
+`BATSTORE_ALLOCATOR`) plus `compare_engines.py --batstore-allocator {jemalloc,mimalloc}` let a
 future comparison run pick either without editing `Cargo.toml`.
 
 **Still not fully closed.** Neither of the two things tried here actually eliminates the

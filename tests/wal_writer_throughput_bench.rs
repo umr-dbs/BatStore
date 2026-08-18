@@ -219,8 +219,8 @@ fn bench_lockfree_batched_writer(
 #[test]
 fn compare_wal_writer_vs_lockfree_throughput() {
     let dir = std::env::temp_dir();
-    let old_path = dir.join(format!("cmvbt_bench_wal_old_{}.log", std::process::id()));
-    let new_path = dir.join(format!("cmvbt_bench_wal_new_{}.log", std::process::id()));
+    let old_path = dir.join(format!("batstore_bench_wal_old_{}.log", std::process::id()));
+    let new_path = dir.join(format!("batstore_bench_wal_new_{}.log", std::process::id()));
 
     println!();
     println!("=== WalWriter (channel + single background writer thread) ===");

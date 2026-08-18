@@ -38,7 +38,7 @@
 \newcommand{\gainbounded}{\textbf{Bounded}}
 \newcommand{\gainenabling}{\textbf{Structural}}
 
-\title{Cache-Friendly by Design: The Optimizations Inside cMVBT-OSIC}
+\title{Cache-Friendly by Design: The Optimizations Inside BatStore}
 \author{Amir Tonta}
 \date{August 2026}
 
@@ -46,7 +46,7 @@
 \maketitle
 
 \begin{abstract}
-This document explains, layer by layer, how \texttt{cMVBT-OSIC} is built to keep a
+This document explains, layer by layer, how \texttt{BatStore} is built to keep a
 CPU's caches, TLB, and lock-free fast paths working \emph{for} it rather than against
 it. It is organized by architectural layer --- physical page layout, then
 concurrency control built on top of that layout, then structural maintenance, then

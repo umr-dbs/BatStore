@@ -2,7 +2,7 @@
 """Plot figures for a scripts/compare_engines.py cross-engine comparison run:
 TPC-C and YCSB A-F throughput, peak memory, throughput-vs-threads, GC on/off
 comparison, and scan/OLAP latency, overlaid across
-cMVBT/LeanStore/WiredTiger/PostgreSQL/vWeaver/libmdbx variants.
+BatStore/LeanStore/WiredTiger/PostgreSQL/vWeaver/libmdbx variants.
 
 Reads <run_dir>/manifest.csv (one row per engine/workload/threads/gc combo,
 written incrementally by compare_engines.py) and writes every figure as both
@@ -43,16 +43,16 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 ENGINE_ORDER = [
-    "cmvbt", "leanstore", "wiredtiger", "postgres", "vweaver_ermia",
+    "batstore", "leanstore", "wiredtiger", "postgres", "vweaver_ermia",
     "vweaver_ermia_frugal", "libmdbx",
 ]
 ENGINE_LABELS = {
-    "cmvbt": "cMVBT", "leanstore": "LeanStore", "wiredtiger": "WiredTiger", "postgres": "PostgreSQL",
+    "batstore": "BatStore", "leanstore": "LeanStore", "wiredtiger": "WiredTiger", "postgres": "PostgreSQL",
     "vweaver_ermia": "vWeaver/ERMIA", "vweaver_ermia_frugal": "Frugal/ERMIA",
     "libmdbx": "libmdbx",
 }
 ENGINE_COLORS = {
-    "cmvbt": "tab:green", "leanstore": "tab:blue", "wiredtiger": "tab:orange", "postgres": "tab:red",
+    "batstore": "tab:green", "leanstore": "tab:blue", "wiredtiger": "tab:orange", "postgres": "tab:red",
     "vweaver_ermia": "tab:purple", "vweaver_ermia_frugal": "tab:pink", "libmdbx": "tab:brown",
 }
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
@@ -60,7 +60,7 @@ HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
 # Engines with a real, working GC on/off toggle (see engines/*.py's SUPPORTS_GC_TOGGLE) -
 # leanstore/wiredtiger only ever report gc_enabled="n/a" (no working toggle in this
 # checkout, see the plan's Context section), so they're excluded from GC-comparison plots.
-GC_TOGGLE_ENGINES = ["cmvbt", "postgres", "vweaver_ermia", "vweaver_ermia_frugal"]
+GC_TOGGLE_ENGINES = ["batstore", "postgres", "vweaver_ermia", "vweaver_ermia_frugal"]
 
 
 def _engine_sort_key(name: str):
@@ -91,6 +91,9 @@ def load_manifest(run_dir: Path) -> pd.DataFrame:
     if not path.exists():
         raise SystemExit(f"{path} not found — is {run_dir} a compare_engines.py run directory?")
     df = pd.read_csv(path)
+    # Older manifests used the pre-rename engine key. Normalize them at the
+    # reader boundary so historical comparison runs remain plottable.
+    df["engine"] = df["engine"].replace({"cmvbt": "batstore"})
     df["notes"] = df["notes"].fillna("")
     df["failed"] = df["notes"].str.startswith(("FAILED", "TIMEOUT", "EXCEPTION"))
     df["gc_enabled"] = df["gc_enabled"].fillna("n/a")
@@ -448,20 +451,20 @@ def plot_ch_query_latency(manifest: pd.DataFrame, ref_threads: int, out_dir: Pat
     _save(fig, out_dir, "ch_query_latency")
 
 
-def plot_cmvbt_olap_scan_latency(run_dir: Path, ref_threads: int, out_dir: Path):
-    """cMVBT-specific: its TPC-C run always includes a concurrent HTAP scan-sweep OLAP
+def plot_batstore_olap_scan_latency(run_dir: Path, ref_threads: int, out_dir: Path):
+    """BatStore-specific: its TPC-C run always includes a concurrent HTAP scan-sweep OLAP
     thread (see tpcc_driver.rs's olap_mode_str default), writing raw per-scan latency vs.
     the scan's staleness/delay to tpcc_scan.csv. Not comparable to the other 3 engines'
     plain-OLTP TPC-C in this harness, so it's its own plot rather than a 4-way bar."""
-    candidates = sorted(run_dir.glob(f"tpcc/cmvbt/threads_{ref_threads}/gc_*/tpcc_scan.csv"))
+    candidates = sorted(run_dir.glob(f"tpcc/batstore/threads_{ref_threads}/gc_*/tpcc_scan.csv"))
     if not candidates:
-        print(f"No tpcc_scan.csv found for cmvbt at threads={ref_threads} — skipping cMVBT OLAP-scan-latency plot.")
+        print(f"No tpcc_scan.csv found for batstore at threads={ref_threads} — skipping BatStore OLAP-scan-latency plot.")
         return
     # Prefer gc=on (the default/representative variant) if present.
     scan_csv = next((c for c in candidates if "gc_on" in c.parts), candidates[0])
     df = pd.read_csv(scan_csv)
     if df.empty:
-        print(f"{scan_csv} is empty — skipping cMVBT OLAP-scan-latency plot.")
+        print(f"{scan_csv} is empty — skipping BatStore OLAP-scan-latency plot.")
         return
     df["latency_us"] = df["latency_ns"] / 1000.0
 
@@ -469,9 +472,9 @@ def plot_cmvbt_olap_scan_latency(run_dir: Path, ref_threads: int, out_dir: Path)
     ax.plot(df["delay_secs"], df["latency_us"], marker="o", color="tab:green")
     ax.set_xlabel("OLAP scan delay / staleness target (seconds)")
     ax.set_ylabel("Scan latency (microseconds)")
-    ax.set_title(f"cMVBT: TPC-C concurrent OLAP-scan latency vs. staleness (threads={ref_threads})")
+    ax.set_title(f"BatStore: TPC-C concurrent OLAP-scan latency vs. staleness (threads={ref_threads})")
     ax.grid(alpha=0.3)
-    _save(fig, out_dir, "cmvbt_tpcc_olap_scan_latency")
+    _save(fig, out_dir, "batstore_tpcc_olap_scan_latency")
 
 
 def main():
@@ -500,7 +503,7 @@ def main():
     plot_throughput_vs_threads_htap(manifest, out_dir)
     plot_gc_comparison(manifest, ref_threads, out_dir)
     plot_scan_latency(manifest, ref_threads, out_dir)
-    plot_cmvbt_olap_scan_latency(run_dir, ref_threads, out_dir)
+    plot_batstore_olap_scan_latency(run_dir, ref_threads, out_dir)
     plot_htap_interference(manifest, ref_threads, out_dir)
     plot_ch_query_latency(manifest, ref_threads, out_dir)
 

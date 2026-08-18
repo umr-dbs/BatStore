@@ -59,7 +59,7 @@ pub fn is_visible(
         // any write by "me" is visible to "my" current transaction — but
         // not to a deliberately historical/point-in-time snapshot (a
         // smaller `reader_ts_start` than the write's own `ts_start`), which
-        // cMVBT supports as a first-class feature distinct from the paper's
+        // BatStore supports as a first-class feature distinct from the paper's
         // "current snapshot only" model.
         return stamp.ts_start() <= reader_ts_start;
     }

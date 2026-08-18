@@ -12,7 +12,7 @@ use crate::mv_wal::record::{self, WalEntry};
 #[test]
 fn group_fsync_flushes_and_wait_unblocks() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_wal_lockfree_test_{}.log",
+        "batstore_wal_lockfree_test_{}.log",
         std::process::id()
     ));
     let _ = fs::remove_file(&path);
@@ -56,7 +56,7 @@ fn group_fsync_flushes_and_wait_unblocks() {
 #[test]
 fn concurrent_writers_each_land_intact_and_distinct() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_wal_lockfree_concurrent_{}.log",
+        "batstore_wal_lockfree_concurrent_{}.log",
         std::process::id()
     ));
     let _ = fs::remove_file(&path);
@@ -142,7 +142,7 @@ fn concurrent_writers_each_land_intact_and_distinct() {
 #[test]
 fn concurrent_local_batches_each_land_intact_and_distinct() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_wal_lockfree_batch_{}.log",
+        "batstore_wal_lockfree_batch_{}.log",
         std::process::id()
     ));
     let _ = fs::remove_file(&path);
@@ -227,7 +227,7 @@ fn concurrent_local_batches_each_land_intact_and_distinct() {
 #[test]
 fn hardened_version_starts_unset_and_only_advances_on_commit() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_wal_lockfree_hardened_{}.log",
+        "batstore_wal_lockfree_hardened_{}.log",
         std::process::id()
     ));
     let _ = fs::remove_file(&path);

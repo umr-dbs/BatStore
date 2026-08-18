@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>cMVBT Explorer</title>
+<title>BatStore Explorer</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23181d25'/%3E%3Cpath d='M16 8v5M9 17v-4h14v4' fill='none' stroke='%238fb2ff' stroke-width='2.2' stroke-linecap='round'/%3E%3Crect x='11.5' y='4' width='9' height='6' rx='2' fill='%235b8cff'/%3E%3Crect x='4' y='17' width='9' height='7' rx='2' fill='%233aa876'/%3E%3Crect x='19' y='17' width='9' height='7' rx='2' fill='%235b8cff'/%3E%3C/svg%3E">
 <style>
   :root {
@@ -1346,7 +1346,7 @@
   <div id="body">
     <div id="sidebar">
       <nav id="workspaceTabs" aria-label="Visualizer views">
-        <div class="workspace-brand"><div class="workspace-brand-mark">cMVBT Explorer</div></div>
+        <div class="workspace-brand"><div class="workspace-brand-mark">BatStore Explorer</div></div>
         <div class="workspace-tab-section">Views</div>
         <button class="workspace-tab active" data-workspace="dashboard">Dashboard</button>
         <button class="workspace-tab" data-workspace="snapshots">Tree view</button>
@@ -1569,13 +1569,13 @@
   // Detailed List is the product default. Apply it once for browsers that
   // predate this default, then continue respecting whatever mode the user
   // explicitly selects afterward.
-  if(localStorage.getItem("cmvbt-viz-record-default")!=="detailed-v1"){
-    localStorage.setItem("cmvbt-viz-record-layout","list");
-    localStorage.setItem("cmvbt-viz-record-detail","1");
-    localStorage.setItem("cmvbt-viz-record-default","detailed-v1");
+  if(localStorage.getItem("batstore-viz-record-default")!=="detailed-v1"){
+    localStorage.setItem("batstore-viz-record-layout","list");
+    localStorage.setItem("batstore-viz-record-detail","1");
+    localStorage.setItem("batstore-viz-record-default","detailed-v1");
   }
-  let recordLayoutMode = localStorage.getItem("cmvbt-viz-record-layout") || "list"; // "list" | "grid"
-  let recordDetailMode = localStorage.getItem("cmvbt-viz-record-detail") !== "0";   // list mode only: timestamps, workers, and deletion details
+  let recordLayoutMode = localStorage.getItem("batstore-viz-record-layout") || "list"; // "list" | "grid"
+  let recordDetailMode = localStorage.getItem("batstore-viz-record-detail") !== "0";   // list mode only: timestamps, workers, and deletion details
   let map2dOnlyLive = false;        // 2D entry map sub-option: only draw still-live entries
   let currentMap2dNodeId = null;    // internal node id the 2D entry map panel is currently showing
   let currentMap2dFenceLower = null; // that node's actual fence bounds - entries must exactly tile this, not a range inferred from their own historical key values; null (only for a rendered root, which has no parent-imposed fence) means "derive from the union of this node's own children instead"
@@ -1596,16 +1596,16 @@
   let currentInspectedNodeId = null;
   const diffAddedNodes = new Set();
   const diffChangedNodes = new Set();
-  if(localStorage.getItem("cmvbt-viz-minimap-default")!=="enabled-v1"){
-    localStorage.setItem("cmvbt-viz-minimap","1");
-    localStorage.setItem("cmvbt-viz-minimap-default","enabled-v1");
+  if(localStorage.getItem("batstore-viz-minimap-default")!=="enabled-v1"){
+    localStorage.setItem("batstore-viz-minimap","1");
+    localStorage.setItem("batstore-viz-minimap-default","enabled-v1");
   }
-  let minimapEnabled = localStorage.getItem("cmvbt-viz-minimap") !== "0";
-  if(localStorage.getItem("cmvbt-viz-performance-default")!=="enabled-v1"){
-    localStorage.setItem("cmvbt-viz-performance","1");
-    localStorage.setItem("cmvbt-viz-performance-default","enabled-v1");
+  let minimapEnabled = localStorage.getItem("batstore-viz-minimap") !== "0";
+  if(localStorage.getItem("batstore-viz-performance-default")!=="enabled-v1"){
+    localStorage.setItem("batstore-viz-performance","1");
+    localStorage.setItem("batstore-viz-performance-default","enabled-v1");
   }
-  let performanceMode = localStorage.getItem("cmvbt-viz-performance") !== "0";
+  let performanceMode = localStorage.getItem("batstore-viz-performance") !== "0";
   let keyboardSelectedNodeId = null;
   let minimapPositions = null;
   let currentFileName = "tree";
@@ -1618,7 +1618,7 @@
   let removedDiffNodes = new Set();
   let anomalyTour = [];
   let anomalyTourIndex = -1;
-  let bookmarks = JSON.parse(localStorage.getItem("cmvbt-viz-bookmarks") || "[]");
+  let bookmarks = JSON.parse(localStorage.getItem("batstore-viz-bookmarks") || "[]");
   let activeWorkspace = "dashboard";
   let suppressBrowserHistory = false, browserHistoryScheduled = false, lastBrowserStateKey = "";
   let currentKeyTracerKey = null, keyTracerReturnPanel = null;
@@ -1633,15 +1633,15 @@
   let lastMarkedNodeId = null;
   let structuralOpsCache = null;
   let hotRecordsCache = null;
-  let lightTheme = localStorage.getItem("cmvbt-viz-theme") === "light";
-  let compactDensity = localStorage.getItem("cmvbt-viz-density") === "compact";
+  let lightTheme = localStorage.getItem("batstore-viz-theme") === "light";
+  let compactDensity = localStorage.getItem("batstore-viz-density") === "compact";
   let navigationHistory = [], navigationHistoryIndex = -1, suppressNavigationHistory = false;
-  let investigationPins = JSON.parse(localStorage.getItem("cmvbt-viz-investigation-pins") || "[]");
-  let statsOverlayEnabled = localStorage.getItem("cmvbt-viz-stats-overlay") === "1";
+  let investigationPins = JSON.parse(localStorage.getItem("batstore-viz-investigation-pins") || "[]");
+  let statsOverlayEnabled = localStorage.getItem("batstore-viz-stats-overlay") === "1";
   let guidedTourStep = 0;
   let utilityPanelRootRefresh = null;
   let queryAnimationToken = 0;
-  let treeLayoutMode = localStorage.getItem("cmvbt-viz-tree-layout") || "hierarchical";
+  let treeLayoutMode = localStorage.getItem("batstore-viz-tree-layout") || "hierarchical";
   document.body.classList.toggle("light-theme", lightTheme);
   document.body.classList.toggle("compact-density", compactDensity);
   function applyAppearancePreferences(){
@@ -1650,15 +1650,15 @@
     themeButton.textContent=lightTheme?"Dark theme":"Light theme";themeButton.classList.toggle("primary",lightTheme);
     densityButton.textContent=compactDensity?"Comfortable density":"Compact density";densityButton.classList.toggle("primary",compactDensity);
   }
-  document.getElementById("themeToggleBtn").onclick=()=>{lightTheme=!lightTheme;localStorage.setItem("cmvbt-viz-theme",lightTheme?"light":"dark");applyAppearancePreferences();};
-  document.getElementById("densityToggleBtn").onclick=()=>{compactDensity=!compactDensity;localStorage.setItem("cmvbt-viz-density",compactDensity?"compact":"comfortable");applyAppearancePreferences();heightCache.clear();if(dump)render();};
+  document.getElementById("themeToggleBtn").onclick=()=>{lightTheme=!lightTheme;localStorage.setItem("batstore-viz-theme",lightTheme?"light":"dark");applyAppearancePreferences();};
+  document.getElementById("densityToggleBtn").onclick=()=>{compactDensity=!compactDensity;localStorage.setItem("batstore-viz-density",compactDensity?"compact":"comfortable");applyAppearancePreferences();heightCache.clear();if(dump)render();};
   document.getElementById("presentationModeBtn").onclick=()=>document.body.classList.toggle("presentation-mode");
   applyAppearancePreferences();
 
   const view = { x: 0, y: 0, k: 1 };
   // Both adjustable at runtime via the toolbar's Appearance group - not consts.
-  let NODE_W = parseInt(localStorage.getItem("cmvbt-viz-node-w"), 10) || 280;
-  let RECORDS_H = parseInt(localStorage.getItem("cmvbt-viz-records-h"), 10) || 600;
+  let NODE_W = parseInt(localStorage.getItem("batstore-viz-node-w"), 10) || 280;
+  let RECORDS_H = parseInt(localStorage.getItem("batstore-viz-records-h"), 10) || 600;
   const HGAP = 24, VGAP = 46;
   const EXPAND_ALL_WARN_THRESHOLD = 1500;
   // A B+tree internal node can have up to FAN_OUT (often 100+) children -
@@ -1666,7 +1666,7 @@
   // reasonable zoom level) unreadable. Cap how many render per node until
   // the user explicitly asks for the rest via the "+N more" box. Adjustable
   // at runtime via the toolbar's "Children shown" input - not a const.
-  let DEFAULT_CHILD_PAGE = parseInt(localStorage.getItem("cmvbt-viz-child-page"), 10) || 4;
+  let DEFAULT_CHILD_PAGE = parseInt(localStorage.getItem("batstore-viz-child-page"), 10) || 4;
   const MORE_PREFIX = "more::";
   const MAP2D_W = 720, MAP2D_H = 460, MAP2D_PAD = 64, MAP2D_RIGHT_PAD = 24;
 
@@ -1867,7 +1867,7 @@
     rangeHits.clear(); rangeCropMode = false; rangeCropBounds = null; heatmapMetric = null; anomalyTour = []; anomalyTourIndex = -1;
 
     const nodeCount = Object.keys(dump.nodes).length;
-    if(nodeCount>5000&&!performanceMode){performanceMode=true;localStorage.setItem("cmvbt-viz-performance","1");document.getElementById("performanceModeBtn").classList.add("primary");updateTreeActionStatus();showToast("Large dump detected: viewport performance mode enabled automatically.",4800);}
+    if(nodeCount>5000&&!performanceMode){performanceMode=true;localStorage.setItem("batstore-viz-performance","1");document.getElementById("performanceModeBtn").classList.add("primary");updateTreeActionStatus();showToast("Large dump detected: viewport performance mode enabled automatically.",4800);}
     fileLabel.textContent = name;
     fileLabel.title = name;
     document.getElementById("fileMeta").textContent = (currentFileSize / 1e6).toFixed(2) + " MB";
@@ -1881,7 +1881,7 @@
     updateTimelineLabel();
 
     if (dump.roots.length) {
-      const savedRootId = localStorage.getItem("cmvbt-viz-selected-root");
+      const savedRootId = localStorage.getItem("batstore-viz-selected-root");
       const initial = dump.roots.find(r => r.node_id === savedRootId) || latestRoot();
       selectRoot(initial.node_id, initial);
       switchWorkspace("dashboard");
@@ -2090,12 +2090,12 @@
   function currentBrowserState(section=currentDashboardSourceSection){
     const root=dump?sortedRootsAsc()[+timelineRange.value]||dump.roots.find(item=>item.node_id===currentRootId):null;
     const panel=!keyTracerPanel.classList.contains("hidden")?{type:"keyTracer",key:currentKeyTracerKey}:!map2dPanel.classList.contains("hidden")?{type:"map2d",nodeId:currentMap2dNodeId,details:utilityPanel.classList.contains("node-details-open")&&!utilityPanel.classList.contains("hidden")}:!utilityPanel.classList.contains("hidden")?{type:"utility",title:document.getElementById("utilityTitle").textContent,html:utilityBody.innerHTML}:!tracePanel.classList.contains("hidden")?{type:"trace"}:null;
-    return{cmvbtExplorer:true,workspace:activeWorkspace,rootId:root?.node_id||currentRootId||null,rootVersion:root?String(root.version):null,section,dashboardScrollTop:dashboardView.scrollTop,panel};
+    return{batstoreExplorer:true,workspace:activeWorkspace,rootId:root?.node_id||currentRootId||null,rootVersion:root?String(root.version):null,section,dashboardScrollTop:dashboardView.scrollTop,panel};
   }
   function commitBrowserState(section=null){
     if(suppressBrowserHistory)return;
     const state=currentBrowserState(section),key=JSON.stringify(state);if(key===lastBrowserStateKey)return;
-    if(!history.state?.cmvbtExplorer)history.replaceState(state,"",location.href);else history.pushState(state,"",location.href);
+    if(!history.state?.batstoreExplorer)history.replaceState(state,"",location.href);else history.pushState(state,"",location.href);
     lastBrowserStateKey=key;
   }
   function scheduleBrowserState(){
@@ -2113,7 +2113,7 @@
     document.getElementById("inlineRangeCrop").textContent="Crop tree to matches";
     document.getElementById("inlineRangeClear").disabled=true;
     document.getElementById("inlineRangeResults").textContent="Enter an inclusive lower and upper key.";
-    localStorage.setItem("cmvbt-viz-selected-root", nodeId);
+    localStorage.setItem("batstore-viz-selected-root", nodeId);
     expanded.clear(); // start fully collapsed (just the root box) - a wide root
                        // (e.g. a near-capacity FAN_OUT page) would otherwise force an
                        // unreadably tiny "fit" scale right away.
@@ -4370,7 +4370,7 @@
 
   document.getElementById("minimapBtn").addEventListener("click", () => {
     minimapEnabled = !minimapEnabled;
-    localStorage.setItem("cmvbt-viz-minimap", minimapEnabled ? "1" : "0");
+    localStorage.setItem("batstore-viz-minimap", minimapEnabled ? "1" : "0");
     renderMinimap();
   });
   const minimapEl=document.getElementById("minimap");
@@ -4509,21 +4509,21 @@
   }
   recordListBtn.addEventListener("click", () => {
     recordLayoutMode = "list"; recordDetailMode = false;
-    localStorage.setItem("cmvbt-viz-record-layout", recordLayoutMode);
-    localStorage.setItem("cmvbt-viz-record-detail", "0");
+    localStorage.setItem("batstore-viz-record-layout", recordLayoutMode);
+    localStorage.setItem("batstore-viz-record-detail", "0");
     heightCache.clear(); applyRecordModeButtons(); render();
   });
   recordDetailedBtn.addEventListener("click", () => {
     recordLayoutMode = "list"; recordDetailMode = true;
-    localStorage.setItem("cmvbt-viz-record-layout", recordLayoutMode);
-    localStorage.setItem("cmvbt-viz-record-detail", "1");
+    localStorage.setItem("batstore-viz-record-layout", recordLayoutMode);
+    localStorage.setItem("batstore-viz-record-detail", "1");
     heightCache.clear();
     applyRecordModeButtons();
     render();
   });
   recordGridBtn.addEventListener("click", () => {
     recordLayoutMode = "grid";
-    localStorage.setItem("cmvbt-viz-record-layout", recordLayoutMode);
+    localStorage.setItem("batstore-viz-record-layout", recordLayoutMode);
     heightCache.clear();
     applyRecordModeButtons();
     render();
@@ -4549,7 +4549,7 @@
       return;
     }
     DEFAULT_CHILD_PAGE = v;
-    localStorage.setItem("cmvbt-viz-child-page", String(v));
+    localStorage.setItem("batstore-viz-child-page", String(v));
     childPageInput.value = v;
     childPageRange.value = v;
     childrenShownSummary.textContent = "Children: " + v;
@@ -4588,7 +4588,7 @@
     nodeWidthRange.value = v;
     nodeWidthSummary.textContent = "Node width: " + v + "px";
     document.documentElement.style.setProperty("--node-w", v + "px");
-    localStorage.setItem("cmvbt-viz-node-w", String(v));
+    localStorage.setItem("batstore-viz-node-w", String(v));
     if (nodeWidthFrame !== null) cancelAnimationFrame(nodeWidthFrame);
     nodeWidthFrame = requestAnimationFrame(() => {
       nodeWidthFrame = null;
@@ -4618,7 +4618,7 @@
     recordsHeightRange.value = v;
     recordsHeightSummary.textContent = "Leaf height: " + v + "px";
     document.documentElement.style.setProperty("--records-h", v + "px");
-    localStorage.setItem("cmvbt-viz-records-h", String(v));
+    localStorage.setItem("batstore-viz-records-h", String(v));
     if (recordsHeightFrame !== null) cancelAnimationFrame(recordsHeightFrame);
     recordsHeightFrame = requestAnimationFrame(() => {
       recordsHeightFrame = null;
@@ -4731,7 +4731,7 @@
   performanceModeBtn.addEventListener("click", () => {
     performanceMode = !performanceMode;
     performanceModeBtn.classList.toggle("primary", performanceMode);
-    localStorage.setItem("cmvbt-viz-performance", performanceMode ? "1" : "0");
+    localStorage.setItem("batstore-viz-performance", performanceMode ? "1" : "0");
     updateTreeActionStatus();
     render();
   });
@@ -5361,21 +5361,21 @@
       if(panel.details&&panel.nodeId)openNodeInspector(panel.nodeId,"overview",{preserveMap:true});
     }
   }
-  window.addEventListener("popstate",event=>{const state=event.state;if(!state?.cmvbtExplorer)return;suppressBrowserHistory=true;lastBrowserStateKey=JSON.stringify(state);currentDashboardSourceSection=state.section||null;switchWorkspace(state.workspace||"dashboard");if(dump&&state.rootId){const root=dump.roots.find(item=>item.node_id===state.rootId&&String(item.version)===String(state.rootVersion))||dump.roots.find(item=>item.node_id===state.rootId);if(root)selectRoot(root.node_id,root);}requestAnimationFrame(()=>requestAnimationFrame(()=>{restoreBrowserPanel(state.panel);if((state.workspace||"dashboard")==="dashboard"&&Number.isFinite(state.dashboardScrollTop))dashboardView.scrollTo({top:state.dashboardScrollTop,behavior:"auto"});else if(state.section)document.getElementById(state.section)?.scrollIntoView({behavior:"auto",block:"start"});else if((state.workspace||"dashboard")==="dashboard")dashboardView.scrollTo({top:0,behavior:"auto"});suppressBrowserHistory=false;}));});
-  if(!history.state?.cmvbtExplorer){const initialBrowserState=currentBrowserState();history.replaceState(initialBrowserState,"",location.href);lastBrowserStateKey=JSON.stringify(initialBrowserState);}else lastBrowserStateKey=JSON.stringify(history.state);
+  window.addEventListener("popstate",event=>{const state=event.state;if(!state?.batstoreExplorer)return;suppressBrowserHistory=true;lastBrowserStateKey=JSON.stringify(state);currentDashboardSourceSection=state.section||null;switchWorkspace(state.workspace||"dashboard");if(dump&&state.rootId){const root=dump.roots.find(item=>item.node_id===state.rootId&&String(item.version)===String(state.rootVersion))||dump.roots.find(item=>item.node_id===state.rootId);if(root)selectRoot(root.node_id,root);}requestAnimationFrame(()=>requestAnimationFrame(()=>{restoreBrowserPanel(state.panel);if((state.workspace||"dashboard")==="dashboard"&&Number.isFinite(state.dashboardScrollTop))dashboardView.scrollTo({top:state.dashboardScrollTop,behavior:"auto"});else if(state.section)document.getElementById(state.section)?.scrollIntoView({behavior:"auto",block:"start"});else if((state.workspace||"dashboard")==="dashboard")dashboardView.scrollTo({top:0,behavior:"auto"});suppressBrowserHistory=false;}));});
+  if(!history.state?.batstoreExplorer){const initialBrowserState=currentBrowserState();history.replaceState(initialBrowserState,"",location.href);lastBrowserStateKey=JSON.stringify(initialBrowserState);}else lastBrowserStateKey=JSON.stringify(history.state);
   const panelHistoryObserver=new MutationObserver(()=>scheduleBrowserState());
   [utilityPanel,keyTracerPanel,tracePanel,map2dPanel].forEach(panel=>panelHistoryObserver.observe(panel,{attributes:true,attributeFilter:["class"]}));
   document.querySelectorAll(".workspace-tab").forEach(el=>el.addEventListener("click",()=>switchWorkspace(el.dataset.workspace)));
   const sidebarEl=document.getElementById("sidebar"), contextPanelToggle=document.getElementById("contextPanelToggle");
-  const savedSidebarWidth=parseInt(localStorage.getItem("cmvbt-viz-sidebar-width"),10);
+  const savedSidebarWidth=parseInt(localStorage.getItem("batstore-viz-sidebar-width"),10);
   if(Number.isFinite(savedSidebarWidth))sidebarEl.style.setProperty("--sidebar-w",Math.max(300,Math.min(650,savedSidebarWidth))+"px");
   const sidebarResize=document.getElementById("sidebarResize");
   sidebarResize.addEventListener("pointerdown",e=>{if(sidebarEl.classList.contains("context-collapsed")||document.body.classList.contains("plain-tree-workspace"))return;sidebarResize.setPointerCapture(e.pointerId);sidebarResize.classList.add("dragging");e.preventDefault();});
   sidebarResize.addEventListener("pointermove",e=>{if(!sidebarResize.hasPointerCapture(e.pointerId))return;const width=Math.max(300,Math.min(650,e.clientX-sidebarEl.getBoundingClientRect().left));sidebarEl.style.setProperty("--sidebar-w",width+"px");});
-  sidebarResize.addEventListener("pointerup",e=>{if(!sidebarResize.hasPointerCapture(e.pointerId))return;sidebarResize.releasePointerCapture(e.pointerId);sidebarResize.classList.remove("dragging");localStorage.setItem("cmvbt-viz-sidebar-width",Math.round(sidebarEl.getBoundingClientRect().width));requestAnimationFrame(()=>{if(activeWorkspace!=="dashboard")fitToView();});});
-  let contextCollapsed=localStorage.getItem("cmvbt-viz-context-collapsed")==="1";
+  sidebarResize.addEventListener("pointerup",e=>{if(!sidebarResize.hasPointerCapture(e.pointerId))return;sidebarResize.releasePointerCapture(e.pointerId);sidebarResize.classList.remove("dragging");localStorage.setItem("batstore-viz-sidebar-width",Math.round(sidebarEl.getBoundingClientRect().width));requestAnimationFrame(()=>{if(activeWorkspace!=="dashboard")fitToView();});});
+  let contextCollapsed=localStorage.getItem("batstore-viz-context-collapsed")==="1";
   function applyContextCollapse(){sidebarEl.classList.toggle("context-collapsed",contextCollapsed);contextPanelToggle.innerHTML=contextCollapsed?'Panel &#9654;':'&#9664; Panel';contextPanelToggle.title=contextCollapsed?'Expand the options panel':'Collapse the options panel';requestAnimationFrame(()=>{if(activeWorkspace!=="dashboard")fitToView();});}
-  contextPanelToggle.addEventListener("click",()=>{contextCollapsed=!contextCollapsed;localStorage.setItem("cmvbt-viz-context-collapsed",contextCollapsed?"1":"0");applyContextCollapse();});
+  contextPanelToggle.addEventListener("click",()=>{contextCollapsed=!contextCollapsed;localStorage.setItem("batstore-viz-context-collapsed",contextCollapsed?"1":"0");applyContextCollapse();});
   applyContextCollapse();
   document.querySelectorAll("[data-side-action]").forEach(el=>el.addEventListener("click",()=>runAdvanced(el.dataset.sideAction)));
   document.getElementById("appearancePanelHost").appendChild(document.getElementById("grpAppearance"));
@@ -5385,7 +5385,7 @@
   document.getElementById("statusTreeActionsMenuHost").appendChild(document.getElementById("expandAllBtn").closest("details"));
   document.getElementById("replayLatestBtn").addEventListener("click",replayLatestStructuralChange);
   const treeLayoutSelect=document.getElementById("treeLayoutSelect");if(![...treeLayoutSelect.options].some(o=>o.value===treeLayoutMode))treeLayoutMode="hierarchical";treeLayoutSelect.value=treeLayoutMode;
-  treeLayoutSelect.addEventListener("change",()=>{treeLayoutMode=treeLayoutSelect.value;localStorage.setItem("cmvbt-viz-tree-layout",treeLayoutMode);if(dump){render();requestAnimationFrame(fitToView);}showToast("Tree layout: "+treeLayoutSelect.options[treeLayoutSelect.selectedIndex].text);});
+  treeLayoutSelect.addEventListener("change",()=>{treeLayoutMode=treeLayoutSelect.value;localStorage.setItem("batstore-viz-tree-layout",treeLayoutMode);if(dump){render();requestAnimationFrame(fitToView);}showToast("Tree layout: "+treeLayoutSelect.options[treeLayoutSelect.selectedIndex].text);});
   document.getElementById("fitTreeSideBtn").addEventListener("click",fitToView);
   document.getElementById("minimapSideBtn").addEventListener("click",()=>document.getElementById("minimapBtn").click());
   document.getElementById("validateSideBtn").addEventListener("click",()=>document.getElementById("validateBtn").click());
@@ -5496,9 +5496,9 @@
     host.innerHTML='<div class="stats-overlay-head"><span>Tree statistics</span><button type="button" class="btn panel-close-btn" id="statsOverlayClose" title="Close" aria-label="Close tree statistics">×</button></div><div class="stats-overlay-grid"><div><b>v'+escapeHtml(root?.version??"—")+'</b><span>Snapshot</span></div><div><b>'+s.nodes+'</b><span>Reachable nodes</span></div><div><b>'+Math.round(s.avgFill*100)+'%</b><span>Average fill</span></div><div><b>'+Math.round(s.avgDead*100)+'%</b><span>Dead space</span></div><div><b>'+s.leaves+'</b><span>Leaf pages</span></div><div><b>'+s.records+'</b><span>Records</span></div></div>';
     const close=document.getElementById("statsOverlayClose");
     close.onpointerdown=e=>e.stopPropagation();
-    close.onclick=e=>{e.stopPropagation();statsOverlayEnabled=false;localStorage.setItem("cmvbt-viz-stats-overlay","0");host.classList.add("hidden");document.getElementById("statsOverlayBtn").classList.remove("primary");};
+    close.onclick=e=>{e.stopPropagation();statsOverlayEnabled=false;localStorage.setItem("batstore-viz-stats-overlay","0");host.classList.add("hidden");document.getElementById("statsOverlayBtn").classList.remove("primary");};
   }
-  document.getElementById("statsOverlayBtn").onclick=()=>{statsOverlayEnabled=!statsOverlayEnabled;localStorage.setItem("cmvbt-viz-stats-overlay",statsOverlayEnabled?"1":"0");renderStatsOverlay();};
+  document.getElementById("statsOverlayBtn").onclick=()=>{statsOverlayEnabled=!statsOverlayEnabled;localStorage.setItem("batstore-viz-stats-overlay",statsOverlayEnabled?"1":"0");renderStatsOverlay();};
   function metricCards(items) {
     return '<div class="metric-grid">' + items.map(([k,v]) => '<div class="metric"><b>' + escapeHtml(v) + '</b>' + escapeHtml(k) + '</div>').join("") + '</div>';
   }
@@ -5625,7 +5625,7 @@
       };
     }
     document.getElementById("inspectLifecycle").onclick=()=>openLifecycle(id,true,tab,options);
-    document.getElementById("inspectPin").onclick=()=>{investigationPins=pinned?investigationPins.filter(x=>x!==id):[...new Set([...investigationPins,id])];localStorage.setItem("cmvbt-viz-investigation-pins",JSON.stringify(investigationPins));openNodeInspector(id,tab,options);showToast(pinned?"Removed from investigation workspace.":"Pinned to investigation workspace.");};
+    document.getElementById("inspectPin").onclick=()=>{investigationPins=pinned?investigationPins.filter(x=>x!==id):[...new Set([...investigationPins,id])];localStorage.setItem("batstore-viz-investigation-pins",JSON.stringify(investigationPins));openNodeInspector(id,tab,options);showToast(pinned?"Removed from investigation workspace.":"Pinned to investigation workspace.");};
     if(document.getElementById("inspectExplain"))document.getElementById("inspectExplain").onclick=()=>{lastMarkedNodeId=id;explainMarkedNode(true,tab,options);};
   }
   function openLifecycle(id,returnToInspector=false,returnTab="overview",inspectorOptions={}) {
@@ -5666,8 +5666,8 @@
   function openInvestigationWorkspace(){
     const cards=investigationPins.map(id=>{const n=getNode(id);if(!n)return"";return '<div class="analysis-card"><h3>'+escapeHtml(id)+'</h3>'+escapeHtml(n.type)+' · '+nodeEntries(n).length+' entries · '+Math.round(nodeMetric(n,"fill")*100)+'% fill<div class="trace-row-actions"><button class="btn" data-pin-open="'+escapeHtml(id)+'">Inspect</button><button class="btn" data-pin-locate="'+escapeHtml(id)+'">Locate</button><button class="btn" data-pin-remove="'+escapeHtml(id)+'">Remove</button></div></div>';}).join("");
     showUtilityPanel("Investigation workspace",'<div class="utility-controls"><button class="btn primary" id="workspaceReport">Export report</button><button class="btn" id="workspaceClear">Clear pins</button></div>'+(cards||'<div class="analysis-card">Pin nodes from the node inspector to compare and revisit them here.</div>'));
-    utilityBody.querySelectorAll("[data-pin-open]").forEach(el=>el.onclick=()=>openNodeInspector(el.dataset.pinOpen));utilityBody.querySelectorAll("[data-pin-locate]").forEach(el=>el.onclick=()=>locateNodeInTree(el.dataset.pinLocate));utilityBody.querySelectorAll("[data-pin-remove]").forEach(el=>el.onclick=()=>{investigationPins=investigationPins.filter(x=>x!==el.dataset.pinRemove);localStorage.setItem("cmvbt-viz-investigation-pins",JSON.stringify(investigationPins));openInvestigationWorkspace();});
-    document.getElementById("workspaceClear").onclick=()=>{investigationPins=[];localStorage.setItem("cmvbt-viz-investigation-pins","[]");openInvestigationWorkspace();};document.getElementById("workspaceReport").onclick=exportInteractiveReport;
+    utilityBody.querySelectorAll("[data-pin-open]").forEach(el=>el.onclick=()=>openNodeInspector(el.dataset.pinOpen));utilityBody.querySelectorAll("[data-pin-locate]").forEach(el=>el.onclick=()=>locateNodeInTree(el.dataset.pinLocate));utilityBody.querySelectorAll("[data-pin-remove]").forEach(el=>el.onclick=()=>{investigationPins=investigationPins.filter(x=>x!==el.dataset.pinRemove);localStorage.setItem("batstore-viz-investigation-pins",JSON.stringify(investigationPins));openInvestigationWorkspace();});
+    document.getElementById("workspaceClear").onclick=()=>{investigationPins=[];localStorage.setItem("batstore-viz-investigation-pins","[]");openInvestigationWorkspace();};document.getElementById("workspaceReport").onclick=exportInteractiveReport;
   }
   const guidedTourSteps=[
     ["Welcome","Use the dashboard for health and evolution summaries, then open Tree view to explore pages."],
@@ -5679,27 +5679,27 @@
   ];
   function showGuidedTour(step=guidedTourStep){guidedTourStep=Math.max(0,Math.min(guidedTourSteps.length-1,step));const [title,copy]=guidedTourSteps[guidedTourStep];showUtilityPanel("Guided tour · "+title,'<div class="tour-progress"><div style="width:'+((guidedTourStep+1)/guidedTourSteps.length*100)+'%"></div></div><div class="analysis-card"><h3>'+escapeHtml(title)+'</h3>'+escapeHtml(copy)+'</div><div class="utility-controls"><button class="btn" id="tourPrevious" '+(guidedTourStep===0?'disabled':'')+'>Previous</button><button class="btn primary" id="tourContinue">'+(guidedTourStep===guidedTourSteps.length-1?'Finish':'Continue')+'</button></div>');document.getElementById("tourPrevious").onclick=()=>showGuidedTour(guidedTourStep-1);document.getElementById("tourContinue").onclick=()=>{if(guidedTourStep===guidedTourSteps.length-1){utilityPanel.classList.add("hidden");guidedTourStep=0;}else showGuidedTour(guidedTourStep+1);};}
   function showVisualizerGuide(){
-    showUtilityPanel("Tour, shortcuts & options",'<div class="analysis-card"><h3>Welcome to the cMVBT visualizer</h3>Load a JSON dump, explore its snapshots, inspect physical pages, trace keys, compare versions, and export an investigation report.</div><div class="utility-controls"><button class="btn primary" id="startGuideTour">Start guided tour</button><button class="btn" id="guideChooseFile">Choose a dump</button></div><h3>Mouse controls</h3><div class="guide-grid"><div class="guide-row"><b>Canvas drag</b><span>Pan around the tree</span></div><div class="guide-row"><b>Wheel</b><span>Zoom around the pointer</span></div><div class="guide-row"><b>Minimap</b><span>Click or drag to reposition the main view</span></div><div class="guide-row"><b>Node header</b><span>Expand or collapse a page</span></div><div class="guide-row"><b>Node i</b><span>Open Overview, Entries, Routing, History, and Health</span></div><div class="guide-row"><b>☆</b><span>Mark a node for bulk actions</span></div></div><h3>Keyboard shortcuts</h3><div class="guide-grid"><div class="guide-row"><b>Ctrl/Cmd + K</b><span>Open the command palette</span></div><div class="guide-row"><b>/</b><span>Focus key search</span></div><div class="guide-row"><b>Arrow keys</b><span>Move between parent, child, and neighbouring nodes</span></div><div class="guide-row"><b>Enter</b><span>Expand or collapse the keyboard-selected node</span></div><div class="guide-row"><b>F</b><span>Fit the visible tree to the canvas</span></div><div class="guide-row"><b>P</b><span>Toggle presentation mode</span></div><div class="guide-row"><b>Escape</b><span>Close panels, menus, maps, and the command palette</span></div><div class="guide-row"><b>Alt + ← / →</b><span>Navigate backward or forward in the 2D entry map</span></div></div><h3>Main options</h3><div class="guide-grid"><div class="guide-row"><b>Data view</b><span>Choose List, Detailed list, Grid, Live view, or Hide dead</span></div><div class="guide-row"><b>Tree actions</b><span>Expand, collapse, limit depth, mark pages, or enable Performance mode</span></div><div class="guide-row"><b>Stats</b><span>Show an optional current-tree metrics overlay</span></div><div class="guide-row"><b>Snapshots</b><span>Scrub versions, play evolution, and inspect structural events</span></div><div class="guide-row"><b>Compare</b><span>Highlight added, removed, and changed pages between versions</span></div><div class="guide-row"><b>Workspace</b><span>Pin nodes, revisit findings, and export a report</span></div></div><h3>Command expressions</h3><div class="analysis-card"><code>key 42</code> · <code>node abc123</code> · <code>version 100</code> · <code>range 10..500</code><br><code>fill &gt; 90%</code> · <code>dead &gt; 50%</code> · <code>type leaf</code> · <code>changed since 100</code></div>');
+    showUtilityPanel("Tour, shortcuts & options",'<div class="analysis-card"><h3>Welcome to the BatStore visualizer</h3>Load a JSON dump, explore its snapshots, inspect physical pages, trace keys, compare versions, and export an investigation report.</div><div class="utility-controls"><button class="btn primary" id="startGuideTour">Start guided tour</button><button class="btn" id="guideChooseFile">Choose a dump</button></div><h3>Mouse controls</h3><div class="guide-grid"><div class="guide-row"><b>Canvas drag</b><span>Pan around the tree</span></div><div class="guide-row"><b>Wheel</b><span>Zoom around the pointer</span></div><div class="guide-row"><b>Minimap</b><span>Click or drag to reposition the main view</span></div><div class="guide-row"><b>Node header</b><span>Expand or collapse a page</span></div><div class="guide-row"><b>Node i</b><span>Open Overview, Entries, Routing, History, and Health</span></div><div class="guide-row"><b>☆</b><span>Mark a node for bulk actions</span></div></div><h3>Keyboard shortcuts</h3><div class="guide-grid"><div class="guide-row"><b>Ctrl/Cmd + K</b><span>Open the command palette</span></div><div class="guide-row"><b>/</b><span>Focus key search</span></div><div class="guide-row"><b>Arrow keys</b><span>Move between parent, child, and neighbouring nodes</span></div><div class="guide-row"><b>Enter</b><span>Expand or collapse the keyboard-selected node</span></div><div class="guide-row"><b>F</b><span>Fit the visible tree to the canvas</span></div><div class="guide-row"><b>P</b><span>Toggle presentation mode</span></div><div class="guide-row"><b>Escape</b><span>Close panels, menus, maps, and the command palette</span></div><div class="guide-row"><b>Alt + ← / →</b><span>Navigate backward or forward in the 2D entry map</span></div></div><h3>Main options</h3><div class="guide-grid"><div class="guide-row"><b>Data view</b><span>Choose List, Detailed list, Grid, Live view, or Hide dead</span></div><div class="guide-row"><b>Tree actions</b><span>Expand, collapse, limit depth, mark pages, or enable Performance mode</span></div><div class="guide-row"><b>Stats</b><span>Show an optional current-tree metrics overlay</span></div><div class="guide-row"><b>Snapshots</b><span>Scrub versions, play evolution, and inspect structural events</span></div><div class="guide-row"><b>Compare</b><span>Highlight added, removed, and changed pages between versions</span></div><div class="guide-row"><b>Workspace</b><span>Pin nodes, revisit findings, and export a report</span></div></div><h3>Command expressions</h3><div class="analysis-card"><code>key 42</code> · <code>node abc123</code> · <code>version 100</code> · <code>range 10..500</code><br><code>fill &gt; 90%</code> · <code>dead &gt; 50%</code> · <code>type leaf</code> · <code>changed since 100</code></div>');
     document.getElementById("startGuideTour").onclick=()=>showGuidedTour(0);document.getElementById("guideChooseFile").onclick=()=>{utilityPanel.classList.add("hidden");fileInput.value="";fileInput.click();};
   }
   function showAbout(){
     const dumpState=dump?"A tree dump is loaded and ready to explore.":"Load a tree dump to begin an investigation.";
-    showUtilityPanel("About the Explorer",'<div class="about-page"><section class="about-hero"><span class="about-product-mark"><i></i> cMVBT Explorer</span><h2>See how a concurrent multiversion B-tree changes over time.</h2><p>Explore physical pages, follow routing decisions, inspect record lifecycles, compare root snapshots, and understand tree health from one interactive workspace.</p></section><h3 class="about-section-title">What you can investigate</h3><div class="about-capabilities"><div class="about-capability"><span class="about-capability-icon">⌘</span><b>Tree structure</b><span>Navigate internal and leaf pages, ranges, fences, and structural relationships.</span></div><div class="about-capability"><span class="about-capability-icon">▦</span><b>Timeline maps</b><span>Relate key space to versions and distinguish live from superseded entries.</span></div><div class="about-capability"><span class="about-capability-icon">↶</span><b>History & evolution</b><span>Trace records, replay root transitions, and compare structural sharing.</span></div><div class="about-capability"><span class="about-capability-icon">♥</span><b>Health diagnostics</b><span>Review fill, debris, capacity pressure, hot keys, and anomalies.</span></div></div><div class="about-note"><span class="about-note-icon">◇</span><div><b>Your analysis stays in this page</b><span>The explorer reads the dump locally in the browser. '+escapeHtml(dumpState)+'</span></div></div><h3 class="about-section-title">Created by</h3><div class="about-author"><span class="about-author-avatar">AT</span><div><b>Amir Tonta</b><span>Concurrent multiversion B-tree visualization and analysis</span><div class="about-author-links"><a href="mailto:amir.tonta@mathematik.uni-marburg.de">✉ amir.tonta@mathematik.uni-marburg.de</a><a href="https://github.com/tonta-amir" target="_blank" rel="noopener noreferrer">◈ github.com/tonta-amir</a></div></div></div><div class="about-actions"><button class="btn primary" id="aboutTour">Open tour & shortcuts</button><button class="btn" id="aboutCommands">Open command palette</button></div></div>');
+    showUtilityPanel("About the Explorer",'<div class="about-page"><section class="about-hero"><span class="about-product-mark"><i></i> BatStore Explorer</span><h2>See how a concurrent multiversion B-tree changes over time.</h2><p>Explore physical pages, follow routing decisions, inspect record lifecycles, compare root snapshots, and understand tree health from one interactive workspace.</p></section><h3 class="about-section-title">What you can investigate</h3><div class="about-capabilities"><div class="about-capability"><span class="about-capability-icon">⌘</span><b>Tree structure</b><span>Navigate internal and leaf pages, ranges, fences, and structural relationships.</span></div><div class="about-capability"><span class="about-capability-icon">▦</span><b>Timeline maps</b><span>Relate key space to versions and distinguish live from superseded entries.</span></div><div class="about-capability"><span class="about-capability-icon">↶</span><b>History & evolution</b><span>Trace records, replay root transitions, and compare structural sharing.</span></div><div class="about-capability"><span class="about-capability-icon">♥</span><b>Health diagnostics</b><span>Review fill, debris, capacity pressure, hot keys, and anomalies.</span></div></div><div class="about-note"><span class="about-note-icon">◇</span><div><b>Your analysis stays in this page</b><span>The explorer reads the dump locally in the browser. '+escapeHtml(dumpState)+'</span></div></div><h3 class="about-section-title">Created by</h3><div class="about-author"><span class="about-author-avatar">AT</span><div><b>Amir Tonta</b><span>Concurrent multiversion B-tree visualization and analysis</span><div class="about-author-links"><a href="mailto:amir.tonta@mathematik.uni-marburg.de">✉ amir.tonta@mathematik.uni-marburg.de</a><a href="https://github.com/tonta-amir" target="_blank" rel="noopener noreferrer">◈ github.com/tonta-amir</a></div></div></div><div class="about-actions"><button class="btn primary" id="aboutTour">Open tour & shortcuts</button><button class="btn" id="aboutCommands">Open command palette</button></div></div>');
     document.getElementById("aboutTour").onclick=showVisualizerGuide;
     document.getElementById("aboutCommands").onclick=()=>{utilityPanel.classList.add("hidden");openCommandPalette();};
   }
   document.getElementById("guidedTourBtn").onclick=()=>showGuidedTour(0);
   document.getElementById("loadingTourBtn").onclick=showVisualizerGuide;
   document.getElementById("aboutBtn").onclick=showAbout;
-  function saveBookmark(){if(!currentRootId)return;const item={name:prompt("Bookmark name:","v"+(sortedRootsAsc()[+timelineRange.value]?.version||""))||"Bookmark",note:prompt("Optional investigation note:","")||"",rootId:currentRootId,version:String(sortedRootsAsc()[+timelineRange.value]?.version||""),nodeId:keyboardSelectedNodeId||currentRootId,view:{...view},time:new Date().toISOString()};bookmarks.push(item);localStorage.setItem("cmvbt-viz-bookmarks",JSON.stringify(bookmarks));openBookmarks();}
+  function saveBookmark(){if(!currentRootId)return;const item={name:prompt("Bookmark name:","v"+(sortedRootsAsc()[+timelineRange.value]?.version||""))||"Bookmark",note:prompt("Optional investigation note:","")||"",rootId:currentRootId,version:String(sortedRootsAsc()[+timelineRange.value]?.version||""),nodeId:keyboardSelectedNodeId||currentRootId,view:{...view},time:new Date().toISOString()};bookmarks.push(item);localStorage.setItem("batstore-viz-bookmarks",JSON.stringify(bookmarks));openBookmarks();}
   function restoreDeepLink(){if(!location.hash.startsWith("#state="))return;try{const s=JSON.parse(decodeURIComponent(escape(atob(location.hash.slice(7))))),v=tryBigInt(s.v),r=v!==null?rootForVersion(v):null;switchWorkspace("tree");if(r)selectRoot(r.node_id,r);if(Number.isFinite(s.x)&&Number.isFinite(s.y)&&Number.isFinite(s.k)){view.x=s.x;view.y=s.y;view.k=s.k;applyTransform();}if(s.n)locateNodeInTree(s.n);}catch(e){console.warn("Invalid visualizer deep link",e);}}
   async function copyTextWithFallback(value){
     try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(value);showToast("Deep link copied. Load the same dump when opening it.");return;}}catch(_e){}
     const area=document.createElement("textarea");area.value=value;area.style.position="fixed";area.style.opacity="0";document.body.appendChild(area);area.select();
     try{document.execCommand("copy");showToast("Deep link copied. Load the same dump when opening it.");}catch(_e){prompt("Copy this deep link:",value);}finally{area.remove();}
   }
-  function importSession(){const input=document.createElement("input");input.type="file";input.accept=".json";input.onchange=()=>{const reader=new FileReader();reader.onload=()=>{try{const s=JSON.parse(reader.result);if(Array.isArray(s.bookmarks)){bookmarks=s.bookmarks;localStorage.setItem("cmvbt-viz-bookmarks",JSON.stringify(bookmarks));openBookmarks();}}catch(e){alert("Invalid session file: "+e.message);}};reader.readAsText(input.files[0]);};input.click();}
-  function openBookmarks(){showUtilityPanel("Bookmarks & investigation state",'<div class="utility-controls"><button class="btn primary" id="addBookmark">Add current view</button><button class="btn" id="copyDeepLink">Copy deep link</button><button class="btn" id="exportSession">Export session</button><button class="btn" id="importSession">Import session</button></div><div class="analysis-card">Deep links restore the version, selected node, pan, and zoom after the same dump is loaded.</div>'+bookmarks.map((b,i)=>'<div class="bookmark-row" data-bookmark="'+i+'"><b>'+escapeHtml(b.name)+'</b><br>v'+escapeHtml(b.version)+' · '+escapeHtml(b.nodeId)+(b.note?'<br><small>'+escapeHtml(b.note)+'</small>':'')+' <button class="btn" data-delete-bookmark="'+i+'">Delete</button></div>').join(""));document.getElementById("addBookmark").onclick=saveBookmark;document.getElementById("copyDeepLink").onclick=()=>{const state=btoa(unescape(encodeURIComponent(JSON.stringify({v:sortedRootsAsc()[+timelineRange.value]?.version,n:keyboardSelectedNodeId,x:view.x,y:view.y,k:view.k}))));location.hash="state="+state;copyTextWithFallback(location.href);};document.getElementById("exportSession").onclick=()=>downloadBlob(currentFileName+"-session.json",new Blob([JSON.stringify({bookmarks,state:{rootId:currentRootId,view}},null,2)],{type:"application/json"}));document.getElementById("importSession").onclick=importSession;utilityBody.querySelectorAll("[data-bookmark]").forEach(el=>el.onclick=e=>{if(e.target.closest("[data-delete-bookmark]"))return;const b=bookmarks[+el.dataset.bookmark],r=dump.roots.find(r=>r.node_id===b.rootId);if(r)selectRoot(r.node_id,r);view.x=b.view.x;view.y=b.view.y;view.k=b.view.k;applyTransform();locateNodeInTree(b.nodeId);});utilityBody.querySelectorAll("[data-delete-bookmark]").forEach(el=>el.onclick=()=>{bookmarks.splice(+el.dataset.deleteBookmark,1);localStorage.setItem("cmvbt-viz-bookmarks",JSON.stringify(bookmarks));openBookmarks();});}
+  function importSession(){const input=document.createElement("input");input.type="file";input.accept=".json";input.onchange=()=>{const reader=new FileReader();reader.onload=()=>{try{const s=JSON.parse(reader.result);if(Array.isArray(s.bookmarks)){bookmarks=s.bookmarks;localStorage.setItem("batstore-viz-bookmarks",JSON.stringify(bookmarks));openBookmarks();}}catch(e){alert("Invalid session file: "+e.message);}};reader.readAsText(input.files[0]);};input.click();}
+  function openBookmarks(){showUtilityPanel("Bookmarks & investigation state",'<div class="utility-controls"><button class="btn primary" id="addBookmark">Add current view</button><button class="btn" id="copyDeepLink">Copy deep link</button><button class="btn" id="exportSession">Export session</button><button class="btn" id="importSession">Import session</button></div><div class="analysis-card">Deep links restore the version, selected node, pan, and zoom after the same dump is loaded.</div>'+bookmarks.map((b,i)=>'<div class="bookmark-row" data-bookmark="'+i+'"><b>'+escapeHtml(b.name)+'</b><br>v'+escapeHtml(b.version)+' · '+escapeHtml(b.nodeId)+(b.note?'<br><small>'+escapeHtml(b.note)+'</small>':'')+' <button class="btn" data-delete-bookmark="'+i+'">Delete</button></div>').join(""));document.getElementById("addBookmark").onclick=saveBookmark;document.getElementById("copyDeepLink").onclick=()=>{const state=btoa(unescape(encodeURIComponent(JSON.stringify({v:sortedRootsAsc()[+timelineRange.value]?.version,n:keyboardSelectedNodeId,x:view.x,y:view.y,k:view.k}))));location.hash="state="+state;copyTextWithFallback(location.href);};document.getElementById("exportSession").onclick=()=>downloadBlob(currentFileName+"-session.json",new Blob([JSON.stringify({bookmarks,state:{rootId:currentRootId,view}},null,2)],{type:"application/json"}));document.getElementById("importSession").onclick=importSession;utilityBody.querySelectorAll("[data-bookmark]").forEach(el=>el.onclick=e=>{if(e.target.closest("[data-delete-bookmark]"))return;const b=bookmarks[+el.dataset.bookmark],r=dump.roots.find(r=>r.node_id===b.rootId);if(r)selectRoot(r.node_id,r);view.x=b.view.x;view.y=b.view.y;view.k=b.view.k;applyTransform();locateNodeInTree(b.nodeId);});utilityBody.querySelectorAll("[data-delete-bookmark]").forEach(el=>el.onclick=()=>{bookmarks.splice(+el.dataset.deleteBookmark,1);localStorage.setItem("batstore-viz-bookmarks",JSON.stringify(bookmarks));openBookmarks();});}
   function exportStatistics(format){const roots=sortedRootsAsc().map(r=>({version:r.version,height:r.height,root_id:r.node_id,...statsFor(r.node_id)}));if(format==="json")downloadBlob(currentFileName+"-statistics.json",new Blob([JSON.stringify({file:currentFileName,fan_out:dump.fan_out,roots},null,2)],{type:"application/json"}));else downloadBlob(currentFileName+"-statistics.csv",new Blob(["version,height,root_id,nodes,internal,leaf,truncated,records,active,dead,avg_fill,avg_dead\n"+roots.map(r=>[r.version,r.height,r.root_id,r.nodes,r.internal,r.leaf,r.truncated,r.records,r.active,r.dead,r.avgFill,r.avgDead].join(",")).join("\n")],{type:"text/csv"}));}
   function exportInteractiveReport(){
     if(!dump||!currentRootId)return;const s=statsFor(currentRootId),root=sortedRootsAsc()[+timelineRange.value]||latestRoot(),findings=scanAnomalies();
@@ -5713,7 +5713,7 @@
     ["Node inspector","Entries, routes, history, and diagnostics","inspector"],["Investigation workspace","Pinned nodes and report building","workspace"],["Anomaly inbox","Prioritized findings and explanations","anomalyInbox"],["Guided tour","Learn the visualizer interactively","guidedTour"],["Timeline events","Show root, height, insert, and delete activity","timelineEvents"],["Structural diff","Overlay two versions","structuralDiff"],["Node lifecycle","References and fences over time","lifecycle"],["Health dashboard","Capacity and debris metrics","health"],["Heatmap overlays","Fill, dead space, records, churn","heatmaps"],["Explain marked node","Plain-language diagnostics","explain"],["Bookmarks & links","Save and share investigation state","bookmarks"],["Validation repair hints","Actionable grouped findings","repairHints"],["Export report","Self-contained investigation HTML","report"],["Export statistics","Download root metrics as CSV","statsExport"],["Compare another dump","Before/after regression summary","multiDump"],["Large-dump mode","Virtualized performance rendering","largeMode"],["Anomaly tour","Walk every suspicious node","tour"]
   ].map(x=>'<button class="btn" data-advanced="'+x[2]+'"><b>'+x[0]+'</b><br><span class="toolbar-group-label">'+x[1]+'</span></button>').join("")+'</div>');utilityBody.querySelectorAll("[data-advanced]").forEach(b=>b.onclick=()=>runAdvanced(b.dataset.advanced));}
   function runAdvanced(action){const roots=sortedRootsAsc(),last=roots[roots.length-1],prev=roots[Math.max(0,roots.length-2)],selected=keyboardSelectedNodeId||currentRootId;
-    if(action==="health")openHealth();else if(action==="replayLatest")replayLatestStructuralChange();else if(action==="inspector")openNodeInspector(selected);else if(action==="workspace")openInvestigationWorkspace();else if(action==="anomalyInbox")openAnomalyInbox();else if(action==="guidedTour")showGuidedTour(0);else if(action==="report")exportInteractiveReport();else if(action==="lifecycle")openLifecycle(prompt("Node id:",selected)||selected);else if(action==="explain")explainMarkedNode();else if(action==="bookmarks")openBookmarks();else if(action==="statsExport")openStatisticsExport();else if(action==="multiDump")openMultiDump();else if(action==="tour")showTour();else if(action==="largeMode"){performanceMode=true;performanceModeBtn.classList.add("primary");localStorage.setItem("cmvbt-viz-performance","1");updateTreeActionStatus();showUtilityPanel("Large-dump mode",'<div class="analysis-card validation-ok">Viewport virtualization is enabled. Off-screen nodes are skipped and root counts remain cancellable.</div>');render();}
+    if(action==="health")openHealth();else if(action==="replayLatest")replayLatestStructuralChange();else if(action==="inspector")openNodeInspector(selected);else if(action==="workspace")openInvestigationWorkspace();else if(action==="anomalyInbox")openAnomalyInbox();else if(action==="guidedTour")showGuidedTour(0);else if(action==="report")exportInteractiveReport();else if(action==="lifecycle")openLifecycle(prompt("Node id:",selected)||selected);else if(action==="explain")explainMarkedNode();else if(action==="bookmarks")openBookmarks();else if(action==="statsExport")openStatisticsExport();else if(action==="multiDump")openMultiDump();else if(action==="tour")showTour();else if(action==="largeMode"){performanceMode=true;performanceModeBtn.classList.add("primary");localStorage.setItem("batstore-viz-performance","1");updateTreeActionStatus();showUtilityPanel("Large-dump mode",'<div class="analysis-card validation-ok">Viewport virtualization is enabled. Off-screen nodes are skipped and root counts remain cancellable.</div>');render();}
     else if(action==="heatmaps"){showUtilityPanel("Heatmap overlays",'<div class="utility-controls"><select id="heatMetric"><option value="dead">Dead-space ratio</option><option value="fill">Capacity fill</option><option value="records">Entry count</option><option value="churn">Version churn</option></select><button class="btn primary" id="applyHeat">Apply</button><button class="btn" id="clearHeat">Clear</button></div><p>Green is low, amber medium, red high.</p>');document.getElementById("applyHeat").onclick=()=>{heatmapMetric=document.getElementById("heatMetric").value;render();};document.getElementById("clearHeat").onclick=()=>{heatmapMetric=null;render();};}
     else if(action==="structuralDiff"){
       if(roots.length<2){showToast("This dump contains only one root snapshot, so there is nothing to compare yet.");return;}
@@ -6213,12 +6213,12 @@
   // whenever this changes (a node box's real rendered height depends on it).
   // ---------------------------------------------------------------------
   const FONT_SCALE_MIN = 0.7, FONT_SCALE_MAX = 2.2, FONT_SCALE_STEP = 0.1;
-  let fontScale = parseFloat(localStorage.getItem("cmvbt-viz-font-scale")) || 1;
+  let fontScale = parseFloat(localStorage.getItem("batstore-viz-font-scale")) || 1;
 
   function applyFontScale() {
     document.documentElement.style.setProperty("--font-scale", fontScale.toFixed(2));
     document.getElementById("fontResetBtn").textContent = Math.round(fontScale * 100) + "%";
-    localStorage.setItem("cmvbt-viz-font-scale", fontScale.toFixed(2));
+    localStorage.setItem("batstore-viz-font-scale", fontScale.toFixed(2));
     heightCache.clear(); // box heights were measured at the old font size - now wrong
     render();
   }

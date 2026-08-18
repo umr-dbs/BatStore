@@ -17,15 +17,15 @@ larger leaf to scan/copy. The five variants land page-exact on:
 | Large | 2043 | 64 KiB |
 | Huge | 16379 | 512 KiB |
 
-`Medium` is the binary's default (`cMVBT tpcc`'s positional arg 21, unwired in
-`scripts/engines/cmvbt.py` until this benchmark - see that file's `run()`).
+`Medium` is the binary's default (`batstore tpcc`'s positional arg 21, unwired in
+`scripts/engines/batstore.py` until this benchmark - see that file's `run()`).
 
 ## Setup
 
 Fixed population of 8 warehouses (matching commit `1f6d666`'s own reference config) so
 leaf capacity is the only thing varying between points - a separate, earlier experiment in
 this same investigation already covers scaling warehouse *count* (1/8/80) and is not
-repeated here. Engine: cMVBT only. Workload: plain `tpcc` (its always-on HTAP scan-sweep
+repeated here. Engine: BatStore only. Workload: plain `tpcc` (its always-on HTAP scan-sweep
 OLAP thread supplies the scan-latency columns). Every run pinned to NUMA node 0
 (`numactl --cpubind=0 --membind=0`, baked into `scripts/engines/common.py`) on the 2x AMD
 EPYC 7742 server. 8s per point, 20 points total (5 sizes x 2 thread counts x gc on/off).

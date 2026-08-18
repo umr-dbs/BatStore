@@ -274,7 +274,7 @@ fn generated_multi_page_chain_serves_point_and_range_reads() {
         link,
         Interval::new(7, 7),
         &mut visible,
-        &std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
         |record| {
             range_payloads.push(*record.payload());
             true
@@ -361,7 +361,7 @@ fn generated_six_page_chain_serves_point_and_range_reads_at_every_depth() {
         link,
         Interval::new(7, 7),
         &mut visible,
-        &std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
         |record| {
             range_payloads.push(*record.payload());
             true

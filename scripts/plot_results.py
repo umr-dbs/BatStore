@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot cMVBT benchmark results (TPC-C, CH-benCHmark/TPC-H, HTAP, YCSB).
+"""Plot BatStore benchmark results (TPC-C, CH-benCHmark/TPC-H, HTAP, YCSB).
 
 Reads the CSV files written by the Rust benchmark drivers
 (mv_bench::tpcc_driver, mv_bench::ycsb_driver) and renders them with

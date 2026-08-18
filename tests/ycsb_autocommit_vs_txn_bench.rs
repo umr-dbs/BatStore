@@ -47,7 +47,7 @@ fn config(field_length: usize, execution_mode: YcsbExecutionMode) -> DriverConfi
         root_star_index: RootIndexType::FrugalList,
         wal: None,
         wal_lockfree_batch_size: None,
-        output_dir: std::env::temp_dir().join("cmvbt_ycsb_autocommit_vs_txn_bench_out"),
+        output_dir: std::env::temp_dir().join("batstore_ycsb_autocommit_vs_txn_bench_out"),
     }
 }
 

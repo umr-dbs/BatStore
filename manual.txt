@@ -2,7 +2,7 @@ CROSS-ENGINE BENCHMARK HARNESS - MANUAL
 ========================================
 
 This harness runs matched TPC-C, YCSB (A-F), and HTAP/CH-benCHmark workloads against seven
-storage engines - cMVBT (its own MVBTree, and a second libmdbx-backed comparison point),
+storage engines - BatStore (its own MVBTree, and a second libmdbx-backed comparison point),
 LeanStore, LeanStore's WiredTiger adapter, PostgreSQL (via BenchBase), and vWeaver_ermia
 (ERMIA) built two ways: `-DCMAKE_BUILD_PARAM=Vweaver` (vWeaver's own "weaving" version-chain
 compaction, engines/vweaver_ermia.py) and `-DCMAKE_BUILD_PARAM=Eval_skiplist` (the plain
@@ -23,7 +23,7 @@ scripts work starting from nothing, on any machine:
         benchbase/                   BenchBase checkout + target/benchbase-postgres/
         vWeaver_ermia/                 ERMIA checkout + build/ (Vweaver) + build_frugal/
                                           (Eval_skiplist) - one shared checkout, two builds
-        cmvbt/                          only if umr-dbs/cMVBT-OSIC was reachable to clone
+        batstore/                          only if umr-dbs/BatStore was reachable to clone
         scratch/<engine>/                 reused, wiped-before-every-run data directories
 
 
@@ -33,7 +33,7 @@ scripts work starting from nothing, on any machine:
 - Linux, x86_64. `numactl` is REQUIRED (every benchmark subprocess runs under
   `numactl --cpubind=0 --membind=0` - there is no unpinned fallback, by design, so
   results are never accidentally cross-NUMA-node).
-- Rust + Cargo (for cMVBT) - stable toolchain, whatever `cargo build --release` needs.
+- Rust + Cargo (for BatStore) - stable toolchain, whatever `cargo build --release` needs.
 - CMake + a C++ toolchain with TBB, liburing, and the usual compression libs (snappy,
   zlib, bz2, lz4, zstd), for LeanStore + WiredTiger.
 - clang/clang++ + libnuma-dev + libgoogle-glog-dev + libibverbs-dev, for vWeaver_ermia
@@ -47,7 +47,7 @@ scripts work starting from nothing, on any machine:
   automatically, see below).
 
 All of this (except Rust/Cargo, which is assumed already installed since this is the
-cMVBT repo itself) is installed/built by setup_environment.py - see section 2.
+BatStore repo itself) is installed/built by setup_environment.py - see section 2.
 
 
 2. FIRST-TIME SETUP
@@ -95,9 +95,9 @@ What it does, in order:
      ./mvnw). Before building, the script PATCHES BenchBase's pom.xml to strip out
      `com.spotify.fmt:fmt-maven-plugin` - see "MAVEN PLUGIN WORKAROUND" below. This step
      is idempotent too (safe to re-run, detects if the plugin block is already gone).
-  9. Attempts to clone cMVBT itself (umr-dbs/cMVBT-OSIC) into the workspace; if that
+  9. Attempts to clone BatStore itself (umr-dbs/BatStore) into the workspace; if that
      fails (e.g. the repo is private and you don't have access here), falls back to
-     building the checkout this script is already part of instead - see "CMVBT_REPO
+     building the checkout this script is already part of instead - see "BATSTORE_REPO
      RESOLUTION" below for exactly how this is decided and a gotcha to know about.
   10. Sets up the Python venv at scripts/.venv with pandas + matplotlib (needed only for
      plot_compare.py, not for running experiments).
@@ -109,7 +109,7 @@ builds. vWeaver and its hugepage setup remain excluded unless `--full` is passed
 Flags to skip individual steps:
 
     --skip-apt --skip-wiredtiger --skip-leanstore --skip-hugepages --skip-vweaver
-    --skip-vweaver-frugal --skip-postgres --skip-benchbase --skip-cmvbt --skip-venv
+    --skip-vweaver-frugal --skip-postgres --skip-benchbase --skip-batstore --skip-venv
     --skip-postgres-tmpfs
 
 Example: `python3 scripts/setup_environment.py --skip-postgres --skip-benchbase`
@@ -153,32 +153,29 @@ yet), it re-patches pom.xml and retries the Maven build automatically; no manual
 needed.
 
 
-CMVBT_REPO RESOLUTION (read this if cMVBT-related runs seem to use stale code)
+BATSTORE_REPO RESOLUTION (read this if BatStore-related runs seem to use stale code)
 ----------------------------------------------------------------------------------
 
-`scripts/engines/common.py` resolves `CMVBT_REPO` like this: if
-`<workspace>/cmvbt/Cargo.toml` exists, use `<workspace>/cmvbt`; otherwise fall back to
+`scripts/engines/common.py` resolves `BATSTORE_REPO` like this: if
+`<workspace>/batstore/Cargo.toml` exists, use `<workspace>/batstore`; otherwise fall back to
 this file's own grandparent directory (i.e. the checkout this script is already part of -
 self-referential, so it's automatically correct without any clone). The `Cargo.toml`
 check is meant to distinguish "a real clone happened" from "nothing's there yet" - but it
 can't distinguish a REAL, up-to-date clone from any OTHER directory that merely happens to
 contain a Cargo.toml (e.g. a stale manual copy from before this automation existed).
 
-If you have an old, non-git directory at `<workspace>/cmvbt` from before this clone
+If you have an old, non-git directory at `<workspace>/batstore` from before this clone
 automation existed, it will shadow the self-referential fallback and silently get used
 instead of your actively-developed checkout - any Rust source changes you make in the
 "real" repo won't be reflected in benchmark runs. Either delete that stale directory, or
-set the `CMVBT_REPO` environment variable explicitly to override auto-detection:
+set the `BATSTORE_REPO` environment variable explicitly to override auto-detection:
 
-    CMVBT_REPO=/path/to/the/repo/you/are/editing python3 scripts/compare_engines.py ...
+    BATSTORE_REPO=/path/to/the/repo/you/are/editing python3 scripts/compare_engines.py ...
 
-**cMVBT-OSIC is currently private.** On this workstation the clone attempt fails and the
-self-referential fallback engages (correct - it builds from wherever you're actually
-running this). On the real server, this only clones a fresh, up-to-date copy if you've
-pushed your local changes to that remote first - I have no credentials for a private repo
-and won't attempt to push on your behalf. If you want the server to have this session's
-harness/LeanStore-patch/libmdbx-backend work, push it yourself before relying on a
-server-side clone having it.
+If the BatStore clone is unavailable, the self-referential fallback engages and builds
+from the checkout containing these scripts. When both a workspace clone and a separate
+development checkout exist, ensure the workspace clone contains the revision you intend
+to benchmark or set `BATSTORE_REPO` explicitly.
 
 
 3. RUNNING EXPERIMENTS
@@ -203,7 +200,7 @@ exactly how many runs and a lower-bound time estimate before anything starts:
 
 Common ways to narrow scope for a faster/targeted run:
 
-    python3 scripts/compare_engines.py --engines cmvbt,leanstore --workloads tpcc,ycsb_e
+    python3 scripts/compare_engines.py --engines batstore,leanstore --workloads tpcc,ycsb_e
     python3 scripts/compare_engines.py --threads 2,4,16,64
     python3 scripts/compare_engines.py --gc on
     python3 scripts/compare_engines.py --workloads htap_q1,htap_q6
@@ -212,7 +209,7 @@ Options:
 
   --output-root DIR        where run_<timestamp>/ directories go (default:
                             comparison_results)
-  --engines LIST            comma-separated subset of: cmvbt, leanstore, wiredtiger,
+  --engines LIST            comma-separated subset of: batstore, leanstore, wiredtiger,
                             postgres, vweaver_ermia, vweaver_ermia_frugal, libmdbx
                             (default: all seven)
   --workloads LIST           comma-separated subset of: tpcc, ycsb_a..ycsb_f, htap_q1,
@@ -221,7 +218,7 @@ Options:
                             8-byte value), applied consistently to every YCSB engine
   --ycsb-key-only            only establish key/visibility matches; by default point
                             reads and scans consume the selected payload's bytes
-  --cmvbt-ycsb-mode MODE     cMVBT only: atomic (default) uses the one-operation
+  --batstore-ycsb-mode MODE     BatStore only: atomic (default) uses the one-operation
                             commit-before-publish path; transaction uses the ordinary
                             registered transaction lifecycle
   --tiny                    small/fast smoke-test scale (1 warehouse, 10k YCSB records,
@@ -240,7 +237,7 @@ Options:
   --ycsb-duration SECS
   --theta FLOAT              YCSB Zipfian skew parameter
   --dram-gib FLOAT           LeanStore/WiredTiger buffer pool size, and vWeaver_ermia's
-                            -node_memory_gb (unused by cmvbt/postgres/libmdbx). Omit it and
+                            -node_memory_gb (unused by batstore/postgres/libmdbx). Omit it and
                             this auto-computes PER WORKLOAD/THREADS POINT, proportional to
                             that point's own estimated dataset size (common.py::
                             dram_gib_for - ~4x a rough ~100MB/warehouse or ~1KB/record
@@ -274,20 +271,20 @@ Every engine's own on-disk DATA (not its small result artifacts - those still li
 the per-combo tree above) lives at a FIXED, tmpfs-backed path, entirely deleted and
 recreated before every single run:
 
-    <SCRATCH_ROOT>/<engine>_data/     (leanstore, wiredtiger, libmdbx, cmvbt)
+    <SCRATCH_ROOT>/<engine>_data/     (leanstore, wiredtiger, libmdbx, batstore)
     <SCRATCH_ROOT>/vweaver_ermia_log/
     <SCRATCH_ROOT>/vweaver_ermia_frugal_log/
 
-SCRATCH_ROOT (env var, default /dev/shm/cmvbt_bench_scratch) MUST be tmpfs -
+SCRATCH_ROOT (env var, default /dev/shm/batstore_bench_scratch) MUST be tmpfs -
 common.py::fresh_scratch_dir checks this on every call and sys.exit's loudly if it isn't,
 rather than silently falling back to a real disk-backed directory. This is what makes
 "in-memory only" an actual guarantee rather than a hope: LeanStore/WiredTiger/libmdbx/
 vWeaver_ermia all still perform real file I/O (page eviction, WAL flush, mmap writeback)
 regardless of buffer-pool/cache sizing - backing that I/O with tmpfs (RAM) is the only way
-to ensure none of it ever reaches a physical disk. cMVBT's own WAL is forced ON,
-unconditionally, in every workload this harness drives (see cmvbt.py) and written to this
+to ensure none of it ever reaches a physical disk. BatStore's own WAL is forced ON,
+unconditionally, in every workload this harness drives (see batstore.py) and written to this
 same tmpfs-backed scratch dir - LeanStore's WAL (baked into its B-tree core,
-WALMacros.hpp) can't be disabled either, so leaving cMVBT's off by default would compare a
+WALMacros.hpp) can't be disabled either, so leaving BatStore's off by default would compare a
 durable-logging engine against a non-durable one; forcing it on everywhere means the only
 overhead this adds anywhere is genuine serialization/fsync cost, never real disk I/O. See
 section 5 below for PostgreSQL, which this harness does NOT control the storage of.
@@ -313,7 +310,7 @@ the small per-combo artifacts (stdout.log, result CSVs) survive for later inspec
 Not every engine supports every dimension identically - the harness is explicit about
 this rather than papering over it:
 
-- WAL: cMVBT's WAL is forced ON unconditionally (see section 4) to match LeanStore, whose
+- WAL: BatStore's WAL is forced ON unconditionally (see section 4) to match LeanStore, whose
   WAL (baked into its B-tree core) can't be disabled either. The WiredTigerAdapter this
   harness drives (frontend/shared/WiredTigerAdapter.hpp) originally opened its connection
   with `log=(enabled=false)` - WiredTiger's own WAL silently OFF, an asymmetry against
@@ -322,7 +319,7 @@ this rather than papering over it:
   concept (its own copy-on-write meta-page double-buffering is its durability mechanism);
   PostgreSQL's WAL is always on and can't be disabled either.
 
-- GC on/off: cMVBT (real --gc flag), PostgreSQL (via `autovacuum`, toggled with
+- GC on/off: BatStore (real --gc flag), PostgreSQL (via `autovacuum`, toggled with
   `ALTER SYSTEM` + `pg_reload_conf()`, no restart needed), and vWeaver_ermia (real
   `-enable_gc` flag - gates actual version-chain reclamation in dbcore/sm-alloc.cpp and
   dbcore/sm-oid.cpp, confirmed by reading both call sites, not just its own README) all
@@ -338,9 +335,9 @@ this rather than papering over it:
   only Q1 ("Pricing Summary Report") and Q6 ("Forecasting Revenue Change") are
   implemented across the engines that support this at all - these two happen to be the
   only pure-aggregation, no-join queries in the set, which is why they're the ones that
-  could be ported everywhere without a lot of new work. cMVBT and PostgreSQL/BenchBase
-  already had real implementations (cMVBT also implements Q4/Q5 internally, but those
-  aren't part of this cross-engine comparison - only Q1/Q6 rows get read out of cMVBT's
+  could be ported everywhere without a lot of new work. BatStore and PostgreSQL/BenchBase
+  already had real implementations (BatStore also implements Q4/Q5 internally, but those
+  aren't part of this cross-engine comparison - only Q1/Q6 rows get read out of BatStore's
   own output). LeanStore/WiredTiger's analyticalQuery() was a literal "TODO: implement CH
   analytical queries" stub before this harness added real Q1/Q6 bodies to it (see
   frontend/tpc-c/TPCCWorkload.hpp in the LeanStore checkout). libmdbx got the same
@@ -359,7 +356,7 @@ this rather than papering over it:
 
 - libmdbx's single-writer model: unlike every other engine here, libmdbx (like LMDB)
   allows only ONE read-write transaction active process-wide at a time - there is no
-  possible write-write race the way cMVBT's OSIC or a real distributed-lock MVCC engine
+  possible write-write race the way BatStore's OSIC or a real distributed-lock MVCC engine
   has. Any workload with a write component (update/insert/read-modify-write for YCSB;
   New-Order/Payment/Delivery for TPC-C) will show throughput fundamentally bounded by that
   single-writer serialization as thread count grows. This is a genuine, expected
@@ -460,37 +457,37 @@ this rather than papering over it:
   customers-per-district counts, TPC-C's "by last name" customer lookups (Payment/
   Order-Status, ~60% of those transactions) can have a high miss rate purely because the
   ~1,000 possible last-name codes outnumber the loaded customer pool - also expected, not
-  a bug (verified identical behavior between cMVBT's own TPC-C driver and the new libmdbx
+  a bug (verified identical behavior between BatStore's own TPC-C driver and the new libmdbx
   one at the same tiny scale).
 
 
 6. HOW LIBMDBX WAS ADDED (src/mv_bench/mdbx_ycsb.rs, mdbx_tpcc.rs)
 ------------------------------------------------------------------------
 
-A second, independent storage backend inside cMVBT itself, using the `libmdbx` Rust crate
-(a path-copying/copy-on-write B+Tree) instead of cMVBT's own version-chain MVBTree, run
+A second, independent storage backend inside BatStore itself, using the `libmdbx` Rust crate
+(a path-copying/copy-on-write B+Tree) instead of BatStore's own version-chain MVBTree, run
 through the SAME standard TPC-C/YCSB A-F workloads for a genuine architecture-vs-
 architecture MVCC comparison. Gated behind the `mdbx-backend` Cargo feature (optional -
 not every build needs a second storage engine):
 
     cargo build --release --features mdbx-backend
 
-This reuses cMVBT's existing schema/row/key/WAL-codec layer entirely as-is (`TpccRow`/
+This reuses BatStore's existing schema/row/key/WAL-codec layer entirely as-is (`TpccRow`/
 `YcsbRow`, their `WalPayload` byte encoders, `TpccConfig`/`YcsbConfig`, every bit-packed
 `u64` key-builder function) - that layer was already fully storage-engine-agnostic. Only
 the transaction logic and driver loop are reimplemented against libmdbx's
 `Transaction<RO|RW>` API, since there's no trait boundary in this codebase between
-cMVBT's own tree and its business logic - `mdbx_ycsb.rs`/`mdbx_tpcc.rs` are parallel
+BatStore's own tree and its business logic - `mdbx_ycsb.rs`/`mdbx_tpcc.rs` are parallel
 files, not a generic backend swapped into the existing drivers. New CLI subcommands
 (`mdbx_ycsb`, `mdbx_tpcc`) mirror the existing `ycsb`/`tpcc` subcommands' positional-arg
 order wherever the concept overlaps, dropping every knob that has no libmdbx equivalent
-(cMVBT's own GC/root-index/WAL/affinity knobs).
+(BatStore's own GC/root-index/WAL/affinity knobs).
 
 
 7. REBUILDING ONE ENGINE MANUALLY (after editing its source, without the full script)
 --------------------------------------------------------------------------------------
 
-cMVBT:
+BatStore:
     cargo build --release
     cargo build --release --features mdbx-backend    # to also get mdbx_ycsb/mdbx_tpcc
 
@@ -550,12 +547,12 @@ Every figure is written as both PDF and SVG into <run-dir>/plots/. Figures produ
   summary_all_workloads            Every workload's primary metric, log-scaled, one chart
   threads_sweep_<workload>         Throughput vs. thread count, one line per engine (and
                                   per GC variant where applicable) - one file per workload
-  gc_on_vs_off                     GC-on vs GC-off throughput, cmvbt/postgres only (the
+  gc_on_vs_off                     GC-on vs GC-off throughput, batstore/postgres only (the
                                   only two with a real toggle - see section 5)
   ycsb_e_scan_latency              YCSB-E scan-op latency (p50/p95/p99), across engines
-  cmvbt_tpcc_olap_scan_latency      cMVBT-only: its always-on concurrent OLAP-scan-sweep
+  batstore_tpcc_olap_scan_latency      BatStore-only: its always-on concurrent OLAP-scan-sweep
                                   thread's latency vs. staleness/delay (HTAP-mode data
-                                  specific to cMVBT, not comparable to the other engines'
+                                  specific to BatStore, not comparable to the other engines'
                                   plain-OLTP TPC-C run in this harness)
   htap_interference                 OLTP throughput drop (%) under concurrent CH-benCHmark
                                   analytics (htap_q1/htap_q6) vs. plain TPC-C, per engine
@@ -574,7 +571,7 @@ were the default). Every such figure's title says which thread count it's pinned
 
 manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
 
-    engine                cmvbt | leanstore | wiredtiger | postgres | vweaver_ermia |
+    engine                batstore | leanstore | wiredtiger | postgres | vweaver_ermia |
                             vweaver_ermia_frugal | libmdbx
     workload               tpcc | ycsb_a..ycsb_f | htap_q1 | htap_q6
     config_label            scale label ("tiny" or "server")
@@ -587,7 +584,7 @@ manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
                             (see section 5), not 0
     scan_p50_us / scan_p95_us / scan_p99_us / scan_avg_us / scan_count
                               scan/analytical-query latency (microseconds) - populated for
-                              ycsb_e (scan ops), tpcc (cMVBT's own HTAP scan-sweep only),
+                              ycsb_e (scan ops), tpcc (BatStore's own HTAP scan-sweep only),
                               and htap_q1/htap_q6 (CH-benCHmark query latency); 0/blank
                               elsewhere
     notes                     "FAILED ..." / "EXCEPTION: ..." on error (e.g.

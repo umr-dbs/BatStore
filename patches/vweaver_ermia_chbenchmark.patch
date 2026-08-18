@@ -71,7 +71,7 @@
  
 +// ---------------------------------------------------------------------
 +// CH-benCHmark Q1/Q6 (see mv_bench::tpch_queries::q1/q6 in the sibling
-+// cMVBT-OSIC harness for the reference implementation every engine there
++// BatStore harness for the reference implementation every engine there
 +// ports) - run from a dedicated thread (tpcc_bench_runner::StartHtapThread,
 +// below) rather than mixed into the normal per-transaction weighted workload
 +// the way Query2/txn_query2 above is: this matches the "N OLTP threads + 1

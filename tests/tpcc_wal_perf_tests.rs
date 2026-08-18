@@ -64,7 +64,7 @@ fn config(num_terminals: usize, wal_path: PathBuf, batch_size: Option<usize>) ->
         wal: Some((wal_path, Duration::from_millis(5))),
         wal_lockfree_batch_size: batch_size,
         htap_baseline: None,
-        output_dir: std::env::temp_dir().join("cmvbt_tpcc_wal_perf_test_out"),
+        output_dir: std::env::temp_dir().join("batstore_tpcc_wal_perf_test_out"),
     }
 }
 
@@ -77,7 +77,7 @@ fn wal_backend_perf_sweep_tpcc() {
     for &threads in THREAD_COUNTS {
         for &(label, batch_size) in BACKENDS {
             let wal_path = dir.join(format!(
-                "cmvbt_tpcc_wal_perf_{label}_{threads}_{}.log",
+                "batstore_tpcc_wal_perf_{label}_{threads}_{}.log",
                 std::process::id()
             ));
             let _ = std::fs::remove_file(&wal_path);

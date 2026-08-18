@@ -1,14 +1,14 @@
-"""libmdbx engine wrapper - drives cMVBT's own binary (same as cmvbt.py), but its
+"""libmdbx engine wrapper - drives BatStore's own binary (same as batstore.py), but its
 `mdbx_ycsb`/`mdbx_tpcc` subcommands (src/mv_bench/mdbx_ycsb.rs / mdbx_tpcc.rs), a second,
 independent storage backend built on the `libmdbx` crate (path-copying/copy-on-write
-B+Tree) instead of cMVBT's own version-chain MVBTree - only compiled in behind the
+B+Tree) instead of BatStore's own version-chain MVBTree - only compiled in behind the
 `mdbx-backend` Cargo feature, since it's an optional comparison point, not part of every
 build.
 
 TPC-C + YCSB A-F + htap_q1/htap_q6 - the latter two run mdbx_tpcc.rs's own Q1 ("Pricing
 Summary Report")/Q6 ("Forecasting Revenue Change") queries (mdbx_q1/mdbx_q6, a libmdbx
 port of `mv_bench::tpch_queries::q1`/`q6`) concurrently with the OLTP terminals, same
-mechanism as cmvbt.py's "ch" olap_mode. Unlike cMVBT/LeanStore/WiredTiger, only Q1/Q6 are
+mechanism as batstore.py's "ch" olap_mode. Unlike BatStore/LeanStore/WiredTiger, only Q1/Q6 are
 implemented (not the full 4-query CH-benCHmark rotation) - libmdbx's own TPC-C schema
 (mdbx_tpcc.rs) only has the 11 core tables, not CH-benCHmark's SUPPLIER/NATION/REGION
 addition Q4/Q5 need, and Q1/Q6 are the only 2 of CH-benCHmark's 22 queries that are pure
@@ -16,7 +16,7 @@ addition Q4/Q5 need, and Q1/Q6 are the only 2 of CH-benCHmark's 22 queries that 
 mdbx_tpcc.rs's module docs).
 
 libmdbx (like LMDB) allows only one read-write transaction active process-wide at a time -
-there is no possible write-write race the way cMVBT's OSIC or a real MVCC engine has, so
+there is no possible write-write race the way BatStore's OSIC or a real MVCC engine has, so
 unlike every other engine here, throughput at higher thread counts is fundamentally
 bounded by that single-writer serialization for any workload with a write component. This
 is a genuine, expected characteristic of path-copying/CoW MVCC to surface honestly, not a
@@ -28,8 +28,8 @@ from pathlib import Path
 
 from . import common
 
-REPO_ROOT = common.CMVBT_REPO
-BINARY = REPO_ROOT / "target" / "release" / "cMVBT"
+REPO_ROOT = common.BATSTORE_REPO
+BINARY = REPO_ROOT / "target" / "release" / "batstore"
 
 # libmdbx's own MVCC reclaims old pages once no reader references them (like any real
 # path-copying store) - no separate on/off toggle exists or is being added, same treatment
@@ -39,9 +39,9 @@ SUPPORTS_GC_TOGGLE = False
 
 def ensure_built() -> None:
     import subprocess
-    # Same shared binary/allocator knob as cmvbt.py's own ensure_built() - see
-    # common.cmvbt_cargo_build_args's doc for why this can't just be duplicated ad hoc.
-    subprocess.run(common.cmvbt_cargo_build_args("mdbx-backend"), cwd=REPO_ROOT, check=True)
+    # Same shared binary/allocator knob as batstore.py's own ensure_built() - see
+    # common.batstore_cargo_build_args's doc for why this can't just be duplicated ad hoc.
+    subprocess.run(common.batstore_cargo_build_args("mdbx-backend"), cwd=REPO_ROOT, check=True)
 
 
 def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", reload: bool = True,
@@ -118,7 +118,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         latency = common.read_latency_summary(output_dir / "s_htap_scan_latency_summary.csv")
     elif workload in common.HTAP_WORKLOADS:
         # mdbx_tpcc.rs writes the requested query's rows into tpcc_scan.csv (see
-        # MdbxScanResult's doc there), using the same mode-column convention as cMVBT.
+        # MdbxScanResult's doc there), using the same mode-column convention as BatStore.
         mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
         latency = common.percentiles_from_samples(
             output_dir / "tpcc_scan.csv", "latency_ns", filter_column="mode", filter_value=mode,

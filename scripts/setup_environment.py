@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bootstraps the standard engines used by scripts/compare_engines.py, FROM NOTHING:
-clones their sibling repos (cMVBT itself only if it's reachable, see step_cmvbt), applies
+clones their sibling repos (BatStore itself only if it's reachable, see step_batstore), applies
 this harness's required patches, then builds each one, sets up PostgreSQL, and creates the
 Python plotting venv. The failure-prone vWeaver/ERMIA variants and their hugepage setup are
 excluded by default; pass --full to include them.
@@ -51,8 +51,8 @@ VWEAVER_REPO = common.VWEAVER_REPO
 VWEAVER_BUILD_DIR = VWEAVER_REPO / "build"
 VWEAVER_FRUGAL_BUILD_DIR = VWEAVER_REPO / "build_frugal"
 
-CMVBT_OSIC_URL = "https://github.com/umr-dbs/cMVBT-OSIC.git"
-CMVBT_WORKSPACE_CLONE = WORKSPACE_ROOT / "cmvbt"
+BATSTORE_REPO_URL = "https://github.com/umr-dbs/BatStore.git"
+BATSTORE_WORKSPACE_CLONE = WORKSPACE_ROOT / "batstore"
 # The exact commit patches/leanstore.patch (this repo) was generated against - pinned so
 # the patch always applies cleanly regardless of how far upstream LeanStore has moved.
 LEANSTORE_URL = "https://github.com/leanstore/leanstore.git"
@@ -169,7 +169,7 @@ def step_fresh_checkouts() -> None:
     workspace = WORKSPACE_ROOT.resolve()
     targets = [
         WIREDTIGER_REPO, LEANSTORE_REPO, BENCHBASE_REPO, VWEAVER_REPO,
-        CMVBT_WORKSPACE_CLONE,
+        BATSTORE_WORKSPACE_CLONE,
     ]
     for target in targets:
         resolved = target.resolve(strict=False)
@@ -467,7 +467,7 @@ def step_postgres_tmpfs() -> None:
     under common.SCRATCH_ROOT - the same tmpfs-verified root every other engine's data now
     uses, see common.py::fresh_scratch_dir), so PostgreSQL gets the same in-memory-only
     guarantee LeanStore/WiredTiger/libmdbx/vWeaver_ermia already have from that function,
-    and cMVBT already has for its tmpfs-backed WAL.
+    and BatStore already has for its tmpfs-backed WAL.
 
     Run by default (disable with --skip-postgres-tmpfs). Unlike every other step here,
     this one STOPS your real, already-running PostgreSQL SERVER (not a
@@ -515,7 +515,7 @@ def step_postgres_tmpfs() -> None:
         # Repair engine scratch directories left by an earlier root-run too. Do not touch
         # postgresql_data: the server correctly requires that tree to remain postgres-owned.
         for name in (
-            "cmvbt_data", "leanstore_data", "wiredtiger_data", "libmdbx_data",
+            "batstore_data", "leanstore_data", "wiredtiger_data", "libmdbx_data",
             "vweaver_ermia_log", "vweaver_ermia_frugal_log",
         ):
             engine_dir = common.SCRATCH_ROOT / name
@@ -649,39 +649,39 @@ def step_benchbase() -> None:
     run(["tar", "xzf", str(tgz)], cwd=BENCHBASE_REPO / "target")
 
 
-def step_cmvbt() -> None:
-    log("Setting up cMVBT")
-    if not CMVBT_WORKSPACE_CLONE.exists():
-        log(f"Attempting to clone {CMVBT_OSIC_URL} into {CMVBT_WORKSPACE_CLONE}")
-        result = subprocess.run(["git", "clone", CMVBT_OSIC_URL, str(CMVBT_WORKSPACE_CLONE)])
+def step_batstore() -> None:
+    log("Setting up BatStore")
+    if not BATSTORE_WORKSPACE_CLONE.exists():
+        log(f"Attempting to clone {BATSTORE_REPO_URL} into {BATSTORE_WORKSPACE_CLONE}")
+        result = subprocess.run(["git", "clone", BATSTORE_REPO_URL, str(BATSTORE_WORKSPACE_CLONE)])
         if result.returncode != 0:
-            shutil.rmtree(CMVBT_WORKSPACE_CLONE, ignore_errors=True)  # drop any partial clone
-            print(f"Clone failed (cMVBT-OSIC may be private, or this machine may lack "
+            shutil.rmtree(BATSTORE_WORKSPACE_CLONE, ignore_errors=True)  # drop any partial clone
+            print(f"Clone failed (BatStore may be private, or this machine may lack "
                   f"access) - falling back to the checkout this script is already part of "
                   f"instead. If you expect access here (e.g. you've since been granted it, "
                   f"or you're on the real server with credentials configured), just re-run "
                   f"this script.")
 
     active_repo = (
-        CMVBT_WORKSPACE_CLONE if (CMVBT_WORKSPACE_CLONE / "Cargo.toml").exists()
-        else common.CMVBT_REPO
+        BATSTORE_WORKSPACE_CLONE if (BATSTORE_WORKSPACE_CLONE / "Cargo.toml").exists()
+        else common.BATSTORE_REPO
     )
-    log(f"Building cMVBT ({active_repo})")
+    log(f"Building BatStore ({active_repo})")
     # setup_environment promises a binary usable by every wrapper, including libmdbx.
     # Building without this feature makes `compare_engines.py --skip-build --engines
     # libmdbx` fail because the mdbx_ycsb/mdbx_tpcc subcommands do not exist.
-    run(common.cmvbt_cargo_build_args("mdbx-backend"), cwd=active_repo)
+    run(common.batstore_cargo_build_args("mdbx-backend"), cwd=active_repo)
 
 
 def step_python_venv() -> None:
     log("Setting up the Python plotting venv")
-    venv_dir = common.CMVBT_REPO / "scripts" / ".venv"
+    venv_dir = common.BATSTORE_REPO / "scripts" / ".venv"
     pip = venv_dir / "bin" / "pip"
     if pip.exists():
         print(f"{venv_dir} already set up, skipping.")
         return
     run([sys.executable, "-m", "venv", str(venv_dir)])
-    run([str(pip), "install", "-q", "-r", str(common.CMVBT_REPO / "scripts" / "requirements.txt")])
+    run([str(pip), "install", "-q", "-r", str(common.BATSTORE_REPO / "scripts" / "requirements.txt")])
 
 
 def main() -> None:
@@ -703,7 +703,7 @@ def main() -> None:
     parser.add_argument("--skip-hugepages", action="store_true")
     parser.add_argument("--skip-postgres", action="store_true")
     parser.add_argument("--skip-benchbase", action="store_true")
-    parser.add_argument("--skip-cmvbt", action="store_true")
+    parser.add_argument("--skip-batstore", "--skip-cmvbt", dest="skip_batstore", action="store_true")
     parser.add_argument("--skip-venv", action="store_true")
     parser.add_argument(
         "--skip-postgres-tmpfs", action="store_true",
@@ -727,7 +727,7 @@ def main() -> None:
         ("vweaver-frugal", not args.full or args.skip_vweaver_frugal, step_vweaver_ermia_frugal),
         ("postgres", args.skip_postgres, step_postgres),
         ("benchbase", args.skip_benchbase, step_benchbase),
-        ("cmvbt", args.skip_cmvbt, step_cmvbt),
+        ("batstore", args.skip_batstore, step_batstore),
         ("venv", args.skip_venv, step_python_venv),
     ]
 

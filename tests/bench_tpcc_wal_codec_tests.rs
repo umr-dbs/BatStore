@@ -190,7 +190,7 @@ fn crash_recovery_round_trip_for_boxed_rows() {
     use crate::mv_crud_model::crud_operation_result::CRUDOperationResult;
     use crate::mv_root::index_root::RootIndexType;
 
-    let path = std::env::temp_dir().join(format!("cmvbt_tpcc_wal_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!("batstore_tpcc_wal_test_{}.log", std::process::id()));
     let _ = std::fs::remove_file(&path);
 
     let warehouse_key = k_warehouse(1);
@@ -319,7 +319,7 @@ fn tpcc_database_crash_recovery_round_trip_across_tables() {
     use crate::mv_root::index_root::RootIndexType;
 
     let base_path =
-        std::env::temp_dir().join(format!("cmvbt_tpcc_db_wal_test_{}.log", std::process::id()));
+        std::env::temp_dir().join(format!("batstore_tpcc_db_wal_test_{}.log", std::process::id()));
     let meta_path = format!("{}.meta", base_path.display());
     let _ = std::fs::remove_file(&base_path);
     let _ = std::fs::remove_file(&meta_path);

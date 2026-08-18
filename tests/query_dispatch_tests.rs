@@ -195,7 +195,7 @@ fn repeated_failed_updates_do_not_corrupt_later_state() {
 #[test]
 fn update_in_place_disabled_while_wal_attached() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_dispatch_wal_test_{}.log",
+        "batstore_dispatch_wal_test_{}.log",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);

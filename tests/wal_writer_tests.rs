@@ -8,7 +8,7 @@ use crate::mv_wal::writer::WalWriter;
 
 #[test]
 fn group_commit_flushes_and_wait_unblocks() {
-    let path = std::env::temp_dir().join(format!("cmvbt_wal_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!("batstore_wal_test_{}.log", std::process::id()));
     let _ = fs::remove_file(&path);
 
     let writer: WalWriter<u64, u64> = WalWriter::open(&path, Duration::from_millis(5)).unwrap();
@@ -50,7 +50,7 @@ fn group_commit_flushes_and_wait_unblocks() {
 #[test]
 fn group_commit_table_tagged_flushes_and_round_trips() {
     let path =
-        std::env::temp_dir().join(format!("cmvbt_wal_table_test_{}.log", std::process::id()));
+        std::env::temp_dir().join(format!("batstore_wal_table_test_{}.log", std::process::id()));
     let _ = fs::remove_file(&path);
 
     let writer: WalWriter<u64, u64> = WalWriter::open(&path, Duration::from_millis(5)).unwrap();

@@ -9,7 +9,7 @@
 //! in the key/event-time space past which data is considered settled: keys
 //! behind the watermark rarely change again, keys at or ahead of it are
 //! still being actively written. This workload models exactly that split so
-//! it stresses cMVBT's coldpages path (`mv_tree::smo`'s `VERSION_SPLIT`):
+//! it stresses BatStore's coldpages path (`mv_tree::smo`'s `VERSION_SPLIT`):
 //! a narrow hot window absorbs repeated updates (concentrating surviving
 //! versions on a handful of leaves) while concurrent OLAP scans hold open
 //! snapshots that prevent GC from reclaiming those versions in between.

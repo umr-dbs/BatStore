@@ -1,7 +1,7 @@
 """LeanStore native engine wrapper - drives build/frontend/{tpcc,ycsb} directly
 and parses LeanStore's own per-second profiling CSV (log_cr.csv's `tx` /
 `new_order_tx` columns - the latter added specifically for tpmC parity with
-cMVBT, see frontend/tpc-c/tpcc.cpp).
+BatStore, see frontend/tpc-c/tpcc.cpp).
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         # +1 worker: `threads` OLTP threads plus 1 dedicated CH-analytics thread (LeanStore
         # carves ch_a_threads *out of* worker_threads - see tpcc.cpp - so worker_threads
         # must be threads+1 to keep the OLTP thread count comparable to the plain "tpcc"
-        # workload at the same sweep point, matching cMVBT's additive OLTP+OLAP design).
+        # workload at the same sweep point, matching BatStore's additive OLTP+OLAP design).
         args = [
             str(leanstore_build.binary("tpcc")),
             f"--tpcc_warehouse_count={scale.tpcc_warehouses}",
@@ -71,7 +71,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         duration = scale.s_htap_duration
         # scale.ycsb_threads holds the swept --threads value for every workload (see
         # compare_engines.py's scale_variant construction) - split it into a fixed
-        # OLAP-scanner pool plus the remainder as write threads, matching cmvbt.py's
+        # OLAP-scanner pool plus the remainder as write threads, matching batstore.py's
         # s_htap branch exactly.
         threads = scale.ycsb_threads
         olap_threads = min(scale.s_htap_olap_threads, max(1, threads - 1))

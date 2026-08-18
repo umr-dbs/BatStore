@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Cross-engine benchmark harness: runs TPC-C, YCSB A-F, and HTAP/CH-benCHmark
-(htap_q1/htap_q6) against cMVBT, LeanStore, LeanStore's WiredTiger adapter,
+(htap_q1/htap_q6) against BatStore, LeanStore, LeanStore's WiredTiger adapter,
 and PostgreSQL (via BenchBase), sweeping thread/terminal count and GC on/off,
 all NUMA-pinned to one node (`numactl --cpubind=0 --membind=0`, see
 engines/common.py::run_and_track_rss), normalizing every result into one
@@ -12,14 +12,14 @@ SMT threads, matching --cpubind=0. Not every engine has a real GC toggle: see
 engines/{leanstore,wiredtiger}.py's SUPPORTS_GC_TOGGLE = False (LeanStore's
 --pgc flag is dead code in this checkout, and the WiredTiger adapter has no
 equivalent at all) - those two engines run once per (workload, threads) with
-gc_enabled="n/a" regardless of --gc. cMVBT (real --gc flag) and PostgreSQL
+gc_enabled="n/a" regardless of --gc. BatStore (real --gc flag) and PostgreSQL
 (via autovacuum, see engines/postgres_benchbase.py) get a real on/off compare.
 
 htap_q1/htap_q6 (see common.py's HTAP_WORKLOADS) run TPC-C OLTP concurrently
 with one dedicated thread repeatedly executing CH-benCHmark Q1 ("Pricing
 Summary Report") or Q6 ("Forecasting Revenue Change") - the only 2 of
 CH-benCHmark's 22 queries genuinely implemented across every engine here
-(cmvbt, leanstore, wiredtiger, postgres, libmdbx, and both vweaver_ermia
+(batstore, leanstore, wiredtiger, postgres, libmdbx, and both vweaver_ermia
 variants - see manual.txt section 5; vweaver_ermia_frugal has a separate,
 pre-existing KNOWN ISSUE there that crashes it on any sustained workload).
 Compare
@@ -31,7 +31,7 @@ measurement, no separate baseline sub-phase needed.
 Usage:
     python3 scripts/compare_engines.py
     python3 scripts/compare_engines.py --tiny --threads 2,4
-    python3 scripts/compare_engines.py --engines cmvbt,leanstore --workloads tpcc,ycsb_e
+    python3 scripts/compare_engines.py --engines batstore,leanstore --workloads tpcc,ycsb_e
     python3 scripts/compare_engines.py --threads 1,4,16,64 --gc on
     python3 scripts/compare_engines.py --warehouses 16 --tpcc-duration 120
 """
@@ -50,12 +50,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from engines import (
-    cmvbt, common, leanstore, libmdbx, postgres_benchbase, vweaver_ermia,
+    batstore, common, leanstore, libmdbx, postgres_benchbase, vweaver_ermia,
     vweaver_ermia_frugal, wiredtiger,
 )
 
 ENGINE_MODULES = {
-    "cmvbt": cmvbt,
+    "batstore": batstore,
     "leanstore": leanstore,
     "wiredtiger": wiredtiger,
     "postgres": postgres_benchbase,
@@ -80,11 +80,12 @@ def parse_args() -> argparse.Namespace:
                    help=f"comma-separated subset of {common.ALL_WORKLOADS}")
     p.add_argument("--tiny", action="store_true", help="use TINY_SCALE (smoke test) instead of the server scale")
     p.add_argument("--skip-build", action="store_true", help="skip each engine's ensure_built() step")
-    p.add_argument("--cmvbt-allocator", choices=["jemalloc", "mimalloc"], default="jemalloc",
-                   help="global allocator cMVBT's binary is built with (see Cargo.toml's `mimalloc` "
+    p.add_argument("--batstore-allocator", "--cmvbt-allocator", dest="batstore_allocator",
+                   choices=["jemalloc", "mimalloc"], default="jemalloc",
+                   help="global allocator BatStore's binary is built with (see Cargo.toml's `mimalloc` "
                         "feature) - 'jemalloc' is the crate's own default; 'mimalloc' measured a few %% "
                         "faster on YCSB's WAL path but a few %% slower on TPC-C, so it's opt-in here too. "
-                        "Only affects the cmvbt/libmdbx engines, which share one binary.")
+                        "Only affects the batstore/libmdbx engines, which share one binary.")
 
     p.add_argument("--threads", default=None,
                    help=f"comma-separated thread/terminal counts to sweep (default {DEFAULT_THREADS}, "
@@ -102,8 +103,9 @@ def parse_args() -> argparse.Namespace:
                    help="standard=10x100-byte YCSB row (default); u64=one 8-byte value")
     p.add_argument("--ycsb-key-only", action="store_true",
                    help="match/validate keys but do not consume payload bytes (default reads payload)")
-    p.add_argument("--cmvbt-ycsb-mode", choices=["atomic", "transaction"], default="atomic",
-                   help="cMVBT YCSB path: commit-before-publish auto-commit (default), or ordinary transaction lifecycle")
+    p.add_argument("--batstore-ycsb-mode", "--cmvbt-ycsb-mode", dest="batstore_ycsb_mode",
+                   choices=["atomic", "transaction"], default="atomic",
+                   help="BatStore YCSB path: commit-before-publish auto-commit (default), or ordinary transaction lifecycle")
     p.add_argument("--dram-gib", type=float)
 
     p.add_argument("--s-htap-record-count", type=int,
@@ -162,15 +164,18 @@ def _workload_duration(workload: str, scale: common.Scale) -> float:
 
 def main() -> None:
     args = parse_args()
-    # Read fresh by common.cmvbt_cargo_build_args() inside cmvbt.py/libmdbx.py's own
+    # Read fresh by common.batstore_cargo_build_args() inside batstore.py/libmdbx.py's own
     # ensure_built() - see that function's doc for why this is an env var, not a direct
-    # module attribute, and why it's set unconditionally here even if "cmvbt"/"libmdbx"
+    # module attribute, and why it's set unconditionally here even if "batstore"/"libmdbx"
     # aren't in --engines (harmless: the var is simply never read in that case).
-    os.environ["CMVBT_ALLOCATOR"] = args.cmvbt_allocator
+    os.environ["BATSTORE_ALLOCATOR"] = args.batstore_allocator
     os.environ["YCSB_PAYLOAD_BYTES"] = "8" if args.ycsb_payload == "u64" else "1000"
-    os.environ["CMVBT_YCSB_MODE"] = args.cmvbt_ycsb_mode
+    os.environ["BATSTORE_YCSB_MODE"] = args.batstore_ycsb_mode
     scale = build_scale(args)
-    engines = [e.strip() for e in args.engines.split(",") if e.strip()]
+    engines = [
+        "batstore" if e.strip() == "cmvbt" else e.strip()
+        for e in args.engines.split(",") if e.strip()
+    ]
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
     gc_list = [g.strip() for g in args.gc.split(",") if g.strip()]
     if args.threads:
@@ -232,7 +237,7 @@ def main() -> None:
     print(f"scale         : {scale.label} (warehouses={scale.tpcc_warehouses}, "
           f"ycsb_records={scale.ycsb_records})")
     print(f"engines       : {engines}")
-    print(f"cmvbt alloc   : {args.cmvbt_allocator} (ignored unless 'cmvbt'/'libmdbx' is in --engines)")
+    print(f"batstore alloc   : {args.batstore_allocator} (ignored unless 'batstore'/'libmdbx' is in --engines)")
     print(f"workloads     : {workloads}")
     print(f"YCSB payload  : {args.ycsb_payload} ({'key-only' if args.ycsb_key_only else 'payload-read'})")
     print(f"threads sweep : {thread_list}")
@@ -247,8 +252,8 @@ def main() -> None:
         f"capped at {common.default_dram_gib()} (this machine's NUMA-node-safe ceiling)"
     )
     print(f"in-memory only: SCRATCH_ROOT={common.SCRATCH_ROOT} (tmpfs-verified; LeanStore/WiredTiger/"
-          f"libmdbx/vWeaver_ermia/cmvbt data never touches a real disk) dram_gib: {dram_gib_desc} "
-          f"(LeanStore/WiredTiger buffer pool - not used by cmvbt, whose WAL is forced on but "
+          f"libmdbx/vWeaver_ermia/batstore data never touches a real disk) dram_gib: {dram_gib_desc} "
+          f"(LeanStore/WiredTiger buffer pool - not used by batstore, whose WAL is forced on but "
           f"unbounded like every other in-memory structure here, or postgres, whose shared_buffers "
           f"isn't managed by this script)")
     print(f"planned runs  : {total_runs} (>= {total_secs / 60:.1f} min of measured time alone, "
@@ -288,7 +293,7 @@ def main() -> None:
                 # TPC-C spec sizes populations at ~10 terminals per warehouse; a fixed
                 # warehouse count while terminals sweep up to 128 would push the
                 # terminals/warehouse ratio to 16:1 at the top end - far more contention
-                # than the spec's intended range, and a likely contributor to cMVBT's
+                # than the spec's intended range, and a likely contributor to BatStore's
                 # observed panic at threads=128 (see task_89ebda8a). Scaling warehouses
                 # with threads keeps contention roughly constant across the sweep, so it
                 # measures throughput vs. concurrency without confounding it with

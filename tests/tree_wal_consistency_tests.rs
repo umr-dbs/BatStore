@@ -34,7 +34,7 @@ fn dec(k: u64) -> u64 {
 
 fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "cmvbt_consistency_{name}_{}.log",
+        "batstore_consistency_{name}_{}.log",
         std::process::id()
     ))
 }
@@ -725,7 +725,7 @@ fn repro_run_range(tree: &TestTree, t: u64) {
                 if crate::mv_tree::smo::TRACE_KEY_DEBUG {
                     let log = crate::mv_tree::smo::drain_trace_log().join("\n");
                     let _ = std::fs::write(
-                        "/tmp/claude-1000/-home-amir-RustroverProjects-cMVBT/f3d9fdfb-aec9-4964-9963-71106541c3dd/scratchpad/trace_log_dump.txt",
+                        "/tmp/claude-1000/-home-amir-RustroverProjects-BatStore/f3d9fdfb-aec9-4964-9963-71106541c3dd/scratchpad/trace_log_dump.txt",
                         &log,
                     );
                 }

@@ -153,7 +153,7 @@ fn serialized_concurrent_workload_never_violates_the_split_invariant() {
 /// original, fully unsynchronized concurrent pattern. Expected to fail
 /// intermittently — that's the whole point of this investigation — so it
 /// does not belong in the normal always-green suite. Run explicitly:
-/// `cargo test --bin cMVBT -- --ignored concurrent_unsynchronized_workload_reproduces_the_failure`
+/// `cargo test --bin batstore -- --ignored concurrent_unsynchronized_workload_reproduces_the_failure`
 #[test]
 // #[ignore]
 fn concurrent_unsynchronized_workload_reproduces_the_failure() {

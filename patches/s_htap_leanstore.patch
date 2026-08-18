@@ -53,7 +53,7 @@ index 0000000..4eba3e4
 +#include <memory>
 +#include <vector>
 +// -------------------------------------------------------------------------------------
-+// "S-HTAP" streaming-workload frontend - the LeanStore-native counterpart of cMVBT's
++// "S-HTAP" streaming-workload frontend - the LeanStore-native counterpart of BatStore's
 +// src/mv_bench/s_htap_driver.rs: a near-sorted arrival stream plus recency-biased hot-tail
 +// updates (write threads) running concurrently with OLAP scans that straddle the cold/hot
 +// boundary (OLAP threads), against one single-table B-treeVI, reusing the same
@@ -83,7 +83,7 @@ index 0000000..4eba3e4
 +}
 +// -------------------------------------------------------------------------------------
 +// Mints the next arrival key: a monotonic ticket with an optional bounded backward jitter -
-+// same "allowed lateness" semantics as s_htap_random::mint_arrival_key on the cMVBT side. A
++// same "allowed lateness" semantics as s_htap_random::mint_arrival_key on the BatStore side. A
 +// jittered key can collide with one already minted by an earlier ticket; arrival_upsert
 +// below treats that as a legitimate late-arriving upsert, not an error.
 +static SHtapKey mint_arrival_key(std::atomic<u64>& next_seq, u64 max_lateness)
@@ -95,7 +95,7 @@ index 0000000..4eba3e4
 +}
 +// -------------------------------------------------------------------------------------
 +// Recency-biased "which of the `window` most recent keys" sample, anchored to the current
-+// tail - mirrors HotTailSampler on the cMVBT side (a small fixed-size window, not one that
++// tail - mirrors HotTailSampler on the BatStore side (a small fixed-size window, not one that
 +// widens with the whole keyspace). Reuses LeanStore's own (unscrambled) ZipfGenerator, same
 +// "left unscrambled on purpose" reasoning as s_htap_random.rs's doc.
 +static SHtapKey sample_hot_tail(utils::ZipfGenerator& zipf, u64 window, u64 current_max_key)
@@ -105,7 +105,7 @@ index 0000000..4eba3e4
 +}
 +// -------------------------------------------------------------------------------------
 +// [lo, hi] (inclusive) bounds for a straddling OLAP scan - same three region shapes as
-+// s_htap_random::olap_scan_bounds on the cMVBT side (pure hot-tail / pure cold-history /
++// s_htap_random::olap_scan_bounds on the BatStore side (pure hot-tail / pure cold-history /
 +// straddling), computed identically.
 +static void olap_scan_bounds(u64 current_max_key, u64 lag, u64 span, u64& lo, u64& len)
 +{
@@ -303,7 +303,7 @@ index 0000000..4eba3e4
 +   }
 +   crm.joinAll();
 +   // -------------------------------------------------------------------------------------
-+   // Summary (not raw per-op samples - see the matching comment in ycsb.cpp / cMVBT's
++   // Summary (not raw per-op samples - see the matching comment in ycsb.cpp / BatStore's
 +   // s_htap_driver.rs::write_results for why). Nearest-rank percentiles, in microseconds.
 +   // Written to the current working directory, matching every other engine's convention
 +   // here (scripts/engines/leanstore.py always invokes this binary with cwd=output_dir).
@@ -360,7 +360,7 @@ index 0000000..4d40b14
 +#include <thread>
 +#include <vector>
 +// -------------------------------------------------------------------------------------
-+// WiredTiger counterpart of s_htap.cpp / cMVBT's src/mv_bench/s_htap_driver.rs - same
++// WiredTiger counterpart of s_htap.cpp / BatStore's src/mv_bench/s_htap_driver.rs - same
 +// near-sorted-arrival + hot-tail-update + straddling-OLAP-scan workload, driven through
 +// WiredTigerAdapter against WiredTiger's own C API (same Adapter<Record> interface
 +// LeanStore's own B-tree uses - see frontend/shared/WiredTigerAdapter.hpp).
@@ -369,7 +369,7 @@ index 0000000..4d40b14
 +// `overwrite=false`, so WT_CURSOR::insert's default (overwrite=true) already makes it an
 +// unconditional upsert - no DUPLICATE error path to handle. `new_arrival` vs `late_upsert`
 +// is still reported (an existence check via a raw cursor search before the write) purely
-+// so this engine's result CSVs stay directly comparable to cMVBT/LeanStore/libmdbx's, not
++// so this engine's result CSVs stay directly comparable to BatStore/LeanStore/libmdbx's, not
 +// because WiredTiger needs the distinction.
 +// -------------------------------------------------------------------------------------
 +using namespace std;
@@ -626,7 +626,7 @@ index 0000000..4d40b14
 +      t.join();
 +   }
 +   // Summary (not raw per-op samples - see the matching comment in wiredtiger_ycsb.cpp /
-+   // cMVBT's s_htap_driver.rs::write_results for why). Nearest-rank percentiles, in
++   // BatStore's s_htap_driver.rs::write_results for why). Nearest-rank percentiles, in
 +   // microseconds. Written to the current working directory, matching every other engine's
 +   // convention here (scripts/engines/wiredtiger.py always invokes this binary with
 +   // cwd=output_dir).

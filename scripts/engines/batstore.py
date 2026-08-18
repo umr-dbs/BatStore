@@ -1,11 +1,11 @@
-"""cMVBT engine wrapper: invokes the release binary directly (cwd = output_dir,
+"""BatStore engine wrapper: invokes the release binary directly (cwd = output_dir,
 since `cargo run -- tpcc|ycsb ...` always writes its CSVs to the current
 working directory — see src/mv_bench/tpcc_driver.rs::main_tpcc /
 ycsb_driver.rs::main_ycsb, both hardcode `output_dir: PathBuf::from(".")`).
 
 WAL is forced on, unconditionally, for every run here (see the wal_path/args wiring
 in run() below) - LeanStore's own WAL (WALMacros.hpp, baked into its B-tree core)
-can't be turned off either, so leaving cMVBT's WAL off by default would compare a
+can't be turned off either, so leaving BatStore's WAL off by default would compare a
 durable-logging engine against a non-durable one. Written to a tmpfs-backed
 scratch dir (common.fresh_scratch_dir), same treatment as every other engine's
 on-disk DATA - see common.SCRATCH_ROOT's docstring - so the only overhead this adds
@@ -19,23 +19,23 @@ from pathlib import Path
 
 from . import common
 
-REPO_ROOT = common.CMVBT_REPO
-BINARY = REPO_ROOT / "target" / "release" / "cMVBT"
+REPO_ROOT = common.BATSTORE_REPO
+BINARY = REPO_ROOT / "target" / "release" / "batstore"
 
-# cMVBT has a real, already-wired `--gc` flag on both drivers (see tpcc_driver.rs/
+# BatStore has a real, already-wired `--gc` flag on both drivers (see tpcc_driver.rs/
 # ycsb_driver.rs) - a genuine gc=on/off comparison is possible here.
 SUPPORTS_GC_TOGGLE = True
 
 
 def ensure_built() -> None:
     # Always built with --features mdbx-backend (not just when "libmdbx" is also in
-    # --engines): cmvbt.py and libmdbx.py share this exact same binary path, and whichever
+    # --engines): batstore.py and libmdbx.py share this exact same binary path, and whichever
     # engine's ensure_built() runs last would otherwise silently determine whether the
     # mdbx_ycsb/mdbx_tpcc subcommands exist - building with the feature unconditionally
     # here removes that ordering dependency entirely. The extra subcommands are inert for
-    # cMVBT's own tpcc/ycsb/htap_* workloads. Allocator (jemalloc/mimalloc) - see
-    # common.cmvbt_cargo_build_args's doc - comes from CMVBT_ALLOCATOR/--cmvbt-allocator.
-    subprocess.run(common.cmvbt_cargo_build_args("mdbx-backend"), cwd=REPO_ROOT, check=True)
+    # BatStore's own tpcc/ycsb/htap_* workloads. Allocator (jemalloc/mimalloc) - see
+    # common.batstore_cargo_build_args's doc - comes from BATSTORE_ALLOCATOR/--batstore-allocator.
+    subprocess.run(common.batstore_cargo_build_args("mdbx-backend"), cwd=REPO_ROOT, check=True)
 
 
 def run(
@@ -43,12 +43,12 @@ def run(
     big_tree_size: str = "medium", ycsb_payload: str = "standard", read_payload: bool = True,
 ) -> common.NormalizedResult:
     """`reload` is accepted for interface parity with postgres_benchbase.run() but unused -
-    every cMVBT invocation is a fresh in-process population, there's no persisted state to
+    every BatStore invocation is a fresh in-process population, there's no persisted state to
     reuse across sweep points.
 
     `big_tree_size` (tiny/small/medium/large/huge) selects Table::Warehouse/Table::District's
     leaf capacity - see tpcc_schema::BigTreeSize's doc - only wired through for the "tpcc"
-    workload (positional arg 21 to `cMVBT tpcc`, see tpcc_driver.rs::main_tpcc); left at the
+    workload (positional arg 21 to `BatStore tpcc`, see tpcc_driver.rs::main_tpcc); left at the
     binary's own "medium" default everywhere else.
     """
     del reload
@@ -59,7 +59,7 @@ def run(
     # treatment) - the driver's own `fs::remove_file(wal_path)` before opening it means
     # this only needs to exist, not start empty, but wiping it here keeps behavior
     # identical to every other engine's on-disk DATA dir regardless.
-    wal_path = common.fresh_scratch_dir("cmvbt_data") / "wal.log"
+    wal_path = common.fresh_scratch_dir("batstore_data") / "wal.log"
 
     if workload == "tpcc":
         duration = scale.tpcc_duration
@@ -108,7 +108,7 @@ def run(
             str(scale.s_htap_max_lateness), str(scale.s_htap_olap_lag),
             str(scale.s_htap_olap_span), str(field_count), str(field_length),
             "false", str(read_payload).lower(), "fg", gc_bool, "false", "true",
-            str(wal_path), "5", os.environ.get("CMVBT_YCSB_MODE", "atomic"),
+            str(wal_path), "5", os.environ.get("BATSTORE_YCSB_MODE", "atomic"),
         ]
         metric_name = "write_ops_per_sec"
         ts_file, ts_column = "s_htap_timeseries.csv", "ops_completed"
@@ -125,7 +125,7 @@ def run(
             str(duration), "default", str(scale.ycsb_theta),
             str(field_count), str(field_length), "100", "fg", gc_bool, "false", "true", str(wal_path), "5", "false",
             str(read_payload).lower(),
-            os.environ.get("CMVBT_YCSB_MODE", "atomic"),
+            os.environ.get("BATSTORE_YCSB_MODE", "atomic"),
         ]
         metric_name = "ops_per_sec"
         ts_file, ts_column = "ycsb_timeseries.csv", "ops_completed"
@@ -138,16 +138,16 @@ def run(
         notes = f"TIMEOUT after {timeout:.0f}s, see stdout.log" if returncode is None else \
             f"FAILED exit={returncode}, see stdout.log"
         return common.NormalizedResult(
-            "cmvbt", workload, scale.label, duration, metric_name, 0.0, 0.0,
+            "batstore", workload, scale.label, duration, metric_name, 0.0, 0.0,
             threads=threads, gc_enabled=gc,
             notes=notes,
         )
 
     if not wal_path.is_file() or wal_path.stat().st_size == 0:
         return common.NormalizedResult(
-            "cmvbt", workload, scale.label, duration, metric_name, 0.0, 0.0,
+            "batstore", workload, scale.label, duration, metric_name, 0.0, 0.0,
             threads=threads, gc_enabled=gc,
-            notes=f"FAILED: cMVBT WAL was enabled but {wal_path} is missing or empty",
+            notes=f"FAILED: BatStore WAL was enabled but {wal_path} is missing or empty",
         )
 
     total_ops = common.sum_csv_column(output_dir / ts_file, ts_column)
@@ -172,7 +172,7 @@ def run(
         latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
 
     return common.NormalizedResult(
-        "cmvbt", workload, scale.label, duration, metric_name, value, peak_rss_mb,
+        "batstore", workload, scale.label, duration, metric_name, value, peak_rss_mb,
         threads=threads, gc_enabled=gc,
         scan_p50_us=latency["p50"], scan_p95_us=latency["p95"], scan_p99_us=latency["p99"],
         scan_avg_us=latency["avg"], scan_count=latency["count"],

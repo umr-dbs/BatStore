@@ -248,7 +248,7 @@ fn first_writer_wins_conflict() {
 /// everything it replays and has no notion of transaction boundaries.
 #[test]
 fn multi_op_transaction_writes_are_durable_across_recovery() {
-    let path = std::env::temp_dir().join(format!("cmvbt_tx_wal_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!("batstore_tx_wal_test_{}.log", std::process::id()));
     let meta_path = format!("{}.meta", path.display());
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&meta_path);
@@ -373,7 +373,7 @@ fn dropped_transaction_reverts_its_earlier_writes_on_conflict() {
 #[test]
 fn aborted_transaction_write_does_not_resurface_after_recovery() {
     let path = std::env::temp_dir().join(format!(
-        "cmvbt_tx_abort_wal_test_{}.log",
+        "batstore_tx_abort_wal_test_{}.log",
         std::process::id()
     ));
     let meta_path = format!("{}.meta", path.display());

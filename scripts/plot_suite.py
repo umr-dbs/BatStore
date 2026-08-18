@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot figures for a full cMVBT `benchmark` suite run (see `benchmark` at the
+"""Plot figures for a full BatStore `benchmark` suite run (see `benchmark` at the
 repo root / `src/mv_bench/suite.rs`): TPC-C OLTP-only, CH-benCHmark ("TPC-H"),
 HTAP, and YCSB A-F, each run once with GC on and once with GC off, with
 per-run memory-usage logging.

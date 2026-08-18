@@ -155,9 +155,10 @@ impl<
     /// (`mv_query::query`) for why: a cold chain is fixed for a leaf's
     /// whole lifetime, set once before that leaf is ever linked into the
     /// tree, and a cold page is likewise never mutated after construction.
-    /// `hot_keys` — every key this same leaf visit already produced a match
-    /// for from the *hot* page — seeds a set that is extended by every cold
-    /// match. A cold entry for an already-seen key (an older, formerly
+    /// `seen_keys` takes ownership of every key this same leaf visit already
+    /// produced a match for from the *hot* page, and is extended by every
+    /// cold match without cloning or rehashing the seed set. A cold entry for
+    /// an already-seen key (an older, formerly
     /// superseded version whose own `matches` should ordinarily be mutually
     /// exclusive with the hot version's, but isn't guaranteed to be under
     /// every hot/cold classification path — see `mv_tree::smo`'s
@@ -170,13 +171,12 @@ impl<
         mut link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
         range: Interval<Key>,
         is_visible: &mut F,
-        hot_keys: &std::collections::HashSet<Key>,
+        mut seen_keys: std::collections::HashSet<Key>,
         mut f: V,
     ) where
         F: FnMut(TxStamp) -> bool,
         V: FnMut(crate::mv_page_model::leaf_page::LeafRecordRef<'_, Key, Payload>) -> bool,
     {
-        let mut seen_keys = hot_keys.clone();
         while !link.is_none() {
             let cold_guard = link.cold().borrow_read();
             let cold_leaf = cold_guard.as_leaf_page_ref();
@@ -201,10 +201,10 @@ impl<
         link: ColdLink<FAN_OUT, NUM_RECORDS, Key, Payload>,
         range: Interval<Key>,
         is_visible: &mut F,
-        hot_keys: &std::collections::HashSet<Key>,
+        seen_keys: std::collections::HashSet<Key>,
         out: &mut VecDeque<RecordPointResult<Key, Payload>>,
     ) {
-        Self::walk_cold_chain_for_range(link, range, is_visible, hot_keys, |r| {
+        Self::walk_cold_chain_for_range(link, range, is_visible, seen_keys, |r| {
             out.push_back(RecordPointResult::from_leaf(r));
             true
         });
@@ -326,13 +326,17 @@ impl<
 
                         let cold_link = *curr_block.cold_link();
                         if !cold_link.is_none() {
-                            let hot_keys: std::collections::HashSet<Key> =
-                                self.buff.iter().skip(before).map(|r| r.key).collect();
+                            let seen_capacity = records
+                                .len()
+                                .saturating_add(cold_link.chain_total_count() as usize);
+                            let mut hot_keys =
+                                std::collections::HashSet::with_capacity(seen_capacity);
+                            hot_keys.extend(self.buff.iter().skip(before).map(|r| r.key));
                             Self::extend_from_cold_chain(
                                 cold_link,
                                 self.range,
                                 &mut is_visible,
-                                &hot_keys,
+                                hot_keys,
                                 &mut self.buff,
                             );
                         }
@@ -395,13 +399,20 @@ impl<
                     PageType::LeafRef(leaf_page) => {
                         let records = leaf_page.as_records();
                         let mut matched = 0;
-                        let mut hot_keys: std::collections::HashSet<Key> =
-                            std::collections::HashSet::new();
+                        let cold_link = *curr_block.cold_link();
+                        let mut hot_keys = (!cold_link.is_none()).then(|| {
+                            let seen_capacity = records
+                                .len()
+                                .saturating_add(cold_link.chain_total_count() as usize);
+                            std::collections::HashSet::<Key>::with_capacity(seen_capacity)
+                        });
                         if full_key_range {
                             for record in records {
                                 if record.version().matches(&mut is_visible) {
                                     matched += 1;
-                                    hot_keys.insert(record.key());
+                                    if let Some(hot_keys) = &mut hot_keys {
+                                        hot_keys.insert(record.key());
+                                    }
                                     if let Err(error) = visit(record.key(), record.payload()) {
                                         visit_error = Some(error);
                                         return;
@@ -414,7 +425,9 @@ impl<
                                     && record.version().matches(&mut is_visible)
                                 {
                                     matched += 1;
-                                    hot_keys.insert(record.key());
+                                    if let Some(hot_keys) = &mut hot_keys {
+                                        hot_keys.insert(record.key());
+                                    }
                                     if let Err(error) = visit(record.key(), record.payload()) {
                                         visit_error = Some(error);
                                         return;
@@ -424,13 +437,12 @@ impl<
                         }
                         crate::mv_test::record_leaf_scan(records.len(), matched);
 
-                        let cold_link = *curr_block.cold_link();
-                        if !cold_link.is_none() {
+                        if let Some(hot_keys) = hot_keys {
                             Self::walk_cold_chain_for_range(
                                 cold_link,
                                 self.range,
                                 &mut is_visible,
-                                &hot_keys,
+                                hot_keys,
                                 |r| match visit(r.key(), r.payload()) {
                                     Ok(()) => true,
                                     Err(error) => {

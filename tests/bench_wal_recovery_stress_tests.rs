@@ -169,7 +169,7 @@ fn unique_wal_path() -> std::path::PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Relaxed);
     std::env::temp_dir().join(format!(
-        "cmvbt_wal_recovery_stress_{}_{n}.log",
+        "batstore_wal_recovery_stress_{}_{n}.log",
         std::process::id()
     ))
 }

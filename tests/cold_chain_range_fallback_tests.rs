@@ -88,7 +88,7 @@ fn walks_a_single_cold_page_collecting_visible_in_range_matches() {
         link,
         Interval::new(0, 100),
         &mut is_visible,
-        &std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
         |r: LeafRecordRef<'_, u64, u64>| {
             found.push((r.key(), *r.payload()));
             true
@@ -116,7 +116,7 @@ fn walks_a_chain_of_two_cold_pages_collecting_from_both() {
         link_to_cold1,
         Interval::new(0, 100),
         &mut is_visible,
-        &std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
         |r: LeafRecordRef<'_, u64, u64>| {
             found.push((r.key(), *r.payload()));
             true
@@ -143,7 +143,7 @@ fn emits_a_visible_key_only_once_across_cold_pages() {
         link,
         Interval::new(0, 100),
         &mut is_visible,
-        &std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
         |r| {
             found.push(r.key());
             true
@@ -168,7 +168,7 @@ fn skips_a_cold_key_already_emitted_from_hot() {
         link,
         Interval::new(0, 100),
         &mut is_visible,
-        &hot_keys,
+        hot_keys,
         |_| {
             visits += 1;
             true
@@ -196,7 +196,7 @@ fn stops_early_when_the_callback_returns_false() {
         link_to_cold1,
         Interval::new(0, 100),
         &mut is_visible,
-        &std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
         |_r: LeafRecordRef<'_, u64, u64>| {
             visits += 1;
             false // stop after the very first match (mirrors an error in try_for_each_ref)
@@ -239,7 +239,7 @@ fn walks_a_long_chain_of_many_cold_pages_collecting_from_every_one() {
         link,
         Interval::new(0, 100),
         &mut is_visible,
-        &std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
         |r: LeafRecordRef<'_, u64, u64>| {
             found.push((r.key(), *r.payload()));
             true
@@ -288,7 +288,7 @@ fn stops_partway_through_a_long_chain_when_the_callback_returns_false() {
         link,
         Interval::new(0, 100),
         &mut is_visible,
-        &std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
         |_r: LeafRecordRef<'_, u64, u64>| {
             visits += 1;
             visits < 3
@@ -311,7 +311,7 @@ fn nothing_visible_in_range_yields_no_calls() {
         link,
         Interval::new(0, 100),
         &mut is_visible,
-        &std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
         |_| {
             visits += 1;
             true
@@ -328,7 +328,7 @@ fn empty_link_yields_no_calls() {
         ColdLink::none(),
         Interval::new(0, 100),
         &mut is_visible,
-        &std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
         |_| {
             visits += 1;
             true
