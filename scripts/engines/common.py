@@ -96,6 +96,17 @@ def numactl_prefix() -> list:
     return ["numactl", f"--cpubind={NUMA_NODE}", f"--membind={NUMA_NODE}"]
 
 
+def numa_node_cpu_list(node: int = NUMA_NODE) -> str:
+    """Kernel CPU-list syntax for a NUMA node, suitable for cgroup AllowedCPUs."""
+    path = Path(f"/sys/devices/system/node/node{node}/cpulist")
+    if not path.exists():
+        raise RuntimeError(f"cannot pin to NUMA node {node}: {path} does not exist")
+    cpus = path.read_text().strip()
+    if not cpus:
+        raise RuntimeError(f"cannot pin to NUMA node {node}: {path} is empty")
+    return cpus
+
+
 def default_subprocess_timeout(duration: float) -> float:
     """A generous `run_and_track_rss(..., timeout=...)` bound for a run whose measured
     phase is `duration` seconds: `4x duration + 300s` headroom for population/load,

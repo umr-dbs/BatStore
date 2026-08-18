@@ -29,6 +29,7 @@
 //! go directly into the mmap'd region instead of through a `write()`
 //! syscall into the page cache.
 
+use std::borrow::Cow;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -38,10 +39,14 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use libmdbx::{Database, DatabaseOptions, Mode, ReadWriteOptions, SyncMode, TableFlags, WriteFlags, WriteMap};
+use libmdbx::{
+    Database, DatabaseOptions, Mode, ReadWriteOptions, SyncMode, TableFlags, WriteFlags, WriteMap,
+};
 
 use crate::bat_bench::mem_stats::{MemSampler, DEFAULT_SAMPLE_INTERVAL};
-use crate::bat_bench::ycsb_random::{pick_op, random_row, random_scan_length, KeySampler, RequestDistribution, YcsbMix, YcsbOpType};
+use crate::bat_bench::ycsb_random::{
+    pick_op, random_row, random_scan_length, KeySampler, RequestDistribution, YcsbMix, YcsbOpType,
+};
 use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbKey};
 use crate::bat_wal::record::WalPayload;
 
@@ -72,25 +77,43 @@ const INSERT: usize = 2;
 const SCAN: usize = 3;
 const RMW: usize = 4;
 const NUM_COUNTERS: usize = 5;
-const COUNTER_NAMES: [&str; NUM_COUNTERS] = ["read", "update", "insert", "scan", "read_modify_write"];
+// Keep per-second accounting from becoming part of the point-read benchmark. This
+// matches ycsb_driver.rs: one clock read per 256 operations, rather than one per op.
+const TIMESERIES_CLOCK_EVERY: u64 = 256;
+// Storing/timing every scan is especially intrusive for short in-memory scans. Keep the
+// same systematic sampling rate as BatStore's YCSB driver.
+const SCAN_LATENCY_SAMPLE_EVERY: u64 = 1024;
+const COUNTER_NAMES: [&str; NUM_COUNTERS] =
+    ["read", "update", "insert", "scan", "read_modify_write"];
 
 fn open_db(path: &std::path::Path, num_threads: usize) -> Database<WriteMap> {
-    fs::create_dir_all(path).unwrap_or_else(|e| panic!("mdbx_ycsb: failed to create db dir {}: {e}", path.display()));
+    fs::create_dir_all(path)
+        .unwrap_or_else(|e| panic!("mdbx_ycsb: failed to create db dir {}: {e}", path.display()));
     // libmdbx's reader-slot table defaults to 61 (MDBX_READERS_FULL beyond that) -
     // below our own thread-count sweep (up to 128), which was silently aborting/
     // hanging worker threads via the `.expect` calls below. Size it to the actual
     // thread count plus headroom for the table-creation txn and any internal use.
     let options = DatabaseOptions {
         max_readers: Some((num_threads as std::ffi::c_uint).saturating_add(8)),
-        mode: Mode::ReadWrite(ReadWriteOptions { sync_mode: SyncMode::UtterlyNoSync, ..Default::default() }),
+        mode: Mode::ReadWrite(ReadWriteOptions {
+            sync_mode: SyncMode::UtterlyNoSync,
+            ..Default::default()
+        }),
         ..Default::default()
     };
-    let db = Database::<WriteMap>::open_with_options(path, options)
-        .unwrap_or_else(|e| panic!("mdbx_ycsb: failed to open database at {}: {e}", path.display()));
+    let db = Database::<WriteMap>::open_with_options(path, options).unwrap_or_else(|e| {
+        panic!(
+            "mdbx_ycsb: failed to open database at {}: {e}",
+            path.display()
+        )
+    });
     // The unnamed/default table needs one RW transaction to exist before any reader can
     // open it.
-    let txn = db.begin_rw_txn().expect("mdbx_ycsb: begin_rw_txn (table creation)");
-    txn.create_table(None, TableFlags::empty()).expect("mdbx_ycsb: create_table");
+    let txn = db
+        .begin_rw_txn()
+        .expect("mdbx_ycsb: begin_rw_txn (table creation)");
+    txn.create_table(None, TableFlags::empty())
+        .expect("mdbx_ycsb: create_table");
     txn.commit().expect("mdbx_ycsb: commit (table creation)");
     db
 }
@@ -105,22 +128,36 @@ fn encode_row(cfg: &YcsbConfig) -> Vec<u8> {
 fn mdbx_read(db: &Database<WriteMap>, key: YcsbKey, read_payload: bool) -> bool {
     let txn = db.begin_ro_txn().expect("mdbx_ycsb: begin_ro_txn");
     let table = txn.open_table(None).expect("mdbx_ycsb: open_table");
-    let value = txn.get::<Vec<u8>>(&table, &key.to_be_bytes()).expect("mdbx_ycsb: get");
     if read_payload {
-        if let Some(bytes) = &value {
+        // A clean RO value lives in libmdbx's mmap and can be borrowed for the lifetime
+        // of this transaction. Vec<u8> would allocate and copy the whole (normally 1 KiB)
+        // YCSB row on every read, obscuring the storage engine's actual lookup cost.
+        let value = txn
+            .get::<Cow<'_, [u8]>>(&table, &key.to_be_bytes())
+            .expect("mdbx_ycsb: get");
+        if let Some(bytes) = value.as_deref() {
             std::hint::black_box(bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
         }
+        value.is_some()
+    } else {
+        // Existence-only mode must not decode, allocate, or copy the value.
+        txn.get::<()>(&table, &key.to_be_bytes())
+            .expect("mdbx_ycsb: get")
+            .is_some()
     }
-    value.is_some()
 }
 
 fn mdbx_update(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> bool {
     let txn = db.begin_rw_txn().expect("mdbx_ycsb: begin_rw_txn");
     let table = txn.open_table(None).expect("mdbx_ycsb: open_table");
-    let exists = txn.get::<Vec<u8>>(&table, &key.to_be_bytes()).expect("mdbx_ycsb: get").is_some();
+    let exists = txn
+        .get::<()>(&table, &key.to_be_bytes())
+        .expect("mdbx_ycsb: get")
+        .is_some();
     if exists {
         let buf = encode_row(cfg);
-        txn.put(&table, key.to_be_bytes(), &buf, WriteFlags::UPSERT).expect("mdbx_ycsb: put");
+        txn.put(&table, key.to_be_bytes(), &buf, WriteFlags::UPSERT)
+            .expect("mdbx_ycsb: put");
     }
     txn.commit().expect("mdbx_ycsb: commit");
     exists
@@ -130,7 +167,8 @@ fn mdbx_insert(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) {
     let txn = db.begin_rw_txn().expect("mdbx_ycsb: begin_rw_txn");
     let table = txn.open_table(None).expect("mdbx_ycsb: open_table");
     let buf = encode_row(cfg);
-    txn.put(&table, key.to_be_bytes(), &buf, WriteFlags::UPSERT).expect("mdbx_ycsb: put");
+    txn.put(&table, key.to_be_bytes(), &buf, WriteFlags::UPSERT)
+        .expect("mdbx_ycsb: put");
     txn.commit().expect("mdbx_ycsb: commit");
 }
 
@@ -141,12 +179,14 @@ fn mdbx_scan(db: &Database<WriteMap>, start_key: YcsbKey, len: u64, read_payload
     let table = txn.open_table(None).expect("mdbx_ycsb: open_table");
     let mut cursor = txn.cursor(&table).expect("mdbx_ycsb: cursor");
     let mut count = 0u64;
+    // Borrow values from the mmap in both modes. In key-only mode the returned Cow is
+    // never inspected, so no payload bytes are copied or consumed.
     let mut item = cursor
-        .set_range::<Vec<u8>, Vec<u8>>(&start_key.to_be_bytes())
+        .set_range::<(), Cow<'_, [u8]>>(&start_key.to_be_bytes())
         .expect("mdbx_ycsb: cursor.set_range");
     while item.is_some() && count < len {
         if read_payload {
-            if let Some((_, bytes)) = &item {
+            if let Some((_, bytes)) = item.as_ref() {
                 std::hint::black_box(bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
             }
         }
@@ -154,12 +194,19 @@ fn mdbx_scan(db: &Database<WriteMap>, start_key: YcsbKey, len: u64, read_payload
         if count >= len {
             break;
         }
-        item = cursor.next::<Vec<u8>, Vec<u8>>().expect("mdbx_ycsb: cursor.next");
+        item = cursor
+            .next::<(), Cow<'_, [u8]>>()
+            .expect("mdbx_ycsb: cursor.next");
     }
     count as usize
 }
 
-fn mdbx_read_modify_write(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey, read_payload: bool) -> bool {
+fn mdbx_read_modify_write(
+    db: &Database<WriteMap>,
+    cfg: &YcsbConfig,
+    key: YcsbKey,
+    read_payload: bool,
+) -> bool {
     let _ = mdbx_read(db, key, read_payload);
     mdbx_update(db, cfg, key)
 }
@@ -180,7 +227,8 @@ fn populate(db: &Database<WriteMap>, cfg: &YcsbConfig) {
         let table = txn.open_table(None).expect("mdbx_ycsb: open_table (load)");
         for k in key..=batch_end {
             let buf = encode_row(cfg);
-            txn.put(&table, k.to_be_bytes(), &buf, WriteFlags::UPSERT).expect("mdbx_ycsb: put (load)");
+            txn.put(&table, k.to_be_bytes(), &buf, WriteFlags::UPSERT)
+                .expect("mdbx_ycsb: put (load)");
         }
         txn.commit().expect("mdbx_ycsb: commit (load)");
         key = batch_end + 1;
@@ -214,6 +262,8 @@ fn worker_thread(
     let mut scanned_tuples = 0u64;
     let mut scan_latencies_ns = Vec::new();
     let start = Instant::now();
+    let mut completed = 0u64;
+    let mut current_second = 0usize;
 
     while !stop.load(Relaxed) {
         let record_count = cfg.record_count;
@@ -238,9 +288,13 @@ fn worker_thread(
             YcsbOpType::Scan => {
                 let key = sampler.sample(record_count, max_key_now);
                 let len = random_scan_length(max_scan_length);
-                let scan_start = Instant::now();
-                scanned_tuples += mdbx_scan(&db, key, len, read_payload) as u64;
-                scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
+                if totals[SCAN] % SCAN_LATENCY_SAMPLE_EVERY == 0 {
+                    let scan_start = Instant::now();
+                    scanned_tuples += mdbx_scan(&db, key, len, read_payload) as u64;
+                    scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
+                } else {
+                    scanned_tuples += mdbx_scan(&db, key, len, read_payload) as u64;
+                }
                 totals[SCAN] += 1;
             }
             YcsbOpType::ReadModifyWrite => {
@@ -250,19 +304,37 @@ fn worker_thread(
             }
         }
 
-        let idx = (start.elapsed().as_secs() as usize).min(ops_per_sec.len() - 1);
-        ops_per_sec[idx] += 1;
+        completed += 1;
+        if completed % TIMESERIES_CLOCK_EVERY == 0 {
+            current_second = (start.elapsed().as_secs() as usize).min(ops_per_sec.len() - 1);
+        }
+        ops_per_sec[current_second] += 1;
     }
 
-    WorkerStats { ops_per_sec, totals, scanned_tuples, scan_latencies_ns }
+    WorkerStats {
+        ops_per_sec,
+        totals,
+        scanned_tuples,
+        scan_latencies_ns,
+    }
 }
 
 pub fn run_mdbx_ycsb(cfg: MdbxYcsbConfig) -> MdbxYcsbRunSummary {
-    assert!(cfg.ycsb.record_count >= 1, "mdbx_ycsb: record_count must be >= 1");
+    assert!(
+        cfg.ycsb.record_count >= 1,
+        "mdbx_ycsb: record_count must be >= 1"
+    );
 
-    fs::create_dir_all(&cfg.output_dir)
-        .unwrap_or_else(|e| panic!("mdbx_ycsb: failed to create output_dir {}: {e}", cfg.output_dir.display()));
-    let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
+    fs::create_dir_all(&cfg.output_dir).unwrap_or_else(|e| {
+        panic!(
+            "mdbx_ycsb: failed to create output_dir {}: {e}",
+            cfg.output_dir.display()
+        )
+    });
+    let mem_sampler = MemSampler::start(
+        cfg.output_dir.join("mem_stats.csv"),
+        DEFAULT_SAMPLE_INTERVAL,
+    );
 
     let num_threads = cfg.num_threads.max(1);
     let db = Arc::new(open_db(&cfg.db_path, num_threads));
@@ -277,14 +349,24 @@ pub fn run_mdbx_ycsb(cfg: MdbxYcsbConfig) -> MdbxYcsbRunSummary {
          - distribution        = {:?}\n\
          - max_scan_length     = {}\n\
          - db_path             = {}",
-        cfg.ycsb.record_count, cfg.ycsb.field_count, cfg.ycsb.field_length,
-        cfg.duration, cfg.mix, cfg.distribution, cfg.max_scan_length, cfg.db_path.display(),
+        cfg.ycsb.record_count,
+        cfg.ycsb.field_count,
+        cfg.ycsb.field_length,
+        cfg.duration,
+        cfg.mix,
+        cfg.distribution,
+        cfg.max_scan_length,
+        cfg.db_path.display(),
     );
 
     println!("Loading {} records...", cfg.ycsb.record_count);
     let load_start = Instant::now();
     populate(&db, &cfg.ycsb);
-    println!("Loaded {} records in {:?}.", cfg.ycsb.record_count, load_start.elapsed());
+    println!(
+        "Loaded {} records in {:?}.",
+        cfg.ycsb.record_count,
+        load_start.elapsed()
+    );
 
     let sampler = Arc::new(KeySampler::new(cfg.distribution, cfg.ycsb.record_count));
     let current_max_key = Arc::new(AtomicU64::new(cfg.ycsb.record_count));
@@ -297,15 +379,30 @@ pub fn run_mdbx_ycsb(cfg: MdbxYcsbConfig) -> MdbxYcsbRunSummary {
     let max_scan_length = cfg.max_scan_length;
     let read_payload = cfg.read_payload;
 
-    let handles: Vec<_> = (0..num_threads).map(|_| {
-        let db = db.clone();
-        let cfg = ycsb_cfg;
-        let sampler = sampler.clone();
-        let current_max_key = current_max_key.clone();
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        thread::spawn(move || worker_thread(db, cfg, mix, sampler, max_scan_length, read_payload, current_max_key, duration, stop, barrier))
-    }).collect();
+    let handles: Vec<_> = (0..num_threads)
+        .map(|_| {
+            let db = db.clone();
+            let cfg = ycsb_cfg;
+            let sampler = sampler.clone();
+            let current_max_key = current_max_key.clone();
+            let stop = stop.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                worker_thread(
+                    db,
+                    cfg,
+                    mix,
+                    sampler,
+                    max_scan_length,
+                    read_payload,
+                    current_max_key,
+                    duration,
+                    stop,
+                    barrier,
+                )
+            })
+        })
+        .collect();
 
     barrier.wait();
     let run_start = Instant::now();
@@ -321,7 +418,12 @@ pub fn run_mdbx_ycsb(cfg: MdbxYcsbConfig) -> MdbxYcsbRunSummary {
     write_results(&stats, duration, actual_wall, &cfg.output_dir)
 }
 
-fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wall: Duration, out_dir: &std::path::Path) -> MdbxYcsbRunSummary {
+fn write_results(
+    stats: &[WorkerStats],
+    requested_duration: Duration,
+    actual_wall: Duration,
+    out_dir: &std::path::Path,
+) -> MdbxYcsbRunSummary {
     let series_len = requested_duration.as_secs() as usize + 2;
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_COUNTERS];
@@ -340,10 +442,16 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
 
     let ts_path = out_dir.join("ycsb_timeseries.csv");
     let _ = fs::remove_file(&ts_path);
-    let mut ts_file = OpenOptions::new().create(true).append(true).open(&ts_path).unwrap();
+    let mut ts_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&ts_path)
+        .unwrap();
     ts_file.write_all(b"elapsed_sec,ops_completed\n").unwrap();
     for (sec, count) in per_sec.iter().enumerate() {
-        ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
+        ts_file
+            .write_all(format!("{sec},{count}\n").as_bytes())
+            .unwrap();
     }
 
     // Summary (not raw per-op samples), same format/reasoning as BatStore's own
@@ -351,13 +459,20 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
     scan_latencies_ns.sort_unstable();
     let scan_latency_path = out_dir.join("ycsb_scan_latency_summary.csv");
     let _ = fs::remove_file(&scan_latency_path);
-    let mut scan_latency_file = OpenOptions::new().create(true).append(true).open(&scan_latency_path).unwrap();
-    scan_latency_file.write_all(b"p50_us,p95_us,p99_us,count,avg_us\n").unwrap();
+    let mut scan_latency_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&scan_latency_path)
+        .unwrap();
+    scan_latency_file
+        .write_all(b"p50_us,p95_us,p99_us,count,avg_us\n")
+        .unwrap();
     let pct = |p: f64| -> f64 {
         if scan_latencies_ns.is_empty() {
             0.0
         } else {
-            let idx = ((p * (scan_latencies_ns.len() - 1) as f64).round() as usize).min(scan_latencies_ns.len() - 1);
+            let idx = ((p * (scan_latencies_ns.len() - 1) as f64).round() as usize)
+                .min(scan_latencies_ns.len() - 1);
             scan_latencies_ns[idx] as f64 / 1000.0
         }
     };
@@ -366,10 +481,19 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
     } else {
         scan_latencies_ns.iter().sum::<u64>() as f64 / scan_latencies_ns.len() as f64 / 1000.0
     };
-    scan_latency_file.write_all(format!(
-        "{:.3},{:.3},{:.3},{},{:.3}\n",
-        pct(0.50), pct(0.95), pct(0.99), scan_latencies_ns.len(), avg_us,
-    ).as_bytes()).unwrap();
+    scan_latency_file
+        .write_all(
+            format!(
+                "{:.3},{:.3},{:.3},{},{:.3}\n",
+                pct(0.50),
+                pct(0.95),
+                pct(0.99),
+                scan_latencies_ns.len(),
+                avg_us,
+            )
+            .as_bytes(),
+        )
+        .unwrap();
 
     let total_ops: u64 = totals.iter().sum();
     let throughput = total_ops as f64 / actual_wall.as_secs_f64();
@@ -381,14 +505,24 @@ fn write_results(stats: &[WorkerStats], requested_duration: Duration, actual_wal
     println!("{:<20} {}", "scanned_tuples", scanned_tuples);
     println!("{:<20} {}", "total_ops", total_ops);
     println!("{:<20} {:.2}", "throughput (ops/sec)", throughput);
-    println!("Wrote {} and {}", ts_path.display(), scan_latency_path.display());
+    println!(
+        "Wrote {} and {}",
+        ts_path.display(),
+        scan_latency_path.display()
+    );
 
-    MdbxYcsbRunSummary { throughput_ops_sec: throughput, totals }
+    MdbxYcsbRunSummary {
+        throughput_ops_sec: throughput,
+        totals,
+    }
 }
 
 pub fn main_mdbx_ycsb(parms: Vec<String>) {
     fn arg<T: std::str::FromStr>(parms: &[String], idx: usize, default: T) -> T {
-        parms.get(idx).and_then(|s| s.parse().ok()).unwrap_or(default)
+        parms
+            .get(idx)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
     }
 
     // Positional order mirrors the existing `ycsb` subcommand (main_ycsb) wherever the
@@ -396,14 +530,19 @@ pub fn main_mdbx_ycsb(parms: Vec<String>) {
     // update_in_place, WAL) that have no libmdbx equivalent - see mdbx_tpcc.rs/
     // scripts/engines/libmdbx.py for the same convention.
     let workload: String = parms.get(2).cloned().unwrap_or_else(|| "a".to_string());
-    let mix = YcsbMix::workload(&workload)
-        .unwrap_or_else(|| panic!("mdbx_ycsb: unknown workload '{workload}' (expected one of a, b, c, d, e, f)"));
+    let mix = YcsbMix::workload(&workload).unwrap_or_else(|| {
+        panic!("mdbx_ycsb: unknown workload '{workload}' (expected one of a, b, c, d, e, f)")
+    });
 
     let record_count: u64 = arg(&parms, 3, 100_000);
     let num_threads: usize = arg(&parms, 4, num_cpus::get());
     let duration_secs: u64 = arg(&parms, 5, 30);
 
-    let distribution_str = parms.get(6).map(|s| s.as_str()).unwrap_or("default").to_string();
+    let distribution_str = parms
+        .get(6)
+        .map(|s| s.as_str())
+        .unwrap_or("default")
+        .to_string();
     let theta: f64 = arg(&parms, 7, 0.99);
     let distribution = match distribution_str.as_str() {
         "uniform" => RequestDistribution::Uniform,
@@ -415,11 +554,18 @@ pub fn main_mdbx_ycsb(parms: Vec<String>) {
     let field_count: usize = arg(&parms, 8, 10);
     let field_length: usize = arg(&parms, 9, 100);
     let max_scan_length: u64 = arg(&parms, 10, 100);
-    let db_path: String = parms.get(11).cloned().unwrap_or_else(|| "mdbx_ycsb_db".to_string());
+    let db_path: String = parms
+        .get(11)
+        .cloned()
+        .unwrap_or_else(|| "mdbx_ycsb_db".to_string());
     let read_payload: bool = arg(&parms, 12, true);
 
     run_mdbx_ycsb(MdbxYcsbConfig {
-        ycsb: YcsbConfig { record_count, field_count, field_length },
+        ycsb: YcsbConfig {
+            record_count,
+            field_count,
+            field_length,
+        },
         num_threads,
         duration: Duration::from_secs(duration_secs),
         mix,

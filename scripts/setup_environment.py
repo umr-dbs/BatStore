@@ -59,6 +59,7 @@ LEANSTORE_URL = "https://github.com/leanstore/leanstore.git"
 LEANSTORE_PATCH_COMMIT = "90fcf185c1c8506344a7aa779928787d494348f4"
 LEANSTORE_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "leanstore.patch"
 LEANSTORE_YCSB_PAYLOAD_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_payload_leanstore.patch"
+LEANSTORE_YCSB_FIELDS_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_fields_leanstore.patch"
 LEANSTORE_TPCC_SEMANTICS_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "tpcc_semantics_leanstore.patch"
 LEANSTORE_S_HTAP_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "s_htap_leanstore.patch"
 WIREDTIGER_URL = "https://github.com/wiredtiger/wiredtiger.git"
@@ -226,6 +227,10 @@ def step_leanstore() -> None:
                       cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
         log(f"Applying {LEANSTORE_YCSB_PAYLOAD_PATCH_PATH.name} (canonical/u64 YCSB payloads and explicit payload reads)")
         run(["git", "apply", str(LEANSTORE_YCSB_PAYLOAD_PATCH_PATH)], cwd=LEANSTORE_REPO)
+    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_YCSB_FIELDS_PATCH_PATH)],
+                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        log(f"Applying {LEANSTORE_YCSB_FIELDS_PATCH_PATH.name} (fielded YCSB records and writeallfields semantics)")
+        run(["git", "apply", str(LEANSTORE_YCSB_FIELDS_PATCH_PATH)], cwd=LEANSTORE_REPO)
     if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_TPCC_SEMANTICS_PATCH_PATH)],
                       cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
         log(f"Applying {LEANSTORE_TPCC_SEMANTICS_PATCH_PATH.name} (TPC-C 1% New-Order rollback)")
@@ -447,6 +452,22 @@ def step_postgres() -> None:
         run(["sudo", "systemctl", "restart", "postgresql"])
     else:
         print(f"max_connections already {max_conn.stdout.strip()}, skipping.")
+
+    # Pin the actual PostgreSQL cluster service, not only BenchBase's JDBC process. The
+    # cgroup constraints are inherited by the postmaster and every backend it forks.
+    # --runtime is deliberate: PostgreSQL's tmpfs setup also needs to be restored after a
+    # reboot, so rerunning this setup re-establishes both volatile benchmark properties.
+    cluster = subprocess.run(
+        ["pg_lsclusters", "-h"], capture_output=True, text=True, check=True,
+    ).stdout.splitlines()[0].split()
+    pg_unit = f"postgresql@{cluster[0]}-{cluster[1]}.service"
+    cpu_list = common.numa_node_cpu_list()
+    log(f"Pinning {pg_unit} to NUMA node {common.NUMA_NODE} (CPUs {cpu_list})")
+    run([
+        "sudo", "systemctl", "set-property", "--runtime", pg_unit,
+        f"AllowedCPUs={cpu_list}", f"AllowedMemoryNodes={common.NUMA_NODE}",
+    ])
+    run(["sudo", "systemctl", "restart", pg_unit])
 
 
 def _pg_data_directory() -> Path:
