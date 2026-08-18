@@ -103,6 +103,8 @@ def parse_args() -> argparse.Namespace:
                    help="standard=10x100-byte YCSB row (default); u64=one 8-byte value")
     p.add_argument("--ycsb-key-only", action="store_true",
                    help="match/validate keys but do not consume payload bytes (default reads payload)")
+    p.add_argument("--ycsb-write-all-fields", action="store_true",
+                   help="LeanStore/WiredTiger YCSB updates replace all fields (default updates one random field)")
     p.add_argument("--batstore-ycsb-mode", "--cmvbt-ycsb-mode", dest="batstore_ycsb_mode",
                    choices=["atomic", "transaction"], default="atomic",
                    help="BatStore YCSB path: commit-before-publish auto-commit (default), or ordinary transaction lifecycle")
@@ -170,6 +172,9 @@ def main() -> None:
     # aren't in --engines (harmless: the var is simply never read in that case).
     os.environ["BATSTORE_ALLOCATOR"] = args.batstore_allocator
     os.environ["YCSB_PAYLOAD_BYTES"] = "8" if args.ycsb_payload == "u64" else "1000"
+    os.environ["YCSB_FIELD_COUNT"] = "1" if args.ycsb_payload == "u64" else "10"
+    os.environ["YCSB_FIELD_LENGTH"] = "8" if args.ycsb_payload == "u64" else "100"
+    os.environ["YCSB_WRITE_ALL_FIELDS"] = "true" if args.ycsb_write_all_fields else "false"
     os.environ["BATSTORE_YCSB_MODE"] = args.batstore_ycsb_mode
     scale = build_scale(args)
     engines = [
@@ -220,6 +225,7 @@ def main() -> None:
         "ycsb_payload": args.ycsb_payload,
         "ycsb_payload_bytes": 8 if args.ycsb_payload == "u64" else 1000,
         "ycsb_read_payload": not args.ycsb_key_only,
+        "ycsb_write_all_fields": args.ycsb_write_all_fields,
     }, indent=2) + "\n")
 
     total_runs = 0
@@ -240,11 +246,13 @@ def main() -> None:
     print(f"batstore alloc   : {args.batstore_allocator} (ignored unless 'batstore'/'libmdbx' is in --engines)")
     print(f"workloads     : {workloads}")
     print(f"YCSB payload  : {args.ycsb_payload} ({'key-only' if args.ycsb_key_only else 'payload-read'})")
+    print(f"YCSB updates  : writeallfields={'true' if args.ycsb_write_all_fields else 'false'} "
+          f"(LeanStore/WiredTiger: {'all fields' if args.ycsb_write_all_fields else 'one random field'})")
     print(f"threads sweep : {thread_list}")
     print(f"gc sweep      : {gc_list} (engines with no working GC toggle always run once, gc=n/a)")
-    print(f"NUMA pinning  : numactl --cpubind={common.NUMA_NODE} --membind={common.NUMA_NODE} "
-          f"(every engine subprocess; the Postgres *server* itself is not pinned - see "
-          f"engines/postgres_benchbase.py's module docstring)")
+    print(f"NUMA pinning  : node {common.NUMA_NODE} CPUs/memory for every engine; subprocesses use "
+          f"numactl --cpubind={common.NUMA_NODE} --membind={common.NUMA_NODE}, and PostgreSQL's "
+          f"cluster service uses matching cgroup CPU/memory-node constraints (verified per run)")
     dram_gib_desc = (
         f"--dram-gib={args.dram_gib} (explicit, applied to every workload/threads point unchanged)"
         if args.dram_gib is not None else

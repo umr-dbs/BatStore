@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 from pathlib import Path
 
 from . import common, leanstore_build
@@ -131,6 +132,9 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
             f"--zipf_factor={scale.ycsb_theta}",
             *leanstore_build.ycsb_gflags(letter),
             f"--ycsb_payload_size={8 if ycsb_payload == 'u64' else 1000}",
+            f"--ycsb_field_count={1 if ycsb_payload == 'u64' else 10}",
+            f"--ycsb_field_length={8 if ycsb_payload == 'u64' else 100}",
+            f"--ycsb_write_all_fields={os.environ.get('YCSB_WRITE_ALL_FIELDS', 'false')}",
             f"--ycsb_read_payload={'true' if read_payload else 'false'}",
             f"--dram_gib={scale.dram_gib}",
             f"--ssd_path={ssd_dir}",

@@ -14,11 +14,10 @@ walwriter + one backend per connection) - see common.py's start_process_tree_sam
 which sums current RSS across that whole tree and tracks its peak, the cross-process
 analogue of the other engines' single-PID VmHWM sampling.
 
-Not NUMA-pinned: the actual engine here is the PostgreSQL *server* process
-(postmaster + backends), which is a pre-existing system service this harness
-doesn't spawn - only the JDBC client below runs under numactl (via
-common.run_and_track_rss). Binding the server itself to one NUMA node would
-need a systemd override, outside this script's scope.
+NUMA-pinned: setup_environment.py constrains the actual PostgreSQL cluster service's
+cgroup to node 0's CPUs and memory nodes. This wrapper verifies the live postmaster's
+effective masks before every run; the JDBC client is independently pinned by
+common.run_and_track_rss.
 """
 from __future__ import annotations
 
@@ -254,6 +253,44 @@ def _find_postmaster_pid() -> Optional[int]:
         return None
 
 
+def _expand_cpu_list(value: str) -> set[int]:
+    cpus: set[int] = set()
+    for part in value.strip().split(","):
+        if not part:
+            continue
+        bounds = part.split("-", 1)
+        start = int(bounds[0])
+        end = int(bounds[1]) if len(bounds) == 2 else start
+        cpus.update(range(start, end + 1))
+    return cpus
+
+
+def _verify_postmaster_numa_binding() -> int:
+    """Return the postmaster PID, refusing a comparison unless its live effective CPU
+    and memory-node masks are exactly the node used for every embedded engine."""
+    pid = _find_postmaster_pid()
+    if pid is None:
+        sys.exit("cannot locate the PostgreSQL postmaster; is the cluster running?")
+    status: dict[str, str] = {}
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            status[key] = value.strip()
+    expected_cpus = _expand_cpu_list(common.numa_node_cpu_list())
+    actual_cpus = _expand_cpu_list(status.get("Cpus_allowed_list", ""))
+    actual_nodes = _expand_cpu_list(status.get("Mems_allowed_list", ""))
+    if actual_cpus != expected_cpus or actual_nodes != {common.NUMA_NODE}:
+        sys.exit(
+            f"PostgreSQL postmaster PID {pid} is not pinned to NUMA node {common.NUMA_NODE}: "
+            f"Cpus_allowed_list={status.get('Cpus_allowed_list')!r}, "
+            f"Mems_allowed_list={status.get('Mems_allowed_list')!r}; expected CPUs "
+            f"{common.numa_node_cpu_list()!r}, memory node {common.NUMA_NODE}. Run "
+            f"`python3 scripts/setup_environment.py --reuse-checkouts` to configure the "
+            f"cluster service cgroup."
+        )
+    return pid
+
+
 def _template_connection_values() -> dict[str, str]:
     """BenchBase XML values matching common's environment-overridable connection.
 
@@ -394,6 +431,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     callers. compare_engines.py deliberately passes reload=True for every PostgreSQL point
     so every measurement starts from freshly created and loaded benchmark tables.
     """
+    postmaster_pid = _verify_postmaster_numa_binding()
     _verify_tmpfs_datadir()
     _set_unsafe_durability()
 
@@ -467,8 +505,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     print(f"PostgreSQL BenchBase config: {config_path} (rate=unlimited, terminals={threads})")
     _set_autovacuum(gc != "off")
 
-    postmaster_pid = _find_postmaster_pid()
-    tree_sampler = common.start_process_tree_sampler(postmaster_pid) if postmaster_pid else None
+    tree_sampler = common.start_process_tree_sampler(postmaster_pid)
 
     create_load = ["--create=true", "--load=true"] if reload else ["--create=false", "--load=false"]
     args = [

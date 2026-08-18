@@ -26,6 +26,8 @@ def ensure_built(targets=("tpcc", "ycsb", "wiredtiger_tpcc", "wiredtiger_ycsb", 
             "cmake", "-S", str(LEANSTORE_REPO), "-B", str(BUILD_DIR),
             "-DCMAKE_BUILD_TYPE=Release",
             f"-DYCSB_PAYLOAD_BYTES={os.environ.get('YCSB_PAYLOAD_BYTES', '1000')}",
+            f"-DYCSB_FIELD_COUNT={os.environ.get('YCSB_FIELD_COUNT', '10')}",
+            f"-DYCSB_FIELD_LENGTH={os.environ.get('YCSB_FIELD_LENGTH', '100')}",
             f"-DCMAKE_CXX_FLAGS=-I{WIREDTIGER_BUILD_DIR / 'include'}",
             f"-DCMAKE_EXE_LINKER_FLAGS=-L{WIREDTIGER_BUILD_DIR} -Wl,-rpath,{WIREDTIGER_BUILD_DIR}",
         ], check=True)
