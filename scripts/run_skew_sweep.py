@@ -49,6 +49,7 @@ ENGINE_MODULES = {
 # side only) is what makes the four engines' "uniform" points genuinely comparable.
 DEFAULT_SKEWS = ["uniform", "0.1", "0.4", "0.8", "0.99", "1.4"]
 DEFAULT_THREADS = [2, 4, 8, 16, 32, 64, 128]
+DEFAULT_GC = ["on", "off"]
 
 
 def skew_to_theta(skew: str) -> float:
@@ -68,6 +69,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threads", default=None,
                    help=f"comma-separated thread counts to sweep (default {DEFAULT_THREADS}, "
                         f"or [2,4] with --tiny)")
+    p.add_argument("--gc", default=",".join(DEFAULT_GC),
+                   help="comma-separated subset of on,off - engines with no working GC "
+                        "toggle (see SUPPORTS_GC_TOGGLE in each engines/*.py) are only run "
+                        "once and report that same result for every requested gc label")
     p.add_argument("--tiny", action="store_true", help="use TINY_SCALE (smoke test)")
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--batstore-allocator", "--cmvbt-allocator", dest="batstore_allocator",
@@ -100,6 +105,12 @@ def main() -> None:
     engines = [e.strip() for e in args.engines.split(",") if e.strip()]
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
     skews = [s.strip() for s in args.skews.split(",") if s.strip()]
+    gc_list = [g.strip() for g in args.gc.split(",") if g.strip()]
+    for g in gc_list:
+        if g not in ("on", "off"):
+            sys.exit(f"unknown --gc value '{g}' (expected 'on' and/or 'off')")
+    if not gc_list:
+        sys.exit("--gc must contain at least one value")
     thread_list = (
         [int(t.strip()) for t in args.threads.split(",") if t.strip()] if args.threads
         else ([2, 4] if args.tiny else list(DEFAULT_THREADS))
@@ -125,6 +136,7 @@ def main() -> None:
     print(f"workloads     : {workloads}")
     print(f"skews         : {skews} (theta={[skew_to_theta(s) for s in skews]})")
     print(f"threads sweep : {thread_list}")
+    print(f"gc sweep      : {gc_list} (engines with no working GC toggle always run once)")
     print("######################################\n")
 
     if not args.skip_build:
@@ -148,21 +160,23 @@ def main() -> None:
                         scale_variant = dataclasses.replace(
                             scale_variant, dram_gib=common.dram_gib_for(workload, scale_variant),
                         )
-                    out_dir = run_dir / workload / engine_name / f"skew_{skew}" / f"threads_{threads}"
+                    out_dir_base = run_dir / workload / engine_name / f"skew_{skew}" / f"threads_{threads}"
                     print(f"=== {workload} / {engine_name} / skew={skew} (theta={theta}) / threads={threads} ===")
+                    run_kwargs = dict(
+                        reload=(engine_name == "postgres"),
+                        ycsb_payload=args.ycsb_payload, read_payload=not args.ycsb_key_only,
+                    )
                     try:
-                        result = module.run(
-                            workload, scale_variant, out_dir, gc="on", reload=(engine_name == "postgres"),
-                            ycsb_payload=args.ycsb_payload, read_payload=not args.ycsb_key_only,
-                        )
+                        gc_results = common.run_gc_variants(module, workload, scale_variant, out_dir_base, gc_list, run_kwargs)
                     except Exception as e:  # noqa: BLE001 - one point's failure shouldn't abort the sweep
-                        result = common.NormalizedResult(
+                        gc_results = [(gc, common.NormalizedResult(
                             engine_name, workload, scale_variant.label, scale_variant.ycsb_duration,
                             "error", 0.0, 0.0, threads=threads, gc_enabled="n/a", notes=f"EXCEPTION: {e}",
-                        )
-                    common.append_manifest_row(manifest_path, result)
-                    status = result.notes or "OK"
-                    print(f"    {result.primary_metric_name}={result.primary_metric_value:.2f}  [{status}]")
+                        )) for gc in gc_list]
+                    for gc, result in gc_results:
+                        common.append_manifest_row(manifest_path, result)
+                        status = result.notes or "OK"
+                        print(f"    gc={gc}  {result.primary_metric_name}={result.primary_metric_value:.2f}  [{status}]")
 
     print("\n########## skew sweep complete ##########")
     print(f"manifest : {manifest_path}")

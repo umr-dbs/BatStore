@@ -47,6 +47,7 @@ DEFAULT_OLAP_THREADS = [1, 2, 4, 8, 16, 32]
 # should be scaled down, more focus on the analytical part" ask this script implements.
 DEFAULT_OLTP_TERMINALS = 4
 DEFAULT_WAREHOUSES = 2
+DEFAULT_GC = ["on", "off"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,6 +64,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warehouses", type=int, default=DEFAULT_WAREHOUSES,
                    help=f"fixed, scaled-down TPC-C warehouse count (default {DEFAULT_WAREHOUSES})")
     p.add_argument("--tpcc-duration", type=int, default=60)
+    p.add_argument("--gc", default=",".join(DEFAULT_GC),
+                   help="comma-separated subset of on,off - engines with no working GC "
+                        "toggle (see SUPPORTS_GC_TOGGLE in each engines/*.py) are only run "
+                        "once and report that same result for every requested gc label")
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--batstore-allocator", "--cmvbt-allocator", dest="batstore_allocator",
                    choices=["jemalloc", "mimalloc"], default="jemalloc")
@@ -88,6 +93,7 @@ def main() -> None:
     engines = [e.strip() for e in args.engines.split(",") if e.strip()]
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
     olap_thread_list = [int(t.strip()) for t in args.olap_threads.split(",") if t.strip()]
+    gc_list = [g.strip() for g in args.gc.split(",") if g.strip()]
 
     for e in engines:
         if e not in ENGINE_MODULES:
@@ -95,6 +101,11 @@ def main() -> None:
     for w in workloads:
         if w not in common.HTAP_WORKLOADS:
             sys.exit(f"unknown workload '{w}' (this sweep is HTAP-only: {common.HTAP_WORKLOADS})")
+    for g in gc_list:
+        if g not in ("on", "off"):
+            sys.exit(f"unknown --gc value '{g}' (expected 'on' and/or 'off')")
+    if not gc_list:
+        sys.exit("--gc must contain at least one value")
 
     run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
     manifest_path = run_dir / "manifest.csv"
@@ -111,6 +122,7 @@ def main() -> None:
     print(f"OLTP (fixed)    : warehouses={args.warehouses}, terminals={args.oltp_terminals}, "
           f"duration={args.tpcc_duration}s")
     print(f"OLAP threads    : {olap_thread_list}")
+    print(f"gc sweep        : {gc_list} (engines with no working GC toggle always run once)")
     print("####################################################\n")
 
     if not args.skip_build:
@@ -129,27 +141,28 @@ def main() -> None:
                     scale_variant = dataclasses.replace(
                         scale_variant, dram_gib=common.dram_gib_for(workload, scale_variant),
                     )
-                out_dir = run_dir / workload / engine_name / f"olap_threads_{olap_threads}"
+                out_dir_base = run_dir / workload / engine_name / f"olap_threads_{olap_threads}"
                 print(f"=== {workload} / {engine_name} / olap_threads={olap_threads} "
                       f"(oltp_terminals={args.oltp_terminals}) ===")
+                run_kwargs = dict(reload=(engine_name == "postgres"))
                 try:
-                    result = module.run(
-                        workload, scale_variant, out_dir, gc="on", reload=(engine_name == "postgres"),
-                    )
+                    gc_results = common.run_gc_variants(module, workload, scale_variant, out_dir_base, gc_list, run_kwargs)
                 except Exception as e:  # noqa: BLE001 - one point's failure shouldn't abort the sweep
-                    result = common.NormalizedResult(
+                    gc_results = [(gc, common.NormalizedResult(
                         engine_name, workload, scale_variant.label, args.tpcc_duration,
                         "error", 0.0, 0.0, threads=args.oltp_terminals, gc_enabled="n/a",
                         notes=f"EXCEPTION: {e}",
-                    )
-                # Stamp the analytical thread count into config_label (parsed back out by
-                # plot_htap_analytical.py) - same convention as run_skew_sweep.py's "skew=".
-                result.config_label = f"{result.config_label} olap_threads={olap_threads}"
-                common.append_manifest_row(manifest_path, result)
-                olap_qps = result.scan_count / result.duration_secs if result.duration_secs else 0.0
-                status = result.notes or "OK"
-                print(f"    oltp={result.primary_metric_value:.2f} {result.primary_metric_name}  "
-                      f"olap={olap_qps:.3f} queries/sec (n={result.scan_count})  [{status}]")
+                    )) for gc in gc_list]
+                for gc, result in gc_results:
+                    # Stamp the analytical thread count into config_label (parsed back out
+                    # by plot_htap_analytical.py) - same convention as
+                    # run_skew_sweep.py's "skew=".
+                    result.config_label = f"{result.config_label} olap_threads={olap_threads}"
+                    common.append_manifest_row(manifest_path, result)
+                    olap_qps = result.scan_count / result.duration_secs if result.duration_secs else 0.0
+                    status = result.notes or "OK"
+                    print(f"    gc={gc}  oltp={result.primary_metric_value:.2f} {result.primary_metric_name}  "
+                          f"olap={olap_qps:.3f} queries/sec (n={result.scan_count})  [{status}]")
 
     print("\n########## HTAP analytical sweep complete ##########")
     print(f"manifest : {manifest_path}")
