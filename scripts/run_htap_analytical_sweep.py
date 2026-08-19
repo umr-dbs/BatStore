@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""HTAP analytical-thread sweep: a small, fixed-size TPC-C OLTP workload (scaled down -
+few warehouses/terminals, the point is analytical pressure, not OLTP scale) runs
+concurrently with a growing pool of dedicated analytical (OLAP) threads, each repeatedly
+executing CH-benCHmark Q1 ("Pricing Summary Report") or Q6 ("Forecasting Revenue Change")
+in a loop for the run's whole duration (see htap_q1/htap_q6 in common.HTAP_WORKLOADS, and
+Scale.htap_olap_threads - the knob this script sweeps).
+
+x-axis = number of analytical threads; produces two throughput series per engine: the
+OLTP side (new_order_per_sec, held against a FIXED OLTP terminal count so the x-axis is
+purely the analytical side) and the OLAP side (CH-benCHmark queries/sec, summed across all
+analytical threads) - see plot_htap_analytical.py.
+
+Usage:
+    python3 scripts/run_htap_analytical_sweep.py
+    python3 scripts/run_htap_analytical_sweep.py --engines batstore,libmdbx,postgres,wiredtiger,leanstore
+    python3 scripts/run_htap_analytical_sweep.py --olap-threads 1,2,4,8,16 --oltp-terminals 4 --warehouses 2
+    python3 scripts/run_htap_analytical_sweep.py --workloads htap_q1
+"""
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import datetime
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from engines import batstore, common, leanstore, libmdbx, postgres_benchbase, vweaver_ermia, vweaver_ermia_frugal, wiredtiger
+
+ENGINE_MODULES = {
+    "batstore": batstore,
+    "leanstore": leanstore,
+    "wiredtiger": wiredtiger,
+    "postgres": postgres_benchbase,
+    "vweaver_ermia": vweaver_ermia,
+    "vweaver_ermia_frugal": vweaver_ermia_frugal,
+    "libmdbx": libmdbx,
+}
+
+DEFAULT_OLAP_THREADS = [1, 2, 4, 8, 16, 32]
+# Scaled-down HTAP focus: a small, fixed OLTP population/terminal count (not swept), so the
+# only thing changing across this sweep is analytical pressure - matches the "TPC-C part
+# should be scaled down, more focus on the analytical part" ask this script implements.
+DEFAULT_OLTP_TERMINALS = 4
+DEFAULT_WAREHOUSES = 2
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--output-root", default="htap_analytical_results")
+    p.add_argument("--engines", default=",".join(common.ENGINES),
+                   help=f"comma-separated subset of {common.ENGINES}")
+    p.add_argument("--workloads", default=",".join(common.HTAP_WORKLOADS),
+                   help=f"comma-separated subset of {common.HTAP_WORKLOADS}")
+    p.add_argument("--olap-threads", default=",".join(str(t) for t in DEFAULT_OLAP_THREADS),
+                   help=f"comma-separated analytical thread counts to sweep (default {DEFAULT_OLAP_THREADS})")
+    p.add_argument("--oltp-terminals", type=int, default=DEFAULT_OLTP_TERMINALS,
+                   help=f"fixed OLTP terminal count, held constant across the sweep (default {DEFAULT_OLTP_TERMINALS})")
+    p.add_argument("--warehouses", type=int, default=DEFAULT_WAREHOUSES,
+                   help=f"fixed, scaled-down TPC-C warehouse count (default {DEFAULT_WAREHOUSES})")
+    p.add_argument("--tpcc-duration", type=int, default=60)
+    p.add_argument("--skip-build", action="store_true")
+    p.add_argument("--batstore-allocator", "--cmvbt-allocator", dest="batstore_allocator",
+                   choices=["jemalloc", "mimalloc"], default="jemalloc")
+    p.add_argument("--dram-gib", type=float)
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    os.environ["BATSTORE_ALLOCATOR"] = args.batstore_allocator
+    os.environ["YCSB_PAYLOAD_BYTES"] = "1000"
+    os.environ["YCSB_FIELD_COUNT"] = "10"
+    os.environ["YCSB_FIELD_LENGTH"] = "100"
+    os.environ["YCSB_WRITE_ALL_FIELDS"] = "false"
+    os.environ["BATSTORE_YCSB_MODE"] = "atomic"
+
+    base_scale = common.Scale(tpcc_warehouses=args.warehouses, tpcc_terminals=args.oltp_terminals,
+                               tpcc_duration=args.tpcc_duration,
+                               label=f"htap_analytical(warehouses={args.warehouses},oltp_terminals={args.oltp_terminals})")
+    if args.dram_gib is not None:
+        base_scale.dram_gib = args.dram_gib
+
+    engines = [e.strip() for e in args.engines.split(",") if e.strip()]
+    workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
+    olap_thread_list = [int(t.strip()) for t in args.olap_threads.split(",") if t.strip()]
+
+    for e in engines:
+        if e not in ENGINE_MODULES:
+            sys.exit(f"unknown engine '{e}'")
+    for w in workloads:
+        if w not in common.HTAP_WORKLOADS:
+            sys.exit(f"unknown workload '{w}' (this sweep is HTAP-only: {common.HTAP_WORKLOADS})")
+
+    run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
+    manifest_path = run_dir / "manifest.csv"
+    common.write_manifest_header(manifest_path)
+    (run_dir / "run_config.json").write_text(json.dumps({
+        "olap_threads": olap_thread_list, "oltp_terminals": args.oltp_terminals,
+        "warehouses": args.warehouses, "workloads": workloads, "engines": engines,
+    }, indent=2) + "\n")
+
+    print("\n########## HTAP analytical-thread sweep ##########")
+    print(f"run directory   : {run_dir}")
+    print(f"engines         : {engines}")
+    print(f"workloads       : {workloads}")
+    print(f"OLTP (fixed)    : warehouses={args.warehouses}, terminals={args.oltp_terminals}, "
+          f"duration={args.tpcc_duration}s")
+    print(f"OLAP threads    : {olap_thread_list}")
+    print("####################################################\n")
+
+    if not args.skip_build:
+        for name in engines:
+            ensure_built = getattr(ENGINE_MODULES[name], "ensure_built", None)
+            if ensure_built:
+                print(f"[build] {name}...")
+                ensure_built()
+
+    for workload in workloads:
+        for engine_name in engines:
+            module = ENGINE_MODULES[engine_name]
+            for olap_threads in olap_thread_list:
+                scale_variant = dataclasses.replace(base_scale, htap_olap_threads=olap_threads)
+                if args.dram_gib is None:
+                    scale_variant = dataclasses.replace(
+                        scale_variant, dram_gib=common.dram_gib_for(workload, scale_variant),
+                    )
+                out_dir = run_dir / workload / engine_name / f"olap_threads_{olap_threads}"
+                print(f"=== {workload} / {engine_name} / olap_threads={olap_threads} "
+                      f"(oltp_terminals={args.oltp_terminals}) ===")
+                try:
+                    result = module.run(
+                        workload, scale_variant, out_dir, gc="on", reload=(engine_name == "postgres"),
+                    )
+                except Exception as e:  # noqa: BLE001 - one point's failure shouldn't abort the sweep
+                    result = common.NormalizedResult(
+                        engine_name, workload, scale_variant.label, args.tpcc_duration,
+                        "error", 0.0, 0.0, threads=args.oltp_terminals, gc_enabled="n/a",
+                        notes=f"EXCEPTION: {e}",
+                    )
+                # Stamp the analytical thread count into config_label (parsed back out by
+                # plot_htap_analytical.py) - same convention as run_skew_sweep.py's "skew=".
+                result.config_label = f"{result.config_label} olap_threads={olap_threads}"
+                common.append_manifest_row(manifest_path, result)
+                olap_qps = result.scan_count / result.duration_secs if result.duration_secs else 0.0
+                status = result.notes or "OK"
+                print(f"    oltp={result.primary_metric_value:.2f} {result.primary_metric_name}  "
+                      f"olap={olap_qps:.3f} queries/sec (n={result.scan_count})  [{status}]")
+
+    print("\n########## HTAP analytical sweep complete ##########")
+    print(f"manifest : {manifest_path}")
+    print(f"plot with: python3 scripts/plot_htap_analytical.py --run-dir {run_dir}")
+    print("######################################################\n")
+
+
+if __name__ == "__main__":
+    main()

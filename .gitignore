@@ -2,8 +2,11 @@
 Cargo.lock
 /scripts/.venv
 /comparison_results
+/skew_sweep_results
+/htap_analytical_results
+/benchmark_results
 /tx_tests
 __pycache__/
 /*.csv
-.idea/workspace.xml
-.idea/vcs.xml
+.idea/
+.ai/

@@ -66,6 +66,12 @@ pub struct MdbxTpccConfig {
     /// docs). `false` for plain `tpcc`/`ycsb_*` runs, which skip the extra
     /// thread and the `tpcc_scan.csv` output entirely.
     pub htap_mode: MdbxHtapMode,
+    /// How many of the above OLAP threads to run concurrently (all executing the same
+    /// `htap_mode` query in a loop) - lets the analytical side of an HTAP mix be swept
+    /// independently of the OLTP terminal count. Ignored (no OLAP thread spawned) when
+    /// `htap_mode` is `None`. Defaults to 1 via `main_mdbx_tpcc`'s positional parsing,
+    /// matching the previous fixed-at-1 behavior.
+    pub num_olap_threads: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -873,12 +879,11 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     }
     println!("Loaded {} warehouse(s) in {:?}.", cfg.tpcc.num_warehouses, load_start.elapsed());
 
-    // +1 OLAP thread when htap_ch_benchmark is set - same "every distinct thread
+    // num_olap_threads OLAP threads when htap_mode is set - same "every distinct thread
     // permanently owns a barrier slot" shape as tpcc_driver.rs's num_terminals +
-    // num_olap_threads (see that module's threading-constraint doc), just fixed at
-    // exactly 0 or 1 OLAP threads here (see module docs on scope).
-    let has_olap = cfg.htap_mode != MdbxHtapMode::None;
-    let barrier = Arc::new(Barrier::new(num_terminals + 1 + has_olap as usize));
+    // num_olap_threads (see that module's threading-constraint doc).
+    let num_olap_threads = if cfg.htap_mode == MdbxHtapMode::None { 0 } else { cfg.num_olap_threads };
+    let barrier = Arc::new(Barrier::new(num_terminals + 1 + num_olap_threads));
     let stop = Arc::new(AtomicBool::new(false));
     let duration = cfg.duration;
 
@@ -896,12 +901,12 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     // tpcc_random::now_millis), not a simulated TPC-H date range, so an
     // unrestricted [MIN, MAX) filter is what makes Q1/Q6 see the whole loaded
     // data set.
-    let olap_handle = has_olap.then(|| {
+    let olap_handles: Vec<_> = (0..num_olap_threads).map(|_| {
         let db = db.clone();
         let stop = stop.clone();
         let barrier = barrier.clone();
         thread::spawn(move || olap_thread(db, i64::MIN, i64::MAX, stop, barrier, cfg.htap_mode))
-    });
+    }).collect();
 
     barrier.wait();
     let run_start = Instant::now();
@@ -910,7 +915,9 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     stop.store(true, Relaxed);
 
     let stats: Vec<TerminalStats> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    let scan_results = olap_handle.map(|h| h.join().unwrap()).unwrap_or_default();
+    let scan_results: Vec<MdbxScanResult> = olap_handles.into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
     let actual_wall = run_start.elapsed();
 
     mem_sampler.stop();
@@ -998,6 +1005,7 @@ pub fn main_mdbx_tpcc(parms: Vec<String>) {
         "ch_q6" => MdbxHtapMode::Q6,
         _ => MdbxHtapMode::None,
     };
+    let num_olap_threads: usize = arg(&parms, 10, 1);
 
     run_mdbx_tpcc(MdbxTpccConfig {
         tpcc: TpccConfig {
@@ -1010,6 +1018,7 @@ pub fn main_mdbx_tpcc(parms: Vec<String>) {
             num_suppliers: 0,
         },
         htap_mode,
+        num_olap_threads,
         num_terminals,
         duration: Duration::from_secs(duration_secs),
         db_path: PathBuf::from(db_path),

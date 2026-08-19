@@ -63,7 +63,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         htap_mode = workload.replace("htap_", "ch_") if workload in common.HTAP_WORKLOADS else "none"
         args = [
             str(BINARY), "mdbx_tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
-            "100000", "3000", "3000", str(db_path), htap_mode,
+            "100000", "3000", "3000", str(db_path), htap_mode, str(scale.htap_olap_threads),
         ]
         metric_name = "new_order_per_sec"
         ts_file, ts_column = "tpcc_oltp_timeseries.csv", "new_order_committed"

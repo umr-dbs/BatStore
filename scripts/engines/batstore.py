@@ -87,7 +87,7 @@ def run(
         olap_mode = "ch_q1" if workload == "htap_q1" else "ch_q6"
         args = [
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
-            "false", gc_bool, "false", "fg", olap_mode, "1", "10.0",
+            "false", gc_bool, "false", "fg", olap_mode, str(scale.htap_olap_threads), "10.0",
             "100000", "3000", "3000", "true", str(wal_path), "5", "EUROPE", "10000",
         ]
         metric_name = "new_order_per_sec"

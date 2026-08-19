@@ -36,7 +36,7 @@ fn abort_write_reverts_a_plain_insert() {
     insert(&mut leaf, 1, stamp, 42);
     assert_eq!(leaf.active_dead_count(), (1, 0));
 
-    assert_eq!(leaf.abort_write(1, stamp).0, AbortOutcome::Invalidated);
+    assert_eq!(leaf.abort_write(1, stamp), AbortOutcome::Invalidated);
     let record = leaf.as_records().into_iter().rfind(|r| r.key == 1).unwrap();
     assert!(!record.version().is_live());
     assert!(record.version().insertion_stamp().is_invalid());
@@ -44,7 +44,7 @@ fn abort_write_reverts_a_plain_insert() {
 
     // Idempotent: processing the same key's abort twice must not
     // double-adjust the counts.
-    assert_eq!(leaf.abort_write(1, stamp).0, AbortOutcome::NotFound);
+    assert_eq!(leaf.abort_write(1, stamp), AbortOutcome::NotFound);
     assert_eq!(leaf.active_dead_invalid(), (0, 0, 1));
 }
 
@@ -65,7 +65,7 @@ fn soa_layout_keeps_keys_dense_and_validity_mask_skips_aborted_slots() {
     );
 
     assert_eq!(leaf.latest_position(4, true), Some(2));
-    assert_eq!(leaf.abort_write(4, stamp).0, AbortOutcome::Invalidated);
+    assert_eq!(leaf.abort_write(4, stamp), AbortOutcome::Invalidated);
     assert_eq!(
         leaf.latest_position(4, true),
         Some(0),
@@ -118,7 +118,7 @@ fn abort_write_reverts_an_update_and_resurrects_its_predecessor() {
     leaf.commit_delta(-1, 1);
     assert_eq!(leaf.active_dead_count(), (1, 1));
 
-    assert_eq!(leaf.abort_write(5, stamp).0, AbortOutcome::Invalidated);
+    assert_eq!(leaf.abort_write(5, stamp), AbortOutcome::Invalidated);
 
     let records: Vec<_> = leaf
         .as_records()
@@ -188,7 +188,7 @@ fn delete_after_update_skips_an_invalidated_entry_to_reach_the_true_predecessor(
     insert(&mut leaf, 1, stamp1, 11); // v1
     assert!(matches!(leaf.delete_after_update(1, stamp1), Ok(Some(_))));
     leaf.commit_delta(-1, 1);
-    assert_eq!(leaf.abort_write(1, stamp1).0, AbortOutcome::Invalidated);
+    assert_eq!(leaf.abort_write(1, stamp1), AbortOutcome::Invalidated);
     assert_eq!(leaf.active_dead_count(), (1, 1)); // v0 live, v1 dead(invalid)
 
     // T2 (a later transaction on the same key) now updates it: pushes v2
@@ -240,7 +240,7 @@ fn apply_invalidate_does_not_resurrect_an_unrelated_deletion() {
     // A later transaction inserts key 1 fresh (allowed: the prior entry
     // is deleted, not live), then aborts.
     insert(&mut leaf, 1, stamp_b, 2);
-    assert_eq!(leaf.abort_write(1, stamp_b).0, AbortOutcome::Invalidated);
+    assert_eq!(leaf.abort_write(1, stamp_b), AbortOutcome::Invalidated);
 
     // The unrelated, genuinely-deleted original entry must stay
     // deleted — this abort has nothing to do with it.
@@ -280,7 +280,7 @@ fn abort_write_reverts_a_plain_delete_past_a_trailing_invalidated_entry() {
     // after v0 (which is still live).
     let stamp_x = TxStamp::new(1, 150);
     insert(&mut leaf, 1, stamp_x, 99); // v1
-    assert_eq!(leaf.abort_write(1, stamp_x).0, AbortOutcome::Invalidated);
+    assert_eq!(leaf.abort_write(1, stamp_x), AbortOutcome::Invalidated);
     assert_eq!(leaf.active_dead_invalid(), (1, 0, 1)); // v0 live, v1 invalid
 
     // T2 now plainly deletes key 1: `delete` skips the invalid v1 and
@@ -294,7 +294,7 @@ fn abort_write_reverts_a_plain_delete_past_a_trailing_invalidated_entry() {
     // physically-newest entry (v1, invalid but not deleted) instead of
     // v0, reported no deleted entry to undo, and left v0 wrongly deleted
     // forever.
-    assert_eq!(leaf.abort_write(1, stamp_t2).0, AbortOutcome::Undeleted);
+    assert_eq!(leaf.abort_write(1, stamp_t2), AbortOutcome::Undeleted);
 
     let records: Vec<_> = leaf
         .as_records()

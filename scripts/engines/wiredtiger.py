@@ -85,13 +85,13 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
         query_no = 101 if workload == "htap_q1" else 106
-        # +1 worker: same reasoning as leanstore.py's htap_q1/htap_q6 branch - this
-        # adapter carves ch_a_threads out of worker_threads too (see wiredtiger_tpcc.cpp).
+        # +olap_threads workers: same reasoning as leanstore.py's htap_q1/htap_q6 branch -
+        # this adapter carves ch_a_threads out of worker_threads too (see wiredtiger_tpcc.cpp).
         args = [
             str(leanstore_build.binary("wiredtiger_tpcc")),
             f"--tpcc_warehouse_count={scale.tpcc_warehouses}",
-            f"--worker_threads={threads + 1}",
-            "--ch_a_threads=1", "--ch_a_rounds=1", f"--ch_a_query={query_no}",
+            f"--worker_threads={threads + scale.htap_olap_threads}",
+            f"--ch_a_threads={scale.htap_olap_threads}", "--ch_a_rounds=1", f"--ch_a_query={query_no}",
             f"--dram_gib={scale.dram_gib}",
             f"--ssd_path={ssd_dir}",
             f"--run_for_seconds={duration}",

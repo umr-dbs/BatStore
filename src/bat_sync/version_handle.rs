@@ -10,15 +10,11 @@ use std::hash::Hash;
 pub(crate) const START_VERSION: Version = 1;
 
 // Diagnostic instrumentation for the tpcc-stress cross-table invariant bug
-// (2026-08-15) - counts how often abort_writes' silent give-up paths
-// actually trigger, to find which one is responsible. debug-only: this is
-// hot-path code, so the counters (and their eprintln!s) don't belong in
-// release builds.
+// (2026-08-15) - counts how often abort_writes' silent give-up path
+// actually triggers. debug-only: this is hot-path code, so the counter
+// (and its eprintln!) doesn't belong in release builds.
 #[cfg(debug_assertions)]
 pub(crate) static ABORT_TERMINAL_WITH_REMAINING: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-#[cfg(debug_assertions)]
-pub(crate) static ABORT_PREDECESSOR_MISSING_HOT: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 impl<
@@ -282,13 +278,9 @@ impl<
     /// one latch. The defensive retry preserves the old one-call-per-entry
     /// behavior if a run is ever distributed across leaves.
     ///
-    /// A pending predecessor (`LeafPage::abort_write`'s `Option<TxStamp>`)
-    /// is resolved purely against this same hot leaf now that there is no
-    /// separate cold-chain page to search: `apply_invalidate` already
-    /// performs a bounded, same-page search for it before returning
-    /// `Some`, so a leftover `Some` here means the predecessor genuinely
-    /// isn't on this page (logged via the `ABORT_PREDECESSOR_MISSING_*`
-    /// counters below rather than treated as an error).
+    /// An `Update`-abort's linked predecessor is always resolved locally by
+    /// `LeafPage::abort_write` itself: a key's versions never straddle a
+    /// split, so there is no separate page left to search.
     #[inline]
     pub(crate) fn abort_writes(&self, key: Key, stamp: TxStamp, count: usize) {
         let mut remaining = count;
@@ -296,7 +288,7 @@ impl<
             let leaf_guard = self.traversal_write_olc_registered(key);
             let leaf_deref_mut = leaf_guard.deref_mut();
             let leaf_page = leaf_deref_mut.as_leaf_page();
-            let (outcome, pending_predecessor) = leaf_page.abort_write(key, stamp);
+            let outcome = leaf_page.abort_write(key, stamp);
 
             if outcome == AbortOutcome::NotFound {
                 // Genuinely nothing anywhere -- matches today's terminal
@@ -310,16 +302,6 @@ impl<
                 }
                 break;
             }
-
-            #[cfg(debug_assertions)]
-            if let Some(pred_stamp) = pending_predecessor {
-                ABORT_PREDECESSOR_MISSING_HOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!(
-                    "[abort-diag] predecessor MISSING (hot invalidate) key={key} stamp={stamp} pred_stamp={pred_stamp}"
-                );
-            }
-            #[cfg(not(debug_assertions))]
-            let _ = pending_predecessor;
 
             remaining -= 1;
         }
