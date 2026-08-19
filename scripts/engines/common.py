@@ -676,3 +676,25 @@ def percentiles_from_samples(csv_path: Path, column: str, filter_column: str = N
         "p50": _pct(0.50), "p95": _pct(0.95), "p99": _pct(0.99),
         "count": n, "avg": sum(values) / n,
     }
+
+
+def run_gc_variants(module, workload: str, scale, out_dir_base: Path, gc_list: list, run_kwargs: dict):
+    """Runs `module.run(...)` once per requested gc setting in `gc_list` - except for
+    engines with no working GC toggle (see SUPPORTS_GC_TOGGLE in each engines/*.py), which
+    only get run once total: the same NormalizedResult is reported for every requested gc
+    label (with gc_enabled stamped to that label) instead of paying for a second, identical
+    run. Used by run_skew_sweep.py/run_htap_analytical_sweep.py, which - unlike
+    compare_engines.py's own gc handling - want an "on" and an "off" row for every engine,
+    even ones with no real toggle, rather than collapsing those into a single "n/a" row.
+
+    Returns a list of (gc_label, NormalizedResult) pairs, one per entry in gc_list, in order.
+    """
+    supports_gc = getattr(module, "SUPPORTS_GC_TOGGLE", False)
+    if not supports_gc:
+        result = module.run(workload, scale, out_dir_base / "gc_n_a", gc="on", **run_kwargs)
+        return [(gc, dataclasses.replace(result, gc_enabled=gc)) for gc in gc_list]
+    pairs = []
+    for gc in gc_list:
+        result = module.run(workload, scale, out_dir_base / f"gc_{gc}", gc=gc, **run_kwargs)
+        pairs.append((gc, result))
+    return pairs
