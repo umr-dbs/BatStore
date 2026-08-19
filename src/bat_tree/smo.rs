@@ -233,13 +233,12 @@ impl<
         let (active, dead) = (active as usize, dead as usize);
 
         // A leaf can also be sparse on *active* alone while its *raw*
-        // footprint (active+dead) stays large, without ever having gone
-        // through a cold-offloading split yet -- e.g. a run of plain,
+        // footprint (active+dead) stays large -- e.g. a run of plain,
         // never-updated single-version deletes under one still-open
         // transaction, where every record is its own key's "newest" entry
-        // (see `grouped_hot_cold_records`) and so can never be shed to a
-        // cold chain in the first place, not even in principle, until that
-        // transaction resolves. Classifying that leaf `ActiveUnderflow` on
+        // (see `hot_records_only`) and so is still protected garbage that
+        // can't be dropped, not even in principle, until that transaction
+        // resolves. Classifying that leaf `ActiveUnderflow` on
         // active count alone routes it into `on_underflow_node`/`merge()`,
         // which can only combine it with a sibling if their *combined* raw
         // footprint fits one page -- if the sibling is itself substantial
@@ -259,9 +258,9 @@ impl<
         // apart from "was protected once, but that transaction committed
         // long ago and every one of these entries is now permanently,
         // safely dead." A leaf built up entirely from one-shot,
-        // never-reinserted deletes (so nothing here is cold-offload
-        // eligible either — see the branch above) can accumulate enough
-        // such garbage to sit above the 20% bar forever, even at
+        // never-reinserted deletes (so nothing here is protected either —
+        // see the branch above) can accumulate enough such garbage to
+        // sit above the 20% bar forever, even at
         // `active == 0`, leaving it permanently exempt from underflow and
         // permanently un-mergeable — confirmed via
         // `ascending_insert_then_random_order_delete_leaves_tree_empty`/

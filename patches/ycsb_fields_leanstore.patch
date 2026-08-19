@@ -1,0 +1,174 @@
+diff --git a/frontend/CMakeLists.txt b/frontend/CMakeLists.txt
+index 2080cc4..af00001 100644
+--- a/frontend/CMakeLists.txt
++++ b/frontend/CMakeLists.txt
+@@ -8,7 +8,10 @@ target_include_directories(bulk_loading PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+ 
+ add_executable(ycsb ycsb/ycsb.cpp)
+ set(YCSB_PAYLOAD_BYTES "1000" CACHE STRING "Physical YCSB value bytes")
+-target_compile_definitions(ycsb PRIVATE YCSB_PAYLOAD_BYTES=${YCSB_PAYLOAD_BYTES})
++set(YCSB_FIELD_COUNT "10" CACHE STRING "Physical YCSB field count")
++set(YCSB_FIELD_LENGTH "100" CACHE STRING "Physical bytes per YCSB field")
++target_compile_definitions(ycsb PRIVATE YCSB_PAYLOAD_BYTES=${YCSB_PAYLOAD_BYTES}
++  YCSB_FIELD_COUNT=${YCSB_FIELD_COUNT} YCSB_FIELD_LENGTH=${YCSB_FIELD_LENGTH})
+ target_link_libraries(ycsb leanstore Threads::Threads)
+ target_include_directories(ycsb PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+ 
+@@ -53,6 +56,7 @@ target_include_directories(wiredtiger_tpcc PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+ 
+ add_executable(wiredtiger_ycsb ycsb/wiredtiger_ycsb.cpp)
+-target_compile_definitions(wiredtiger_ycsb PRIVATE YCSB_PAYLOAD_BYTES=${YCSB_PAYLOAD_BYTES})
++target_compile_definitions(wiredtiger_ycsb PRIVATE YCSB_PAYLOAD_BYTES=${YCSB_PAYLOAD_BYTES}
++  YCSB_FIELD_COUNT=${YCSB_FIELD_COUNT} YCSB_FIELD_LENGTH=${YCSB_FIELD_LENGTH})
+ target_link_libraries(wiredtiger_ycsb leanstore wiredtiger Threads::Threads dl z libbz2.a lz4 snappy)
+ target_include_directories(wiredtiger_ycsb PRIVATE ${SHARED_INCLUDE_DIRECTORY})
+ # prefer https://source.wiredtiger.com/10.0.0/build-posix.html over sudo apt-get install wiredtiger libwiredtiger-dev
+diff --git a/frontend/ycsb/ycsb.cpp b/frontend/ycsb/ycsb.cpp
+index 263d12f..af00002 100644
+--- a/frontend/ycsb/ycsb.cpp
++++ b/frontend/ycsb/ycsb.cpp
+@@ -23,6 +23,9 @@ DEFINE_uint32(ycsb_read_ratio, 100, "");
+ DEFINE_uint64(ycsb_tuple_count, 0, "");
+ DEFINE_uint32(ycsb_payload_size, YCSB_PAYLOAD_BYTES, "compiled tuple size in bytes");
+ DEFINE_bool(ycsb_read_payload, true, "consume the complete value on reads/scans");
++DEFINE_uint32(ycsb_field_count, YCSB_FIELD_COUNT, "compiled YCSB field count");
++DEFINE_uint32(ycsb_field_length, YCSB_FIELD_LENGTH, "compiled bytes per YCSB field");
++DEFINE_bool(ycsb_write_all_fields, false, "replace every field on update instead of one random field");
+ DEFINE_uint32(ycsb_warmup_rounds, 0, "");
+ DEFINE_uint32(ycsb_insert_threads, 0, "");
+ DEFINE_uint32(ycsb_threads, 0, "");
+@@ -43,6 +46,10 @@ DEFINE_uint32(ycsb_max_scan_length, 100, "max tuples per scan op (YCSB E); actua
+ using namespace leanstore;
+ // -------------------------------------------------------------------------------------
+ using YCSBKey = u64;
+-using YCSBPayload = BytesPayload<YCSB_PAYLOAD_BYTES>;
++using YCSBField = BytesPayload<YCSB_FIELD_LENGTH>;
++struct YCSBPayload {
++   YCSBField fields[YCSB_FIELD_COUNT];
++};
++static_assert(sizeof(YCSBPayload) == YCSB_PAYLOAD_BYTES);
+ using KVTable = Relation<YCSBKey, YCSBPayload>;
+ static inline void consume_payload(const YCSBPayload& payload) {
+@@ -63,5 +70,8 @@ int main(int argc, char** argv)
+ {
+    gflags::SetUsageMessage("Leanstore Frontend");
+    gflags::ParseCommandLineFlags(&argc, &argv, true);
++   ensure(FLAGS_ycsb_payload_size == sizeof(YCSBPayload));
++   ensure(FLAGS_ycsb_field_count == YCSB_FIELD_COUNT);
++   ensure(FLAGS_ycsb_field_length == YCSB_FIELD_LENGTH);
+    // -------------------------------------------------------------------------------------
+    chrono::high_resolution_clock::time_point begin, end;
+@@ -211,9 +221,19 @@ int main(int argc, char** argv)
+                   } else if (op_rnd < FLAGS_ycsb_insert_ratio + FLAGS_ycsb_scan_ratio + FLAGS_ycsb_rmw_ratio) {
+                      // YCSB F: read-modify-write - read then update the same key in one op.
+                      table.lookup1({key}, [&](const KVTable& record) { consume_payload(record.my_payload); });
+-                     UpdateDescriptorGenerator1(rmw_update_descriptor, KVTable, my_payload);
+-                     utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result), sizeof(YCSBPayload));
++                     const u32 field = utils::RandomGenerator::getRandU64(0, YCSB_FIELD_COUNT);
++                     UpdateDescriptorInit(rmw_update_descriptor, 1);
++                     rmw_update_descriptor.slots[0].offset = offsetof(KVTable, my_payload) +
++                                                               (FLAGS_ycsb_write_all_fields ? 0 : field * sizeof(YCSBField));
++                     rmw_update_descriptor.slots[0].length = FLAGS_ycsb_write_all_fields ? sizeof(YCSBPayload) : sizeof(YCSBField);
++                     if (FLAGS_ycsb_write_all_fields)
++                        utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result), sizeof(YCSBPayload));
++                     else
++                        utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result.fields[field]), sizeof(YCSBField));
+                      table.update1(
+-                         {key}, [&](KVTable& rec) { rec.my_payload = result; }, rmw_update_descriptor);
++                         {key}, [&](KVTable& rec) {
++                            if (FLAGS_ycsb_write_all_fields) rec.my_payload = result;
++                            else rec.my_payload.fields[field] = result.fields[field];
++                         }, rmw_update_descriptor);
+                      leanstore::storage::BMC::global_bf->evictLastPage();
+                   } else if (FLAGS_ycsb_read_ratio == 100 || utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
+@@ -223,10 +243,20 @@ int main(int argc, char** argv)
+                      table.lookup1({key}, [&](const KVTable& record) { consume_payload(record.my_payload); });
+                      leanstore::storage::BMC::global_bf->evictLastPage();  // to ignore the replacement strategy effect on MVCC experiment
+                   } else {
+-                     UpdateDescriptorGenerator1(tabular_update_descriptor, KVTable, my_payload);
+-                     utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result), sizeof(YCSBPayload));
++                     const u32 field = utils::RandomGenerator::getRandU64(0, YCSB_FIELD_COUNT);
++                     UpdateDescriptorInit(tabular_update_descriptor, 1);
++                     tabular_update_descriptor.slots[0].offset = offsetof(KVTable, my_payload) +
++                                                                   (FLAGS_ycsb_write_all_fields ? 0 : field * sizeof(YCSBField));
++                     tabular_update_descriptor.slots[0].length = FLAGS_ycsb_write_all_fields ? sizeof(YCSBPayload) : sizeof(YCSBField);
++                     if (FLAGS_ycsb_write_all_fields)
++                        utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result), sizeof(YCSBPayload));
++                     else
++                        utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result.fields[field]), sizeof(YCSBField));
+                      // -------------------------------------------------------------------------------------
+                      table.update1(
+-                         {key}, [&](KVTable& rec) { rec.my_payload = result; }, tabular_update_descriptor);
++                         {key}, [&](KVTable& rec) {
++                            if (FLAGS_ycsb_write_all_fields) rec.my_payload = result;
++                            else rec.my_payload.fields[field] = result.fields[field];
++                         }, tabular_update_descriptor);
+                      leanstore::storage::BMC::global_bf->evictLastPage();  // to ignore the replacement strategy effect on MVCC experiment
+                   }
+diff --git a/frontend/ycsb/wiredtiger_ycsb.cpp b/frontend/ycsb/wiredtiger_ycsb.cpp
+index c0bdac0..af00003 100644
+--- a/frontend/ycsb/wiredtiger_ycsb.cpp
++++ b/frontend/ycsb/wiredtiger_ycsb.cpp
+@@ -26,5 +26,8 @@ using namespace std;
+ DEFINE_uint32(ycsb_read_ratio, 100, "");
+ DEFINE_uint32(ycsb_payload_size, YCSB_PAYLOAD_BYTES, "compiled tuple size in bytes");
+ DEFINE_bool(ycsb_read_payload, true, "consume the complete value on reads/scans");
++DEFINE_uint32(ycsb_field_count, YCSB_FIELD_COUNT, "compiled YCSB field count");
++DEFINE_uint32(ycsb_field_length, YCSB_FIELD_LENGTH, "compiled bytes per YCSB field");
++DEFINE_bool(ycsb_write_all_fields, false, "replace every field on update instead of one random field");
+ DEFINE_uint64(ycsb_tuple_count, 0, "");
+ DEFINE_uint32(ycsb_warmup_rounds, 0, "");
+@@ -43,5 +46,9 @@ thread_local WT_CURSOR* WiredTigerDB::cursor[20] = {nullptr};
+ // -------------------------------------------------------------------------------------
+ using YCSBKey = u64;
+-using YCSBPayload = BytesPayload<YCSB_PAYLOAD_BYTES>;
++using YCSBField = BytesPayload<YCSB_FIELD_LENGTH>;
++struct YCSBPayload {
++   YCSBField fields[YCSB_FIELD_COUNT];
++};
++static_assert(sizeof(YCSBPayload) == YCSB_PAYLOAD_BYTES);
+ using YCSBTable = Relation<YCSBKey, YCSBPayload>;
+ static inline void consume_payload(const YCSBPayload& payload) {
+@@ -63,5 +70,8 @@ int main(int argc, char** argv)
+ {
+    gflags::SetUsageMessage("WiredTiger TPC-C");
+    gflags::ParseCommandLineFlags(&argc, &argv, true);
++   ensure(FLAGS_ycsb_payload_size == sizeof(YCSBPayload));
++   ensure(FLAGS_ycsb_field_count == YCSB_FIELD_COUNT);
++   ensure(FLAGS_ycsb_field_length == YCSB_FIELD_LENGTH);
+    // -------------------------------------------------------------------------------------
+    chrono::high_resolution_clock::time_point begin, end;
+@@ -146,15 +156,29 @@ int main(int argc, char** argv)
+                } else if (op_rnd < FLAGS_ycsb_insert_ratio + FLAGS_ycsb_scan_ratio + FLAGS_ycsb_rmw_ratio) {
+                   // YCSB F: read-modify-write - read then update the same key in one op.
+                   table.lookup1({key}, [&](const YCSBTable& record) { consume_payload(record.my_payload); });
++                  const u32 field = leanstore::utils::RandomGenerator::getRandU64(0, YCSB_FIELD_COUNT);
+                   UpdateDescriptorGenerator1(rmw_update_descriptor, YCSBTable, my_payload);
+-                  leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result), sizeof(YCSBPayload));
++                  if (FLAGS_ycsb_write_all_fields)
++                     leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result), sizeof(YCSBPayload));
++                  else
++                     leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result.fields[field]), sizeof(YCSBField));
+                   table.update1(
+-                      {key}, [&](YCSBTable& rec) { rec.my_payload = result; }, rmw_update_descriptor);
++                      {key}, [&](YCSBTable& rec) {
++                         if (FLAGS_ycsb_write_all_fields) rec.my_payload = result;
++                         else rec.my_payload.fields[field] = result.fields[field];
++                      }, rmw_update_descriptor);
+                } else if (FLAGS_ycsb_read_ratio == 100 || leanstore::utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
+                   table.lookup1({key}, [&](const YCSBTable& record) { consume_payload(record.my_payload); });
+                } else {
++                  const u32 field = leanstore::utils::RandomGenerator::getRandU64(0, YCSB_FIELD_COUNT);
+                   UpdateDescriptorGenerator1(tabular_update_descriptor, YCSBTable, my_payload);
+-                  leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result), sizeof(YCSBPayload));
++                  if (FLAGS_ycsb_write_all_fields)
++                     leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result), sizeof(YCSBPayload));
++                  else
++                     leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&result.fields[field]), sizeof(YCSBField));
+                   table.update1(
+-                      {key}, [&](YCSBTable& rec) { rec.my_payload = result; }, tabular_update_descriptor);
++                      {key}, [&](YCSBTable& rec) {
++                         if (FLAGS_ycsb_write_all_fields) rec.my_payload = result;
++                         else rec.my_payload.fields[field] = result.fields[field];
++                      }, tabular_update_descriptor);
+                }
