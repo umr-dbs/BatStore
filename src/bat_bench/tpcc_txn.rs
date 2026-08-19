@@ -760,30 +760,40 @@ pub fn new_order(
     }
 
     tx.commit();
-    let db_id = db as *const TpccDatabase as usize;
-    if TPCC_DIAG_DATABASES.lock().unwrap().contains(&db_id) {
-        NO_DIAG_LOG
-            .lock()
-            .unwrap()
-            .push((db_id, home_w_id, d_id, o_id));
+    #[cfg(any(test, debug_assertions))]
+    {
+        let db_id = db as *const TpccDatabase as usize;
+        if TPCC_DIAG_DATABASES.lock().unwrap().contains(&db_id) {
+            NO_DIAG_LOG
+                .lock()
+                .unwrap()
+                .push((db_id, home_w_id, d_id, o_id));
+        }
     }
     TxnOutcome::Committed
 }
 
-// TEMPORARY diagnostic (2026-08-15): records every (w_id, d_id, o_id) a
-// New-Order transaction actually committed, so a test can cross-check the
-// final observed `d_next_o_id` against the true max assigned o_id — see
-// `tests/bench_tpcc_stress_tests.rs`'s no-gc/GC-on comparison.
+// Diagnostic (2026-08-15): records every (w_id, d_id, o_id) a New-Order
+// transaction actually committed, so a test can cross-check the final
+// observed `d_next_o_id` against the true max assigned o_id — see
+// `tests/bench_tpcc_stress_tests.rs`'s no-gc/GC-on comparison. debug-only:
+// the lookup on every commit above is otherwise a mutex lock + hashset
+// probe on the hot transactional path, so this must not exist in release
+// builds.
+#[cfg(any(test, debug_assertions))]
 pub static NO_DIAG_LOG: std::sync::Mutex<Vec<(usize, u32, u8, u32)>> =
     std::sync::Mutex::new(Vec::new());
 
+#[cfg(any(test, debug_assertions))]
 static TPCC_DIAG_DATABASES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<usize>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
-/// Enables or disables temporary transaction diagnostics for one database.
-/// Keeping the registration database-scoped prevents parallel tests from
-/// mixing otherwise-identical warehouse/district identifiers.
+/// Enables or disables transaction diagnostics for one database. Keeping the
+/// registration database-scoped prevents parallel tests from mixing
+/// otherwise-identical warehouse/district identifiers. debug-only (see
+/// `NO_DIAG_LOG`'s doc) — a no-op in release builds.
+#[cfg(any(test, debug_assertions))]
 pub fn set_diagnostics_enabled(db: &TpccDatabase, enabled: bool) {
     let db_id = db as *const TpccDatabase as usize;
     let mut databases = TPCC_DIAG_DATABASES.lock().unwrap();
@@ -793,14 +803,20 @@ pub fn set_diagnostics_enabled(db: &TpccDatabase, enabled: bool) {
         databases.remove(&db_id);
     }
 }
+#[cfg(not(any(test, debug_assertions)))]
+pub fn set_diagnostics_enabled(_db: &TpccDatabase, _enabled: bool) {}
 
 /// Stops diagnostics and removes only this database's collected entries.
+/// debug-only (see `NO_DIAG_LOG`'s doc) — a no-op in release builds.
+#[cfg(any(test, debug_assertions))]
 pub fn clear_diagnostics(db: &TpccDatabase) {
     let db_id = db as *const TpccDatabase as usize;
     set_diagnostics_enabled(db, false);
     NO_DIAG_LOG.lock().unwrap().retain(|&(id, ..)| id != db_id);
     PAY_DIAG_LOG.lock().unwrap().retain(|&(id, ..)| id != db_id);
 }
+#[cfg(not(any(test, debug_assertions)))]
+pub fn clear_diagnostics(_db: &TpccDatabase) {}
 
 // ---------------------------------------------------------------------
 // Payment (spec §2.5): ~43% of the mix.
@@ -906,17 +922,22 @@ pub fn payment(
     ));
 
     tx.commit();
-    let db_id = db as *const TpccDatabase as usize;
-    if TPCC_DIAG_DATABASES.lock().unwrap().contains(&db_id) {
-        PAY_DIAG_LOG.lock().unwrap().push((db_id, home_w_id, d_id, amount));
+    #[cfg(any(test, debug_assertions))]
+    {
+        let db_id = db as *const TpccDatabase as usize;
+        if TPCC_DIAG_DATABASES.lock().unwrap().contains(&db_id) {
+            PAY_DIAG_LOG.lock().unwrap().push((db_id, home_w_id, d_id, amount));
+        }
     }
     TxnOutcome::Committed
 }
 
-// TEMPORARY diagnostic (2026-08-15): records every committed Payment's
-// (home_w_id, d_id, amount), so a test can independently recompute the
-// expected warehouse/district ytd growth and cross-check it against what a
-// table scan actually observes — see `tests/bench_tpcc_stress_tests.rs`.
+// Diagnostic (2026-08-15): records every committed Payment's (home_w_id,
+// d_id, amount), so a test can independently recompute the expected
+// warehouse/district ytd growth and cross-check it against what a table
+// scan actually observes — see `tests/bench_tpcc_stress_tests.rs`.
+// debug-only, same reasoning as `NO_DIAG_LOG`.
+#[cfg(any(test, debug_assertions))]
 pub static PAY_DIAG_LOG: std::sync::Mutex<Vec<(usize, u32, u8, f64)>> =
     std::sync::Mutex::new(Vec::new());
 

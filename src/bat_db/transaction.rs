@@ -621,43 +621,48 @@ impl<
     pub fn abort(mut self) -> bool {
         if let TransactionState::InFlight = self.committed {
             self.committed = TransactionState::Aborted;
-
-            // Reverse (LIFO) order, not chronological: reverting is not
-            // atomic across every written key at once — each `abort_write`
-            // individually re-exposes that one key to any other concurrent
-            // transaction the instant it runs, well before the rest of
-            // `self.written` has been reverted too. When an earlier write
-            // in this transaction effectively acts as a lock/dequeue step
-            // that later writes in the same transaction depend on (e.g.
-            // `bat_bench::tpcc_txn::deliver_one_district` deletes a NewOrder
-            // queue entry first, then updates that order's Orders/OrderLine/
-            // Customer rows), reverting in forward order un-deletes — i.e.
-            // re-queues — that entry *first*, while this abort still has
-            // several other writes left to revert: a concurrent Delivery
-            // scan can pick the freshly re-queued order back up and start
-            // racing this thread's own in-flight reversal of its
-            // OrderLine/Customer rows, corrupting them out from under it.
-            // Reverting last-write-first instead means every write this
-            // transaction made *after* that lock/dequeue step is already
-            // fully reverted by the time the dequeue step's own reversal
-            // makes the entry visible to anyone else again — the same
-            // ordering a plain undo-log/rollback would use.
-            let stamp = TxStamp::new(self.worker_id, self.ts_start);
-            let mut end = self.written.len();
-            while end != 0 {
-                let (slot, key) = self.written[end - 1];
-                let mut start = end - 1;
-                while start != 0 && self.written[start - 1] == (slot, key) {
-                    start -= 1;
-                }
-                self.tables[slot].tree.abort_writes(key, stamp, end - start);
-                end = start;
-            }
-
+            self.unwind_writes();
             self.db.end_snapshot(self.ts_start);
             true
         } else {
             false
+        }
+    }
+
+    // Reverse (LIFO) order, not chronological: reverting is not atomic
+    // across every written key at once — each `abort_write` individually
+    // re-exposes that one key to any other concurrent transaction the
+    // instant it runs, well before the rest of `self.written` has been
+    // reverted too. When an earlier write in this transaction effectively
+    // acts as a lock/dequeue step that later writes in the same transaction
+    // depend on (e.g. `bat_bench::tpcc_txn::deliver_one_district` deletes a
+    // NewOrder queue entry first, then updates that order's Orders/
+    // OrderLine/Customer rows), reverting in forward order un-deletes — i.e.
+    // re-queues — that entry *first*, while this abort still has several
+    // other writes left to revert: a concurrent Delivery scan can pick the
+    // freshly re-queued order back up and start racing this thread's own
+    // in-flight reversal of its OrderLine/Customer rows, corrupting them out
+    // from under it. Reverting last-write-first instead means every write
+    // this transaction made *after* that lock/dequeue step is already fully
+    // reverted by the time the dequeue step's own reversal makes the entry
+    // visible to anyone else again — the same ordering a plain undo-log/
+    // rollback would use.
+    //
+    // Shared between `abort()` and `Drop::drop` — both need this exact
+    // unwind, but only `abort(self)` can consume `self` by value, so this
+    // takes `&mut self` and each caller handles its own state transition
+    // and `end_snapshot` around it.
+    fn unwind_writes(&mut self) {
+        let stamp = TxStamp::new(self.worker_id, self.ts_start);
+        let mut end = self.written.len();
+        while end != 0 {
+            let (slot, key) = self.written[end - 1];
+            let mut start = end - 1;
+            while start != 0 && self.written[start - 1] == (slot, key) {
+                start -= 1;
+            }
+            self.tables[slot].tree.abort_writes(key, stamp, end - start);
+            end = start;
         }
     }
 }
@@ -680,20 +685,9 @@ impl<
         // here — not just belt-and-suspenders: re-running would double
         // `end_snapshot` this transaction's `ts_start`.
         if let TransactionState::InFlight = self.committed {
-            // Reverse (LIFO) order — see `abort`'s identical doc above for
-            // why forward order can expose a partially-unwound transaction
-            // to a concurrent one mid-abort.
-            let stamp = TxStamp::new(self.worker_id, self.ts_start);
-            let mut end = self.written.len();
-            while end != 0 {
-                let (slot, key) = self.written[end - 1];
-                let mut start = end - 1;
-                while start != 0 && self.written[start - 1] == (slot, key) {
-                    start -= 1;
-                }
-                self.tables[slot].tree.abort_writes(key, stamp, end - start);
-                end = start;
-            }
+            // See `unwind_writes`'s doc for why this must run in reverse
+            // (LIFO) order.
+            self.unwind_writes();
             self.db.end_snapshot(self.ts_start);
         }
     }
