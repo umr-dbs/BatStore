@@ -111,11 +111,12 @@ CHBENCHMARK_CONFIG_TEMPLATE = """<?xml version="1.0"?>
     <isolation>TRANSACTION_SERIALIZABLE</isolation>
     <batchsize>128</batchsize>
     <scalefactor>{warehouses}</scalefactor>
-    <!-- Default (no @bench) applies to tpcc; chbenchmark gets its own fixed 1 dedicated
-         analytics terminal, matching the "N OLTP threads + 1 OLAP thread" convention used
-         for BatStore/LeanStore/WiredTiger's htap_q1/htap_q6 (see their engines/*.py). -->
+    <!-- Default (no @bench) applies to tpcc; chbenchmark gets its own dedicated analytics
+         terminal pool (default 1), matching the "N OLTP threads + M OLAP threads"
+         convention used for BatStore/LeanStore/WiredTiger's htap_q1/htap_q6 (see their
+         engines/*.py) - sized from scale.htap_olap_threads. -->
     <terminals>{terminals}</terminals>
-    <terminals bench="chbenchmark">1</terminals>
+    <terminals bench="chbenchmark">{olap_threads}</terminals>
     <works>
         <work>
             <time>{duration}</time>
@@ -454,7 +455,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         threads = scale.tpcc_terminals
         config_path.write_text(CHBENCHMARK_CONFIG_TEMPLATE.format(
             warehouses=scale.tpcc_warehouses, terminals=threads, duration=duration,
-            ch_weights=CHBENCHMARK_WEIGHTS[workload],
+            ch_weights=CHBENCHMARK_WEIGHTS[workload], olap_threads=scale.htap_olap_threads,
             **_template_connection_values(),
         ))
         bench_type = "tpcc,chbenchmark"

@@ -320,6 +320,12 @@ class Scale:
     ycsb_threads: int = 16
     ycsb_duration: int = 30
     ycsb_theta: float = 0.99
+    # htap_q1/htap_q6 (see HTAP_WORKLOADS): number of dedicated analytical (OLAP) threads
+    # repeating the workload's query concurrently with the OLTP terminals swept via
+    # tpcc_terminals - the x-axis for an "HTAP scaling" plot (throughput vs. number of
+    # analytical threads, TPC-C's own OLTP side held fixed). Defaults to 1, matching every
+    # engine wrapper's previous hardcoded behavior.
+    htap_olap_threads: int = 1
     # "S-HTAP" streaming workload (src/bat_bench/s_htap_driver.rs): near-sorted
     # arrivals + recency-biased hot-tail updates running concurrently with OLAP scans
     # that straddle the cold/hot boundary - see that module's doc. `s_htap_record_count`

@@ -7,75 +7,12 @@ use crate::bat_record_model::tx_stamp::TxStamp;
 use crate::bat_record_model::version_info::VersionInfo;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
-use std::mem::{ManuallyDrop, MaybeUninit};
-use std::sync::atomic::AtomicU64;
+use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 struct LeafData<Payload> {
     version: VersionInfo,
     payload: PayloadSlot<Payload>,
-}
-
-const INLINE_VALID_WORDS: usize = 2;
-
-union ValidMaskStorage {
-    inline: ManuallyDrop<[AtomicU64; INLINE_VALID_WORDS]>,
-    heap: ManuallyDrop<Box<[AtomicU64]>>,
-}
-
-/// Keeps the normal 4 KiB leaf's 123 validity bits directly in the page.
-/// The larger experimental TPC-C leaves retain the old out-of-line bitmap,
-/// without making the normal representation larger than two machine words.
-struct ValidMask<const N: usize> {
-    storage: ValidMaskStorage,
-}
-
-impl<const N: usize> ValidMask<N> {
-    const INLINE: bool = N <= INLINE_VALID_WORDS * 64;
-
-    fn new() -> Self {
-        let storage = if Self::INLINE {
-            ValidMaskStorage {
-                inline: ManuallyDrop::new([const { AtomicU64::new(0) }; INLINE_VALID_WORDS]),
-            }
-        } else {
-            ValidMaskStorage {
-                heap: ManuallyDrop::new(
-                    (0..N.div_ceil(64))
-                        .map(|_| AtomicU64::new(0))
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                ),
-            }
-        };
-        Self { storage }
-    }
-
-    #[inline(always)]
-    fn word(&self, index: usize) -> &AtomicU64 {
-        debug_assert!(index < N.div_ceil(64));
-        unsafe {
-            if Self::INLINE {
-                &self.storage.inline[index]
-            } else {
-                &self.storage.heap[index]
-            }
-        }
-    }
-
-    fn clear(&self) {
-        for index in 0..N.div_ceil(64) {
-            self.word(index).store(0, Release);
-        }
-    }
-}
-
-impl<const N: usize> Drop for ValidMask<N> {
-    fn drop(&mut self) {
-        if !Self::INLINE {
-            unsafe { ManuallyDrop::drop(&mut self.storage.heap) }
-        }
-    }
 }
 
 /// Borrowed, zero-copy view of one structure-of-arrays leaf slot.
@@ -283,9 +220,6 @@ pub struct LeafPage<
     pub(crate) len: PageLenField,
     key_region: [MaybeUninit<Key>; NUM_RECORDS],
     data_region: [MaybeUninit<LeafData<Payload>>; NUM_RECORDS],
-    /// One atomic bit per physical slot. Set means the insertion stamp is
-    /// not invalidated. This is deliberately not an MVCC visibility mask.
-    valid_mask: ValidMask<NUM_RECORDS>,
 }
 
 impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Default
@@ -325,7 +259,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
             len: PageLenField::new(0),
             key_region: unsafe { MaybeUninit::uninit().assume_init() },
             data_region: unsafe { MaybeUninit::uninit().assume_init() },
-            valid_mask: ValidMask::new(),
         }
     }
     #[inline(always)]
@@ -396,18 +329,14 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
     pub fn set_payload_at(&mut self, index: usize, payload: Payload) {
         self.data_mut()[index].payload.set(payload)
     }
+    /// Whether the entry at `index` still has a live (non-aborted)
+    /// insertion — i.e. not `VersionInfo::invalidate`d. Deletedness is a
+    /// separate axis (see `is_live`); this only tracks abort of the insert
+    /// itself, matching what `latest_position(_, skip_invalid=true)` and
+    /// the same-stamp predecessor searches below need.
     #[inline(always)]
     fn bit_is_valid(&self, index: usize) -> bool {
-        self.valid_mask.word(index / 64).load(Acquire) & (1u64 << (index % 64)) != 0
-    }
-    #[inline(always)]
-    fn set_valid(&self, index: usize, valid: bool) {
-        let bit = 1u64 << (index % 64);
-        if valid {
-            self.valid_mask.word(index / 64).fetch_or(bit, Release);
-        } else {
-            self.valid_mask.word(index / 64).fetch_and(!bit, Release);
-        }
+        !self.version_at(index).insertion_stamp().is_invalid()
     }
     #[inline(always)]
     pub(crate) fn latest_position(&self, key: Key, skip_invalid: bool) -> Option<usize> {
@@ -444,7 +373,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
                 .add(index)
                 .write(MaybeUninit::new(LeafData { version, payload }));
         }
-        self.set_valid(index, true)
     }
     #[inline(always)]
     pub fn commit_delta(&self, active_delta: i32, dead_delta: i32) {
@@ -463,13 +391,11 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
                 .cast::<LeafData<Payload>>()
                 .drop_in_place()
         };
-        self.set_valid(index, false)
     }
     pub fn on_reuse(&mut self) {
         let n = self.len();
         self.len.store(0, Release);
         self.drop_records(n);
-        self.valid_mask.clear();
     }
     fn drop_records(&mut self, n: usize) {
         unsafe {
@@ -514,10 +440,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
                         payload: r.source_payload_slot().clone(),
                     }));
             }
-            self.set_valid(
-                len + index,
-                !r.source_version().insertion_stamp().is_invalid(),
-            );
         }
         assert_eq!(written, count, "bulk source length changed while inserting");
         self.len.store(
@@ -547,7 +469,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
             written += 1;
             let (key, version, payload) = record.into_parts();
             active += usize::from(version.is_live());
-            let valid = !version.insertion_stamp().is_invalid();
             unsafe {
                 self.key_region
                     .as_mut_ptr()
@@ -558,7 +479,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
                     .add(len + index)
                     .write(MaybeUninit::new(LeafData { version, payload }));
             }
-            self.set_valid(len + index, valid);
         }
         assert_eq!(written, count, "owned bulk source length was incorrect");
         self.len.store(
@@ -603,38 +523,27 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
             Err(())
         }
     }
-    /// The second element of the return tuple is only ever `Some` when the
-    /// first is `Invalidated`: an `Update`-abort whose own linked
-    /// predecessor (see `apply_invalidate`'s doc) wasn't found on *this*
-    /// page. A plain `Insert`'s abort looks identical from here (both "no
-    /// predecessor found locally") — that ambiguity is fine, see
-    /// `apply_invalidate`'s doc for why a further, empty search for the
-    /// pending stamp is a harmless no-op in that case. `bat_sync::
-    /// version_handle::abort_writes` treats a leftover `Some` here as a
-    /// genuine miss (logged, not retried elsewhere) since there is no
-    /// separate historical page left to keep searching; a caller that
-    /// doesn't care (e.g. this file's own tests, which only ever exercise
-    /// a single page) can ignore it.
-    pub(crate) fn abort_write(
-        &mut self,
-        key: Key,
-        my_stamp: TxStamp,
-    ) -> (AbortOutcome, Option<TxStamp>) {
+    /// A key's versions never straddle a split (`smo::split`'s `KEY_SPLIT`
+    /// partitions by key range, and its `VERSION_SPLIT` moves a whole key's
+    /// surviving chain together), so an `Update`-abort's linked predecessor
+    /// (see `apply_invalidate`'s doc) is always on this same page when one
+    /// exists at all.
+    pub(crate) fn abort_write(&mut self, key: Key, my_stamp: TxStamp) -> AbortOutcome {
         let Some(i) = self.latest_position(key, true) else {
-            return (AbortOutcome::NotFound, None);
+            return AbortOutcome::NotFound;
         };
         if self.version_at(i).insertion_stamp() == my_stamp {
-            let pending_predecessor = self.apply_invalidate(key);
-            (AbortOutcome::Invalidated, pending_predecessor)
+            self.apply_invalidate(key);
+            AbortOutcome::Invalidated
         } else if self.apply_undelete(key) {
-            (AbortOutcome::Undeleted, None)
+            AbortOutcome::Undeleted
         } else {
-            (AbortOutcome::NotFound, None)
+            AbortOutcome::NotFound
         }
     }
     pub(crate) fn abort_writes(&mut self, key: Key, my_stamp: TxStamp, limit: usize) -> usize {
         let mut n = 0;
-        while n < limit && !matches!(self.abort_write(key, my_stamp).0, AbortOutcome::NotFound) {
+        while n < limit && !matches!(self.abort_write(key, my_stamp), AbortOutcome::NotFound) {
             n += 1
         }
         n
@@ -684,32 +593,21 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
     }
     /// Invalidates `key`'s latest (valid) entry — the reversal half of an
     /// aborted `Insert`/`Update`'s own insert — and, if it was itself an
-    /// `Update`'s insert-half, tries to resurrect the predecessor its own
+    /// `Update`'s insert-half, resurrects the predecessor its own
     /// `delete_after_update` marked deleted (same stamp on both halves).
-    ///
-    /// Returns `None` if that predecessor was found and resurrected
-    /// locally, or if there plainly was none to begin with (a bare
-    /// `Insert`'s abort); returns `Some(stamp)` — the exact
-    /// `deletion_stamp` still being searched for — if a bounded, same-page
-    /// search didn't find it. `abort_write` passes this straight through
-    /// as its own return tuple's second element (see that method's doc)
-    /// so a cold-chain-aware caller further up can keep looking.
-    pub(crate) fn apply_invalidate(&mut self, key: Key) -> Option<TxStamp> {
+    /// A bare `Insert`'s abort has no such predecessor, so the search below
+    /// legitimately finds nothing in that case.
+    pub(crate) fn apply_invalidate(&mut self, key: Key) {
         let Some(i) = self.latest_position(key, true) else {
-            return None;
+            return;
         };
         let stamp = self.version_at(i).insertion_stamp();
         let was_live = self.version_at(i).is_live();
         self.version_mut_at(i).invalidate();
-        self.set_valid(i, false);
         if was_live {
             self.commit_delta(-1, 1)
         }
-        if self.undelete_matching_deletion_stamp(key, stamp, Some(i)) {
-            None
-        } else {
-            Some(stamp)
-        }
+        self.undelete_matching_deletion_stamp(key, stamp, Some(i));
     }
     pub(crate) fn apply_undelete(&mut self, key: Key) -> bool {
         let Some(i) = self.latest_position(key, true) else {

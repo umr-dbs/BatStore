@@ -99,6 +99,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ycsb-records", type=int)
     p.add_argument("--ycsb-duration", type=int)
     p.add_argument("--theta", type=float)
+    p.add_argument("--htap-olap-threads", type=int,
+                   help="number of dedicated analytical (OLAP) threads for htap_q1/htap_q6, "
+                        "run concurrently with the (fixed) --threads-sized OLTP terminal pool "
+                        "- sweep this via a shell loop for a throughput-vs-analytical-threads plot")
     p.add_argument("--ycsb-payload", choices=["standard", "u64"], default="standard",
                    help="standard=10x100-byte YCSB row (default); u64=one 8-byte value")
     p.add_argument("--ycsb-key-only", action="store_true",
@@ -137,6 +141,7 @@ def build_scale(args: argparse.Namespace) -> common.Scale:
         "ycsb_records": args.ycsb_records,
         "ycsb_duration": args.ycsb_duration,
         "ycsb_theta": args.theta,
+        "htap_olap_threads": args.htap_olap_threads,
         "dram_gib": args.dram_gib,
         "s_htap_record_count": args.s_htap_record_count,
         "s_htap_duration": args.s_htap_duration,
