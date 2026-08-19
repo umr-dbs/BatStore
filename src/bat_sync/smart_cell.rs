@@ -452,33 +452,12 @@ impl<E: Default + 'static> SmartGuard<E> {
         matches!(self, Reader(..))
     }
 
-    /// TEMPORARY diagnostic: has *anything* written to this cell since this
-    /// guard's own snapshot was taken? Compares the version this `Reader`
-    /// captured at `borrow_read()` time against the cell's current, live
-    /// version — a mismatch means some writer acquired and released this
-    /// cell's write lock in between, entirely unbeknownst to whoever is
-    /// still holding this stale `Reader`. Used to check whether `simba`
-    /// (read once for `split()`/`merge()`, then unconditionally retired with
-    /// no re-validation at all) ever actually changes out from under a split
-    /// in practice, not just in theory.
-    /// Always `false` for a `Writer` (nothing else could have touched it).
-    #[inline(always)]
-    pub fn changed_since_snapshot(&self) -> bool {
-        match self {
-            Reader(cell, read_latch) => unsafe { (*cell.0).cell_version.load(Relaxed) != *read_latch },
-            Writer(..) => false,
-        }
-    }
-
-    /// TEMPORARY diagnostic: the cell's current, live version — for a
-    /// precise "did this specific narrower window see a write" check,
-    /// narrower than `changed_since_snapshot`'s "since this guard was first
-    /// created" (which includes a lot of normal, harmless earlier activity).
-    /// Call this immediately before `split()`/`merge()`'s own read, then
-    /// compare the result against a second call after — a mismatch there
-    /// means a write landed in exactly the window between the content
-    /// snapshot and retirement, not merely sometime since this guard's
-    /// birth.
+    /// The cell's current, live version — call this immediately before
+    /// `split()`/`merge()`'s own read, then compare the result against a
+    /// second call after: a mismatch means some writer acquired and
+    /// released this cell's write lock in exactly that window, entirely
+    /// unbeknownst to `simba` (read once for `split()`/`merge()`, then
+    /// unconditionally retired with no re-validation at all).
     #[inline(always)]
     pub fn live_version(&self) -> LatchVersion {
         match self {

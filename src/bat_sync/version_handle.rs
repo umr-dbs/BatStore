@@ -9,11 +9,15 @@ use std::hash::Hash;
 
 pub(crate) const START_VERSION: Version = 1;
 
-// TEMPORARY diagnostic instrumentation for the tpcc-stress cross-table
-// invariant bug (2026-08-15) - counts how often abort_writes' three silent
-// give-up paths actually trigger, to find which one is responsible.
+// Diagnostic instrumentation for the tpcc-stress cross-table invariant bug
+// (2026-08-15) - counts how often abort_writes' silent give-up paths
+// actually trigger, to find which one is responsible. debug-only: this is
+// hot-path code, so the counters (and their eprintln!s) don't belong in
+// release builds.
+#[cfg(debug_assertions)]
 pub(crate) static ABORT_TERMINAL_WITH_REMAINING: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+#[cfg(debug_assertions)]
 pub(crate) static ABORT_PREDECESSOR_MISSING_HOT: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -297,6 +301,7 @@ impl<
             if outcome == AbortOutcome::NotFound {
                 // Genuinely nothing anywhere -- matches today's terminal
                 // (already-fully-reverted, or count was already 0) case.
+                #[cfg(debug_assertions)]
                 if remaining > 1 {
                     ABORT_TERMINAL_WITH_REMAINING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     eprintln!(
@@ -306,12 +311,15 @@ impl<
                 break;
             }
 
+            #[cfg(debug_assertions)]
             if let Some(pred_stamp) = pending_predecessor {
                 ABORT_PREDECESSOR_MISSING_HOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 eprintln!(
                     "[abort-diag] predecessor MISSING (hot invalidate) key={key} stamp={stamp} pred_stamp={pred_stamp}"
                 );
             }
+            #[cfg(not(debug_assertions))]
+            let _ = pending_predecessor;
 
             remaining -= 1;
         }
