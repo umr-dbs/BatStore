@@ -326,6 +326,13 @@ class Scale:
     # analytical threads, TPC-C's own OLTP side held fixed). Defaults to 1, matching every
     # engine wrapper's previous hardcoded behavior.
     htap_olap_threads: int = 1
+    # htap_q1/htap_q6, BatStore only (see engines/batstore.py's `run()` doc and
+    # src/bat_bench/parallel_scan.rs): fans each individual query out across this many
+    # dedicated helper threads instead of running it on one thread alone. `1` (default) is
+    # the plain sequential path, matching every engine's previous behavior unchanged -
+    # every other engine ignores this field entirely (only batstore.py's `run()` accepts a
+    # `scan_fanout` kwarg at all - see run_htap_analytical_sweep.py's per-engine run_kwargs).
+    htap_scan_fanout: int = 1
     # "S-HTAP" streaming workload (src/bat_bench/s_htap_driver.rs): near-sorted
     # arrivals + recency-biased hot-tail updates running concurrently with OLAP scans
     # that straddle the cold/hot boundary - see that module's doc. `s_htap_record_count`

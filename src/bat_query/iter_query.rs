@@ -15,6 +15,66 @@ use crate::bat_record_model::tx_stamp::WorkerId;
 use crate::bat_record_model::version_info::Version;
 use crate::bat_tree::mvbt::MVBTSt;
 
+/// Software-prefetch hint for `block`'s backing memory — issued far enough
+/// ahead of the actual dereference (see call sites below) to hide some of
+/// that cache-miss latency behind other work instead of stalling on it.
+/// Skipped entirely on non-`x86_64` targets; either way this can never
+/// affect correctness, only (hopefully) timing.
+#[inline(always)]
+fn prefetch_block<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display,
+    Payload: Clone + Default,
+>(
+    block: &BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(block.0 as *const i8, std::arch::x86_64::_MM_HINT_T0);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = block;
+}
+
+/// Peeks — without mutating any scan state — the block `refill`'s or
+/// `try_for_each_ref`'s *next* loop iteration will descend into right after
+/// finishing `curr_fence`'s leaf, and prefetches it. `path`'s second-to-last
+/// entry is exactly that leaf's parent internal page: it's still on the
+/// stack (only the leaf itself gets popped once processed), so this is the
+/// very same reverse `find` the `IndexRef` branch already runs against it —
+/// just run one step early, before this leaf's own records are visited,
+/// so the sibling's cache lines are in flight while that happens instead of
+/// only being requested once the scan actually gets there.
+///
+/// A pure hint: no parent on the stack (root is itself a leaf), no matching
+/// child (this was genuinely the last leaf in range), or a version mismatch
+/// (shouldn't happen mid-traversal of one immutable snapshot, but nothing
+/// here needs to assert that) all just skip the prefetch.
+#[inline(always)]
+fn prefetch_next_leaf<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display,
+    Payload: Clone + Default,
+>(
+    path: &[(Interval<Key>, BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>)],
+    next_lower: Key,
+    si: SnapShot,
+) {
+    let Some(parent_index) = path.len().checked_sub(2) else {
+        return;
+    };
+    if let PageType::IndexRef(parent) = path[parent_index].1.as_page_ref() {
+        let (keys, versions) = parent.keys_versions();
+        if let Some((pos, _)) = versions.iter().zip(keys).enumerate().rev().find(
+            |(_, (version, fence))| version.matched(si) && fence.contains(next_lower),
+        ) {
+            prefetch_block(&parent.get_pointer(pos));
+        }
+    }
+}
+
 pub struct RangeQueryIter<
     'a,
     const FAN_OUT: usize,
@@ -222,6 +282,12 @@ impl<
                         }
                     }
                     PageType::LeafRef(leaf_page) => {
+                        let reached_end = curr_fence.upper >= self.range.upper
+                            || curr_fence.upper == tree.cold.max_key;
+                        if !reached_end {
+                            prefetch_next_leaf(&self.path, inc(curr_fence.upper), si);
+                        }
+
                         let records = leaf_page.as_records();
 
                         let before = self.buff.len();
@@ -247,11 +313,13 @@ impl<
                                 })
                                 .map(RecordPointResult::from_leaf),
                         );
-                        crate::bat_test::record_leaf_scan(records.len(), self.buff.len() - before);
+                        crate::bat_test::record_leaf_scan(
+                            tree as *const _ as usize,
+                            records.len(),
+                            self.buff.len() - before,
+                        );
 
                         self.path.pop();
-                        let reached_end = curr_fence.upper >= self.range.upper
-                            || curr_fence.upper == tree.cold.max_key;
                         if reached_end {
                             self.path.clear();
                         } else {
@@ -305,6 +373,12 @@ impl<
                         }
                     }
                     PageType::LeafRef(leaf_page) => {
+                        let reached_end = curr_fence.upper >= self.range.upper
+                            || curr_fence.upper == tree.cold.max_key;
+                        if !reached_end {
+                            prefetch_next_leaf(&self.path, inc(curr_fence.upper), si);
+                        }
+
                         let records = leaf_page.as_records();
                         let mut matched = 0;
                         if full_key_range {
@@ -330,12 +404,10 @@ impl<
                                 }
                             }
                         }
-                        crate::bat_test::record_leaf_scan(records.len(), matched);
+                        crate::bat_test::record_leaf_scan(tree as *const _ as usize, records.len(), matched);
 
                         self.path.pop();
-                        if curr_fence.upper >= self.range.upper
-                            || curr_fence.upper == tree.cold.max_key
-                        {
+                        if reached_end {
                             self.path.clear();
                         } else {
                             self.range.lower = inc(curr_fence.upper);

@@ -212,23 +212,34 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     // WorkerId (see module docs), so it doubles the terminal thread budget.
     let terminal_cost = if cfg.htap_baseline.is_some() { 2 } else { 1 };
 
+    // Each OLAP thread running `ChQ1`/`ChQ6` with `scan_fanout > 1` spawns
+    // that many *additional*, permanently-WorkerId-consuming scoped threads
+    // (see `parallel_scan`'s module doc) — 0 extra at `scan_fanout <= 1`,
+    // matching every prior sequential behavior exactly.
+    let olap_thread_cost = 1 + match &cfg.olap_mode {
+        OlapMode::ChQ1 { scan_fanout, .. } | OlapMode::ChQ6 { scan_fanout, .. } if *scan_fanout > 1 => {
+            *scan_fanout
+        }
+        _ => 0,
+    };
+
     // +1: the main thread itself acquires a WorkerId too, since it does the
     // (sequential) data-set population directly via `dispatch_crud` before
     // any terminal/OLAP thread is spawned.
-    if 1 + num_terminals * terminal_cost + num_olap > max_threads {
+    if 1 + num_terminals * terminal_cost + num_olap * olap_thread_cost > max_threads {
         println!(
-            "!! 1 loader + {num_terminals} terminals{} + {num_olap} OLAP threads > max_workers ({max_threads} = num_cpus); clamping.",
+            "!! 1 loader + {num_terminals} terminals{} + {num_olap} OLAP threads (x{olap_thread_cost} each) > max_workers ({max_threads} = num_cpus); clamping.",
             if terminal_cost == 2 { " (x2: HTAP baseline sub-phase)" } else { "" }
         );
         num_terminals = (max_threads.saturating_sub(2) / terminal_cost).max(1);
-        num_olap = max_threads.saturating_sub(1 + num_terminals * terminal_cost);
+        num_olap = max_threads.saturating_sub(1 + num_terminals * terminal_cost) / olap_thread_cost;
     }
 
     fs::create_dir_all(&cfg.output_dir)
         .unwrap_or_else(|e| panic!("tpcc: failed to create output_dir {}: {e}", cfg.output_dir.display()));
     let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
-    let worker_capacity = 1 + num_terminals * terminal_cost + num_olap;
+    let worker_capacity = 1 + num_terminals * terminal_cost + num_olap * olap_thread_cost;
     let db = Arc::new(match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);
@@ -405,15 +416,12 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
         crate::bat_test::dump_scan_trace();
     }
 
-    // All terminal/OLAP worker threads are joined above, so every thread's
-    // `RestartLocal` TLS has already torn down and merged into the global
-    // aggregate by this point (see `bat_test::RestartLocal`'s doc) — safe to
-    // dump now. No-op (writes an empty file) when `RESTART_TRACE` is off.
-    if crate::bat_test::RESTART_TRACE {
-        crate::bat_test::dump_restart_trace(
-            cfg.output_dir.join("tpcc_restart_trace.csv").to_str().unwrap());
-        crate::bat_test::dump_attempt_histogram(
-            cfg.output_dir.join("tpcc_attempt_histogram.csv").to_str().unwrap());
+    // Shared table-name resolution for both per-table dumps below (`SCAN_TRACE`'s
+    // per-table breakdown and `RESTART_TRACE`'s root-restart breakdown) — built at
+    // most once, and only when at least one of the two is actually enabled, since
+    // both flags are `false` by default and this whole block is dead-code-eliminated
+    // then.
+    if crate::bat_test::SCAN_TRACE || crate::bat_test::RESTART_TRACE {
         use crate::bat_bench::tpcc_schema::{BigTreeOp, Table, TpccKey, TpccRow};
 
         struct AddrOp;
@@ -429,9 +437,31 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
         let mut table_names = db.db.table_names_by_addr();
         table_names.push((db.dispatch_big(Table::Warehouse, AddrOp), "warehouse".to_string()));
         table_names.push((db.dispatch_big(Table::District, AddrOp), "district".to_string()));
-        crate::bat_test::dump_root_restarts_by_table(
-            cfg.output_dir.join("tpcc_root_restarts_by_table.csv").to_str().unwrap(),
-            &table_names);
+
+        // `SCAN_TRACE`'s per-table breakdown: which table's leaves are actually
+        // paying the visited-vs-matched "garbage tax" documented in
+        // `docs/bigtree_size_benchmark.md` — see `htap_q1`/`htap_q6`'s `ORDER_LINE`
+        // scans specifically. Safe to read any time (see the plain-global-atomics
+        // comment above), so no join-ordering constraint here either.
+        if crate::bat_test::SCAN_TRACE {
+            crate::bat_test::dump_scan_trace_by_table(
+                cfg.output_dir.join("tpcc_scan_trace_by_table.csv").to_str().unwrap(),
+                &table_names);
+        }
+
+        // All terminal/OLAP worker threads are joined above, so every thread's
+        // `RestartLocal` TLS has already torn down and merged into the global
+        // aggregate by this point (see `bat_test::RestartLocal`'s doc) — safe to
+        // dump now. No-op (writes an empty file) when `RESTART_TRACE` is off.
+        if crate::bat_test::RESTART_TRACE {
+            crate::bat_test::dump_restart_trace(
+                cfg.output_dir.join("tpcc_restart_trace.csv").to_str().unwrap());
+            crate::bat_test::dump_attempt_histogram(
+                cfg.output_dir.join("tpcc_attempt_histogram.csv").to_str().unwrap());
+            crate::bat_test::dump_root_restarts_by_table(
+                cfg.output_dir.join("tpcc_root_restarts_by_table.csv").to_str().unwrap(),
+                &table_names);
+        }
     }
 
     write_results(&terminal_stats, &scan_results, duration, actual_wall, baseline_tpm_c, &cfg.output_dir)
@@ -572,6 +602,13 @@ pub fn main_tpcc(parms: Vec<String>) {
         "512kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB512,
         _ => crate::bat_bench::tpcc_schema::BigTreeSize::KiB32,
     };
+    // Per-query intra-scan fan-out for `ch_q1`/`ch_q6` only (see
+    // `OlapMode::ChQ1`'s doc and `parallel_scan`'s module doc) — 1 (default)
+    // matches every prior sequential behavior exactly. Every distinct OS
+    // thread that ever touches a tree permanently consumes one `WorkerId`
+    // slot from a fixed, never-growing pool, so this must stay small
+    // relative to `max_workers` alongside `num_terminals`/`num_olap_threads`.
+    let scan_fanout: usize = arg(&parms, 22, 1);
 
     let (olap_mode, num_olap_threads) = match olap_mode_str.as_str() {
         "none" => (OlapMode::RepeatedFreshFullScan, 0),
@@ -588,11 +625,16 @@ pub fn main_tpcc(parms: Vec<String>) {
             OlapMode::ChBenchmark { region_name: ch_region, date_lo: i64::MIN, date_hi: i64::MAX },
             num_olap_threads,
         ),
-        "ch_q1" => (OlapMode::ChQ1 { delivered_before: i64::MAX }, num_olap_threads),
+        "ch_q1" => (
+            OlapMode::ChQ1 { delivered_before: i64::MAX, scan_fanout, num_warehouses },
+            num_olap_threads,
+        ),
         "ch_q6" => (OlapMode::ChQ6 {
             date_lo: i64::MIN,
             date_hi: i64::MAX,
             max_qty: 24,
+            scan_fanout,
+            num_warehouses,
         }, num_olap_threads),
         _ => (
             OlapMode::ScanDelaySweep { delays: (0..=(olap_param.max(0.0) as u64)).map(Duration::from_secs).collect() },

@@ -11,6 +11,7 @@ pub mod tpcc_load;
 pub mod tpcc_wal_codec;
 pub mod tpcc_txn;
 pub mod olap_scan;
+pub mod parallel_scan;
 pub mod tpcc_driver;
 pub mod tpch_queries;
 

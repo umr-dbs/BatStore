@@ -41,6 +41,7 @@ def ensure_built() -> None:
 def run(
     workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True,
     big_tree_size: str = "medium", ycsb_payload: str = "standard", read_payload: bool = True,
+    scan_fanout: int = 1,
 ) -> common.NormalizedResult:
     """`reload` is accepted for interface parity with postgres_benchbase.run() but unused -
     every BatStore invocation is a fresh in-process population, there's no persisted state to
@@ -50,6 +51,11 @@ def run(
     leaf capacity - see tpcc_schema::BigTreeSize's doc - only wired through for the "tpcc"
     workload (positional arg 21 to `BatStore tpcc`, see tpcc_driver.rs::main_tpcc); left at the
     binary's own "medium" default everywhere else.
+
+    `scan_fanout` (positional arg 22) fans one `htap_q1`/`htap_q6` query out across that many
+    dedicated helper threads via `parallel_scan::ScanWorkerPool` - see that module's doc. `1`
+    (default) is the plain sequential path, unchanged from before this parameter existed.
+    Ignored for every other workload, exactly like `big_tree_size` above.
     """
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -89,6 +95,9 @@ def run(
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
             "false", gc_bool, "false", "fg", olap_mode, str(scale.htap_olap_threads), "10.0",
             "100000", "3000", "3000", "true", str(wal_path), "5", "EUROPE", "10000",
+            # Positions 20-21 (htap_baseline_secs/big_tree_size) filled with the driver's
+            # own defaults so position 22 (scan_fanout) is reachable.
+            "0", "32kib", str(scan_fanout),
         ]
         metric_name = "new_order_per_sec"
         ts_file, ts_column = "tpcc_oltp_timeseries.csv", "new_order_committed"

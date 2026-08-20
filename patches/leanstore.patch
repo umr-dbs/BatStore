@@ -57,6 +57,20 @@ index a8f5a12..5ebb9ac 100644
                                  std::to_string(u64(FLAGS_dram_gib * 1024)) + "M");
        std::string cmd("rm -rf " + FLAGS_ssd_path);
        cmd = std::string("mkdir -p " + FLAGS_ssd_path);
+@@ -122,7 +122,12 @@ struct WiredTigerAdapter : public Adapter<Record> {
+       // -------------------------------------------------------------------------------------
+       cursor->set_key(cursor, &key_item);
+       ret = cursor->search(cursor);
+-      error_check(ret);
++      if (ret == WT_NOTFOUND) {
++         // Snapshot-isolation conflict (e.g. a concurrently committed delete), not corruption - abort & retry like WT_ROLLBACK, instead of the fatal raise() in error_check().
++         error_check(map.session->rollback_transaction(map.session, NULL));
++         jumpmu::jump();
++      }
++      error_check(ret);
+       ret = cursor->get_value(cursor, &payload_item);
+       const Record& record = *reinterpret_cast<const Record*>(payload_item.data);
+       fn(record);
 diff --git a/frontend/tpc-c/TPCCWorkload.hpp b/frontend/tpc-c/TPCCWorkload.hpp
 index 575cc43..33a31eb 100644
 --- a/frontend/tpc-c/TPCCWorkload.hpp
