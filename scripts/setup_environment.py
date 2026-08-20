@@ -66,6 +66,7 @@ WIREDTIGER_URL = "https://github.com/wiredtiger/wiredtiger.git"
 BENCHBASE_URL = "https://github.com/cmu-db/benchbase.git"
 BENCHBASE_PATCH_COMMIT = "33c00473807ebd49304d114a6d769d2d2b2bbb34"
 BENCHBASE_YCSB_PAYLOAD_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_payload_benchbase.patch"
+BENCHBASE_YCSB_SKEW_FACTOR_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_skew_factor_benchbase.patch"
 VWEAVER_URL = "https://github.com/SNU-DBXLab-papers/vWeaver_ermia.git"
 # Pinned so patches/vweaver_ermia.patch (removal of `sys/vtimes.h`, which is absent from
 # modern glibc, plus benchmark start-barrier and TPC-C extra-worker fixes) always applies
@@ -139,6 +140,29 @@ def run(cmd, cwd=None, env=None, check=True) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=cwd, env=env, check=check)
 
 
+def shallow_clone(url: str, dest: Path, commit: str | None = None) -> None:
+    """Clones `url` into `dest` with history depth 1 - every checkout here only ever needs
+    the working tree at one commit (to build from, or to `git apply` a patch against), never
+    log/blame/tag history, so a full clone just wastes bandwidth and disk.
+
+    Without `commit`, this is a plain shallow clone of the remote's default branch. With
+    `commit`, a plain `git clone --depth 1` isn't enough - it only fetches the default
+    branch's current tip, which is almost never the pinned commit these callers need - so
+    this instead does a bare `git init` + `git fetch --depth 1 origin <commit>` + `git
+    checkout FETCH_HEAD`, the standard idiom for shallow-fetching one specific commit.
+    Requires the remote to allow fetching by SHA (`uploadpack.allowReachableSHA1InWant` or
+    equivalent) - true for GitHub, which is where every commit-pinned repo here lives.
+    """
+    if commit is None:
+        run(["git", "clone", "--depth", "1", url, str(dest)])
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    run(["git", "init"], cwd=dest)
+    run(["git", "remote", "add", "origin", url], cwd=dest)
+    run(["git", "fetch", "--depth", "1", "origin", commit], cwd=dest)
+    run(["git", "checkout", "FETCH_HEAD"], cwd=dest)
+
+
 def is_apt_package_installed(pkg: str) -> bool:
     result = subprocess.run(
         ["dpkg-query", "-W", "-f=${Status}", pkg], capture_output=True, text=True,
@@ -196,7 +220,7 @@ def step_wiredtiger() -> None:
         print(f"{lib} already exists, skipping.")
         return
     if not WIREDTIGER_REPO.exists():
-        run(["git", "clone", WIREDTIGER_URL, str(WIREDTIGER_REPO)])
+        shallow_clone(WIREDTIGER_URL, WIREDTIGER_REPO)
 
     # `-S`/`-B` (not a pre-existing build dir + relative `.`) so this works on
     # a fresh checkout with no IDE-generated build directory yet, and is
@@ -217,8 +241,7 @@ def step_leanstore() -> None:
     targets = ["tpcc", "ycsb", "wiredtiger_tpcc", "wiredtiger_ycsb", "s_htap", "wiredtiger_s_htap"]
     binaries = [LEANSTORE_BUILD_DIR / "frontend" / t for t in targets]
     if not LEANSTORE_REPO.exists():
-        run(["git", "clone", LEANSTORE_URL, str(LEANSTORE_REPO)])
-        run(["git", "checkout", LEANSTORE_PATCH_COMMIT], cwd=LEANSTORE_REPO)
+        shallow_clone(LEANSTORE_URL, LEANSTORE_REPO, commit=LEANSTORE_PATCH_COMMIT)
         log(f"Applying {LEANSTORE_PATCH_PATH.name} (CH-benCHmark Q1/Q6 analytical queries, "
             f"YCSB-E/HTAP scan-latency instrumentation, New-Order-only counters, WiredTiger "
             f"adapter log=(enabled=true) so its WAL isn't silently off in this comparison)")
@@ -302,8 +325,7 @@ def step_vweaver_ermia() -> None:
     log("Cloning + building vWeaver_ermia (ERMIA) - ermia_SI target only")
     binary = VWEAVER_BUILD_DIR / "ermia_SI"
     if not VWEAVER_REPO.exists():
-        run(["git", "clone", VWEAVER_URL, str(VWEAVER_REPO)])
-        run(["git", "checkout", VWEAVER_PATCH_COMMIT], cwd=VWEAVER_REPO)
+        shallow_clone(VWEAVER_URL, VWEAVER_REPO, commit=VWEAVER_PATCH_COMMIT)
         log(f"Applying {VWEAVER_PATCH_PATH.name} (dead sys/vtimes.h include + "
             f"benchmark start-barrier/TPC-C worker-count fixes)")
         run(["git", "apply", str(VWEAVER_PATCH_PATH)], cwd=VWEAVER_REPO)
@@ -632,8 +654,7 @@ def _patch_benchbase_pom(pom_path: Path) -> None:
 def step_benchbase() -> None:
     log("Building BenchBase (PostgreSQL TPC-C/YCSB client)")
     if not BENCHBASE_REPO.exists():
-        run(["git", "clone", BENCHBASE_URL, str(BENCHBASE_REPO)])
-        run(["git", "checkout", BENCHBASE_PATCH_COMMIT], cwd=BENCHBASE_REPO)
+        shallow_clone(BENCHBASE_URL, BENCHBASE_REPO, commit=BENCHBASE_PATCH_COMMIT)
 
     # Kept as a main-repository patch because BenchBase is an external checkout under
     # ignored tx_tests/. This makes the JDBC column fix and payload/read modes reproducible.
@@ -643,6 +664,17 @@ def step_benchbase() -> None:
     )
     if reverse.returncode != 0:
         run(["git", "apply", str(BENCHBASE_YCSB_PAYLOAD_PATCH_PATH)], cwd=BENCHBASE_REPO)
+
+    # Relaxes YCSBBenchmark's overly conservative `skewFactor >= 1` rejection to just
+    # `skewFactor == 1.0` (the actual singularity in ZipfianGenerator's math, see the
+    # patch's own comment) - lets a skew sweep use theta > 1 (e.g. 1.4) against PostgreSQL
+    # the same way it already can against every other engine here.
+    reverse = subprocess.run(
+        ["git", "apply", "--reverse", "--check", str(BENCHBASE_YCSB_SKEW_FACTOR_PATCH_PATH)],
+        cwd=BENCHBASE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if reverse.returncode != 0:
+        run(["git", "apply", str(BENCHBASE_YCSB_SKEW_FACTOR_PATCH_PATH)], cwd=BENCHBASE_REPO)
 
     _patch_benchbase_pom(BENCHBASE_REPO / "pom.xml")
 
@@ -674,7 +706,7 @@ def step_batstore() -> None:
     log("Setting up BatStore")
     if not BATSTORE_WORKSPACE_CLONE.exists():
         log(f"Attempting to clone {BATSTORE_REPO_URL} into {BATSTORE_WORKSPACE_CLONE}")
-        result = subprocess.run(["git", "clone", BATSTORE_REPO_URL, str(BATSTORE_WORKSPACE_CLONE)])
+        result = subprocess.run(["git", "clone", "--depth", "1", BATSTORE_REPO_URL, str(BATSTORE_WORKSPACE_CLONE)])
         if result.returncode != 0:
             shutil.rmtree(BATSTORE_WORKSPACE_CLONE, ignore_errors=True)  # drop any partial clone
             print(f"Clone failed (BatStore may be private, or this machine may lack "
