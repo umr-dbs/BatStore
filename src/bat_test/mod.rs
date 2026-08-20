@@ -199,18 +199,34 @@ static SCAN_LEAVES_VISITED: AtomicU64 = AtomicU64::new(0);
 static SCAN_RECORDS_VISITED: AtomicU64 = AtomicU64::new(0);
 static SCAN_RECORDS_MATCHED: AtomicU64 = AtomicU64::new(0);
 
-/// Records one leaf visited by a range scan: `visited` is the leaf's whole
-/// physical record count (live + dead), `matched` is how many of those
-/// passed the scan's visibility+range filter. No-op, and dead-code
-/// eliminated, unless `SCAN_TRACE` is `true`.
+/// Per-table breakdown of the same counters — same rationale as
+/// `ROOT_RESTARTS_BY_TABLE` below: a bare global ratio can't distinguish
+/// "every table's leaves are equally garbage-heavy" from "one table (e.g.
+/// `ORDER_LINE` under `htap_q1`/`htap_q6`) dominates the visited/matched
+/// gap." Keyed by the same tree address `record_root_restart_for_table`
+/// uses, value is `(leaves_visited, records_visited, records_matched)`.
+static SCAN_TRACE_BY_TABLE: std::sync::LazyLock<Mutex<HashMap<usize, (u64, u64, u64)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Records one leaf visited by a range scan: `tree_addr` identifies which
+/// table's tree this leaf belongs to (see `SCAN_TRACE_BY_TABLE`'s doc),
+/// `visited` is the leaf's whole physical record count (live + dead),
+/// `matched` is how many of those passed the scan's visibility+range
+/// filter. No-op, and dead-code eliminated, unless `SCAN_TRACE` is `true`.
 #[inline(always)]
-pub fn record_leaf_scan(visited: usize, matched: usize) {
+pub fn record_leaf_scan(tree_addr: usize, visited: usize, matched: usize) {
     if !SCAN_TRACE {
         return;
     }
     SCAN_LEAVES_VISITED.fetch_add(1, Relaxed);
     SCAN_RECORDS_VISITED.fetch_add(visited as u64, Relaxed);
     SCAN_RECORDS_MATCHED.fetch_add(matched as u64, Relaxed);
+
+    let mut by_table = SCAN_TRACE_BY_TABLE.lock();
+    let entry = by_table.entry(tree_addr).or_insert((0, 0, 0));
+    entry.0 += 1;
+    entry.1 += visited as u64;
+    entry.2 += matched as u64;
 }
 
 /// Resets `record_leaf_scan`'s accumulators — same rationale as
@@ -221,6 +237,47 @@ pub fn reset_scan_trace() {
     SCAN_LEAVES_VISITED.store(0, Relaxed);
     SCAN_RECORDS_VISITED.store(0, Relaxed);
     SCAN_RECORDS_MATCHED.store(0, Relaxed);
+    SCAN_TRACE_BY_TABLE.lock().clear();
+}
+
+/// Writes the per-table visited/matched breakdown to `path` as CSV
+/// (`table_name,tree_addr,leaves_visited,records_visited,records_matched,
+/// visited_per_matched`), sorted by records visited descending — same
+/// resolution/caveats as `dump_root_restarts_by_table` (an address with no
+/// matching name prints as its raw hex address; must be called after every
+/// worker thread that might have scanned has already been `join`ed). Only
+/// ever non-empty when `SCAN_TRACE` is `true`.
+pub fn dump_scan_trace_by_table(path: &str, table_names: &[(usize, String)]) {
+    let global = SCAN_TRACE_BY_TABLE.lock();
+    let mut rows: Vec<(&usize, &(u64, u64, u64))> = global.iter().collect();
+    rows.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+
+    let mut f = BufWriter::new(
+        fs::File::create(path)
+            .expect("dump_scan_trace_by_table: failed to create output file"),
+    );
+    writeln!(
+        f,
+        "table_name,tree_addr,leaves_visited,records_visited,records_matched,visited_per_matched"
+    )
+    .unwrap();
+    for (addr, &(leaves, visited, matched)) in rows {
+        let name = table_names
+            .iter()
+            .find(|(candidate, _)| candidate == addr)
+            .map_or("<unresolved>", |(_, name)| name.as_str());
+        let ratio = if matched == 0 {
+            f64::NAN
+        } else {
+            visited as f64 / matched as f64
+        };
+        writeln!(f, "{name},0x{addr:x},{leaves},{visited},{matched},{ratio:.2}").unwrap();
+    }
+
+    println!(
+        "dump_scan_trace_by_table: wrote {path} ({} tables)",
+        global.len()
+    );
 }
 
 /// Prints the accumulated leaves/records-visited-vs-matched totals and their

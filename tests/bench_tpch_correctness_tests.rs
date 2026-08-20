@@ -14,6 +14,7 @@ use crate::bat_bench::tpcc_load::populate_regions_and_nations;
 use crate::bat_bench::tpcc_schema::{
     Order, OrderLine, Stock, Supplier, Table, TpccDatabase, TpccRow, k_order, k_order_line, k_stock,
 };
+use crate::bat_bench::parallel_scan::{ScanWorkerPool, q1_parallel, q6_parallel};
 use crate::bat_bench::tpch_queries::{q1, q4, q5, q6};
 use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
 use crate::bat_crud_model::crud_operation::CRUDOperation;
@@ -371,4 +372,85 @@ fn region_and_nation_reference_data_has_the_expected_fixed_mapping() {
     assert_eq!(region_name_at(2), "ASIA");
     assert_eq!(nation_at(6), ("FRANCE".to_string(), 3));
     assert_eq!(nation_at(8), ("INDIA".to_string(), 2));
+}
+
+/// Populates `Table::OrderLine` with 2 lines per warehouse across
+/// `1..=num_warehouses`, each warehouse's data shifted so the queries below
+/// have warehouse-distinguishable, hand-predictable totals — used to check
+/// `parallel_scan::q1_parallel`/`q6_parallel` (which split the scan by
+/// warehouse, see that module's doc) against the sequential `q1`/`q6` on
+/// exactly the same data.
+fn populate_multi_warehouse_order_lines(db: &TpccDatabase, num_warehouses: u32) {
+    for w in 1..=num_warehouses {
+        insert(
+            db,
+            Table::OrderLine,
+            k_order_line(w, 1, 1, 1),
+            order_line(1, w, Some(50), w as u8, 10.0 * w as f64),
+        );
+        insert(
+            db,
+            Table::OrderLine,
+            k_order_line(w, 1, 1, 2),
+            order_line(2, w, Some(50), w as u8, 5.0 * w as f64),
+        );
+    }
+}
+
+/// `q1_parallel` must agree with the sequential `q1` byte-for-byte on the
+/// same data, including when `fanout` doesn't evenly divide
+/// `num_warehouses` (uneven blocks) and when it exceeds it (some workers get
+/// a genuinely empty range) — see `partition_order_line_range`'s doc for
+/// both cases.
+#[test]
+fn q1_parallel_matches_sequential_q1_across_fanouts() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    let num_warehouses = 5;
+    populate_multi_warehouse_order_lines(&db, num_warehouses);
+
+    let (expected, _) = q1(&db, 100);
+    assert_eq!(expected.len(), 2, "ol_number 1 and 2 across all 5 warehouses");
+
+    for fanout in [1, 2, 3, 8] {
+        std::thread::scope(|scope| {
+            let pool = ScanWorkerPool::spawn(scope, &db, fanout);
+            assert_eq!(pool.fanout(), fanout);
+            let (actual, _) = q1_parallel(&db, &pool, num_warehouses, 100);
+
+            assert_eq!(actual.len(), expected.len(), "fanout={fanout}");
+            for (a, e) in actual.iter().zip(expected.iter()) {
+                assert_eq!(a.ol_number, e.ol_number, "fanout={fanout}");
+                assert_eq!(a.count, e.count, "fanout={fanout}");
+                assert_eq!(a.sum_qty, e.sum_qty, "fanout={fanout}");
+                assert!(
+                    (a.sum_amount - e.sum_amount).abs() < 1e-9,
+                    "fanout={fanout}: expected {}, got {}",
+                    e.sum_amount,
+                    a.sum_amount
+                );
+            }
+        });
+    }
+}
+
+/// Same cross-check as above, for `q6_parallel` vs. the sequential `q6`.
+#[test]
+fn q6_parallel_matches_sequential_q6_across_fanouts() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    let num_warehouses = 5;
+    populate_multi_warehouse_order_lines(&db, num_warehouses);
+
+    let (expected, _) = q6(&db, 0, 200, 250);
+    assert!(expected > 0.0, "sanity: fixture should have matching revenue");
+
+    for fanout in [1, 2, 3, 8] {
+        std::thread::scope(|scope| {
+            let pool = ScanWorkerPool::spawn(scope, &db, fanout);
+            let (actual, _) = q6_parallel(&db, &pool, num_warehouses, 0, 200, 250);
+            assert!(
+                (actual - expected).abs() < 1e-9,
+                "fanout={fanout}: expected {expected}, got {actual}"
+            );
+        });
+    }
 }
