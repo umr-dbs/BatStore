@@ -429,6 +429,60 @@ impl<
         Ok(())
     }
 
+    /// Structural counterpart to `try_for_each_ref`: visits every leaf's
+    /// fence and physical active/dead counts along this scan's range,
+    /// without touching an individual record or running any visibility
+    /// check at all — `active_dead_count()` is a raw per-page counter
+    /// (`LeafPage::active_dead_count`), not filtered by any reader's MVCC
+    /// visibility, so there's nothing to check here beyond the same
+    /// version/fence-matched descent every other method in this file
+    /// already does. Used by idle/proactive compaction
+    /// (`bat_tree::idle_compaction`) to find garbage-heavy leaves cheaply:
+    /// one packed-length-field read per leaf, nothing more.
+    pub(crate) fn for_each_leaf_ratio(mut self, mut visit: impl FnMut(Interval<Key>, u32, u32)) {
+        let si = self.snapshot();
+        let tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload> = self.isolated_snapshot.1;
+        let inc = tree.cold.inc_key;
+
+        while !self.path.is_empty() && self.range.lower <= self.range.upper {
+            let (curr_fence, curr_block) = self.path.last().unwrap().clone();
+            match curr_block.as_page_ref() {
+                PageType::IndexRef(internal_page) => {
+                    let (keys, versions) = internal_page.keys_versions();
+                    if let Some((pos, (_, fence))) =
+                        versions.iter().zip(keys).enumerate().rev().find(
+                            |(_, (version, fence))| {
+                                version.matched(si) && fence.contains(self.range.lower)
+                            },
+                        )
+                    {
+                        self.path.push((*fence, internal_page.get_pointer(pos)));
+                    } else {
+                        self.path.pop();
+                        self.range.lower = inc(curr_fence.upper);
+                    }
+                }
+                PageType::LeafRef(leaf_page) => {
+                    let (active, dead) = leaf_page.active_dead_count();
+                    visit(curr_fence, active, dead);
+
+                    self.path.pop();
+                    if curr_fence.upper >= self.range.upper || curr_fence.upper == tree.cold.max_key {
+                        self.path.clear();
+                    } else {
+                        self.range.lower = inc(curr_fence.upper);
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        if self.register_reader_si {
+            tree.on_release_reader_snapshot(si);
+        }
+        self.is_completed = true;
+    }
+
     /// Streams visible records without cloning payload handles or
     /// materializing a result vector. Intended for analytical folds/counts.
     pub fn for_each_ref(self, mut visit: impl FnMut(Key, &Payload)) {

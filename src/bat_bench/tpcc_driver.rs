@@ -76,6 +76,17 @@ pub struct DriverConfig {
     /// OLAP-free baseline from the *same* loaded data set. `None` skips it
     /// entirely (no extra threads, no extra wall-clock cost) — the default.
     pub htap_baseline: Option<Duration>,
+    /// Idle/proactive compaction (`bat_tree::idle_compaction`): `Some((dead_ratio_threshold,
+    /// sweep_interval))` spawns one extra background thread that repeatedly
+    /// sweeps every table (`Table::ALL`), forcing a compaction on any leaf
+    /// whose dead/(active+dead) ratio is at or above `dead_ratio_threshold`,
+    /// sleeping `sweep_interval` between sweeps — see that module's doc for
+    /// why this exists: a read-heavy table (few, infrequent writes to any
+    /// one leaf) can otherwise sit at a garbage-inflated ratio indefinitely,
+    /// since nothing on the ordinary write path ever revisits such a leaf.
+    /// `None` (default) disables it entirely — no extra thread, no extra
+    /// `WorkerId` cost, unchanged behavior.
+    pub idle_compaction: Option<(f64, Duration)>,
     /// Directory the 3 result CSVs (`tpcc_oltp_timeseries.csv`,
     /// `tpcc_scan.csv`, `mem_stats.csv`) are written to. Defaults to `.` for
     /// the standalone `tpcc`/`tpch`/`htap` subcommands (unchanged cwd
@@ -223,23 +234,30 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
         _ => 0,
     };
 
+    // One more permanent `WorkerId` if idle compaction is enabled — see
+    // `DriverConfig::idle_compaction`'s doc — regardless of how many tables
+    // it sweeps, since it's a single thread looping over `Table::ALL`, not
+    // one thread per table.
+    let idle_compaction_cost = if cfg.idle_compaction.is_some() { 1 } else { 0 };
+
     // +1: the main thread itself acquires a WorkerId too, since it does the
     // (sequential) data-set population directly via `dispatch_crud` before
     // any terminal/OLAP thread is spawned.
-    if 1 + num_terminals * terminal_cost + num_olap * olap_thread_cost > max_threads {
+    let fixed_cost = 1 + idle_compaction_cost;
+    if fixed_cost + num_terminals * terminal_cost + num_olap * olap_thread_cost > max_threads {
         println!(
-            "!! 1 loader + {num_terminals} terminals{} + {num_olap} OLAP threads (x{olap_thread_cost} each) > max_workers ({max_threads} = num_cpus); clamping.",
+            "!! {fixed_cost} loader/idle-compaction + {num_terminals} terminals{} + {num_olap} OLAP threads (x{olap_thread_cost} each) > max_workers ({max_threads} = num_cpus); clamping.",
             if terminal_cost == 2 { " (x2: HTAP baseline sub-phase)" } else { "" }
         );
-        num_terminals = (max_threads.saturating_sub(2) / terminal_cost).max(1);
-        num_olap = max_threads.saturating_sub(1 + num_terminals * terminal_cost) / olap_thread_cost;
+        num_terminals = (max_threads.saturating_sub(fixed_cost + 1) / terminal_cost).max(1);
+        num_olap = max_threads.saturating_sub(fixed_cost + num_terminals * terminal_cost) / olap_thread_cost;
     }
 
     fs::create_dir_all(&cfg.output_dir)
         .unwrap_or_else(|e| panic!("tpcc: failed to create output_dir {}: {e}", cfg.output_dir.display()));
     let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
-    let worker_capacity = 1 + num_terminals * terminal_cost + num_olap * olap_thread_cost;
+    let worker_capacity = fixed_cost + num_terminals * terminal_cost + num_olap * olap_thread_cost;
     let db = Arc::new(match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);
@@ -356,7 +374,7 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     });
 
     let stop = Arc::new(AtomicBool::new(false));
-    let barrier = Arc::new(Barrier::new(num_terminals + num_olap + 1));
+    let barrier = Arc::new(Barrier::new(num_terminals + num_olap + idle_compaction_cost + 1));
     let (scan_tx, scan_rx) = unbounded::<ScanResult>();
 
     let duration = cfg.duration;
@@ -386,6 +404,54 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     }).collect();
     drop(scan_tx);
 
+    // See `DriverConfig::idle_compaction`'s doc: one thread, regardless of
+    // table count, sweeping `Table::ALL` in a loop. Waits on the same
+    // `barrier` as every terminal/OLAP thread (accounted for in that
+    // `Barrier::new` count above) so its sweeps only start once loading is
+    // actually done, same as everything else measured in this timed phase.
+    let idle_compaction_handle = cfg.idle_compaction.map(|(dead_ratio_threshold, sweep_interval)| {
+        let db = db.clone();
+        let stop = stop.clone();
+        let barrier = barrier.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            use crate::bat_bench::tpcc_schema::{BigTreeOp, Table, TpccKey, TpccRow};
+
+            // `Table::Warehouse`/`Table::District` are `TreeClass::Big`
+            // (see that enum's doc) — a different, database-configured
+            // `NUM_RECORDS` than every other table's tree, reached only
+            // through `dispatch_big`'s generic `BigTreeOp` hook, never
+            // `tree_for` (which asserts against exactly this case).
+            struct CompactOp(f64);
+            impl BigTreeOp for CompactOp {
+                type Output = usize;
+                fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+                    self,
+                    tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+                ) -> usize {
+                    tree.compact_idle_pass(self.0)
+                }
+            }
+
+            while !stop.load(Relaxed) {
+                for table in Table::ALL {
+                    match table {
+                        Table::Warehouse | Table::District => {
+                            db.dispatch_big(table, CompactOp(dead_ratio_threshold));
+                        }
+                        _ => {
+                            db.tree_for(table).compact_idle_pass(dead_ratio_threshold);
+                        }
+                    }
+                    if stop.load(Relaxed) {
+                        break;
+                    }
+                }
+                thread::sleep(sweep_interval);
+            }
+        })
+    });
+
     // Releases at the same instant as every worker thread, once loading is
     // done — so the timed phase (and this wall-clock measurement) excludes
     // load time entirely.
@@ -397,6 +463,9 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
 
     let terminal_stats: Vec<TerminalStats> = terminal_handles.into_iter().map(|h| h.join().unwrap()).collect();
     for h in olap_handles {
+        let _ = h.join();
+    }
+    if let Some(h) = idle_compaction_handle {
         let _ = h.join();
     }
     let actual_wall = run_start.elapsed();
@@ -609,6 +678,14 @@ pub fn main_tpcc(parms: Vec<String>) {
     // slot from a fixed, never-growing pool, so this must stay small
     // relative to `max_workers` alongside `num_terminals`/`num_olap_threads`.
     let scan_fanout: usize = arg(&parms, 22, 1);
+    // Idle/proactive compaction (`bat_tree::idle_compaction`, `DriverConfig::idle_compaction`'s
+    // doc) — `0.0` (default) means "disabled", since a real dead ratio is
+    // always `> 0.0` once any garbage exists, so a `0.0` threshold could
+    // never mean "opt-in but never trigger" the way it does here.
+    let idle_compaction_dead_ratio: f64 = arg(&parms, 23, 0.0);
+    let idle_compaction_sweep_secs: f64 = arg(&parms, 24, 5.0);
+    let idle_compaction = (idle_compaction_dead_ratio > 0.0)
+        .then(|| (idle_compaction_dead_ratio, Duration::from_secs_f64(idle_compaction_sweep_secs)));
 
     let (olap_mode, num_olap_threads) = match olap_mode_str.as_str() {
         "none" => (OlapMode::RepeatedFreshFullScan, 0),
@@ -666,6 +743,7 @@ pub fn main_tpcc(parms: Vec<String>) {
         wal: wal_enabled.then(|| (std::path::PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
         wal_lockfree_batch_size: None,
         htap_baseline: (htap_baseline_secs > 0).then(|| Duration::from_secs(htap_baseline_secs)),
+        idle_compaction,
         output_dir: PathBuf::from("."),
     });
 }
@@ -698,6 +776,7 @@ fn standard_driver_config(
         wal: None,
         wal_lockfree_batch_size: None,
         htap_baseline,
+        idle_compaction: None,
         output_dir: PathBuf::from("."),
     }
 }

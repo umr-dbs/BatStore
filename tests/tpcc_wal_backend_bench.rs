@@ -79,6 +79,7 @@ fn config(
         wal: Some((wal_path, Duration::from_millis(5))),
         wal_lockfree_batch_size: batch_size,
         htap_baseline: None,
+        idle_compaction: None,
         output_dir: std::env::temp_dir().join("batstore_tpcc_wal_bench_out"),
     }
 }
