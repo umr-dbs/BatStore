@@ -1980,6 +1980,9 @@ mod bench_tpcc_wal_codec_tests;
 #[path = "../../tests/bench_tpch_correctness_tests.rs"]
 mod bench_tpch_correctness_tests;
 #[cfg(test)]
+#[path = "../../tests/idle_compaction_tests.rs"]
+mod idle_compaction_tests;
+#[cfg(test)]
 #[path = "../../tests/bench_tpch_stress_tests.rs"]
 mod bench_tpch_stress_tests;
 #[cfg(test)]

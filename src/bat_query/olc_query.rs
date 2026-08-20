@@ -400,4 +400,202 @@ impl<
             }
         }
     }
+
+    /// Idle/proactive compaction entry point: forces exactly the same
+    /// latch/split/commit protocol a real overflow would trigger via
+    /// `on_overflow_node`, but for whichever leaf currently covering `key`
+    /// has a dead/(active+dead) ratio at or above `dead_ratio_threshold` —
+    /// see `traversal_compact_internal_olc`'s doc for why this needs its own
+    /// descent rather than reusing `traversal_write_olc`. Returns whether a
+    /// compaction actually happened: `false` if, by the time the descent
+    /// reached it, the leaf no longer qualified (someone else already
+    /// compacted it, a concurrent write pushed it into a real overflow
+    /// instead — that path already compacts it as a side effect, see
+    /// `split()`'s doc — or the candidate scan that picked `key` is simply
+    /// stale).
+    pub(crate) fn compact_leaf_olc(&self, key: Key, dead_ratio_threshold: f64) -> bool {
+        self.with_reclamation_pin(|| {
+            let mut attempts = 0;
+            loop {
+                match self.traversal_compact_internal_olc(key, dead_ratio_threshold, attempts) {
+                    Ok((guard, compacted)) => {
+                        drop(guard);
+                        break compacted;
+                    }
+                    Err(n_attempts) => {
+                        attempts = n_attempts;
+                        sched_yield(attempts);
+                    }
+                }
+            }
+        })
+    }
+
+    /// Root-aware counterpart to `retrieve_root_write_olc`, for the
+    /// compaction traversal only: a tree with few enough live keys has no
+    /// internal pages at all, so its root *is* a leaf directly, with no
+    /// parent for `traversal_compact_internal_olc`'s own loop to force a
+    /// compaction from (that loop only ever checks a *child* it's about to
+    /// descend into, via its parent's `on_overflow_node`). Mirrors
+    /// `retrieve_root_write_internal_olc`'s real overflow/underflow
+    /// handling byte for byte, plus one added arm: an otherwise-`Ok` leaf
+    /// root whose dead ratio crosses `dead_ratio_threshold` gets the same
+    /// `split_root` call a real overflow would, which — like
+    /// `on_overflow_node` — compacts rather than restructures a leaf that
+    /// isn't also key-overflowing (see `split()`'s doc). Returns whether
+    /// that happened, threaded into `traversal_compact_internal_olc`'s own
+    /// `compacted` flag.
+    #[inline]
+    fn retrieve_root_compact_olc(
+        &self,
+        dead_ratio_threshold: f64,
+        mut attempts: Attempts,
+    ) -> (BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>, Attempts, bool) {
+        loop {
+            match self.retrieve_root_compact_internal_olc(dead_ratio_threshold) {
+                Ok((guard, compacted)) => break (guard, attempts, compacted),
+                Err(()) => {
+                    attempts += 1;
+                    sched_yield(attempts);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn retrieve_root_compact_internal_olc(
+        &self,
+        dead_ratio_threshold: f64,
+    ) -> Result<(BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>, bool), ()> {
+        let root = &self.root;
+
+        let mut master_guard = root.borrow_read();
+
+        let root_block = master_guard.block();
+
+        let mut root_guard = root_block.borrow_read();
+
+        let needs_compaction = root_guard.is_leaf() && {
+            let (active, dead) = root_guard.active_dead_count();
+            let total = active as u64 + dead as u64;
+            total > 0 && dead as f64 / total as f64 >= dead_ratio_threshold
+        };
+
+        match root_guard.deref().unsafe_degree_root() {
+            // Same reasoning as `retrieve_root_write_internal_olc`'s
+            // identical arms — see that function's doc.
+            BlockUnsafeDegree::Overflow if master_guard.upgrade_write_lock() => self
+                .split_root(master_guard, root_guard, root.height())
+                .map(|guard| (guard, false)),
+            BlockUnsafeDegree::ActiveUnderflow
+                if master_guard.upgrade_write_lock() && root_guard.upgrade_write_lock() =>
+            {
+                self.merge_root(master_guard, root_guard, root.height())
+                    .map(|guard| (guard, false))
+            }
+            BlockUnsafeDegree::Ok if needs_compaction && master_guard.upgrade_write_lock() => self
+                .split_root(master_guard, root_guard, root.height())
+                .map(|guard| (guard, true)),
+            BlockUnsafeDegree::Ok => Ok((root_guard, false)),
+            _ => Err(()),
+        }
+    }
+
+    /// A hand-duplicated copy of `traversal_write_internal_olc` — not a
+    /// parameterized version of it — with exactly one addition: when the
+    /// child about to become `curr_guard` is a leaf whose
+    /// `active_dead_count()` ratio has crossed `dead_ratio_threshold` *and*
+    /// its physical `unsafe_degree()` is otherwise `Ok` (no overflow/
+    /// underflow correction already pending, which already handles this
+    /// leaf one way or another), this forces the same `on_overflow_node`
+    /// call a real overflow would get. `split()` decides `ByKey` vs
+    /// `ByVersion` from the live count regardless of why it was called (see
+    /// that function's doc), so an under-capacity, garbage-heavy leaf comes
+    /// back compacted (`ByVersion`) rather than restructured.
+    ///
+    /// Duplicated rather than folded into `traversal_write_internal_olc`
+    /// itself: that function sits on every single OLTP write's hot path and
+    /// has a documented history of subtle, timing-dependent corruption bugs
+    /// (see its own comments) — keeping this feature's one added branch
+    /// (and the extra `active_dead_count()` read it needs on every level)
+    /// off that path entirely is worth the duplication, at the cost of the
+    /// two functions drifting if one changes without the other someday.
+    fn traversal_compact_internal_olc(
+        &'_ self,
+        key: Key,
+        dead_ratio_threshold: f64,
+        attempts: Attempts,
+    ) -> Result<(BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>, bool), Attempts> {
+        let (mut curr_guard, attempts, mut compacted) =
+            self.retrieve_root_compact_olc(dead_ratio_threshold, attempts);
+
+        loop {
+            match curr_guard.as_page_ref() {
+                PageType::IndexRef(internal_page) => unsafe {
+                    // Same OLC race guards as `traversal_write_internal_olc`
+                    // — see that function's doc for why each one is needed.
+                    let curr_version_before = match curr_guard.checked_live_version() {
+                        Some(v) => v,
+                        None => return Err(attempts + 1),
+                    };
+
+                    let keys_page = internal_page.keys();
+                    let index = keys_page
+                        .iter()
+                        .enumerate()
+                        .rfind(|(_, range)| range.contains(key))
+                        .map(|(pos, ..)| pos);
+
+                    let Some(index) = index else {
+                        return Err(attempts + 1);
+                    };
+
+                    let next_curr_guard = internal_page.get_pointer(index).borrow_read();
+
+                    if curr_guard.live_version() != curr_version_before {
+                        return Err(attempts + 1);
+                    }
+
+                    let needs_compaction = next_curr_guard.is_leaf() && {
+                        let (active, dead) = next_curr_guard.active_dead_count();
+                        let total = active as u64 + dead as u64;
+                        total > 0 && dead as f64 / total as f64 >= dead_ratio_threshold
+                    };
+
+                    match next_curr_guard.unsafe_degree(&self.ctx) {
+                        BlockUnsafeDegree::Overflow if curr_guard.upgrade_write_lock() => {
+                            match self.on_overflow_node(curr_guard, next_curr_guard, index) {
+                                Ok(guard) => curr_guard = guard,
+                                Err(..) => return Err(attempts + 1),
+                            }
+                        }
+                        BlockUnsafeDegree::ActiveUnderflow if curr_guard.upgrade_write_lock() => {
+                            match self.on_underflow_node(curr_guard, next_curr_guard, index) {
+                                Ok(guard) => curr_guard = guard,
+                                Err(..) => return Err(attempts + 1),
+                            }
+                        }
+                        BlockUnsafeDegree::Ok if needs_compaction && curr_guard.upgrade_write_lock() => {
+                            match self.on_overflow_node(curr_guard, next_curr_guard, index) {
+                                Ok(guard) => {
+                                    curr_guard = guard;
+                                    compacted = true;
+                                }
+                                Err(..) => return Err(attempts + 1),
+                            }
+                        }
+                        BlockUnsafeDegree::Ok => curr_guard = next_curr_guard,
+                        _ => return Err(attempts + 1),
+                    }
+                },
+                _ => {
+                    return if curr_guard.upgrade_write_lock() {
+                        Ok((curr_guard, compacted))
+                    } else {
+                        Err(attempts + 1)
+                    };
+                }
+            }
+        }
+    }
 }
