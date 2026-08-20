@@ -61,7 +61,7 @@ const NOT_IN_FLIGHT: Version = Version::MAX;
 /// shared state.
 pub(crate) struct TxContext {
     global_clock: GlobalClock,
-    commit_logs: Vec<CommitLog>,
+    commit_logs: Box<[CommitLog]>,
     worker_registry: WorkerRegistry,
     /// Active-snapshot tracking: one slot per worker, holding that worker's
     /// currently-published `ts_start` (or `NOT_IN_FLIGHT` while idle) — see
@@ -108,7 +108,7 @@ pub(crate) struct TxContext {
     /// at the 64-core/128-thread scale this project's benchmarks target,
     /// where cross-CCD cache-coherence traffic costs considerably more than
     /// on a small single-CCX box.
-    live_tx: Vec<CachePadded<AtomicVersion>>,
+    live_tx: Box<[CachePadded<AtomicVersion>]>,
     /// Reentrancy depth per worker for `on_tx_start`/`on_tx_completed`, same
     /// indexing as `live_tx` — see that field's doc for why nesting exists.
     /// `Relaxed` throughout: each slot is written only by the one worker it
@@ -166,7 +166,7 @@ pub(crate) struct TxContext {
     /// `CachePadded` for the same false-sharing reason as `live_tx` — see
     /// that field's doc (this field's own "no shared cache line" claim above
     /// is exactly what the padding actually delivers on).
-    in_flight_bound: Vec<CachePadded<AtomicVersion>>,
+    in_flight_bound: Box<[CachePadded<AtomicVersion>]>,
     /// Own copy, independent of any single table's
     /// `TrackerHandleSt::block_reclaim_enabled` (which still gates that
     /// table's own dead-page bookkeeping/reuse) — this one gates whether
