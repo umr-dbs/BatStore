@@ -432,6 +432,21 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     callers. compare_engines.py deliberately passes reload=True for every PostgreSQL point
     so every measurement starts from freshly created and loaded benchmark tables.
     """
+    # patches/ycsb_skew_factor_benchbase.patch (applied by setup_environment.py's
+    # step_benchbase) makes BenchBase's YCSBBenchmark/YCSBWorker treat skewFactor<=0 as a
+    # genuine "uniform" sentinel - YCSBWorker builds a real UniformGenerator for read-key
+    # selection in that case, not an approximation - and relaxes the upstream `>=1`
+    # rejection so theta>1 (e.g. 1.4) works too. Only skewFactor==1.0 is still rejected:
+    # that's ZipfianGenerator's actual singularity (alpha = 1/(1-theta)), with no
+    # reasonable substitute, so it's skipped outright rather than attempted.
+    ycsb_theta = scale.ycsb_theta
+    if workload in common.YCSB_WORKLOADS and ycsb_theta == 1.0:
+        return common.NormalizedResult(
+            "postgres", workload, scale.label, scale.ycsb_duration, "ops_per_sec", 0.0, 0.0,
+            threads=scale.ycsb_threads, gc_enabled=gc,
+            notes="SKIPPED: BenchBase's YCSB module rejects skewFactor==1 (the "
+                  "ZipfianGenerator singularity - no reasonable substitute)",
+        )
     postmaster_pid = _verify_postmaster_numa_binding()
     _verify_tmpfs_datadir()
     _set_unsafe_durability()
@@ -494,7 +509,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         duration = scale.ycsb_duration
         threads = scale.ycsb_threads
         config_path.write_text(YCSB_CONFIG_TEMPLATE.format(
-            scalefactor=scale.ycsb_records / 1000.0, theta=scale.ycsb_theta,
+            scalefactor=scale.ycsb_records / 1000.0, theta=ycsb_theta,
             terminals=threads, duration=duration, weights=YCSB_WEIGHTS[letter],
             field_size=8 if ycsb_payload == "u64" else 100,
             **_template_connection_values(),
