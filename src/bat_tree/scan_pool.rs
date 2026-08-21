@@ -61,7 +61,7 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 use triomphe::Arc;
 
-use crate::bat_query::interval::Interval;
+use crate::bat_query::interval::{Interval, RangeSplit};
 use crate::bat_tree::mvbt::MVBTSt;
 
 type BoxedJob = Box<dyn FnOnce() + Send>;
@@ -89,6 +89,13 @@ pub struct ScanWorkerPool<
     /// busy" reflects work actually in flight, not just what's still
     /// waiting in the queue.
     in_flight: std::sync::Arc<AtomicUsize>,
+    /// How many distinct callers (e.g. OLAP threads) this pool is expected
+    /// to serve at once — set once, at `spawn` time, by whoever enabled the
+    /// pool and happens to know that count already (see `fair_query_fanout`'s
+    /// doc for how it's used and `TpccDatabase::enable_scan_pool`'s for
+    /// where a real caller gets this from). `None` when that count isn't
+    /// known.
+    expected_concurrent_queries: Option<usize>,
 }
 
 impl<
@@ -101,7 +108,16 @@ impl<
     /// Spawns `num_workers.max(MIN_WORKERS)` detached threads sharing one
     /// job queue. Keeps its own clone of `tree` for `dispatch`/
     /// `try_dispatch`'s job-building and inline-fallback use.
-    pub fn spawn(tree: Arc<MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>>, num_workers: usize) -> Self {
+    /// `expected_concurrent_queries` — see that field's and
+    /// `fair_query_fanout`'s docs — is a one-time hint, not something that
+    /// can be changed later; a caller whose own concurrency changes over a
+    /// run (e.g. `num_olap_threads` gets clamped) should pass the count it
+    /// actually ends up running with, not the one it originally asked for.
+    pub fn spawn(
+        tree: Arc<MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>>,
+        num_workers: usize,
+        expected_concurrent_queries: Option<usize>,
+    ) -> Self {
         let num_workers = num_workers.max(MIN_WORKERS);
         let (job_tx, job_rx) = crossbeam_channel::unbounded::<BoxedJob>();
         let in_flight = std::sync::Arc::new(AtomicUsize::new(0));
@@ -116,11 +132,43 @@ impl<
                 }
             });
         }
-        Self { tree, job_tx, num_workers, in_flight }
+        Self { tree, job_tx, num_workers, in_flight, expected_concurrent_queries }
     }
 
     pub fn num_workers(&self) -> usize {
         self.num_workers
+    }
+
+    /// How many workers one query should ask for: this pool's total
+    /// capacity divided evenly across however many callers
+    /// (`expected_concurrent_queries`) are expected to be querying it at
+    /// once, rather than every query grabbing the same fixed slice
+    /// regardless of how crowded the pool actually gets — so with, say, 4
+    /// concurrent OLAP threads sharing a 32-worker pool, each asks for 8;
+    /// with 64 sharing it, each asks for 2; with 128 (more callers than the
+    /// pool can meaningfully divide among), `None` — see below.
+    ///
+    /// Returns `None` when `expected_concurrent_queries` is known but the
+    /// fair share would come out below 2 (too many expected callers for
+    /// this pool to divide meaningfully) — the caller should skip the pool
+    /// entirely for that query and just scan the whole range directly on
+    /// its own thread, since paying dispatch overhead for a single job
+    /// with no parallelism to show for it is worse than not bothering (see
+    /// `parallel_scan::MIN_ROWS_FOR_SCAN_POOL`'s doc for the same reasoning
+    /// applied to scan *size* instead of concurrency).
+    ///
+    /// `expected_concurrent_queries` unknown (`None`/`Some(0)`): `Some(2)`
+    /// — the smallest width that's still genuinely parallel (matches this
+    /// pool's own `MIN_WORKERS` floor), used as a conservative default
+    /// when there's no better information to divide by.
+    pub fn fair_query_fanout(&self) -> Option<usize> {
+        match self.expected_concurrent_queries {
+            None | Some(0) => Some(2),
+            Some(expected_queries) => {
+                let share = self.num_workers / expected_queries;
+                (share >= 2).then_some(share)
+            }
+        }
     }
 
     /// Jobs already submitted but not yet picked up by any worker — see
@@ -190,5 +238,46 @@ impl<
         } else {
             ranges.into_iter().map(|range| make_job(&self.tree, range)).collect()
         }
+    }
+}
+
+/// A separate `impl` block, bounded by `Key: RangeSplit` — unlike every
+/// other method above, `dispatch_evenly` needs to actually split a range
+/// itself rather than being handed pre-split ones, so it's only available
+/// for key types that opted into `RangeSplit` (see that trait's doc for
+/// why this is opt-in rather than automatic for any `Key`). This keeps
+/// that requirement local to this one convenience method instead of
+/// forcing every `Key` this whole module is ever used with — including
+/// ones a caller partitions by hand, like `bat_bench::parallel_scan`'s
+/// `ORDER_LINE`-specific `partition_order_line_range` already does — to
+/// satisfy a bound they don't need.
+impl<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + RangeSplit + 'static,
+    Payload: Display + Clone + Default + Sync + 'static,
+> ScanWorkerPool<FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+    /// The generic, no-partitioner-required entry point: splits `range`
+    /// into this query's fair share of the pool (`fair_query_fanout`) via
+    /// `Key::split_evenly`, then dispatches exactly like `try_dispatch`.
+    /// For any caller that doesn't have (or need) a domain-aware
+    /// partitioner of its own — most straightforward, non-bit-packed key
+    /// spaces — this is a complete "just run my scan through the pool"
+    /// call, no `partition_order_line_range`-style helper required.
+    ///
+    /// Returns `None` if either this pool has no fair share to offer right
+    /// now (`fair_query_fanout`) or `Key::split_evenly` can't divide
+    /// `range` at all (including a `Key` type that never opted into real
+    /// splitting, per `RangeSplit`'s default) — in both cases the caller
+    /// should just scan `range` sequentially itself instead.
+    pub fn dispatch_evenly<R: Send + 'static>(
+        &self,
+        range: Interval<Key>,
+        reducer: impl Fn(&MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>, Interval<Key>) -> R + Send + Sync + 'static,
+    ) -> Option<Vec<R>> {
+        let fanout = self.fair_query_fanout()?;
+        let ranges = Key::split_evenly(range, fanout)?;
+        Some(self.try_dispatch(ranges, reducer))
     }
 }

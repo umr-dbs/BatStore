@@ -455,13 +455,19 @@ impl<
     /// `bat_tree::scan_pool::ScanWorkerPool`'s doc) of `num_workers`
     /// threads, for any query wanting to fan a scan out across it via
     /// `ScanWorkerPool::dispatch`/`try_dispatch` — see `scan_pool` to fetch
-    /// it back out. Panics if `id` names no table. Replacing an
-    /// already-assigned pool drops the old one, whose worker threads then
-    /// exit on their own (see `ScanWorkerPool`'s doc) — this doesn't wait
-    /// for that.
-    pub fn enable_scan_pool(&self, id: TableId, num_workers: usize) {
+    /// it back out. `expected_concurrent_queries` is passed straight
+    /// through to `ScanWorkerPool::spawn` — see that method's and
+    /// `ScanWorkerPool::fair_query_fanout`'s docs for what it's for. Panics
+    /// if `id` names no table. Replacing an already-assigned pool drops
+    /// the old one, whose worker threads then exit on their own (see
+    /// `ScanWorkerPool`'s doc) — this doesn't wait for that.
+    pub fn enable_scan_pool(&self, id: TableId, num_workers: usize, expected_concurrent_queries: Option<usize>) {
         let tree = self.table(id).expect("Database::enable_scan_pool: no table with this TableId");
-        let pool = Arc::new(crate::bat_tree::scan_pool::ScanWorkerPool::spawn(tree, num_workers));
+        let pool = Arc::new(crate::bat_tree::scan_pool::ScanWorkerPool::spawn(
+            tree,
+            num_workers,
+            expected_concurrent_queries,
+        ));
         let mut pools = self.scan_pools.lock().unwrap();
         let idx = id as usize;
         if pools.len() <= idx {
