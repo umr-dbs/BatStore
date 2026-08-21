@@ -330,11 +330,12 @@ class Scale:
     # src/bat_tree/scan_pool.rs): assigns ORDER_LINE a shared scan-worker pool of this many
     # threads (bat_bench::tpcc_schema::TpccDatabase::enable_scan_pool), so every htap_q1/
     # htap_q6 query - across every OLAP thread - fans its scan out across that one shared
-    # pool instead of running sequentially. `0` (default) disables it: the plain sequential
-    # path, matching every engine's previous behavior unchanged - every other engine ignores
-    # this field entirely (only batstore.py's `run()` accepts a `scan_pool_workers` kwarg at
-    # all - see run_htap_analytical_sweep.py's per-engine run_kwargs).
-    htap_scan_pool_workers: int = 0
+    # pool instead of running sequentially. `None` (default) leaves the decision to the
+    # binary itself, which auto-enables the pool once the population is large enough to pay
+    # off; `0` disables it explicitly (the plain sequential path) - every other engine
+    # ignores this field entirely (only batstore.py's `run()` accepts a `scan_pool_workers`
+    # kwarg at all - see run_htap_analytical_sweep.py's per-engine run_kwargs).
+    htap_scan_pool_workers: Optional[int] = None
     # "S-HTAP" streaming workload (src/bat_bench/s_htap_driver.rs): near-sorted
     # arrivals + recency-biased hot-tail updates running concurrently with OLAP scans
     # that straddle the cold/hot boundary - see that module's doc. `s_htap_record_count`

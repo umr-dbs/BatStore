@@ -112,6 +112,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batstore-ycsb-mode", "--cmvbt-ycsb-mode", dest="batstore_ycsb_mode",
                    choices=["atomic", "transaction"], default="atomic",
                    help="BatStore YCSB path: commit-before-publish auto-commit (default), or ordinary transaction lifecycle")
+    p.add_argument("--scan-pool-workers", type=int, default=None,
+                   help="BatStore only (ignored by every other engine): shared scan-worker pool "
+                        "size for htap_q1/htap_q6's ORDER_LINE scans and any ycsb_* workload's "
+                        "usertable scans (DriverConfig::scan_pool_workers). Omitted (default): "
+                        "the binary auto-enables the pool, sized to the machine's own core "
+                        "count, whenever the workload benefits and the population is large "
+                        "enough to pay off - see engines/batstore.py's `run()` doc. Pass `0` to "
+                        "disable it explicitly, or a positive int for an exact worker count.")
     p.add_argument("--dram-gib", type=float)
 
     p.add_argument("--s-htap-record-count", type=int,
@@ -339,10 +347,17 @@ def main() -> None:
                         # but guarantees that mutations and vacuum state from a prior point
                         # cannot contaminate the next measurement.
                         reload_data = engine_name == "postgres"
-                        result = module.run(
-                            workload, scale_variant, out_dir, gc=gc_variant, reload=reload_data,
+                        run_kwargs = dict(
+                            gc=gc_variant, reload=reload_data,
                             ycsb_payload=args.ycsb_payload, read_payload=not args.ycsb_key_only,
                         )
+                        # scan_pool_workers is a batstore.py-only kwarg (see its `run()` doc) -
+                        # every other engine's run() has no such parameter and would raise
+                        # TypeError if passed. Left out entirely when unset so batstore.py's own
+                        # default (auto-enable) applies instead of forcing it off.
+                        if engine_name == "batstore" and args.scan_pool_workers is not None:
+                            run_kwargs["scan_pool_workers"] = args.scan_pool_workers
+                        result = module.run(workload, scale_variant, out_dir, **run_kwargs)
                     except Exception as e:  # noqa: BLE001 - one engine's failure shouldn't abort the whole matrix
                         result = common.NormalizedResult(
                             engine_name, workload, scale_variant.label, _workload_duration(workload, scale_variant),

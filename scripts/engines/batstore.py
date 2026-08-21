@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from . import common
 
@@ -41,7 +42,7 @@ def ensure_built() -> None:
 def run(
     workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True,
     big_tree_size: str = "medium", ycsb_payload: str = "standard", read_payload: bool = True,
-    scan_pool_workers: int = 0,
+    scan_pool_workers: Optional[int] = None,
 ) -> common.NormalizedResult:
     """`reload` is accepted for interface parity with postgres_benchbase.run() but unused -
     every BatStore invocation is a fresh in-process population, there's no persisted state to
@@ -52,12 +53,20 @@ def run(
     workload (positional arg 21 to `BatStore tpcc`, see tpcc_driver.rs::main_tpcc); left at the
     binary's own "medium" default everywhere else.
 
-    `scan_pool_workers` (positional arg 22) assigns ORDER_LINE a shared scan-worker pool of
-    this many threads (`DriverConfig::scan_pool_workers`,
-    `bat_tree::scan_pool::ScanWorkerPool`) for every `htap_q1`/`htap_q6` query - across every
-    OLAP thread - to fan its scan out across, instead of each running sequentially. `0`
-    (default) disables it entirely: the plain sequential path, unchanged from before this
-    parameter existed. Ignored for every other workload, exactly like `big_tree_size` above.
+    `scan_pool_workers` assigns a shared scan-worker pool (`bat_tree::scan_pool::
+    ScanWorkerPool`) for a query to fan its scan out across instead of running it
+    sequentially - `ORDER_LINE`'s pool for `htap_q1`/`htap_q6` (positional arg 22 to
+    `BatStore tpcc`, `DriverConfig::scan_pool_workers` in tpcc_driver.rs), or the
+    usertable's pool for any `ycsb_*` workload (positional arg 20 to `BatStore ycsb`,
+    same field in ycsb_driver.rs). `None` (default) omits the positional arg entirely,
+    which hands the decision to the binary itself: it auto-enables the pool, sized to
+    the machine's own core count, whenever the workload actually benefits (`htap_q1`/
+    `htap_q6` mode, or a YCSB mix that issues scans) and the population is large enough
+    for the pool to pay off - see `parallel_scan::MIN_ROWS_FOR_SCAN_POOL`'s doc for that
+    threshold. Pass `0` to explicitly disable it (the plain sequential path, matching
+    every engine's behavior before this parameter existed), or a positive int to force
+    an exact worker count. Ignored for every other workload, exactly like `big_tree_size`
+    above.
     """
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -99,8 +108,13 @@ def run(
             "100000", "3000", "3000", "true", str(wal_path), "5", "EUROPE", "10000",
             # Positions 20-21 (htap_baseline_secs/big_tree_size) filled with the driver's
             # own defaults so position 22 (scan_pool_workers) is reachable.
-            "0", "32kib", str(scan_pool_workers),
+            "0", "32kib",
         ]
+        # Omitted entirely (not even "0") when `scan_pool_workers` is `None`: main_tpcc's own
+        # CLI parsing then auto-sizes the pool for ch_q1/ch_q6 whenever the population is
+        # large enough - see `run()`'s doc above. An explicit `0`/`N` is sent through as-is.
+        if scan_pool_workers is not None:
+            args.append(str(scan_pool_workers))
         metric_name = "new_order_per_sec"
         ts_file, ts_column = "tpcc_oltp_timeseries.csv", "new_order_committed"
     elif workload == "s_htap":
@@ -138,6 +152,11 @@ def run(
             str(read_payload).lower(),
             os.environ.get("BATSTORE_YCSB_MODE", "atomic"),
         ]
+        # Same omit-for-auto convention as the htap_q1/htap_q6 branch above: leaving this
+        # off lets main_ycsb's own CLI parsing (`default_scan_pool_workers`) auto-enable the
+        # pool whenever this workload's mix issues scans and the population is large enough.
+        if scan_pool_workers is not None:
+            args.append(str(scan_pool_workers))
         metric_name = "ops_per_sec"
         ts_file, ts_column = "ycsb_timeseries.csv", "ops_completed"
 

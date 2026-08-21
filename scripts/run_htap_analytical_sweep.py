@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
                    help="comma-separated subset of on,off - engines with no working GC "
                         "toggle (see SUPPORTS_GC_TOGGLE in each engines/*.py) are only run "
                         "once and report that same result for every requested gc label")
-    p.add_argument("--scan-pool-workers", type=int, default=0,
+    p.add_argument("--scan-pool-workers", type=int, default=None,
                    help="BatStore only (ignored by every other engine): assigns ORDER_LINE a "
                         "shared scan-worker pool of this many total threads (src/bat_tree/"
                         "scan_pool.rs, DriverConfig::scan_pool_workers). Each htap_q1/htap_q6 "
@@ -78,9 +78,11 @@ def parse_args() -> argparse.Namespace:
                         "querying OLAP threads can each get serviced by the pool at once; a query "
                         "runs on its own OLAP thread instead if its fair share has no spare "
                         "capacity right now, or if there are too many OLAP threads sharing the "
-                        "pool to give each one a fair share of at least 2. `0` (default, and what "
-                        "this script always passes explicitly) disables it entirely - the plain "
-                        "sequential path, unchanged. Any nonzero value is floored to 2 by "
+                        "pool to give each one a fair share of at least 2. Omitted (default): "
+                        "main_tpcc's own CLI parsing decides, auto-enabling the pool (sized to "
+                        "the machine's own core count) whenever the population is large enough "
+                        "for it to pay off - pass `0` to disable it entirely instead (the plain "
+                        "sequential path). Any other value is floored to 2 by "
                         "ScanWorkerPool::spawn (a 1-worker 'pool' buys no parallelism). Pool "
                         "worker threads never register a WorkerId (see bat_sync::worker::"
                         "READ_ONLY_SCAN_WORKER_ID) since they never write, so this is NOT counted "
@@ -143,7 +145,12 @@ def main() -> None:
           f"duration={args.tpcc_duration}s")
     print(f"OLAP threads    : {olap_thread_list}")
     print(f"gc sweep        : {gc_list} (engines with no working GC toggle always run once)")
-    if args.scan_pool_workers > 0:
+    if args.scan_pool_workers is None:
+        print("scan pool       : auto (BatStore default - enabled when the population is large "
+              "enough to pay off; every other engine ignores this)")
+    elif args.scan_pool_workers == 0:
+        print("scan pool       : disabled (explicit override; every other engine ignores this)")
+    else:
         print(f"scan pool       : {args.scan_pool_workers} workers (BatStore only - every other engine ignores this)")
     print("####################################################\n")
 
@@ -171,7 +178,10 @@ def main() -> None:
                 run_kwargs = dict(reload=(engine_name == "postgres"))
                 # scan_pool_workers is a batstore.py-only kwarg (see its `run()` doc) - every
                 # other engine's run() has no such parameter and would raise TypeError if passed.
-                if engine_name == "batstore" and args.scan_pool_workers > 0:
+                # `None` is left out of run_kwargs entirely (not even as `None`) so batstore.py's
+                # own default applies and the binary auto-decides; `0`/a positive count is
+                # passed through as an explicit override either way.
+                if engine_name == "batstore" and args.scan_pool_workers is not None:
                     run_kwargs["scan_pool_workers"] = args.scan_pool_workers
                 try:
                     gc_results = common.run_gc_variants(module, workload, scale_variant, out_dir_base, gc_list, run_kwargs)
@@ -186,7 +196,7 @@ def main() -> None:
                     # by plot_htap_analytical.py) - same convention as
                     # run_skew_sweep.py's "skew=".
                     result.config_label = f"{result.config_label} olap_threads={olap_threads}"
-                    if args.scan_pool_workers > 0:
+                    if args.scan_pool_workers is not None:
                         result.config_label = f"{result.config_label} scan_pool_workers={args.scan_pool_workers}"
                     common.append_manifest_row(manifest_path, result)
                     olap_qps = result.scan_count / result.duration_secs if result.duration_secs else 0.0
