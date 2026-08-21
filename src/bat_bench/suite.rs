@@ -181,6 +181,7 @@ fn run_one(
                 wal_lockfree_batch_size: None,
                 htap_baseline: None,
                 idle_compaction: None,
+                scan_pool_workers: None,
                 output_dir: out_dir,
             });
             ("tpmC", summary.tpm_c, None)
@@ -210,6 +211,7 @@ fn run_one(
                 wal_lockfree_batch_size: None,
                 htap_baseline,
                 idle_compaction: None,
+                scan_pool_workers: None,
                 output_dir: out_dir,
             });
             ("tpmC", summary.tpm_c, summary.baseline_tpm_c)

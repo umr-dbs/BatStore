@@ -19,6 +19,40 @@ pub struct WorkerRegistry {
     next: AtomicUsize,
 }
 
+/// A reserved `WorkerId` that `acquire` can never hand out (it only ever
+/// returns values `< max_workers`, and this crate's every real deployment
+/// keeps `max_workers` far below `u16::MAX` — bounded by `num_cpus`-scale
+/// thread budgets, see `bat_tree::mvbt::default_max_workers`). Safe for a
+/// thread to pass as its own `reader_worker` to `visibility::is_visible`/
+/// `RangeQueryIter::new` *without ever calling `worker_id_for`* — i.e.
+/// without permanently claiming a real registry slot — as long as that
+/// thread is a pure reader that never writes (`register_reader_si: false`,
+/// relying on some other, already-registered transaction's snapshot
+/// protection — see `bat_bench::parallel_scan`'s doc):
+///
+///  - `is_visible`'s only use of the reader's own id is the same-worker
+///    fast path (`stamp.worker_id() == reader_worker`) — since no real
+///    writer is ever assigned this id, that comparison is always correctly
+///    `false` for every real stamp, so every check properly falls through
+///    to the real `LCB` lookup instead of a wrong same-worker shortcut.
+///  - Every other per-worker structure on the read path
+///    (`TxContext::commit_logs`, `SnapshotCache`) is indexed by the
+///    *writer's* worker id from the stamp being checked, never by the
+///    reader's own id — so this value is never used as an array index and
+///    can't go out of bounds.
+///  - `with_snapshot_cache`/`with_snapshot_cache_and_logs` (the only other
+///    per-worker state a read touches) are keyed by thread-local storage,
+///    not by `WorkerId` at all, and work for any calling thread regardless
+///    of whether it ever registered one.
+///
+/// Used by `bat_tree::scan_pool::ScanWorkerPool`'s worker threads, which
+/// exist purely to run these read-only sub-range jobs and should never
+/// permanently consume a slot from a tree's fixed, never-growing
+/// `WorkerRegistry` — letting a pool oversubscribe past `max_workers`
+/// entirely safely, since its threads draw from this one shared constant
+/// instead of the registry's counter.
+pub const READ_ONLY_SCAN_WORKER_ID: WorkerId = WorkerId::MAX;
+
 static NEXT_DB_UID: AtomicU64 = AtomicU64::new(0);
 
 impl WorkerRegistry {

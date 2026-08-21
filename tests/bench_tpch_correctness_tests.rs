@@ -12,14 +12,17 @@
 
 use crate::bat_bench::tpcc_load::populate_regions_and_nations;
 use crate::bat_bench::tpcc_schema::{
-    Order, OrderLine, Stock, Supplier, Table, TpccDatabase, TpccRow, k_order, k_order_line, k_stock,
+    BigTreeSize, Order, OrderLine, Stock, Supplier, Table, TpccDatabase, TpccRow, k_order, k_order_line, k_stock,
+    order_line_table_range,
 };
-use crate::bat_bench::parallel_scan::{ScanWorkerPool, q1_parallel, q6_parallel};
+use crate::bat_bench::parallel_scan::{q1_parallel, q6_parallel};
+use crate::bat_bench::tpcc_schema::TpccScanWorkerPool as ScanWorkerPool;
 use crate::bat_bench::tpch_queries::{q1, q4, q5, q6};
 use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
 use crate::bat_crud_model::crud_operation::CRUDOperation;
 use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::bat_root::index_root::RootIndexType;
+use std::time::{Duration, Instant};
 
 fn insert(db: &TpccDatabase, table: Table, key: u64, row: TpccRow) {
     match db
@@ -412,24 +415,25 @@ fn q1_parallel_matches_sequential_q1_across_fanouts() {
     assert_eq!(expected.len(), 2, "ol_number 1 and 2 across all 5 warehouses");
 
     for fanout in [1, 2, 3, 8] {
-        std::thread::scope(|scope| {
-            let pool = ScanWorkerPool::spawn(scope, &db, fanout);
-            assert_eq!(pool.fanout(), fanout);
-            let (actual, _) = q1_parallel(&db, &pool, num_warehouses, 100);
+        let pool = ScanWorkerPool::spawn(db.tree_for(Table::OrderLine), fanout);
+        // `ScanWorkerPool::spawn` floors every request at 2 workers (a
+        // "pool" of 1 buys no parallelism over the sequential path) — see
+        // that method's doc.
+        assert_eq!(pool.num_workers(), fanout.max(2));
+        let (actual, _) = q1_parallel(&db, &pool, num_warehouses, 100);
 
-            assert_eq!(actual.len(), expected.len(), "fanout={fanout}");
-            for (a, e) in actual.iter().zip(expected.iter()) {
-                assert_eq!(a.ol_number, e.ol_number, "fanout={fanout}");
-                assert_eq!(a.count, e.count, "fanout={fanout}");
-                assert_eq!(a.sum_qty, e.sum_qty, "fanout={fanout}");
-                assert!(
-                    (a.sum_amount - e.sum_amount).abs() < 1e-9,
-                    "fanout={fanout}: expected {}, got {}",
-                    e.sum_amount,
-                    a.sum_amount
-                );
-            }
-        });
+        assert_eq!(actual.len(), expected.len(), "fanout={fanout}");
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert_eq!(a.ol_number, e.ol_number, "fanout={fanout}");
+            assert_eq!(a.count, e.count, "fanout={fanout}");
+            assert_eq!(a.sum_qty, e.sum_qty, "fanout={fanout}");
+            assert!(
+                (a.sum_amount - e.sum_amount).abs() < 1e-9,
+                "fanout={fanout}: expected {}, got {}",
+                e.sum_amount,
+                a.sum_amount
+            );
+        }
     }
 }
 
@@ -444,13 +448,215 @@ fn q6_parallel_matches_sequential_q6_across_fanouts() {
     assert!(expected > 0.0, "sanity: fixture should have matching revenue");
 
     for fanout in [1, 2, 3, 8] {
-        std::thread::scope(|scope| {
-            let pool = ScanWorkerPool::spawn(scope, &db, fanout);
-            let (actual, _) = q6_parallel(&db, &pool, num_warehouses, 0, 200, 250);
-            assert!(
-                (actual - expected).abs() < 1e-9,
-                "fanout={fanout}: expected {expected}, got {actual}"
-            );
-        });
+        let pool = ScanWorkerPool::spawn(db.tree_for(Table::OrderLine), fanout);
+        let (actual, _) = q6_parallel(&db, &pool, num_warehouses, 0, 200, 250);
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "fanout={fanout}: expected {expected}, got {actual}"
+        );
     }
+}
+
+/// Exercises the actual database-assignment path (`TpccDatabase::
+/// enable_scan_pool`/`scan_pool`/`disable_scan_pool`) rather than a
+/// hand-spawned `ScanWorkerPool` — this is what `OlapMode::ChQ1`/`ChQ6`
+/// actually call through in `olap_scan::run_olap_worker`. Confirms the
+/// assigned pool produces the exact same result as the sequential query,
+/// and that `scan_pool` correctly reports `None` before assignment and
+/// after `disable_scan_pool`.
+#[test]
+fn enable_scan_pool_assigns_a_working_pool_and_disable_scan_pool_removes_it() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    let num_warehouses = 5;
+    populate_multi_warehouse_order_lines(&db, num_warehouses);
+
+    let (expected, _) = q1(&db, 100);
+    assert!(db.scan_pool(Table::OrderLine).is_none(), "no pool assigned yet");
+
+    db.enable_scan_pool(Table::OrderLine, 3);
+    let pool = db.scan_pool(Table::OrderLine).expect("enable_scan_pool should have assigned one");
+    assert_eq!(pool.num_workers(), 3);
+
+    let (actual, _) = q1_parallel(&db, &pool, num_warehouses, 100);
+    assert_eq!(actual.len(), expected.len());
+    for (a, e) in actual.iter().zip(expected.iter()) {
+        assert_eq!(a.ol_number, e.ol_number);
+        assert_eq!(a.count, e.count);
+        assert_eq!(a.sum_qty, e.sum_qty);
+        assert!((a.sum_amount - e.sum_amount).abs() < 1e-9);
+    }
+
+    db.disable_scan_pool(Table::OrderLine);
+    assert!(db.scan_pool(Table::OrderLine).is_none(), "disable_scan_pool should have cleared it");
+}
+
+/// The whole point of the redesigned pool (see `scan_pool::ScanWorkerPool`'s
+/// doc) is that several concurrent callers can share one pool without their
+/// jobs' results getting mixed up — the old per-query-exclusive design
+/// could only ever have one caller holding it at a time. Runs several
+/// `q1_parallel`/`q6_parallel` calls concurrently against one shared,
+/// database-assigned pool and checks every single one still gets the exact
+/// right answer.
+#[test]
+fn shared_scan_pool_serves_concurrent_callers_correctly() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    let num_warehouses = 5;
+    populate_multi_warehouse_order_lines(&db, num_warehouses);
+
+    let (expected_q1, _) = q1(&db, 100);
+    let (expected_q6, _) = q6(&db, 0, 200, 250);
+    db.enable_scan_pool(Table::OrderLine, 2);
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let db = &db;
+                let expected_q1 = &expected_q1;
+                scope.spawn(move || {
+                    let pool = db.scan_pool(Table::OrderLine).expect("pool was assigned above");
+                    if i % 2 == 0 {
+                        let (actual, _) = q1_parallel(db, &pool, num_warehouses, 100);
+                        assert_eq!(actual.len(), expected_q1.len());
+                        for (a, e) in actual.iter().zip(expected_q1.iter()) {
+                            assert_eq!(a.count, e.count);
+                            assert_eq!(a.sum_qty, e.sum_qty);
+                            assert!((a.sum_amount - e.sum_amount).abs() < 1e-9);
+                        }
+                    } else {
+                        let (actual, _) = q6_parallel(db, &pool, num_warehouses, 0, 200, 250);
+                        assert!((actual - expected_q6).abs() < 1e-9);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+    });
+
+    db.disable_scan_pool(Table::OrderLine);
+}
+
+/// `q1_parallel`/`q6_parallel` go through `ScanWorkerPool::try_dispatch`,
+/// not `dispatch` — when the pool has no spare capacity, a query must run
+/// on the calling thread instead of queuing behind whatever else is
+/// keeping every worker busy. Occupies both of a 2-worker pool's workers
+/// with artificially slow jobs, then checks `q1_parallel` still returns the
+/// exact right answer, and returns almost immediately rather than waiting
+/// out the slow jobs' `hold` duration.
+#[test]
+fn try_dispatch_runs_inline_when_the_pool_has_no_spare_capacity() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    let num_warehouses = 5;
+    populate_multi_warehouse_order_lines(&db, num_warehouses);
+    let (expected, _) = q1(&db, 100);
+
+    let pool = ScanWorkerPool::spawn(db.tree_for(Table::OrderLine), 2);
+    assert_eq!(pool.num_workers(), 2);
+    let hold = Duration::from_millis(300);
+
+    std::thread::scope(|scope| {
+        // Occupy both workers with a slow job each, so the pool has zero
+        // spare capacity for `hold`'s whole duration.
+        for _ in 0..pool.num_workers() {
+            scope.spawn(|| {
+                pool.dispatch(vec![order_line_table_range()], move |_tree, _range| {
+                    std::thread::sleep(hold);
+                    0
+                });
+            });
+        }
+        // Give both workers a moment to actually pick their job up
+        // (`in_flight` only increments once a worker's `recv()` returns).
+        std::thread::sleep(hold / 4);
+        assert!(!pool.has_spare_capacity(), "both workers should be busy with the slow filler jobs");
+
+        let start = Instant::now();
+        let (actual, _) = q1_parallel(&db, &pool, num_warehouses, 100);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < hold / 2,
+            "try_dispatch should have run inline instead of waiting behind the busy pool, took {elapsed:?}"
+        );
+
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert_eq!(a.ol_number, e.ol_number);
+            assert_eq!(a.count, e.count);
+            assert_eq!(a.sum_qty, e.sum_qty);
+            assert!((a.sum_amount - e.sum_amount).abs() < 1e-9);
+        }
+    });
+}
+
+/// The whole point of `bat_sync::worker::READ_ONLY_SCAN_WORKER_ID` (see its
+/// doc) is that a `ScanWorkerPool`'s own worker threads never draw from the
+/// tree's fixed `WorkerRegistry` — so a pool can be sized past
+/// `max_workers` entirely safely. Builds a database whose registry only
+/// has room for 2 real workers, then assigns `ORDER_LINE` a 10-worker
+/// pool: if any pool worker thread ever called `tree.worker_id()`, the
+/// registry would panic (`WorkerRegistry::acquire`'s `assert!(id <
+/// max_workers)`) well before all 10 could register, which would surface
+/// here as `q1_parallel` never getting a result back for at least one of
+/// its jobs (a panicking worker drops its result sender without sending,
+/// so `ScanWorkerPool::dispatch`'s `rx.recv().expect(..)` panics too).
+#[test]
+fn scan_pool_can_oversubscribe_past_max_workers_without_registering() {
+    let db = TpccDatabase::new_with_big_tree_size_and_max_workers(RootIndexType::default(), BigTreeSize::default(), 2);
+    let num_warehouses = 5;
+    populate_multi_warehouse_order_lines(&db, num_warehouses);
+    let (expected, _) = q1(&db, 100);
+
+    db.enable_scan_pool(Table::OrderLine, 10);
+    let pool = db.scan_pool(Table::OrderLine).expect("enable_scan_pool should have assigned one");
+    assert_eq!(pool.num_workers(), 10, "far more workers than max_workers=2");
+
+    let (actual, _) = q1_parallel(&db, &pool, num_warehouses, 100);
+    assert_eq!(actual.len(), expected.len());
+    for (a, e) in actual.iter().zip(expected.iter()) {
+        assert_eq!(a.ol_number, e.ol_number);
+        assert_eq!(a.count, e.count);
+        assert_eq!(a.sum_qty, e.sum_qty);
+        assert!((a.sum_amount - e.sum_amount).abs() < 1e-9);
+    }
+
+    db.disable_scan_pool(Table::OrderLine);
+}
+
+/// Proves the pool genuinely *shares* capacity across concurrently
+/// querying callers, not just "doesn't halt anyone" — see `parallel_scan`'s
+/// "Partitioning" doc for why a query only ever asks for `QUERY_FANOUT`
+/// (2) workers rather than the pool's entire capacity: with a 6-worker
+/// pool, 3 query-sized (2-worker) slices should all get serviced by the
+/// pool's workers at the same time, not one after another. Uses the same
+/// slow-filler-job technique as `try_dispatch_runs_inline_when_the_pool_has_
+/// no_spare_capacity` (`pool.dispatch` directly, bypassing q1/q6-specific
+/// logic) to make "did this run concurrently" a simple wall-clock check:
+/// 3 batches of 2 jobs each, each job sleeping `hold`, all submitted at
+/// once — if the pool actually shares its 6 workers across all 3 batches,
+/// total wall time is ~1 `hold`; if it silently serialized them, ~3.
+#[test]
+fn scan_pool_serves_multiple_query_sized_slices_concurrently() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    let pool = ScanWorkerPool::spawn(db.tree_for(Table::OrderLine), 6);
+    assert_eq!(pool.num_workers(), 6);
+    let hold = Duration::from_millis(200);
+
+    let start = Instant::now();
+    std::thread::scope(|scope| {
+        for _ in 0..3 {
+            scope.spawn(|| {
+                pool.dispatch(vec![order_line_table_range(), order_line_table_range()], move |_tree, _range| {
+                    std::thread::sleep(hold);
+                    0
+                });
+            });
+        }
+    });
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < hold * 2,
+        "3 concurrent 2-worker slices on a 6-worker pool should run at the same time \
+         (~{hold:?} total), not serialize (~3x{hold:?}) — took {elapsed:?}"
+    );
 }

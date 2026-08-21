@@ -77,6 +77,10 @@ pub const TPCC_FAN_OUT: usize = FAN_OUT;
 pub const TPCC_NUM_RECORDS: usize = crate::bat_tree::mvbt::NUM_RECORDS;
 
 pub type TpccTree = crate::bat_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
+/// `TpccDatabase::enable_scan_pool`/`scan_pool`'s pool type — a
+/// `bat_tree::scan_pool::ScanWorkerPool` fixed to `TpccTree`'s own type
+/// parameters, so callers (`parallel_scan`) don't have to spell those out.
+pub type TpccScanWorkerPool = crate::bat_tree::scan_pool::ScanWorkerPool<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 
 /// Deliberately much larger than `TPCC_NUM_RECORDS`: Warehouse and District
 /// are TPC-C's smallest tables by row count (one row per warehouse / ten per
@@ -1076,6 +1080,49 @@ impl TpccDatabase {
         if let Some(stop) = self.idle_compaction_stop.lock().unwrap().take() {
             stop.store(true, Relaxed);
         }
+    }
+
+    /// Assigns `table`'s tree a dedicated shared scan-worker pool — a thin,
+    /// `Table`-keyed wrapper over `bat_db::Database::enable_scan_pool`
+    /// (see that method's and `bat_tree::scan_pool::ScanWorkerPool`'s docs;
+    /// this is a `db`-wide feature, not something specific to
+    /// `TpccDatabase`). `table` must be `TreeClass::Standard` (see
+    /// `tree_for`'s doc, which this panics through for
+    /// `Warehouse`/`District`, since those two live outside `db`'s table
+    /// list entirely).
+    pub fn enable_scan_pool(&self, table: Table, num_workers: usize) {
+        assert_eq!(
+            table.class(),
+            TreeClass::Standard,
+            "TpccDatabase::enable_scan_pool: {table:?} is a TreeClass::Big table"
+        );
+        self.db.enable_scan_pool(self.table_ids[table as usize], num_workers);
+    }
+
+    /// Drops the pool `enable_scan_pool` assigned to `table`, if any — a
+    /// no-op otherwise. See `bat_db::Database::disable_scan_pool`'s doc for
+    /// the (unwaited) worker thread shutdown this triggers. Panics for
+    /// `Warehouse`/`District` — see `enable_scan_pool`'s doc; without this,
+    /// `table_ids`' meaningless `0` for those two would silently disable
+    /// whichever real table happens to hold `TableId` 0.
+    pub fn disable_scan_pool(&self, table: Table) {
+        assert_eq!(
+            table.class(),
+            TreeClass::Standard,
+            "TpccDatabase::disable_scan_pool: {table:?} is a TreeClass::Big table"
+        );
+        self.db.disable_scan_pool(self.table_ids[table as usize]);
+    }
+
+    /// The pool `enable_scan_pool` assigned to `table`, if any. Panics for
+    /// `Warehouse`/`District` — see `disable_scan_pool`'s doc.
+    pub fn scan_pool(&self, table: Table) -> Option<Arc<TpccScanWorkerPool>> {
+        assert_eq!(
+            table.class(),
+            TreeClass::Standard,
+            "TpccDatabase::scan_pool: {table:?} is a TreeClass::Big table"
+        );
+        self.db.scan_pool(self.table_ids[table as usize])
     }
 
     pub fn truncate_commit_log(&self, enabled: bool) {

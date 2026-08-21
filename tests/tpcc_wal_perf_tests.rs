@@ -65,6 +65,7 @@ fn config(num_terminals: usize, wal_path: PathBuf, batch_size: Option<usize>) ->
         wal_lockfree_batch_size: batch_size,
         htap_baseline: None,
         idle_compaction: None,
+        scan_pool_workers: None,
         output_dir: std::env::temp_dir().join("batstore_tpcc_wal_perf_test_out"),
     }
 }

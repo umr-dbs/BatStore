@@ -68,15 +68,21 @@ def parse_args() -> argparse.Namespace:
                    help="comma-separated subset of on,off - engines with no working GC "
                         "toggle (see SUPPORTS_GC_TOGGLE in each engines/*.py) are only run "
                         "once and report that same result for every requested gc label")
-    p.add_argument("--scan-fanout", type=int, default=1,
-                   help="BatStore only (ignored by every other engine): fans each individual "
-                        "htap_q1/htap_q6 query out across this many dedicated helper threads "
-                        "(src/bat_bench/parallel_scan.rs) instead of running it on one thread "
-                        "alone - 1 (default) is the plain sequential path, unchanged. Each "
-                        "OLAP thread costs 1+scan_fanout WorkerId slots when >1 (see "
-                        "tpcc_driver.rs's fixed max_workers clamp) - keep "
-                        "oltp_terminals + olap_threads*(1+scan_fanout) under your machine's "
-                        "core count.")
+    p.add_argument("--scan-pool-workers", type=int, default=0,
+                   help="BatStore only (ignored by every other engine): assigns ORDER_LINE a "
+                        "shared scan-worker pool of this many threads (src/bat_tree/scan_pool.rs, "
+                        "DriverConfig::scan_pool_workers). Each htap_q1/htap_q6 query only ever "
+                        "asks the pool for a small fixed slice (parallel_scan::QUERY_FANOUT, 2 "
+                        "workers), not the whole pool, so several concurrently-querying OLAP "
+                        "threads can each get serviced by the pool at once; a query only runs on "
+                        "its own OLAP thread instead if the pool has no spare slice free right now. "
+                        "`0` (default, and what this script always passes explicitly) disables it "
+                        "entirely - the plain sequential path, unchanged. Any nonzero value is "
+                        "floored to 2 by ScanWorkerPool::spawn (a 1-worker 'pool' buys no "
+                        "parallelism). Pool worker threads never register a WorkerId (see "
+                        "bat_sync::worker::READ_ONLY_SCAN_WORKER_ID) since they never write, so "
+                        "this is NOT counted against your core count the way oltp_terminals/"
+                        "olap_threads are - free to oversubscribe this past nproc if useful.")
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--batstore-allocator", "--cmvbt-allocator", dest="batstore_allocator",
                    choices=["jemalloc", "mimalloc"], default="jemalloc")
@@ -122,7 +128,7 @@ def main() -> None:
     (run_dir / "run_config.json").write_text(json.dumps({
         "olap_threads": olap_thread_list, "oltp_terminals": args.oltp_terminals,
         "warehouses": args.warehouses, "workloads": workloads, "engines": engines,
-        "scan_fanout": args.scan_fanout,
+        "scan_pool_workers": args.scan_pool_workers,
     }, indent=2) + "\n")
 
     print("\n########## HTAP analytical-thread sweep ##########")
@@ -133,8 +139,8 @@ def main() -> None:
           f"duration={args.tpcc_duration}s")
     print(f"OLAP threads    : {olap_thread_list}")
     print(f"gc sweep        : {gc_list} (engines with no working GC toggle always run once)")
-    if args.scan_fanout > 1:
-        print(f"scan fanout     : {args.scan_fanout} (BatStore only - every other engine ignores this)")
+    if args.scan_pool_workers > 0:
+        print(f"scan pool       : {args.scan_pool_workers} workers (BatStore only - every other engine ignores this)")
     print("####################################################\n")
 
     if not args.skip_build:
@@ -149,7 +155,7 @@ def main() -> None:
             module = ENGINE_MODULES[engine_name]
             for olap_threads in olap_thread_list:
                 scale_variant = dataclasses.replace(
-                    base_scale, htap_olap_threads=olap_threads, htap_scan_fanout=args.scan_fanout,
+                    base_scale, htap_olap_threads=olap_threads, htap_scan_pool_workers=args.scan_pool_workers,
                 )
                 if args.dram_gib is None:
                     scale_variant = dataclasses.replace(
@@ -159,10 +165,10 @@ def main() -> None:
                 print(f"=== {workload} / {engine_name} / olap_threads={olap_threads} "
                       f"(oltp_terminals={args.oltp_terminals}) ===")
                 run_kwargs = dict(reload=(engine_name == "postgres"))
-                # scan_fanout is a batstore.py-only kwarg (see its `run()` doc) - every other
-                # engine's run() has no such parameter and would raise TypeError if passed.
-                if engine_name == "batstore" and args.scan_fanout > 1:
-                    run_kwargs["scan_fanout"] = args.scan_fanout
+                # scan_pool_workers is a batstore.py-only kwarg (see its `run()` doc) - every
+                # other engine's run() has no such parameter and would raise TypeError if passed.
+                if engine_name == "batstore" and args.scan_pool_workers > 0:
+                    run_kwargs["scan_pool_workers"] = args.scan_pool_workers
                 try:
                     gc_results = common.run_gc_variants(module, workload, scale_variant, out_dir_base, gc_list, run_kwargs)
                 except Exception as e:  # noqa: BLE001 - one point's failure shouldn't abort the sweep
@@ -176,8 +182,8 @@ def main() -> None:
                     # by plot_htap_analytical.py) - same convention as
                     # run_skew_sweep.py's "skew=".
                     result.config_label = f"{result.config_label} olap_threads={olap_threads}"
-                    if args.scan_fanout > 1:
-                        result.config_label = f"{result.config_label} scan_fanout={args.scan_fanout}"
+                    if args.scan_pool_workers > 0:
+                        result.config_label = f"{result.config_label} scan_pool_workers={args.scan_pool_workers}"
                     common.append_manifest_row(manifest_path, result)
                     olap_qps = result.scan_count / result.duration_secs if result.duration_secs else 0.0
                     status = result.notes or "OK"

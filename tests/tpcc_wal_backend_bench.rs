@@ -80,6 +80,7 @@ fn config(
         wal_lockfree_batch_size: batch_size,
         htap_baseline: None,
         idle_compaction: None,
+        scan_pool_workers: None,
         output_dir: std::env::temp_dir().join("batstore_tpcc_wal_bench_out"),
     }
 }
