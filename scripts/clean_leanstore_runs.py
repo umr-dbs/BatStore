@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Remove bulky LeanStore diagnostics from benchmark run directories.
+"""Remove bulky engine diagnostics from benchmark run directories.
 
 The cross-engine plotters read the run-level ``manifest.csv``. This script also
-keeps LeanStore's compact raw measurement CSVs so normalized values can be
-audited or recomputed. Everything else below a run's ``leanstore`` directories
-is considered disposable engine output.
+keeps the compact LeanStore and PostgreSQL/BenchBase measurement CSVs from
+which normalized values were calculated, so they can be audited or recomputed.
+Everything else below those engines' run directories is disposable output.
 
 The default is a dry run. Pass ``--delete`` to actually remove files.
 """
@@ -19,7 +19,7 @@ from pathlib import Path
 # Files consumed by plotters today, or compact raw measurements from which the
 # manifest values are derived. Keep this deliberately explicit: LeanStore's
 # log_bm.csv and similar profiling tables can be very large.
-KEEP_FILES = {
+LEANSTORE_KEEP_FILES = {
     "log_cr.csv",
     "mem_stats.csv",
     "tpcc_oltp_timeseries.csv",
@@ -32,17 +32,29 @@ KEEP_FILES = {
     "ch_query_latency_summary.csv",
 }
 
+# BenchBase emits an aggregate result, one result per transaction type, raw
+# latency samples, JSON summaries, and several auxiliary files. Only these CSV
+# patterns contributed to the normalized manifest row for each workload.
+POSTGRES_KEEP_PATTERNS = {
+    "tpcc": ("*.results.NewOrder.csv",),
+    "htap_q1": ("*.results.NewOrder.csv", "*.results.Q1.csv"),
+    "htap_q6": ("*.results.NewOrder.csv", "*.results.Q6.csv"),
+    "s_htap": ("*.results.csv", "*.results.OlapScan.csv"),
+    "ycsb_e": ("*.results.csv", "*.results.ScanRecord.csv"),
+}
+POSTGRES_DEFAULT_KEEP_PATTERNS = ("*.results.csv",)
+
 
 @dataclass
 class Totals:
     files: int = 0
     bytes: int = 0
-    leanstore_dirs: int = 0
+    engine_dirs: int = 0
 
     def add(self, other: "Totals") -> None:
         self.files += other.files
         self.bytes += other.bytes
-        self.leanstore_dirs += other.leanstore_dirs
+        self.engine_dirs += other.engine_dirs
 
 
 def human_size(size: int) -> str:
@@ -79,9 +91,9 @@ def discover_runs(targets: list[Path]) -> list[Path]:
     return sorted(runs)
 
 
-def removable_files(leanstore_dir: Path) -> list[Path]:
+def removable_files(engine_dir: Path, keep_file) -> list[Path]:
     files: list[Path] = []
-    for root, dirnames, filenames in os.walk(leanstore_dir, followlinks=False):
+    for root, dirnames, filenames in os.walk(engine_dir, followlinks=False):
         root_path = Path(root)
         # Directory symlinks must be unlinked, never traversed.
         for dirname in list(dirnames):
@@ -91,7 +103,7 @@ def removable_files(leanstore_dir: Path) -> list[Path]:
                 dirnames.remove(dirname)
         for filename in filenames:
             path = root_path / filename
-            if path.name not in KEEP_FILES:
+            if not keep_file(path):
                 files.append(path)
     return files
 
@@ -107,14 +119,31 @@ def prune_empty_dirs(root: Path) -> None:
 
 def clean_run(run_dir: Path, delete: bool, verbose: bool) -> Totals:
     totals = Totals()
-    leanstore_dirs = sorted(
-        path for path in run_dir.rglob("leanstore")
-        if path.is_dir() and not path.is_symlink()
-    )
-    totals.leanstore_dirs = len(leanstore_dirs)
+    engine_specs = []
+    for engine_name in ("leanstore", "postgres"):
+        for engine_dir in run_dir.rglob(engine_name):
+            if not engine_dir.is_dir() or engine_dir.is_symlink():
+                continue
+            if engine_name == "leanstore":
+                keep_file = lambda path: path.name in LEANSTORE_KEEP_FILES
+            else:
+                try:
+                    workload = engine_dir.relative_to(run_dir).parts[0]
+                except (ValueError, IndexError):
+                    workload = ""
+                patterns = POSTGRES_KEEP_PATTERNS.get(
+                    workload, POSTGRES_DEFAULT_KEEP_PATTERNS,
+                )
+                keep_file = lambda path, patterns=patterns: any(
+                    path.match(pattern) for pattern in patterns
+                )
+            engine_specs.append((engine_name, engine_dir, keep_file))
+    totals.engine_dirs = len(engine_specs)
 
-    for leanstore_dir in leanstore_dirs:
-        for path in removable_files(leanstore_dir):
+    per_engine = {"leanstore": Totals(), "postgres": Totals()}
+    for engine_name, engine_dir, keep_file in sorted(engine_specs, key=lambda spec: spec[1]):
+        per_engine[engine_name].engine_dirs += 1
+        for path in removable_files(engine_dir, keep_file):
             try:
                 size = path.lstat().st_size
             except OSError as error:
@@ -122,6 +151,8 @@ def clean_run(run_dir: Path, delete: bool, verbose: bool) -> Totals:
                 continue
             totals.files += 1
             totals.bytes += size
+            per_engine[engine_name].files += 1
+            per_engine[engine_name].bytes += size
             if verbose:
                 action = "delete" if delete else "would delete"
                 print(f"  {action}: {path} ({human_size(size)})")
@@ -131,13 +162,14 @@ def clean_run(run_dir: Path, delete: bool, verbose: bool) -> Totals:
                 except OSError as error:
                     raise SystemExit(f"Failed to delete {path}: {error}") from error
         if delete:
-            prune_empty_dirs(leanstore_dir)
+            prune_empty_dirs(engine_dir)
 
     mode = "deleted" if delete else "would delete"
-    print(
-        f"{run_dir}: {mode} {totals.files} file(s), "
-        f"{human_size(totals.bytes)} from {totals.leanstore_dirs} LeanStore directory tree(s)"
-    )
+    details = ", ".join(
+        f"{name}={engine_total.files} file(s)/{human_size(engine_total.bytes)}"
+        for name, engine_total in per_engine.items() if engine_total.engine_dirs
+    ) or "no LeanStore/PostgreSQL output found"
+    print(f"{run_dir}: {mode} {totals.files} file(s), {human_size(totals.bytes)} ({details})")
     return totals
 
 
