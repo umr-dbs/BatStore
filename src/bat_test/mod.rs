@@ -1992,6 +1992,9 @@ mod bench_wal_recovery_stress_tests;
 #[path = "../../tests/bench_ycsb_correctness_tests.rs"]
 mod bench_ycsb_correctness_tests;
 #[cfg(test)]
+#[path = "../../tests/ycsb_scan_parallel_tests.rs"]
+mod ycsb_scan_parallel_tests;
+#[cfg(test)]
 #[path = "../../tests/bench_ycsb_stress_tests.rs"]
 mod bench_ycsb_stress_tests;
 #[cfg(test)]
