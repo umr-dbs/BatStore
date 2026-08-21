@@ -228,6 +228,13 @@ Options:
   --threads LIST             comma-separated thread/terminal counts to sweep (default:
                             2,4,8,16,32,64,128 - one server socket's worth of SMT
                             threads; becomes 2,4 automatically with --tiny)
+  --htap-cpu-budget N        BatStore HTAP only: CPU capacity shared by OLTP terminals
+                            and the Q1/Q6 parallel scan pool (default: largest --threads
+                            value). At each point the pool gets max(0, N - terminals)
+                            workers; a result below 2 selects the sequential scan path.
+  --scan-pool-workers N      BatStore only: override the dynamic HTAP allocation with one
+                            fixed pool size at every point. Zero disables parallel scans.
+                            When omitted, YCSB continues using its own automatic sizing.
   --gc on|off|on,off         which GC variant(s) to run (default: both) - ignored for
                             engines with no working GC toggle (see section 5)
   --warehouses N             override TPC-C warehouse count (fixed across the whole

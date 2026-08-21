@@ -28,6 +28,11 @@ threads/gc (see plot_compare.py::plot_htap_interference) for the interference
 analytics puts on OLTP - that derived comparison *is* this harness's "HTAP"
 measurement, no separate baseline sub-phase needed.
 
+For BatStore, that one analytical query fans out through a shared scan pool.
+Unless overridden, the pool receives the CPU budget left after the current
+OLTP terminal count: max(0, HTAP_CPU_BUDGET - OLTP_THREADS). The default
+budget is the largest value in --threads.
+
 Usage:
     python3 scripts/compare_engines.py
     python3 scripts/compare_engines.py --tiny --threads 2,4
@@ -114,13 +119,14 @@ def parse_args() -> argparse.Namespace:
                    choices=["atomic", "transaction"], default="atomic",
                    help="BatStore YCSB path: commit-before-publish auto-commit (default), or ordinary transaction lifecycle")
     p.add_argument("--scan-pool-workers", type=int, default=None,
-                   help="BatStore only (ignored by every other engine): shared scan-worker pool "
-                        "size for htap_q1/htap_q6's ORDER_LINE scans and any ycsb_* workload's "
-                        "usertable scans (DriverConfig::scan_pool_workers). Omitted (default): "
-                        "the binary auto-enables the pool, sized to the machine's own core "
-                        "count, whenever the workload benefits and the population is large "
-                        "enough to pay off - see engines/batstore.py's `run()` doc. Pass `0` to "
-                        "disable it explicitly, or a positive int for an exact worker count.")
+                   help="BatStore only (ignored by every other engine): force one fixed shared "
+                        "scan-pool size at every point. Omitted (default): htap_q1/htap_q6 use "
+                        "the capacity left by --htap-cpu-budget after OLTP terminals; YCSB "
+                        "retains its binary auto-sizing. Pass 0 to disable the pool.")
+    p.add_argument("--htap-cpu-budget", type=int,
+                   help="BatStore HTAP OLTP+scan CPU budget; default is the largest --threads "
+                        "value. With no fixed --scan-pool-workers override, each htap_q1/q6 "
+                        "point gets max(0, budget - OLTP terminals) scan-pool workers.")
     p.add_argument("--dram-gib", type=float)
 
     p.add_argument("--s-htap-record-count", type=int,
@@ -178,6 +184,16 @@ def _workload_duration(workload: str, scale: common.Scale) -> float:
     return scale.ycsb_duration
 
 
+def _dynamic_htap_scan_pool_workers(cpu_budget: int, oltp_threads: int) -> int:
+    """Leave OLTP its requested terminals and give remaining capacity to one scan query.
+
+    A one-worker pool has dispatch overhead without parallelism, so a remainder of zero or
+    one selects the sequential OLAP-thread path instead.
+    """
+    remaining = max(0, cpu_budget - oltp_threads)
+    return remaining if remaining >= 2 else 0
+
+
 def main() -> None:
     args = parse_args()
     # Read fresh by common.batstore_cargo_build_args() inside batstore.py/libmdbx.py's own
@@ -215,6 +231,10 @@ def main() -> None:
         sys.exit("--engines, --workloads, and --gc must each contain at least one value")
     if not thread_list or any(t <= 0 for t in thread_list):
         sys.exit("--threads must contain positive integers")
+    if args.htap_cpu_budget is not None and args.htap_cpu_budget <= 0:
+        sys.exit("--htap-cpu-budget must be a positive integer")
+    if args.scan_pool_workers is not None and args.scan_pool_workers < 0:
+        sys.exit("--scan-pool-workers must be zero or a positive integer")
     if scale.tpcc_warehouses <= 0 or scale.tpcc_duration <= 0:
         sys.exit("--warehouses and --tpcc-duration must be positive")
     if scale.ycsb_records <= 0 or scale.ycsb_duration <= 0:
@@ -228,6 +248,8 @@ def main() -> None:
     if scale.dram_gib <= 0:
         sys.exit("--dram-gib must be positive")
 
+    htap_cpu_budget = args.htap_cpu_budget or max(thread_list)
+
     # Must be absolute: each engine wrapper spawns its subprocess with a different cwd
     # (output_dir for leanstore/wiredtiger, BENCHBASE_HOME for postgres), so a relative
     # run_dir would have its derived paths (ssd_path, config_path, ...) re-resolved
@@ -240,6 +262,8 @@ def main() -> None:
         "ycsb_payload_bytes": 8 if args.ycsb_payload == "u64" else 1000,
         "ycsb_read_payload": not args.ycsb_key_only,
         "ycsb_write_all_fields": args.ycsb_write_all_fields,
+        "htap_cpu_budget": htap_cpu_budget,
+        "batstore_scan_pool_workers_override": args.scan_pool_workers,
     }, indent=2) + "\n")
 
     total_runs = 0
@@ -263,6 +287,12 @@ def main() -> None:
     print(f"YCSB updates  : writeallfields={'true' if args.ycsb_write_all_fields else 'false'} "
           f"(LeanStore/WiredTiger: {'all fields' if args.ycsb_write_all_fields else 'one random field'})")
     print(f"threads sweep : {thread_list}")
+    scan_pool_desc = (
+        f"fixed at {args.scan_pool_workers} workers"
+        if args.scan_pool_workers is not None else
+        f"dynamic: max(0, {htap_cpu_budget} CPU budget - OLTP terminals)"
+    )
+    print(f"BatStore HTAP scan pool: {scan_pool_desc}")
     print(f"gc sweep      : {gc_list} (engines with no working GC toggle always run once, gc=n/a)")
     print(f"NUMA pinning  : node {common.NUMA_NODE} CPUs/memory for every engine; subprocesses use "
           f"numactl --cpubind={common.NUMA_NODE} --membind={common.NUMA_NODE}, and PostgreSQL's "
@@ -340,8 +370,20 @@ def main() -> None:
                     # (gc_n/a/) instead of one, leaving gc_n/ looking empty at a glance.
                     gc_dir_name = f"gc_{gc_variant}".replace("/", "_")
                     out_dir = run_dir / workload / engine_name / f"threads_{threads}" / gc_dir_name
+                    batstore_scan_pool_workers = None
+                    if engine_name == "batstore":
+                        if args.scan_pool_workers is not None:
+                            batstore_scan_pool_workers = args.scan_pool_workers
+                        elif workload in common.HTAP_WORKLOADS:
+                            batstore_scan_pool_workers = _dynamic_htap_scan_pool_workers(
+                                htap_cpu_budget, threads,
+                            )
+                    scan_pool_note = (
+                        f" / scan_pool_workers={batstore_scan_pool_workers}"
+                        if batstore_scan_pool_workers is not None else ""
+                    )
                     print(f"=== {workload} / {engine_name} / threads={threads} / gc={gc_variant} / "
-                          f"dram_gib={scale_variant.dram_gib} ===")
+                          f"dram_gib={scale_variant.dram_gib}{scan_pool_note} ===")
                     try:
                         # PostgreSQL is also recreated and loaded for every point. This is
                         # slower than reusing BenchBase tables across the thread/GC sweep,
@@ -353,11 +395,12 @@ def main() -> None:
                             ycsb_payload=args.ycsb_payload, read_payload=not args.ycsb_key_only,
                         )
                         # scan_pool_workers is a batstore.py-only kwarg (see its `run()` doc) -
-                        # every other engine's run() has no such parameter and would raise
-                        # TypeError if passed. Left out entirely when unset so batstore.py's own
-                        # default (auto-enable) applies instead of forcing it off.
-                        if engine_name == "batstore" and args.scan_pool_workers is not None:
-                            run_kwargs["scan_pool_workers"] = args.scan_pool_workers
+                        # every other engine's run() has no such parameter. For BatStore HTAP,
+                        # the dynamic CPU-budget calculation supplies it even without an explicit
+                        # CLI override; for BatStore YCSB it remains absent so binary auto-sizing
+                        # still applies.
+                        if batstore_scan_pool_workers is not None:
+                            run_kwargs["scan_pool_workers"] = batstore_scan_pool_workers
                         result = module.run(workload, scale_variant, out_dir, **run_kwargs)
                     except Exception as e:  # noqa: BLE001 - one engine's failure shouldn't abort the whole matrix
                         result = common.NormalizedResult(

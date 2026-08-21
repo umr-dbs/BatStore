@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Plot figures for a scripts/compare_engines.py cross-engine comparison run:
+"""Plot figures for a scripts/compare_engines.py benchmark run:
 TPC-C and YCSB A-F throughput, peak memory, throughput-vs-threads, GC on/off
 comparison, and scan/OLAP latency, overlaid across
 BatStore/LeanStore/WiredTiger/PostgreSQL/vWeaver/libmdbx variants.
+
+A run containing only one engine gets a workload-by-metric overview instead of
+cross-engine comparison charts.
 
 Reads <run_dir>/manifest.csv (one row per engine/workload/threads/gc combo,
 written incrementally by compare_engines.py) and writes every figure as both
@@ -477,19 +480,151 @@ def plot_batstore_olap_scan_latency(run_dir: Path, ref_threads: int, out_dir: Pa
     _save(fig, out_dir, "batstore_tpcc_olap_scan_latency")
 
 
+def _workload_sort_key(workload: str):
+    if workload == "tpcc":
+        return (0, 0, workload)
+    if workload.startswith("htap_q"):
+        try:
+            return (1, 0, int(workload.removeprefix("htap_q")))
+        except ValueError:
+            return (1, 1, workload)
+    if workload == "s_htap":
+        return (2, 0, workload)
+    if workload.startswith("ycsb_"):
+        return (3, 0, workload)
+    return (4, 0, workload)
+
+
+def _set_measurement_thread_axis(ax, thread_values) -> None:
+    thread_values = sorted(set(thread_values))
+    if not thread_values:
+        return
+    if all(value > 0 for value in thread_values):
+        ax.set_xscale("log", base=2)
+    ax.set_xticks(thread_values)
+    ax.set_xticklabels([str(int(value)) for value in thread_values])
+    ax.minorticks_off()
+    ax.set_xlabel("Threads / terminals")
+    ax.grid(alpha=0.3)
+
+
+def plot_single_engine_overview(
+    manifest: pd.DataFrame, out_dir: Path, output_name: str = "single_engine_overview",
+) -> bool:
+    """Plot workload rows by throughput, latency, and memory for one engine."""
+    engines = list(manifest["engine"].dropna().unique())
+    if len(engines) != 1:
+        return False
+
+    engine = engines[0]
+    valid = manifest[~manifest["failed"]].copy()
+    workloads = sorted(valid["workload"].dropna().unique(), key=_workload_sort_key)
+    if not workloads:
+        print(f"No successful {engine} measurements — skipping single-engine overview.")
+        return True
+
+    fig, axes = plt.subplots(
+        len(workloads), 3, figsize=(15, max(4.2, 3.8 * len(workloads))), squeeze=False,
+    )
+    gc_styles = {
+        "on": ("-", "gc=on"), "n/a": ("-", "gc=n/a"), "off": ("--", "gc=off"),
+    }
+
+    for row, workload in enumerate(workloads):
+        wdf = valid[valid["workload"] == workload]
+        thread_values = sorted(wdf["threads"].unique())
+
+        throughput_ax = axes[row][0]
+        for gc_variant, (linestyle, label) in gc_styles.items():
+            gdf = wdf[wdf["gc_enabled"] == gc_variant].sort_values("threads")
+            if not gdf.empty:
+                throughput_ax.plot(
+                    gdf["threads"], gdf["primary_metric_value"], marker="o",
+                    linestyle=linestyle, label=label,
+                )
+        throughput_ax.set_ylabel(wdf["primary_metric_name"].iloc[0])
+        throughput_ax.set_title(f"{workload}: throughput")
+        _set_measurement_thread_axis(throughput_ax, thread_values)
+        throughput_ax.legend(fontsize=8)
+
+        latency_ax = axes[row][1]
+        latency_df = wdf[wdf["scan_count"] > 0]
+        latency_gc = next(
+            (gc for gc in ("on", "n/a", "off") if gc in set(latency_df["gc_enabled"])), None,
+        )
+        if latency_gc is None:
+            latency_ax.text(
+                0.5, 0.5, "No latency measurements", ha="center", va="center",
+                transform=latency_ax.transAxes,
+            )
+            latency_ax.set_axis_off()
+        else:
+            latency_df = latency_df[latency_df["gc_enabled"] == latency_gc].sort_values("threads")
+            for col, label, linestyle in (
+                ("scan_p50_us", "p50", ":"),
+                ("scan_p95_us", "p95", "--"),
+                ("scan_p99_us", "p99", "-"),
+            ):
+                latency_ax.plot(
+                    latency_df["threads"], latency_df[col], marker="o",
+                    linestyle=linestyle, label=label,
+                )
+            latency_ax.set_ylabel("Latency (microseconds)")
+            latency_ax.set_title(f"{workload}: latency (gc={latency_gc})")
+            _set_measurement_thread_axis(latency_ax, latency_df["threads"].unique())
+            latency_ax.legend(fontsize=8)
+
+        memory_ax = axes[row][2]
+        for gc_variant, (linestyle, label) in gc_styles.items():
+            gdf = wdf[wdf["gc_enabled"] == gc_variant].sort_values("threads")
+            if not gdf.empty:
+                memory_ax.plot(
+                    gdf["threads"], gdf["peak_rss_mb"], marker="o",
+                    linestyle=linestyle, label=label,
+                )
+        memory_ax.set_ylabel("Peak RSS (MB)")
+        memory_ax.set_title(f"{workload}: memory")
+        _set_measurement_thread_axis(memory_ax, thread_values)
+        memory_ax.legend(fontsize=8)
+
+    fig.suptitle(f"{ENGINE_LABELS.get(engine, engine)}: single-engine workload overview")
+    _save(fig, out_dir, output_name)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dir", help="A specific run_YYYYmmdd_HHMMSS directory (default: auto-detect the most recently modified one under --results-root)")
     parser.add_argument("--results-root", default="comparison_results", help="Where to look for run_* directories when --run-dir isn't given")
+    parser.add_argument(
+        "--engine",
+        help=("Plot only this engine with the single-engine overview, even when the "
+              "manifest contains multiple engines (for example: --engine batstore)"),
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir) if args.run_dir else find_latest_run_dir(Path(args.results_root))
     if args.run_dir and not run_dir.exists():
         raise SystemExit(f"{run_dir} does not exist")
 
-    print(f"Plotting cross-engine comparison results from {run_dir}")
+    print(f"Plotting benchmark results from {run_dir}")
     manifest = load_manifest(run_dir)
+    if args.engine:
+        available_engines = sorted(manifest["engine"].dropna().unique())
+        if args.engine not in available_engines:
+            available = ", ".join(available_engines) or "none"
+            raise SystemExit(
+                f"Engine '{args.engine}' is not present in {run_dir / 'manifest.csv'} "
+                f"(available: {available})"
+            )
+        manifest = manifest[manifest["engine"] == args.engine].copy()
+        print(f"Selected single-engine view: {args.engine}")
     out_dir = run_dir / "plots"
+
+    overview_name = f"single_engine_overview_{args.engine}" if args.engine else "single_engine_overview"
+    if plot_single_engine_overview(manifest, out_dir, overview_name):
+        print(f"\nSingle-engine overview written to {out_dir}")
+        return
 
     ref_threads = 0
     for gc_choice in ("on", "off"):

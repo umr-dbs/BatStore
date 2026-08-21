@@ -153,6 +153,38 @@ python3 scripts/plot_compare.py \
   --run-dir comparison_results/run_YYYYMMDD_HHMMSS
 ```
 
+For a run containing only one engine, the plotter automatically creates a
+single `single_engine_overview` figure instead of cross-engine charts. Every
+workload present gets throughput, scan/query latency, and peak-memory panels
+across the measured thread counts and GC modes. This keeps partial runs such as
+BatStore with only `htap_q1`, `htap_q6`, and `ycsb_e` meaningful.
+
+Select the same single-engine view from a run containing several engines with:
+
+```bash
+python3 scripts/plot_compare.py \
+  --run-dir comparison_results/run_YYYYMMDD_HHMMSS \
+  --engine batstore
+```
+
+This writes `single_engine_overview_batstore.{svg,pdf}`, so selecting another
+engine later does not overwrite the BatStore figure.
+
+For BatStore HTAP, `compare_engines.py` keeps one analytical query active and
+allocates its parallel scan pool from the CPU capacity left after OLTP. The
+default budget is the largest `--threads` value; override it explicitly with
+`--htap-cpu-budget`. For example, this gives scan-pool sizes 14, 12, 8, and 0:
+
+```bash
+python3 scripts/compare_engines.py \
+  --engines batstore --workloads tpcc,htap_q1,htap_q6 \
+  --threads 2,4,8,16 --htap-cpu-budget 16
+```
+
+`--scan-pool-workers N` still forces a fixed pool size and takes precedence
+over the dynamic policy. A computed size below two disables the pool and lets
+the OLAP query scan sequentially on its own thread.
+
 ## Running BatStore benchmarks directly
 
 Build and run benchmarks with the release profile. Arguments are positional;
