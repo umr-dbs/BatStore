@@ -241,6 +241,10 @@ fn run_one(
                 wal: None,
                 wal_lockfree_batch_size: None,
                 output_dir: out_dir,
+                scan_pool_workers: ycsb_driver::default_scan_pool_workers(
+                    scale.ycsb_record_count(),
+                    &mix,
+                ),
             });
             ("ops_per_sec", summary.throughput_ops_sec, None)
         }

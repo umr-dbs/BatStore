@@ -48,6 +48,8 @@ fn config(field_length: usize, execution_mode: YcsbExecutionMode) -> DriverConfi
         wal: None,
         wal_lockfree_batch_size: None,
         output_dir: std::env::temp_dir().join("batstore_ycsb_autocommit_vs_txn_bench_out"),
+        // Workload A never scans, so this would auto-decide to `None` anyway.
+        scan_pool_workers: None,
     }
 }
 
