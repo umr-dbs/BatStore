@@ -53,6 +53,7 @@ from engines import (
     batstore, common, leanstore, libmdbx, postgres_benchbase, vweaver_ermia,
     vweaver_ermia_frugal, wiredtiger,
 )
+from clean_leanstore_runs import clean_run as clean_leanstore_run
 
 ENGINE_MODULES = {
     "batstore": batstore,
@@ -368,6 +369,9 @@ def main() -> None:
                     print(f"    {result.primary_metric_name}={result.primary_metric_value:.2f}  "
                           f"peak_rss={result.peak_rss_mb:.1f}MB  "
                           f"scan_p99={result.scan_p99_us:.1f}us (n={result.scan_count})  [{status}]")
+
+    print("\nCleaning unneeded LeanStore run artifacts...")
+    clean_leanstore_run(run_dir, delete=True, verbose=False)
 
     print("\n########## comparison complete ##########")
     print(f"manifest : {manifest_path}")

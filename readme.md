@@ -109,6 +109,21 @@ throughput, memory consumption, scan latency, and HTAP interference can be
 plotted consistently. Individual engine failures are recorded in the manifest
 without discarding the rest of the matrix.
 
+LeanStore also emits large internal profiling tables such as `log_bm.csv`.
+All workload runner scripts remove those tables automatically after their run
+matrix finishes, while retaining the manifest and compact measurement CSVs
+needed to audit or reproduce plots. To clean older run directories manually,
+preview and then apply the same cleanup with:
+
+```bash
+python3 scripts/clean_leanstore_runs.py comparison_results
+python3 scripts/clean_leanstore_runs.py comparison_results --delete
+```
+
+The cleaner only examines recognized run directories and only changes files
+below their `leanstore/` subdirectories. Its default mode does not delete
+anything; add `--verbose` to list every candidate.
+
 Common focused invocations include:
 
 ```bash

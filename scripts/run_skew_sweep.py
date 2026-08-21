@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from engines import batstore, common, leanstore, libmdbx, postgres_benchbase, vweaver_ermia, vweaver_ermia_frugal, wiredtiger
+from clean_leanstore_runs import clean_run as clean_leanstore_run
 
 ENGINE_MODULES = {
     "batstore": batstore,
@@ -177,6 +178,9 @@ def main() -> None:
                         common.append_manifest_row(manifest_path, result)
                         status = result.notes or "OK"
                         print(f"    gc={gc}  {result.primary_metric_name}={result.primary_metric_value:.2f}  [{status}]")
+
+    print("\nCleaning unneeded LeanStore run artifacts...")
+    clean_leanstore_run(run_dir, delete=True, verbose=False)
 
     print("\n########## skew sweep complete ##########")
     print(f"manifest : {manifest_path}")
