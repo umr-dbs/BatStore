@@ -92,7 +92,7 @@ pub enum TransactionState {
 pub(crate) fn insert_on_tree<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 >(
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -159,7 +159,7 @@ pub(crate) fn insert_on_tree<
 pub(crate) fn update_on_tree<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 >(
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -219,7 +219,7 @@ pub(crate) fn update_on_tree<
 pub(crate) fn delete_on_tree<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 >(
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -259,7 +259,7 @@ pub(crate) fn delete_on_tree<
 pub(crate) fn point_on_tree<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 >(
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -278,7 +278,7 @@ pub(crate) fn point_on_tree<
 pub(crate) fn range_on_tree<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 >(
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -295,7 +295,7 @@ pub(crate) fn range_on_tree<
 pub(crate) fn range_min_on_tree<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 >(
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -309,7 +309,7 @@ pub(crate) fn range_min_on_tree<
 struct TxTableState<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static,
 > {
     table: TableId,
@@ -321,7 +321,7 @@ pub struct DbTransaction<
     'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 > {
     db: &'a Database<FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -346,7 +346,7 @@ impl<
     'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 > DbTransaction<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
 {
@@ -671,7 +671,7 @@ impl<
     'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 > Drop for DbTransaction<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
 {
@@ -696,7 +696,7 @@ impl<
 impl<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 > Database<FAN_OUT, NUM_RECORDS, Key, Payload>
 {

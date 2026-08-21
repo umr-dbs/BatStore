@@ -96,7 +96,7 @@ type TableList<
 pub struct Database<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 > {
     pub(crate) ctx: Arc<TxContext>,
@@ -125,12 +125,21 @@ pub struct Database<
     /// `disable_idle_compaction`, so at most one sweep thread is ever
     /// running for this database at a time.
     idle_compaction_stop: ArcSwapOption<AtomicBool>,
+    /// Per-table shared scan-worker pools (see `bat_tree::scan_pool::
+    /// ScanWorkerPool`'s doc), assigned via `enable_scan_pool`/
+    /// `disable_scan_pool` and indexed by `TableId`, same as `tables`.
+    /// `None`/missing for a table with no pool assigned (every table,
+    /// initially). A plain `Mutex`, not `tables`' lock-free `ArcSwap`
+    /// pattern: assigning a pool is a rare, setup-adjacent call, never on
+    /// any hot path, so there's nothing to gain from lock-freedom here —
+    /// same reasoning as `idle_compaction_stop` just above.
+    scan_pools: sync::Mutex<Vec<Option<Arc<crate::bat_tree::scan_pool::ScanWorkerPool<FAN_OUT, NUM_RECORDS, Key, Payload>>>>>,
 }
 
 impl<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 > Database<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
@@ -191,6 +200,7 @@ impl<
             meta_path,
             gc: ArcSwapOption::empty(),
             idle_compaction_stop: ArcSwapOption::empty(),
+            scan_pools: sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -441,6 +451,43 @@ impl<
         }
     }
 
+    /// Assigns `id`'s table a dedicated shared scan-worker pool (see
+    /// `bat_tree::scan_pool::ScanWorkerPool`'s doc) of `num_workers`
+    /// threads, for any query wanting to fan a scan out across it via
+    /// `ScanWorkerPool::dispatch`/`try_dispatch` — see `scan_pool` to fetch
+    /// it back out. Panics if `id` names no table. Replacing an
+    /// already-assigned pool drops the old one, whose worker threads then
+    /// exit on their own (see `ScanWorkerPool`'s doc) — this doesn't wait
+    /// for that.
+    pub fn enable_scan_pool(&self, id: TableId, num_workers: usize) {
+        let tree = self.table(id).expect("Database::enable_scan_pool: no table with this TableId");
+        let pool = Arc::new(crate::bat_tree::scan_pool::ScanWorkerPool::spawn(tree, num_workers));
+        let mut pools = self.scan_pools.lock().unwrap();
+        let idx = id as usize;
+        if pools.len() <= idx {
+            pools.resize_with(idx + 1, || None);
+        }
+        pools[idx] = Some(pool);
+    }
+
+    /// Drops the pool `enable_scan_pool` assigned to `id`, if any — a no-op
+    /// otherwise. See that method's doc for the (unwaited) worker thread
+    /// shutdown this triggers.
+    pub fn disable_scan_pool(&self, id: TableId) {
+        let mut pools = self.scan_pools.lock().unwrap();
+        if let Some(slot) = pools.get_mut(id as usize) {
+            *slot = None;
+        }
+    }
+
+    /// The pool `enable_scan_pool` assigned to `id`, if any.
+    pub fn scan_pool(
+        &self,
+        id: TableId,
+    ) -> Option<Arc<crate::bat_tree::scan_pool::ScanWorkerPool<FAN_OUT, NUM_RECORDS, Key, Payload>>> {
+        self.scan_pools.lock().unwrap().get(id as usize).cloned().flatten()
+    }
+
     /// Reads off the shared clock — same value regardless of which table's
     /// tree it's read through, since every table shares this database's one
     /// `ctx`.
@@ -511,7 +558,7 @@ fn read_catalog(path: &Path) -> io::Result<Vec<String>> {
 impl<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
     Payload: Display + Clone + Default + Sync + 'static + WalPayload,
 > Database<FAN_OUT, NUM_RECORDS, Key, Payload>
 {

@@ -88,23 +88,23 @@ pub enum OlapMode {
     },
     /// Runs only Q1. Used by the cross-engine `htap_q1` workload so Q4/Q5
     /// cannot contaminate its OLTP-interference or query-latency results.
-    /// `scan_fanout` (1 = sequential, matching every prior behavior exactly)
-    /// fans each individual query out across `scan_fanout` dedicated helper
-    /// threads via `parallel_scan::ScanWorkerPool` — see that module's doc
-    /// for why this exists and how it's partitioned. `num_warehouses` is
-    /// needed to compute that partition.
+    /// If `TpccDatabase::enable_scan_pool(Table::OrderLine, _)` was called
+    /// (see `DriverConfig::scan_pool_workers`), fans each query out across
+    /// that shared pool via `parallel_scan::q1_parallel` — see
+    /// `bat_tree::scan_pool::ScanWorkerPool`'s doc for why the pool is shared rather
+    /// than spawned per OLAP thread. Falls back to the plain sequential
+    /// `tpch_queries::q1` otherwise. `num_warehouses` is needed to compute
+    /// the parallel case's partition.
     ChQ1 {
         delivered_before: i64,
-        scan_fanout: usize,
         num_warehouses: u32,
     },
     /// Runs only Q6, for the corresponding isolated `htap_q6` workload. See
-    /// `ChQ1`'s doc for `scan_fanout`/`num_warehouses`.
+    /// `ChQ1`'s doc.
     ChQ6 {
         date_lo: i64,
         date_hi: i64,
         max_qty: u8,
-        scan_fanout: usize,
         num_warehouses: u32,
     },
 }
@@ -304,7 +304,7 @@ fn ch_q1_once(db: &TpccDatabase, delivered_before: i64, run_start: Instant) -> S
 /// `parallel_scan::q1_parallel`'s doc.
 fn ch_q1_parallel_once(
     db: &TpccDatabase,
-    pool: &crate::bat_bench::parallel_scan::ScanWorkerPool,
+    pool: &crate::bat_bench::tpcc_schema::TpccScanWorkerPool,
     num_warehouses: u32,
     delivered_before: i64,
     run_start: Instant,
@@ -328,7 +328,7 @@ fn ch_q1_parallel_once(
 /// `parallel_scan::q6_parallel`'s doc.
 fn ch_q6_parallel_once(
     db: &TpccDatabase,
-    pool: &crate::bat_bench::parallel_scan::ScanWorkerPool,
+    pool: &crate::bat_bench::tpcc_schema::TpccScanWorkerPool,
     num_warehouses: u32,
     date_lo: i64,
     date_hi: i64,
@@ -419,45 +419,45 @@ pub fn run_olap_worker(
         }
         OlapMode::ChQ1 {
             delivered_before,
-            scan_fanout,
             num_warehouses,
         } => {
-            if scan_fanout <= 1 {
-                while !stop.load(Relaxed) {
-                    let _ = results.send(ch_q1_once(db, delivered_before, run_start));
-                }
-            } else {
-                std::thread::scope(|scope| {
-                    let pool = crate::bat_bench::parallel_scan::ScanWorkerPool::spawn(scope, db, scan_fanout);
+            // Looked up once per OLAP thread's whole run, not per query: the
+            // pool (if any) is assigned once, database-wide, by whoever
+            // called `TpccDatabase::enable_scan_pool` — see that method's
+            // and `bat_tree::scan_pool::ScanWorkerPool`'s docs.
+            match db.scan_pool(Table::OrderLine) {
+                Some(pool) => {
                     while !stop.load(Relaxed) {
                         let _ = results.send(ch_q1_parallel_once(
                             db, &pool, num_warehouses, delivered_before, run_start,
                         ));
                     }
-                });
+                }
+                None => {
+                    while !stop.load(Relaxed) {
+                        let _ = results.send(ch_q1_once(db, delivered_before, run_start));
+                    }
+                }
             }
         }
         OlapMode::ChQ6 {
             date_lo,
             date_hi,
             max_qty,
-            scan_fanout,
             num_warehouses,
-        } => {
-            if scan_fanout <= 1 {
+        } => match db.scan_pool(Table::OrderLine) {
+            Some(pool) => {
+                while !stop.load(Relaxed) {
+                    let _ = results.send(ch_q6_parallel_once(
+                        db, &pool, num_warehouses, date_lo, date_hi, max_qty, run_start,
+                    ));
+                }
+            }
+            None => {
                 while !stop.load(Relaxed) {
                     let _ = results.send(ch_q6_once(db, date_lo, date_hi, max_qty, run_start));
                 }
-            } else {
-                std::thread::scope(|scope| {
-                    let pool = crate::bat_bench::parallel_scan::ScanWorkerPool::spawn(scope, db, scan_fanout);
-                    while !stop.load(Relaxed) {
-                        let _ = results.send(ch_q6_parallel_once(
-                            db, &pool, num_warehouses, date_lo, date_hi, max_qty, run_start,
-                        ));
-                    }
-                });
             }
-        }
+        },
     }
 }

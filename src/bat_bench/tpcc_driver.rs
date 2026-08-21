@@ -87,6 +87,32 @@ pub struct DriverConfig {
     /// `None` (default) disables it entirely — no extra thread, no extra
     /// `WorkerId` cost, unchanged behavior.
     pub idle_compaction: Option<(f64, Duration)>,
+    /// Assigns `Table::OrderLine` a shared scan-worker pool (see
+    /// `scan_pool::ScanWorkerPool`'s and `TpccDatabase::enable_scan_pool`'s
+    /// docs) of this many threads, for `OlapMode::ChQ1`/`ChQ6` to fan their
+    /// queries out across — see those variants' docs. `None`/`Some(0)`
+    /// disables it entirely: no pool, every query runs sequentially,
+    /// unchanged from every prior behavior — this struct's own
+    /// field-by-field construction means there's no single "unset" default
+    /// here, but `main_tpcc`'s CLI parsing auto-sizes this to `2 *
+    /// num_olap_threads` whenever its own arg is omitted entirely and the
+    /// mode is `ch_q1`/`ch_q6` (see that function's doc for why `2`). Any
+    /// `Some(n)` is floored to 2 (a "pool" of 1 buys no parallelism over
+    /// the sequential path, see `ScanWorkerPool::spawn`'s doc). Unlike
+    /// every other thread `run_tpcc` budgets, this one is deliberately
+    /// *not* counted against `max_workers`: a pool worker thread never
+    /// calls `tree.worker_id()` (see `bat_sync::worker::
+    /// READ_ONLY_SCAN_WORKER_ID`'s doc for why that's sound for a
+    /// pure-reader thread), so it never draws from the tree's fixed
+    /// `WorkerRegistry` and this can safely oversubscribe past the
+    /// machine's core count. One pool total regardless of
+    /// `num_olap_threads`, since every OLAP thread shares it rather than
+    /// each spawning its own. A submitted query only ever actually queues
+    /// on this pool while it has spare capacity — `parallel_scan::
+    /// q1_parallel`/`q6_parallel` call `ScanWorkerPool::try_dispatch`, so a
+    /// busy pool makes the calling OLAP thread run the scan itself instead
+    /// of waiting in line.
+    pub scan_pool_workers: Option<usize>,
     /// Directory the 3 result CSVs (`tpcc_oltp_timeseries.csv`,
     /// `tpcc_scan.csv`, `mem_stats.csv`) are written to. Defaults to `.` for
     /// the standalone `tpcc`/`tpch`/`htap` subcommands (unchanged cwd
@@ -223,16 +249,7 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     // WorkerId (see module docs), so it doubles the terminal thread budget.
     let terminal_cost = if cfg.htap_baseline.is_some() { 2 } else { 1 };
 
-    // Each OLAP thread running `ChQ1`/`ChQ6` with `scan_fanout > 1` spawns
-    // that many *additional*, permanently-WorkerId-consuming scoped threads
-    // (see `parallel_scan`'s module doc) — 0 extra at `scan_fanout <= 1`,
-    // matching every prior sequential behavior exactly.
-    let olap_thread_cost = 1 + match &cfg.olap_mode {
-        OlapMode::ChQ1 { scan_fanout, .. } | OlapMode::ChQ6 { scan_fanout, .. } if *scan_fanout > 1 => {
-            *scan_fanout
-        }
-        _ => 0,
-    };
+    let olap_thread_cost = 1;
 
     // Two more permanent `WorkerId`s if idle compaction is enabled — see
     // `DriverConfig::idle_compaction`'s and `TpccDatabase::enable_idle_compaction`'s
@@ -241,6 +258,15 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     // since `big_trees` lives outside `Database`'s table list entirely).
     let idle_compaction_cost = if cfg.idle_compaction.is_some() { 2 } else { 0 };
 
+    // Deliberately *not* counted here: `scan_pool_workers`' pool threads
+    // (see `bat_sync::worker::READ_ONLY_SCAN_WORKER_ID`'s doc) never call
+    // `tree.worker_id()` and so never draw from the `WorkerRegistry` this
+    // budget sizes — they're pure job-runners, not workload participants,
+    // and can freely oversubscribe past `max_threads` however large
+    // `cfg.scan_pool_workers` is. `ScanWorkerPool::spawn` still floors it
+    // at 2 (a "pool" of 1 buys no parallelism), but that floor has nothing
+    // to do with this `WorkerId` budget.
+    //
     // +1: the main thread itself acquires a WorkerId too, since it does the
     // (sequential) data-set population directly via `dispatch_crud` before
     // any terminal/OLAP thread is spawned.
@@ -419,12 +445,16 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     if let Some((dead_ratio_threshold, sweep_interval)) = cfg.idle_compaction {
         db.enable_idle_compaction(dead_ratio_threshold, sweep_interval);
     }
+    if let Some(num_workers) = cfg.scan_pool_workers.filter(|&n| n > 0) {
+        db.enable_scan_pool(crate::bat_bench::tpcc_schema::Table::OrderLine, num_workers);
+    }
 
     let run_start = Instant::now();
     println!("Loading done. Running timed phase for {duration:?}...");
     thread::sleep(duration);
     stop.store(true, Relaxed);
     db.disable_idle_compaction();
+    db.disable_scan_pool(crate::bat_bench::tpcc_schema::Table::OrderLine);
 
     let terminal_stats: Vec<TerminalStats> = terminal_handles.into_iter().map(|h| h.join().unwrap()).collect();
     for h in olap_handles {
@@ -633,13 +663,40 @@ pub fn main_tpcc(parms: Vec<String>) {
         "512kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB512,
         _ => crate::bat_bench::tpcc_schema::BigTreeSize::KiB32,
     };
-    // Per-query intra-scan fan-out for `ch_q1`/`ch_q6` only (see
-    // `OlapMode::ChQ1`'s doc and `parallel_scan`'s module doc) — 1 (default)
-    // matches every prior sequential behavior exactly. Every distinct OS
-    // thread that ever touches a tree permanently consumes one `WorkerId`
-    // slot from a fixed, never-growing pool, so this must stay small
-    // relative to `max_workers` alongside `num_terminals`/`num_olap_threads`.
-    let scan_fanout: usize = arg(&parms, 22, 1);
+    // `Table::OrderLine`'s shared scan pool (see `DriverConfig::
+    // scan_pool_workers`'s and `scan_pool::ScanWorkerPool`'s docs), used by
+    // `ch_q1`/`ch_q6` to fan a query out across several threads instead of
+    // scanning sequentially. Three ways to say it, by whether/what position
+    // 22 actually holds:
+    //   - omitted entirely (fewer than 23 positional args given at all) and
+    //     the mode is `ch_q1`/`ch_q6`: auto-sized to `2 * num_olap_threads`
+    //     — "the info is usually there when a workload begins" and this is
+    //     where that default comes from. `parallel_scan::QUERY_FANOUT` (2)
+    //     is how many pool workers one query actually asks for, so sizing
+    //     the pool at 2 per OLAP thread means every concurrently-querying
+    //     OLAP thread can get its own slice at once instead of some of them
+    //     finding no spare capacity and falling back to inline. A no-op
+    //     (kept at `None`/off) for every other mode, since nothing would
+    //     ever look the pool up.
+    //   - explicit `"0"`: off, matching every prior sequential behavior
+    //     exactly (this is what every engines/batstore.py-driven run sends
+    //     by default, so scripted sweeps keep an unambiguous off baseline).
+    //   - explicit `"N"` (`N > 0`): exactly `N` workers.
+    // `ScanWorkerPool::spawn` floors whatever number comes out of this at 2
+    // regardless (a 1-worker "pool" buys no parallelism over the
+    // sequential path). Unlike every other thread this function counts,
+    // none of this is clamped against `max_workers` below — pool worker
+    // threads never register a `WorkerId` at all (see
+    // `bat_sync::worker::READ_ONLY_SCAN_WORKER_ID`'s doc), so oversubscribing
+    // this past the machine's core count is deliberately allowed.
+    let scan_pool_workers: Option<usize> = match parms.get(22).map(|s| s.as_str()) {
+        None if matches!(olap_mode_str.as_str(), "ch_q1" | "ch_q6") => Some((num_olap_threads * 2).max(2)),
+        None => None,
+        Some(s) => match s.parse::<usize>() {
+            Ok(0) | Err(_) => None,
+            Ok(n) => Some(n.max(2)),
+        },
+    };
     // Idle/proactive compaction (`bat_tree::idle_compaction`, `DriverConfig::idle_compaction`'s
     // doc) — `0.0` (default) means "disabled", since a real dead ratio is
     // always `> 0.0` once any garbage exists, so a `0.0` threshold could
@@ -665,14 +722,13 @@ pub fn main_tpcc(parms: Vec<String>) {
             num_olap_threads,
         ),
         "ch_q1" => (
-            OlapMode::ChQ1 { delivered_before: i64::MAX, scan_fanout, num_warehouses },
+            OlapMode::ChQ1 { delivered_before: i64::MAX, num_warehouses },
             num_olap_threads,
         ),
         "ch_q6" => (OlapMode::ChQ6 {
             date_lo: i64::MIN,
             date_hi: i64::MAX,
             max_qty: 24,
-            scan_fanout,
             num_warehouses,
         }, num_olap_threads),
         _ => (
@@ -706,6 +762,7 @@ pub fn main_tpcc(parms: Vec<String>) {
         wal_lockfree_batch_size: None,
         htap_baseline: (htap_baseline_secs > 0).then(|| Duration::from_secs(htap_baseline_secs)),
         idle_compaction,
+        scan_pool_workers,
         output_dir: PathBuf::from("."),
     });
 }
@@ -739,6 +796,7 @@ fn standard_driver_config(
         wal_lockfree_batch_size: None,
         htap_baseline,
         idle_compaction: None,
+        scan_pool_workers: None,
         output_dir: PathBuf::from("."),
     }
 }
