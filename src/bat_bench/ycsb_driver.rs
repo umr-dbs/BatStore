@@ -9,16 +9,19 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Barrier};
+use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use triomphe::Arc;
+
 use crate::bat_bench::mem_stats::{DEFAULT_SAMPLE_INTERVAL, MemSampler};
+use crate::bat_bench::parallel_scan::MIN_ROWS_FOR_SCAN_POOL;
 use crate::bat_bench::ycsb_load::populate;
 use crate::bat_bench::ycsb_random::{
     KeySampler, RequestDistribution, YcsbMix, YcsbOpType, pick_op, random_scan_length,
 };
-use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbTree};
+use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbScanPool, YcsbTree};
 use crate::bat_bench::ycsb_txn;
 use crate::bat_bench::ycsb_txn::YcsbExecutionMode;
 use crate::bat_root::index_root::RootIndexType;
@@ -50,6 +53,38 @@ pub struct DriverConfig {
     /// See `DriverConfig::output_dir` in `tpcc_driver` — same semantics here;
     /// defaults to `.` for the standalone `ycsb` subcommand.
     pub output_dir: PathBuf,
+    /// Assigns the usertable a shared scan-worker pool (see
+    /// `bat_tree::scan_pool::ScanWorkerPool`'s doc) of this many total
+    /// threads, for `Scan` ops to fan out across via `ycsb_txn::
+    /// scan_parallel` instead of walking the whole range on the calling
+    /// thread — same feature and semantics as `tpcc_driver::DriverConfig::
+    /// scan_pool_workers`. `None`/`Some(0)` disables it: every scan runs
+    /// sequentially through `ycsb_txn::scan_with_mode`, unchanged from
+    /// before this field existed. Every `Some(n)` is floored to 2 by
+    /// `ScanWorkerPool::spawn`.
+    ///
+    /// Every builder of a `DriverConfig` (`main_ycsb`'s CLI parsing,
+    /// `bat_bench::suite`) uses `default_scan_pool_workers` to fill this in
+    /// rather than picking their own default, so the pool is on by default
+    /// — auto-sized to this machine's own core count — whenever the mix
+    /// actually issues scans (`mix.scan > 0.0`) and the population is large
+    /// enough for the pool to pay off, with no flag required to opt in.
+    pub scan_pool_workers: Option<usize>,
+}
+
+/// Auto-sizes `DriverConfig::scan_pool_workers`: `Some(default_max_workers)`
+/// when `mix` actually issues scans (`mix.scan > 0.0`) and `record_count` is
+/// at or above `parallel_scan::MIN_ROWS_FOR_SCAN_POOL` (below that, the
+/// pool's own per-job overhead costs more than a sequential scan just takes
+/// — see that constant's doc), `None` (off) otherwise. Mirrors the auto-on
+/// default `tpcc_driver::main_tpcc`'s CLI parsing applies to `Table::
+/// OrderLine`'s pool for `ch_q1`/`ch_q6`, but reusable by every caller that
+/// builds a `DriverConfig` — not just CLI parsing — so a workload with no
+/// scans (A/B/C/D/F) never pays for idle pool threads while YCSB-E gets the
+/// pool by default without any extra configuration.
+pub fn default_scan_pool_workers(record_count: u64, mix: &YcsbMix) -> Option<usize> {
+    (mix.scan > 0.0 && record_count >= MIN_ROWS_FOR_SCAN_POOL)
+        .then(|| crate::bat_tree::mvbt::default_max_workers().max(2))
 }
 
 /// See `tpcc_driver::TpccRunSummary` — same purpose, YCSB's shape.
@@ -96,6 +131,7 @@ fn worker_thread(
     duration: Duration,
     stop: Arc<AtomicBool>,
     barrier: Arc<Barrier>,
+    scan_pool: Option<Arc<YcsbScanPool>>,
 ) -> WorkerStats {
     barrier.wait();
 
@@ -140,12 +176,22 @@ fn worker_thread(
                 let len = random_scan_length(max_scan_length);
                 if totals[SCAN] % SCAN_LATENCY_SAMPLE_EVERY == 0 {
                     let scan_start = Instant::now();
-                    scanned_tuples +=
-                        ycsb_txn::scan_with_mode(&tree, key, len, read_payload) as u64;
+                    scanned_tuples += ycsb_txn::scan_parallel(
+                        scan_pool.as_deref(),
+                        &tree,
+                        key,
+                        len,
+                        read_payload,
+                    ) as u64;
                     scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
                 } else {
-                    scanned_tuples +=
-                        ycsb_txn::scan_with_mode(&tree, key, len, read_payload) as u64;
+                    scanned_tuples += ycsb_txn::scan_parallel(
+                        scan_pool.as_deref(),
+                        &tree,
+                        key,
+                        len,
+                        read_payload,
+                    ) as u64;
                 }
                 totals[SCAN] += 1;
             }
@@ -230,6 +276,16 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         tree.enable_gc(cfg.update_in_place);
     }
 
+    // See `DriverConfig::scan_pool_workers`'s doc: a pool worker thread
+    // never calls `tree.worker_id()` (it only ever runs jobs built around
+    // `READ_ONLY_SCAN_WORKER_ID`, same as `ycsb_txn::scan_parallel`'s own
+    // sequential path), so unlike `num_threads` this is never counted
+    // against `max_threads`/`1 + num_threads` above.
+    let scan_pool: Option<Arc<YcsbScanPool>> = cfg
+        .scan_pool_workers
+        .filter(|&n| n > 0)
+        .map(|n| Arc::new(YcsbScanPool::spawn(tree.clone(), n, Some(num_threads))));
+
     println!(
         "YCSB benchmark\n\
          - record_count        = {}\n\
@@ -244,7 +300,8 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
          - execution_mode    = {:?}\n\
          - GC                  = {} (update_in_place={})\n\
          - WAL                 = {}\n\
-         - root*               = {}",
+         - root*               = {}\n\
+         - scan_pool           = {}",
         cfg.ycsb.record_count,
         cfg.ycsb.field_count,
         cfg.ycsb.field_length,
@@ -267,6 +324,10 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
             (None, _) => "Off".to_string(),
         },
         cfg.root_star_index,
+        match &scan_pool {
+            Some(pool) => format!("On, {} workers", pool.num_workers()),
+            None => "Off".to_string(),
+        },
     );
 
     println!("Loading {} records...", cfg.ycsb.record_count);
@@ -299,6 +360,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
             let current_max_key = current_max_key.clone();
             let stop = stop.clone();
             let barrier = barrier.clone();
+            let scan_pool = scan_pool.clone();
             thread::spawn(move || {
                 worker_thread(
                     tree,
@@ -313,6 +375,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
                     duration,
                     stop,
                     barrier,
+                    scan_pool,
                 )
             })
         })
@@ -495,6 +558,17 @@ pub fn main_ycsb(parms: Vec<String>) {
         "atomic" | "auto" | "autocommit" => YcsbExecutionMode::Atomic,
         other => panic!("ycsb: invalid execution mode '{other}' (expected atomic or transaction)"),
     };
+    // Same 3-way convention as `tpcc_driver::main_tpcc`'s position 22
+    // (`scan_pool_workers`'s doc): omitted entirely -> `default_scan_pool_workers`
+    // decides (on by default for a scan-issuing mix with enough rows);
+    // explicit "0" -> off; explicit "N" -> exactly N workers.
+    let scan_pool_workers: Option<usize> = match parms.get(20).map(|s| s.as_str()) {
+        None => default_scan_pool_workers(record_count, &mix),
+        Some(s) => match s.parse::<usize>() {
+            Ok(0) | Err(_) => None,
+            Ok(n) => Some(n.max(2)),
+        },
+    };
 
     run_ycsb(DriverConfig {
         ycsb: YcsbConfig {
@@ -521,5 +595,6 @@ pub fn main_ycsb(parms: Vec<String>) {
         }),
         wal_lockfree_batch_size: None,
         output_dir: PathBuf::from("."),
+        scan_pool_workers,
     });
 }
