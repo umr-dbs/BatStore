@@ -2007,6 +2007,9 @@ mod db_transaction_abort_tests;
 #[path = "../../tests/iter_query_tests.rs"]
 mod iter_query_tests;
 #[cfg(test)]
+#[path = "../../tests/interval_range_split_tests.rs"]
+mod interval_range_split_tests;
+#[cfg(test)]
 #[path = "../../tests/leaf_page_abort_tests.rs"]
 mod leaf_page_abort_tests;
 #[cfg(test)]

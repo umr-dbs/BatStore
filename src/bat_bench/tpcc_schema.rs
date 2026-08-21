@@ -1086,17 +1086,22 @@ impl TpccDatabase {
     /// `Table`-keyed wrapper over `bat_db::Database::enable_scan_pool`
     /// (see that method's and `bat_tree::scan_pool::ScanWorkerPool`'s docs;
     /// this is a `db`-wide feature, not something specific to
-    /// `TpccDatabase`). `table` must be `TreeClass::Standard` (see
-    /// `tree_for`'s doc, which this panics through for
-    /// `Warehouse`/`District`, since those two live outside `db`'s table
-    /// list entirely).
-    pub fn enable_scan_pool(&self, table: Table, num_workers: usize) {
+    /// `TpccDatabase`). `expected_concurrent_queries` — typically the
+    /// caller's own OLAP thread count, since that's usually known by the
+    /// time a workload begins — feeds `ScanWorkerPool::fair_query_fanout`,
+    /// so each concurrently-querying caller asks for its fair share of
+    /// this pool instead of every query grabbing a fixed slice regardless
+    /// of how many others are sharing it; `None` if that count isn't
+    /// known. `table` must be `TreeClass::Standard` (see `tree_for`'s doc,
+    /// which this panics through for `Warehouse`/`District`, since those
+    /// two live outside `db`'s table list entirely).
+    pub fn enable_scan_pool(&self, table: Table, num_workers: usize, expected_concurrent_queries: Option<usize>) {
         assert_eq!(
             table.class(),
             TreeClass::Standard,
             "TpccDatabase::enable_scan_pool: {table:?} is a TreeClass::Big table"
         );
-        self.db.enable_scan_pool(self.table_ids[table as usize], num_workers);
+        self.db.enable_scan_pool(self.table_ids[table as usize], num_workers, expected_concurrent_queries);
     }
 
     /// Drops the pool `enable_scan_pool` assigned to `table`, if any — a

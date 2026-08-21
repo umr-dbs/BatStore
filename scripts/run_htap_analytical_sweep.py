@@ -70,19 +70,23 @@ def parse_args() -> argparse.Namespace:
                         "once and report that same result for every requested gc label")
     p.add_argument("--scan-pool-workers", type=int, default=0,
                    help="BatStore only (ignored by every other engine): assigns ORDER_LINE a "
-                        "shared scan-worker pool of this many threads (src/bat_tree/scan_pool.rs, "
-                        "DriverConfig::scan_pool_workers). Each htap_q1/htap_q6 query only ever "
-                        "asks the pool for a small fixed slice (parallel_scan::QUERY_FANOUT, 2 "
-                        "workers), not the whole pool, so several concurrently-querying OLAP "
-                        "threads can each get serviced by the pool at once; a query only runs on "
-                        "its own OLAP thread instead if the pool has no spare slice free right now. "
-                        "`0` (default, and what this script always passes explicitly) disables it "
-                        "entirely - the plain sequential path, unchanged. Any nonzero value is "
-                        "floored to 2 by ScanWorkerPool::spawn (a 1-worker 'pool' buys no "
-                        "parallelism). Pool worker threads never register a WorkerId (see "
-                        "bat_sync::worker::READ_ONLY_SCAN_WORKER_ID) since they never write, so "
-                        "this is NOT counted against your core count the way oltp_terminals/"
-                        "olap_threads are - free to oversubscribe this past nproc if useful.")
+                        "shared scan-worker pool of this many total threads (src/bat_tree/"
+                        "scan_pool.rs, DriverConfig::scan_pool_workers). Each htap_q1/htap_q6 "
+                        "query only ever asks for its fair share of the pool "
+                        "(ScanWorkerPool::fair_query_fanout: pool size / OLAP thread count, "
+                        "floored at 2 workers), not the whole pool, so several concurrently- "
+                        "querying OLAP threads can each get serviced by the pool at once; a query "
+                        "runs on its own OLAP thread instead if its fair share has no spare "
+                        "capacity right now, or if there are too many OLAP threads sharing the "
+                        "pool to give each one a fair share of at least 2. `0` (default, and what "
+                        "this script always passes explicitly) disables it entirely - the plain "
+                        "sequential path, unchanged. Any nonzero value is floored to 2 by "
+                        "ScanWorkerPool::spawn (a 1-worker 'pool' buys no parallelism). Pool "
+                        "worker threads never register a WorkerId (see bat_sync::worker::"
+                        "READ_ONLY_SCAN_WORKER_ID) since they never write, so this is NOT counted "
+                        "against your core count the way oltp_terminals/olap_threads are - free to "
+                        "oversubscribe this past nproc (main_tpcc's own auto-sizing does exactly "
+                        "that, defaulting to the machine's own core count).")
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--batstore-allocator", "--cmvbt-allocator", dest="batstore_allocator",
                    choices=["jemalloc", "mimalloc"], default="jemalloc")

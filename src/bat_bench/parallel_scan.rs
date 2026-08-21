@@ -29,29 +29,34 @@
 //! (`tpcc_schema::k_order_line`), so the whole-table range splits into
 //! `num_warehouses` disjoint, contiguous sub-intervals by pure bit
 //! arithmetic — no tree traversal needed to find the split points. Each
-//! call always splits into exactly `QUERY_FANOUT` (or `pool.num_workers()`,
-//! whichever is smaller) contiguous, near-equal shares of warehouses (the
-//! last block absorbing any remainder); a worker with no warehouses left
-//! gets a genuinely empty interval and returns instantly, rather than
-//! being skipped.
+//! call splits into `pool.fair_query_fanout()` contiguous, near-equal
+//! shares of warehouses (the last block absorbing any remainder); a
+//! worker with no warehouses left gets a genuinely empty interval and
+//! returns instantly, rather than being skipped.
 //!
-//! `QUERY_FANOUT` is deliberately *not* `pool.num_workers()`: a query that
-//! always requested the pool's *entire* capacity would leave nothing for
-//! any other concurrently-querying OLAP thread to grab — the first query
-//! to dispatch would occupy every worker, and every other one would see
-//! `has_spare_capacity() == false` and fall back to running inline for as
-//! long as the first query's jobs are in flight, defeating the whole point
-//! of a *shared* pool. Asking for a small, fixed slice per query instead
-//! means several queries' slices can fit in the pool at once — see
-//! `bat_tree::scan_pool::ScanWorkerPool`'s doc for the "shared queue, not
-//! per-query-exclusive workers" rationale this completes. `q1_parallel`/
-//! `q6_parallel` go through `ScanWorkerPool::try_dispatch`, not `dispatch`,
-//! so a pool with no spare slice available right now runs every one of a
-//! query's blocks on the calling thread instead of queuing behind other
-//! callers — see that method's doc.
+//! The fan-out is deliberately each query's *fair share* of the pool
+//! (`ScanWorkerPool::fair_query_fanout`), not `pool.num_workers()`: a query
+//! that always requested the pool's *entire* capacity would leave nothing
+//! for any other concurrently-querying OLAP thread to grab — the first
+//! query to dispatch would occupy every worker, and every other one would
+//! see `has_spare_capacity() == false` and fall back to running inline for
+//! as long as the first query's jobs are in flight, defeating the whole
+//! point of a *shared* pool. Dividing the pool's capacity by however many
+//! callers are expected instead means several queries' fair shares can fit
+//! in the pool at once — see `bat_tree::scan_pool::ScanWorkerPool`'s doc
+//! for the "shared queue, not per-query-exclusive workers" rationale this
+//! completes. When `fair_query_fanout` returns `None` (too many expected
+//! callers to divide the pool meaningfully), a query skips the pool
+//! entirely and just scans directly on the calling thread — see that
+//! method's doc. Otherwise, `q1_parallel`/`q6_parallel` go through
+//! `ScanWorkerPool::try_dispatch`, not `dispatch`, so a pool with no spare
+//! slice available *right now* also runs every one of a query's blocks on
+//! the calling thread instead of queuing behind other callers — see that
+//! method's doc.
 
 use crate::bat_bench::tpcc_schema::{
-    TpccDatabase, TpccKey, TpccScanWorkerPool as ScanWorkerPool, TpccTree, k_order_line, order_line_table_range,
+    Table, TpccDatabase, TpccKey, TpccScanWorkerPool as ScanWorkerPool, TpccTree, k_order_line,
+    order_line_table_range,
 };
 use crate::bat_bench::tpcc_txn::TpccTxn;
 use crate::bat_bench::tpch_queries::OrderLineSummary;
@@ -60,14 +65,21 @@ use crate::bat_query::iter_query::RangeQueryIter;
 use crate::bat_record_model::version_info::Version;
 use crate::bat_sync::worker::READ_ONLY_SCAN_WORKER_ID;
 
-/// How many sub-ranges one `q1_parallel`/`q6_parallel` call asks the pool
-/// for — see this module's "Partitioning" doc for why this is a small fixed
-/// number rather than `pool.num_workers()`. `2` is the smallest width that's
-/// still genuinely parallel (matches `ScanWorkerPool::spawn`'s own 2-worker
-/// floor), so several concurrent queries' slices can coexist in a pool
-/// sized a couple of workers per OLAP thread without any of them starving
-/// for capacity.
-const QUERY_FANOUT: usize = 2;
+/// Below roughly this many `ORDER_LINE` rows, the pool's own per-job
+/// overhead (a channel send/recv plus a private oneshot result channel per
+/// sub-range — see `bat_tree::scan_pool::ScanWorkerPool`'s doc) costs more
+/// than sequential `tpch_queries::q1`/`q6` just takes to walk the whole
+/// range itself. Measured directly by `tests/bench_tpch_correctness_tests.rs`'s
+/// `scan_pool_vs_sequential_crossover` (an `ORDER_LINE` size sweep, pool vs.
+/// sequential, 2 workers): the pool is ~14x slower at ~80 rows, ~1.5x
+/// slower at ~40,000, roughly at parity by ~65,000, and a stable ~8-9%
+/// *faster* from ~100,000 rows up. `tpcc_driver::main_tpcc` uses this to
+/// decide whether auto-sizing the scan pool is even worth doing for a given
+/// `TpccConfig`, rather than a per-call check here — `q1_parallel`/
+/// `q6_parallel` only ever see `num_warehouses`, which (unlike an actual
+/// row-count estimate computable from `TpccConfig`'s population
+/// parameters) isn't an accurate enough size proxy to gate on directly.
+pub const MIN_ROWS_FOR_SCAN_POOL: u64 = 65_536;
 
 fn empty_groups() -> [OrderLineSummary; 16] {
     std::array::from_fn(|i| OrderLineSummary {
@@ -139,9 +151,10 @@ fn partition_order_line_range(num_warehouses: u32, fanout: usize) -> Vec<Interva
 /// `WorkerId` for the same reason `ScanWorkerPool`'s worker threads do (see
 /// that constant's doc): a job here might run on one of the pool's own
 /// worker threads (which never register a `WorkerId` at all) or, via
-/// `try_dispatch`'s busy fallback, inline on this call's own already-
-/// registered OLAP thread — either way the sentinel is correct, so the
-/// closure doesn't need to know or care which.
+/// `try_dispatch`'s busy fallback (or `pool.fair_query_fanout()` returning
+/// `None`, below), inline on this call's own already-registered OLAP
+/// thread — either way the sentinel is correct, so the reducer doesn't
+/// need to know or care which.
 pub fn q1_parallel(
     db: &TpccDatabase,
     pool: &ScanWorkerPool,
@@ -151,8 +164,7 @@ pub fn q1_parallel(
     let tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
 
-    let ranges = partition_order_line_range(num_warehouses, QUERY_FANOUT.min(pool.num_workers()));
-    let partials = pool.try_dispatch(ranges, move |tree: &TpccTree, range| {
+    let reducer = move |tree: &TpccTree, range| {
         let mut groups = empty_groups();
         RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref(|key, row| {
             let ol = row.as_order_line();
@@ -168,7 +180,18 @@ pub fn q1_parallel(
             g.sum_amount += ol.ol_amount;
         });
         groups
-    });
+    };
+
+    let partials = match pool.fair_query_fanout() {
+        Some(fanout) => {
+            let ranges = partition_order_line_range(num_warehouses, fanout);
+            pool.try_dispatch(ranges, reducer)
+        }
+        // No fair share available (too many expected concurrent callers to
+        // divide this pool meaningfully) — skip pool machinery entirely,
+        // same outcome `try_dispatch`'s own busy fallback would reach.
+        None => vec![reducer(&db.tree_for(Table::OrderLine), order_line_table_range())],
+    };
     tx.commit();
 
     let mut total = empty_groups();
@@ -197,22 +220,26 @@ pub fn q6_parallel(
     let tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
 
-    let ranges = partition_order_line_range(num_warehouses, QUERY_FANOUT.min(pool.num_workers()));
-    let revenue: f64 = pool
-        .try_dispatch(ranges, move |tree: &TpccTree, range| {
-            let mut revenue = 0.0;
-            RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref(|_, row| {
-                let ol = row.as_order_line();
-                if ol.ol_delivery_d.is_some_and(|delivered| {
-                    delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty
-                }) {
-                    revenue += ol.ol_amount;
-                }
-            });
-            revenue
-        })
-        .into_iter()
-        .sum();
+    let reducer = move |tree: &TpccTree, range| {
+        let mut revenue = 0.0;
+        RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref(|_, row| {
+            let ol = row.as_order_line();
+            if ol.ol_delivery_d.is_some_and(|delivered| {
+                delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty
+            }) {
+                revenue += ol.ol_amount;
+            }
+        });
+        revenue
+    };
+
+    let revenue: f64 = match pool.fair_query_fanout() {
+        Some(fanout) => {
+            let ranges = partition_order_line_range(num_warehouses, fanout);
+            pool.try_dispatch(ranges, reducer).into_iter().sum()
+        }
+        None => reducer(&db.tree_for(Table::OrderLine), order_line_table_range()),
+    };
     tx.commit();
     (revenue, ts_start)
 }
