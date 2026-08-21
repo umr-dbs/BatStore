@@ -588,13 +588,16 @@ impl<
                         _ => return Err(attempts + 1),
                     }
                 },
-                _ => {
-                    return if curr_guard.upgrade_write_lock() {
-                        Ok((curr_guard, compacted))
-                    } else {
-                        Err(attempts + 1)
-                    };
-                }
+                // Unlike `traversal_write_internal_olc`'s identical-looking
+                // base case, this traversal never writes to the leaf it
+                // finally lands on — any compaction it needed already
+                // happened one level up, via `on_overflow_node` on this
+                // leaf as somebody else's child (or `split_root` if it's
+                // the tree's root — see `retrieve_root_compact_olc`'s doc).
+                // `compact_leaf_olc` only ever drops the returned guard, so
+                // there's nothing here that needs exclusive access — a
+                // plain, already-valid `Reader` is enough.
+                _ => return Ok((curr_guard, compacted)),
             }
         }
     }

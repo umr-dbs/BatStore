@@ -49,6 +49,10 @@ use crate::bat_tree::mvbt::FAN_OUT;
 use crate::bat_wal::backend::WalBackend;
 use crate::bat_wal::record::TableId;
 use std::fmt::{Display, Formatter};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::thread;
+use std::time::Duration;
 use triomphe::Arc;
 
 pub type TpccKey = u64;
@@ -297,6 +301,33 @@ fn pick_big<'x, T>(table: Table, warehouse: &'x Arc<T>, district: &'x Arc<T>) ->
     }
 }
 
+/// Spawns `TpccDatabase::enable_idle_compaction`'s big-tree sweep thread,
+/// generic over whichever concrete `FAN_OUT`/`NUM_RECORDS` the caller's
+/// `BigTrees` arm resolved to — one function serves all 8 variants, same
+/// rationale as `pick_big`. Loops `warehouse`/`district` directly (not
+/// `Table::ALL`/`dispatch_big`'s dynamic table lookup) since there are only
+/// ever exactly these two.
+fn spawn_big_idle_compaction_thread<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+    warehouse: &Arc<crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>>,
+    district: &Arc<crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>>,
+    dead_ratio_threshold: f64,
+    sweep_interval: Duration,
+    stop: std::sync::Arc<AtomicBool>,
+) {
+    let warehouse = warehouse.clone();
+    let district = district.clone();
+    thread::spawn(move || {
+        while !stop.load(Relaxed) {
+            warehouse.compact_idle_pass(dead_ratio_threshold);
+            if stop.load(Relaxed) {
+                break;
+            }
+            district.compact_idle_pass(dead_ratio_threshold);
+            thread::sleep(sweep_interval);
+        }
+    });
+}
+
 /// One `TreeClass::Big`-only operation, generic over whichever concrete
 /// `FAN_OUT`/`NUM_RECORDS` `TpccDatabase::dispatch_big` resolves it against —
 /// see that method's doc. Implementors are small, single-use structs holding
@@ -533,6 +564,17 @@ pub struct TpccDatabase {
     /// `Table::Warehouse`/`Table::District`'s trees, at whichever
     /// `BigTreeSize` this database was built with — see `BigTrees`'s doc.
     pub(crate) big_trees: BigTrees,
+    /// The currently-running big-tree idle-compaction sweep thread's stop
+    /// flag (see `enable_idle_compaction`), or `None` if it's off. `db`'s
+    /// own `enable_idle_compaction`/`disable_idle_compaction` (see
+    /// `bat_db::Database`) already covers every *standard* table; this
+    /// covers `Table::Warehouse`/`Table::District` specifically, since
+    /// `big_trees` lives outside `db`'s table list entirely and needs its
+    /// own sweep thread. A plain `Mutex`, not `db`'s lock-free `ArcSwap`
+    /// pattern: enabling/disabling this is a rare, database-init-adjacent
+    /// call, never on any hot path, so there's nothing to gain from
+    /// lock-freedom here.
+    idle_compaction_stop: Mutex<Option<std::sync::Arc<AtomicBool>>>,
 }
 
 fn inc_key(k: TpccKey) -> TpccKey {
@@ -596,6 +638,7 @@ impl TpccDatabase {
             db,
             table_ids,
             big_trees,
+            idle_compaction_stop: Mutex::new(None),
         }
     }
 
@@ -636,6 +679,7 @@ impl TpccDatabase {
             db,
             table_ids,
             big_trees,
+            idle_compaction_stop: Mutex::new(None),
         })
     }
 
@@ -970,6 +1014,70 @@ impl TpccDatabase {
         }
     }
 
+    /// Idle/proactive compaction across all 14 tables — see
+    /// `bat_db::Database::enable_idle_compaction`'s doc for the mechanism
+    /// and its "created once, at database-init time" table-snapshot
+    /// assumption, which applies here identically. `db.enable_idle_compaction`
+    /// already covers the 12 standard tables; this additionally spawns its
+    /// own sweep thread for `Table::Warehouse`/`Table::District`
+    /// specifically, since `big_trees` lives outside `db`'s table list
+    /// entirely (see `TreeClass`'s doc) and so isn't reached by `db`'s own
+    /// sweep. Calling this again (or `disable_idle_compaction`) first stops
+    /// any previously running big-tree sweep thread.
+    ///
+    /// Two background threads total, each a permanent `WorkerId` — this
+    /// one plus `db.enable_idle_compaction`'s own — see that method's doc.
+    pub fn enable_idle_compaction(&self, dead_ratio_threshold: f64, sweep_interval: Duration) {
+        self.db.enable_idle_compaction(dead_ratio_threshold, sweep_interval);
+
+        self.disable_big_idle_compaction();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        *self.idle_compaction_stop.lock().unwrap() = Some(stop.clone());
+
+        match &self.big_trees {
+            BigTrees::KiB1 { warehouse, district } => {
+                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
+            }
+            BigTrees::KiB2 { warehouse, district } => {
+                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
+            }
+            BigTrees::KiB4 { warehouse, district } => {
+                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
+            }
+            BigTrees::KiB8 { warehouse, district } => {
+                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
+            }
+            BigTrees::KiB16 { warehouse, district } => {
+                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
+            }
+            BigTrees::KiB32 { warehouse, district } => {
+                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
+            }
+            BigTrees::KiB64 { warehouse, district } => {
+                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
+            }
+            BigTrees::KiB512 { warehouse, district } => {
+                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
+            }
+        }
+    }
+
+    /// Stops both idle-compaction sweep threads started by
+    /// `enable_idle_compaction` (this database's own big-tree thread, and
+    /// `db`'s standard-table one) — a no-op for either that isn't running.
+    /// See `bat_db::Database::disable_idle_compaction`'s doc: signals and
+    /// returns immediately, doesn't wait for either thread's current sweep.
+    pub fn disable_idle_compaction(&self) {
+        self.db.disable_idle_compaction();
+        self.disable_big_idle_compaction();
+    }
+
+    fn disable_big_idle_compaction(&self) {
+        if let Some(stop) = self.idle_compaction_stop.lock().unwrap().take() {
+            stop.store(true, Relaxed);
+        }
+    }
+
     pub fn truncate_commit_log(&self, enabled: bool) {
         self.db.allow_historic_query(enabled);
         match &self.big_trees {
@@ -1155,6 +1263,7 @@ impl TpccDatabase {
             db,
             table_ids,
             big_trees,
+            idle_compaction_stop: Mutex::new(None),
         })
     }
 }

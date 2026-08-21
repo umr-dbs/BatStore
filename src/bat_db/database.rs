@@ -3,6 +3,8 @@ use std::hash::Hash;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::thread;
 use std::time::Duration;
 
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -117,6 +119,12 @@ pub struct Database<
     /// `Some(update_in_place)` once `enable_gc` was called (applied to any
     /// table created afterwards); `None` (GC off) otherwise.
     gc: ArcSwapOption<bool>,
+    /// The currently-running idle-compaction sweep thread's stop flag (see
+    /// `enable_idle_compaction`), or `None` if it's off. Swapped to a fresh
+    /// flag on every `enable_idle_compaction` call and to `None` on
+    /// `disable_idle_compaction`, so at most one sweep thread is ever
+    /// running for this database at a time.
+    idle_compaction_stop: ArcSwapOption<AtomicBool>,
 }
 
 impl<
@@ -182,6 +190,7 @@ impl<
             wal,
             meta_path,
             gc: ArcSwapOption::empty(),
+            idle_compaction_stop: ArcSwapOption::empty(),
         }
     }
 
@@ -373,6 +382,63 @@ impl<
             entry.tree.allow_historic_query(enabled);
         }
         self.gc.store(None);
+    }
+
+    /// Spawns one background thread that repeatedly sweeps every table on
+    /// this database (see `MVBTSt::compact_idle_pass`'s doc), forcing a
+    /// compaction on any leaf whose dead/(active+dead) ratio is at or above
+    /// `dead_ratio_threshold`, sleeping `sweep_interval` between sweeps —
+    /// the fix for a read-heavy table (few, infrequent writes to any one
+    /// leaf) otherwise sitting at a garbage-inflated ratio indefinitely,
+    /// since nothing on the ordinary write path ever revisits such a leaf.
+    ///
+    /// Snapshots the *current* table list once, at call time, the same
+    /// "tables are created once, at database-init time" assumption
+    /// `enable_gc`/this struct's own doc already rely on — a table created
+    /// afterwards isn't picked up until the next `enable_idle_compaction`
+    /// call. Calling this again (or `disable_idle_compaction`) first stops
+    /// any previously running sweep thread, so at most one ever runs at a
+    /// time.
+    ///
+    /// The spawned thread permanently consumes one `WorkerId` from this
+    /// database's fixed worker pool the moment its first sweep actually
+    /// writes anything (see `bat_sync::worker::WorkerRegistry`'s doc) —
+    /// callers sizing `max_workers` (`new_with_max_workers`) need to budget
+    /// for it. It also outlives `&self` — it holds its own `Arc` clone of
+    /// each table's tree, not a reference back to this `Database` — so a
+    /// caller that drops this database without calling
+    /// `disable_idle_compaction` first leaves the thread running forever,
+    /// keeping those trees (and this database's `ctx`) alive through its
+    /// own clones.
+    pub fn enable_idle_compaction(&self, dead_ratio_threshold: f64, sweep_interval: Duration) {
+        self.disable_idle_compaction();
+
+        let stop = sync::Arc::new(AtomicBool::new(false));
+        self.idle_compaction_stop.store(Some(stop.clone()));
+
+        let trees: Vec<_> = self.tables.load().iter().map(|entry| entry.tree.clone()).collect();
+        thread::spawn(move || {
+            while !stop.load(Relaxed) {
+                for tree in &trees {
+                    tree.compact_idle_pass(dead_ratio_threshold);
+                    if stop.load(Relaxed) {
+                        break;
+                    }
+                }
+                thread::sleep(sweep_interval);
+            }
+        });
+    }
+
+    /// Stops the background sweep thread started by `enable_idle_compaction`,
+    /// if one is running — a no-op otherwise. Signals the thread to exit and
+    /// returns immediately; it does not wait for the thread's current
+    /// sleep/sweep to finish, since this is best-effort housekeeping, not
+    /// something callers need to synchronize with.
+    pub fn disable_idle_compaction(&self) {
+        if let Some(stop) = self.idle_compaction_stop.swap(None) {
+            stop.store(true, Relaxed);
+        }
     }
 
     /// Reads off the shared clock — same value regardless of which table's

@@ -234,11 +234,12 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
         _ => 0,
     };
 
-    // One more permanent `WorkerId` if idle compaction is enabled — see
-    // `DriverConfig::idle_compaction`'s doc — regardless of how many tables
-    // it sweeps, since it's a single thread looping over `Table::ALL`, not
-    // one thread per table.
-    let idle_compaction_cost = if cfg.idle_compaction.is_some() { 1 } else { 0 };
+    // Two more permanent `WorkerId`s if idle compaction is enabled — see
+    // `DriverConfig::idle_compaction`'s and `TpccDatabase::enable_idle_compaction`'s
+    // docs: one sweep thread for the 12 standard tables (`Database`'s own),
+    // one for `Table::Warehouse`/`Table::District` (`TpccDatabase`'s own,
+    // since `big_trees` lives outside `Database`'s table list entirely).
+    let idle_compaction_cost = if cfg.idle_compaction.is_some() { 2 } else { 0 };
 
     // +1: the main thread itself acquires a WorkerId too, since it does the
     // (sequential) data-set population directly via `dispatch_crud` before
@@ -374,7 +375,7 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     });
 
     let stop = Arc::new(AtomicBool::new(false));
-    let barrier = Arc::new(Barrier::new(num_terminals + num_olap + idle_compaction_cost + 1));
+    let barrier = Arc::new(Barrier::new(num_terminals + num_olap + 1));
     let (scan_tx, scan_rx) = unbounded::<ScanResult>();
 
     let duration = cfg.duration;
@@ -404,68 +405,29 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     }).collect();
     drop(scan_tx);
 
-    // See `DriverConfig::idle_compaction`'s doc: one thread, regardless of
-    // table count, sweeping `Table::ALL` in a loop. Waits on the same
-    // `barrier` as every terminal/OLAP thread (accounted for in that
-    // `Barrier::new` count above) so its sweeps only start once loading is
-    // actually done, same as everything else measured in this timed phase.
-    let idle_compaction_handle = cfg.idle_compaction.map(|(dead_ratio_threshold, sweep_interval)| {
-        let db = db.clone();
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        thread::spawn(move || {
-            barrier.wait();
-            use crate::bat_bench::tpcc_schema::{BigTreeOp, Table, TpccKey, TpccRow};
-
-            // `Table::Warehouse`/`Table::District` are `TreeClass::Big`
-            // (see that enum's doc) — a different, database-configured
-            // `NUM_RECORDS` than every other table's tree, reached only
-            // through `dispatch_big`'s generic `BigTreeOp` hook, never
-            // `tree_for` (which asserts against exactly this case).
-            struct CompactOp(f64);
-            impl BigTreeOp for CompactOp {
-                type Output = usize;
-                fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
-                    self,
-                    tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
-                ) -> usize {
-                    tree.compact_idle_pass(self.0)
-                }
-            }
-
-            while !stop.load(Relaxed) {
-                for table in Table::ALL {
-                    match table {
-                        Table::Warehouse | Table::District => {
-                            db.dispatch_big(table, CompactOp(dead_ratio_threshold));
-                        }
-                        _ => {
-                            db.tree_for(table).compact_idle_pass(dead_ratio_threshold);
-                        }
-                    }
-                    if stop.load(Relaxed) {
-                        break;
-                    }
-                }
-                thread::sleep(sweep_interval);
-            }
-        })
-    });
-
     // Releases at the same instant as every worker thread, once loading is
     // done — so the timed phase (and this wall-clock measurement) excludes
     // load time entirely.
     barrier.wait();
+
+    // `TpccDatabase::enable_idle_compaction`'s own background thread(s) —
+    // see `DriverConfig::idle_compaction`'s doc — started right as the
+    // timed phase begins, same as everything else measured in it, and
+    // stopped right as it ends, below, so a caller that runs `run_tpcc`
+    // more than once in the same process (`bat_bench::suite`) never leaves
+    // a stale sweep thread running against an about-to-be-dropped `db`.
+    if let Some((dead_ratio_threshold, sweep_interval)) = cfg.idle_compaction {
+        db.enable_idle_compaction(dead_ratio_threshold, sweep_interval);
+    }
+
     let run_start = Instant::now();
     println!("Loading done. Running timed phase for {duration:?}...");
     thread::sleep(duration);
     stop.store(true, Relaxed);
+    db.disable_idle_compaction();
 
     let terminal_stats: Vec<TerminalStats> = terminal_handles.into_iter().map(|h| h.join().unwrap()).collect();
     for h in olap_handles {
-        let _ = h.join();
-    }
-    if let Some(h) = idle_compaction_handle {
         let _ = h.join();
     }
     let actual_wall = run_start.elapsed();
