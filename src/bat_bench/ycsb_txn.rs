@@ -296,47 +296,60 @@ pub fn scan_with_mode(tree: &YcsbTree, start_key: YcsbKey, len: u64, read_payloa
     }
 }
 
-/// Parallel drop-in for `scan_with_mode`: fans the same scan out across
-/// `pool` when that's actually worth doing (`ScanWorkerPool::
-/// dispatch_evenly`'s size and fair-share gates — see that method's doc),
-/// falling straight back to `scan_with_mode` otherwise, so a caller can
-/// always reach for this and get whichever path actually helps.
+/// One entry point for a scan that may or may not have a pool to fan out
+/// across: `pool: None` always takes the same plain sequential path
+/// `scan_with_mode` does (a real, explicit "no parallel workers" mode, not
+/// just an incidental fallback — useful on its own, e.g. for a test that
+/// wants a guaranteed-sequential baseline). `Some(pool)` hands the decision
+/// of whether `[start_key, start_key + len - 1]` is even worth splitting —
+/// and, if so, how — to `RangeQueryIter::fold_ref_parallel`; this function
+/// itself never checks size or fair share, so a caller with a pool can
+/// always just call this instead of branching between this and
+/// `scan_with_mode` itself.
 ///
 /// `YcsbKey`'s dense, unpacked sequential-id layout (unlike `tpcc_schema::
 /// TpccKey`'s bit-packed fields) is exactly the case `bat_query::interval::
 /// RangeSplit`'s `u64` impl is safe for without any extra care — this
-/// call's own `[start_key, start_key + len - 1]` range is already the
-/// real, tight bounds of what's being scanned, not a type-level sentinel.
+/// call's own range is already the real, tight bounds of what's being
+/// scanned, not a type-level sentinel.
 ///
 /// Manages its own snapshot registration (`tree.begin_snapshot`/
 /// `on_release_reader_snapshot`) the same way `RangeIterSi`'s own dispatch
-/// arm does, since the pool's sub-range jobs run with `register_reader_si:
+/// arm does, since a pool's sub-range jobs run with `register_reader_si:
 /// false` and rely on it staying registered for the whole dispatch — see
 /// `bat_bench::parallel_scan`'s module doc for the same trust relationship
 /// `q1_parallel`/`q6_parallel` already rely on via their own `TpccTxn`.
-pub fn scan_parallel(pool: &YcsbScanPool, tree: &YcsbTree, start_key: YcsbKey, len: u64, read_payload: bool) -> usize {
+/// Uses `READ_ONLY_SCAN_WORKER_ID` even on the sequential path (not this
+/// thread's own real `WorkerId`): this scan never writes, so there is no
+/// same-worker fast path to lose by not using it, and it keeps this
+/// function's behavior identical regardless of which path it ends up
+/// taking — see that constant's doc.
+pub fn scan_parallel(
+    pool: Option<&YcsbScanPool>,
+    tree: &YcsbTree,
+    start_key: YcsbKey,
+    len: u64,
+    read_payload: bool,
+) -> usize {
     let hi = start_key.saturating_add(len.saturating_sub(1));
     let range = Interval::new(start_key, hi);
     let ts_start = tree.begin_snapshot();
 
-    let result = pool.dispatch_evenly(range, move |tree, range| {
-        let mut count = 0usize;
-        RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref(|_, payload| {
+    let count = RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).fold_ref_parallel(
+        pool,
+        || 0usize,
+        move |count, _, payload| {
             if read_payload {
                 let checksum = payload.as_bytes().iter().fold(0u8, |a, b| a.wrapping_add(*b));
                 std::hint::black_box(checksum);
             }
-            count += 1;
-        });
-        count
-    });
+            count + 1
+        },
+        |a, b| a + b,
+    );
 
     tree.on_release_reader_snapshot(ts_start);
-
-    match result {
-        Some(counts) => counts.into_iter().sum(),
-        None => scan_with_mode(tree, start_key, len, read_payload),
-    }
+    count
 }
 
 /// Reads then unconditionally rewrites `key` (YCSB "read a record, modify

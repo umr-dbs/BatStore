@@ -100,11 +100,15 @@ impl BigTreeOp for RangeOp {
         self,
         tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) -> Res<'static> {
+        // `Big`-class tables (`Table::Warehouse`/`Table::District`) can never
+        // have a scan pool assigned — see `TpccDatabase::enable_scan_pool`'s
+        // doc — so there is never a pool to look up here.
         normalize(range_on_tree(
             tree,
             self.worker_id,
             self.ts_start,
             self.range,
+            None,
         ))
     }
 }
@@ -269,7 +273,12 @@ impl<'a> TpccTxn<'a> {
     /// Range read against this transaction's fixed snapshot, on `table`.
     /// `force_read_all` is kept only for call-site compatibility — the
     /// underlying `range_on_tree` is always eager; every real call site in
-    /// this crate already passes `true`.
+    /// this crate already passes `true`. Transparently fans out across
+    /// `table`'s scan pool (`TpccDatabase::scan_pool`) when one is assigned
+    /// and `range` is large enough to be worth splitting — see
+    /// `range_on_tree`'s and `iter_query::RangeQueryIter`'s `*_parallel`
+    /// methods' doc for where that decision actually happens; this call
+    /// site only has to look the pool up, not decide anything about it.
     pub fn range(
         &mut self,
         table: Table,
@@ -282,6 +291,7 @@ impl<'a> TpccTxn<'a> {
                 self.worker_id,
                 self.ts_start,
                 range,
+                self.db.scan_pool(table).as_deref(),
             ),
             TreeClass::Big => self.db.dispatch_big(
                 table,
@@ -365,9 +375,22 @@ impl<'a> TpccTxn<'a> {
         acc.unwrap()
     }
 
-    /// Counts visible rows without constructing result objects.
+    /// Counts visible rows without constructing result objects. Standard-
+    /// class tables fan out across `table`'s scan pool the same way `range`
+    /// does, for the same reason (see that method's doc) — `Big`-class
+    /// tables (which can never have one) keep going through `range_fold`.
     pub fn range_count(&mut self, table: Table, range: Interval<TpccKey>) -> usize {
-        self.range_fold(table, range, 0usize, |count, _, _| count + 1)
+        match table.class() {
+            TreeClass::Standard => RangeQueryIter::new(
+                &self.db.tree_for(table),
+                self.ts_start,
+                range,
+                false,
+                self.worker_id,
+            )
+                .count_ref_parallel(self.db.scan_pool(table).as_deref()),
+            TreeClass::Big => self.range_fold(table, range, 0usize, |count, _, _| count + 1),
+        }
     }
 
     pub fn insert(&mut self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'static> {
