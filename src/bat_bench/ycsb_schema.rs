@@ -38,6 +38,13 @@ pub const YCSB_FAN_OUT: usize = crate::bat_tree::mvbt::FAN_OUT;
 pub const YCSB_NUM_RECORDS: usize = crate::bat_tree::mvbt::NUM_RECORDS;
 
 pub type YcsbTree = MVBTSt<YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow>;
+/// `ycsb_txn::scan_parallel`'s pool type — a `bat_tree::scan_pool::
+/// ScanWorkerPool` fixed to `YcsbTree`'s own type parameters. `YcsbKey`
+/// being a plain, dense sequential id (unlike `tpcc_schema::TpccKey`'s
+/// bit-packed fields) is exactly the case `bat_query::interval::
+/// RangeSplit`'s numeric-bisection `u64` impl is safe for out of the box —
+/// see that trait's doc.
+pub type YcsbScanPool = crate::bat_tree::scan_pool::ScanWorkerPool<YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow>;
 
 /// Database scale/shape, mirroring YCSB's `recordcount`/`fieldcount`/
 /// `fieldlength` workload properties.

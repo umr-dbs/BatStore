@@ -224,6 +224,28 @@ pub trait RangeSplit: Ord + Copy + Hash + Display + Sized {
         let _ = (range, fanout);
         None
     }
+
+    /// A cheap, exact count of how many values `range` covers — used by
+    /// `dispatch_evenly` to decide whether a scan is even worth
+    /// parallelizing *before* paying to split and dispatch it (splitting
+    /// a handful of rows across a pool costs more in channel/oneshot
+    /// overhead than it saves — see `bat_tree::scan_pool`'s
+    /// `MIN_LEN_FOR_SPLIT_DISPATCH` for the measurement behind that).
+    ///
+    /// Same caveat as `split_evenly` — this is only meaningful when
+    /// `range` is already the real, tight bounds of what's being
+    /// scanned: for a bit-packed key's full type-level `MIN..MAX` span,
+    /// this reports an enormous count regardless of how few rows are
+    /// actually populated, so it can't tell "worth parallelizing" from
+    /// "not" any better than `split_evenly` could balance the work.
+    ///
+    /// The default (`None`) means "no opinion" — `dispatch_evenly`
+    /// interprets that permissively (proceeds as if the range were large
+    /// enough), not as a reason to skip splitting.
+    fn approx_len(range: Interval<Self>) -> Option<u64> {
+        let _ = range;
+        None
+    }
 }
 
 /// Splits `[range.lower, range.upper]` into `fanout` contiguous,
@@ -271,5 +293,18 @@ impl RangeSplit for u64 {
             ranges.push(Interval::new(lo as u64, hi as u64));
         }
         Some(ranges)
+    }
+
+    fn approx_len(range: Interval<u64>) -> Option<u64> {
+        if range.lower > range.upper {
+            return Some(0);
+        }
+        // Same u128 overflow guard as `split_evenly`, then saturate back
+        // down to `u64` — a caller gating on this only cares whether it
+        // clears some threshold, so a saturated "however large `u64` can
+        // say" for the one input (`[0, u64::MAX]`) that would otherwise
+        // overflow is exactly as useful as the true value.
+        let span = (range.upper as u128) - (range.lower as u128) + 1;
+        Some(span.min(u64::MAX as u128) as u64)
     }
 }

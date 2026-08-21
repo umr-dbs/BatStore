@@ -270,14 +270,32 @@ impl<
     /// now (`fair_query_fanout`) or `Key::split_evenly` can't divide
     /// `range` at all (including a `Key` type that never opted into real
     /// splitting, per `RangeSplit`'s default) — in both cases the caller
-    /// should just scan `range` sequentially itself instead.
+    /// should just scan `range` sequentially itself instead. Also `None`
+    /// if `Key::approx_len(range)` reports fewer than
+    /// `MIN_LEN_FOR_SPLIT_DISPATCH` values — parallelizing a scan that
+    /// small would spend more on channel/oneshot overhead than it could
+    /// possibly save (an unknown length, `approx_len` returning `None`, is
+    /// *not* treated as "too small" — see that method's doc).
     pub fn dispatch_evenly<R: Send + 'static>(
         &self,
         range: Interval<Key>,
         reducer: impl Fn(&MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>, Interval<Key>) -> R + Send + Sync + 'static,
     ) -> Option<Vec<R>> {
+        if Key::approx_len(range).is_some_and(|len| len < MIN_LEN_FOR_SPLIT_DISPATCH) {
+            return None;
+        }
         let fanout = self.fair_query_fanout()?;
         let ranges = Key::split_evenly(range, fanout)?;
         Some(self.try_dispatch(ranges, reducer))
     }
 }
+
+/// Below this many values (per `RangeSplit::approx_len`), `dispatch_evenly`
+/// skips the pool entirely and reports `None` — the same measurement and
+/// reasoning as `bat_bench::parallel_scan::MIN_ROWS_FOR_SCAN_POOL` (that
+/// constant gates a *different* decision, whether to enable a whole pool
+/// for a run at all, based on estimated population; this one gates a
+/// single call's own range, based on what it actually covers), kept as its
+/// own constant here since it's this module's generic entry point that
+/// needs it, not anything TPC-C-specific.
+pub const MIN_LEN_FOR_SPLIT_DISPATCH: u64 = 65_536;

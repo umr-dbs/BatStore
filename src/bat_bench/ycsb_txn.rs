@@ -25,13 +25,15 @@
 //! a page it needs.
 
 use crate::bat_bench::ycsb_random::{random_field_patch, random_row};
-use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbKey, YcsbTree};
+use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbKey, YcsbScanPool, YcsbTree};
 use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
 use crate::bat_crud_model::crud_operation::CRUDOperation;
 use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::bat_db::transaction::{insert_on_tree, point_on_tree, update_on_tree};
 use crate::bat_query::interval::Interval;
+use crate::bat_query::iter_query::RangeQueryIter;
 use crate::bat_record_model::tx_stamp::TxStamp;
+use crate::bat_sync::worker::READ_ONLY_SCAN_WORKER_ID;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum YcsbExecutionMode {
@@ -291,6 +293,49 @@ pub fn scan_with_mode(tree: &YcsbTree, start_key: YcsbKey, len: u64, read_payloa
             }
         }
         other => panic!("ycsb scan: unexpected result: {other}"),
+    }
+}
+
+/// Parallel drop-in for `scan_with_mode`: fans the same scan out across
+/// `pool` when that's actually worth doing (`ScanWorkerPool::
+/// dispatch_evenly`'s size and fair-share gates — see that method's doc),
+/// falling straight back to `scan_with_mode` otherwise, so a caller can
+/// always reach for this and get whichever path actually helps.
+///
+/// `YcsbKey`'s dense, unpacked sequential-id layout (unlike `tpcc_schema::
+/// TpccKey`'s bit-packed fields) is exactly the case `bat_query::interval::
+/// RangeSplit`'s `u64` impl is safe for without any extra care — this
+/// call's own `[start_key, start_key + len - 1]` range is already the
+/// real, tight bounds of what's being scanned, not a type-level sentinel.
+///
+/// Manages its own snapshot registration (`tree.begin_snapshot`/
+/// `on_release_reader_snapshot`) the same way `RangeIterSi`'s own dispatch
+/// arm does, since the pool's sub-range jobs run with `register_reader_si:
+/// false` and rely on it staying registered for the whole dispatch — see
+/// `bat_bench::parallel_scan`'s module doc for the same trust relationship
+/// `q1_parallel`/`q6_parallel` already rely on via their own `TpccTxn`.
+pub fn scan_parallel(pool: &YcsbScanPool, tree: &YcsbTree, start_key: YcsbKey, len: u64, read_payload: bool) -> usize {
+    let hi = start_key.saturating_add(len.saturating_sub(1));
+    let range = Interval::new(start_key, hi);
+    let ts_start = tree.begin_snapshot();
+
+    let result = pool.dispatch_evenly(range, move |tree, range| {
+        let mut count = 0usize;
+        RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref(|_, payload| {
+            if read_payload {
+                let checksum = payload.as_bytes().iter().fold(0u8, |a, b| a.wrapping_add(*b));
+                std::hint::black_box(checksum);
+            }
+            count += 1;
+        });
+        count
+    });
+
+    tree.on_release_reader_snapshot(ts_start);
+
+    match result {
+        Some(counts) => counts.into_iter().sum(),
+        None => scan_with_mode(tree, start_key, len, read_payload),
     }
 }
 
