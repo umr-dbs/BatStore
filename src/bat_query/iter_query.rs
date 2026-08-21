@@ -8,12 +8,14 @@ use crate::bat_page_model::BlockRef;
 use crate::bat_page_model::node::PageType;
 use crate::bat_page_model::time_matcher::TimeMatcher;
 use crate::bat_query::SnapShot;
-use crate::bat_query::interval::Interval;
+use crate::bat_query::interval::{Interval, RangeSplit};
 use crate::bat_query::snapshot::ReaderIsolatedSnapShot;
 use crate::bat_record_model::record_point::RecordPointResult;
 use crate::bat_record_model::tx_stamp::WorkerId;
 use crate::bat_record_model::version_info::Version;
+use crate::bat_sync::worker::READ_ONLY_SCAN_WORKER_ID;
 use crate::bat_tree::mvbt::MVBTSt;
+use crate::bat_tree::scan_pool::ScanWorkerPool;
 
 /// Software-prefetch hint for `block`'s backing memory — issued far enough
 /// ahead of the actual dereference (see call sites below) to hide some of
@@ -543,5 +545,151 @@ impl<
             .min_by_key(|(_, r)| r.key)
             .map(|(index, _)| index)?;
         self.buff.remove(min_index)
+    }
+
+    /// Releases this iterator's own reader-snapshot registration (if any)
+    /// and marks it complete, without running `refill`'s normal drain loop —
+    /// used by every `*_parallel` method below once it has gone the
+    /// pool-dispatch route instead of `refill`'s usual walk, so `Drop` (which
+    /// only releases when `!is_completed`) doesn't release a second time.
+    fn finish_after_dispatch(&mut self) {
+        if self.register_reader_si {
+            self.bat_tree().on_release_reader_snapshot(self.snapshot());
+        }
+        self.is_completed = true;
+    }
+}
+
+/// The `*_parallel` counterparts of this module's plain terminal methods
+/// above — same job, but able to fan a large-enough `range` out across a
+/// caller-supplied [`ScanWorkerPool`] instead of always walking it on the
+/// calling thread alone. Kept in their own `impl` block, bounded by the
+/// extra `RangeSplit`/`Send` requirements dispatching across threads
+/// actually needs (see `ScanWorkerPool::dispatch_evenly`'s doc for why that
+/// bound is opt-in rather than on every `RangeQueryIter` method), so a
+/// `Key`/`Payload` pair that never needs parallel scanning doesn't have to
+/// satisfy it just because this module defines these methods somewhere.
+///
+/// This is deliberately *the* place that decision lives: a caller (a
+/// `DbTransaction`/`TpccTxn` range method, a workload's own scan helper,
+/// ...) just hands over whatever pool it has — `None` if it doesn't have
+/// one, or doesn't want to use it right now — and every "is this range even
+/// worth splitting", "does the pool have a fair share to offer", "which
+/// worker id should a pool-thread job use", and "fall back to plain
+/// sequential" decision happens right here, once, instead of each caller
+/// re-implementing that dance by hand (which is exactly what every one of
+/// this module's callers had to do before these methods existed — see
+/// `bat_bench::parallel_scan::q1_parallel`/`bat_bench::ycsb_txn::
+/// scan_parallel`'s own history for two hand-rolled versions of it).
+///
+/// `pool: None` always takes the plain sequential path — a real, explicit
+/// "no parallel workers" mode for a caller that wants one on purpose (e.g. a
+/// test comparing sequential vs. pooled timing/output, or a caller that
+/// knows this particular call is too latency-sensitive to risk dispatch
+/// overhead), not just an incidental side effect of not having a pool.
+///
+/// A query that only wants the smallest key in `range`
+/// ([`RangeQueryIter::min_by_key`]) has no `_parallel` counterpart here on
+/// purpose: it only ever needs to look at the first leaf with a match, so
+/// splitting the rest of the range across a pool would do strictly more
+/// work for the same answer, never less.
+impl<
+    'a,
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + RangeSplit + 'static,
+    Payload: Display + Clone + Default + Sync + Send + 'static,
+> RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+{
+    /// `Iterator::collect`'s parallel counterpart — eagerly materializes
+    /// every visible match in `self.range`, splitting across `pool`'s fair
+    /// share when it's large enough to be worth it (see this `impl` block's
+    /// doc), falling back to plain `collect()` otherwise.
+    pub fn collect_parallel(
+        mut self,
+        pool: Option<&ScanWorkerPool<FAN_OUT, NUM_RECORDS, Key, Payload>>,
+    ) -> Vec<RecordPointResult<Key, Payload>> {
+        let ranges = pool.and_then(|pool| pool.evenly_split_ranges(self.range));
+        let Some((pool, ranges)) = pool.zip(ranges) else {
+            return self.collect();
+        };
+        let version = self.snapshot();
+        let parts = pool.try_dispatch(ranges, move |tree, sub_range| {
+            RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID).collect::<Vec<_>>()
+        });
+        self.finish_after_dispatch();
+        parts.into_iter().flatten().collect()
+    }
+
+    /// `count_ref`'s parallel counterpart — see `collect_parallel`'s doc.
+    pub fn count_ref_parallel(
+        mut self,
+        pool: Option<&ScanWorkerPool<FAN_OUT, NUM_RECORDS, Key, Payload>>,
+    ) -> usize {
+        let ranges = pool.and_then(|pool| pool.evenly_split_ranges(self.range));
+        let Some((pool, ranges)) = pool.zip(ranges) else {
+            return self.count_ref();
+        };
+        let version = self.snapshot();
+        let parts = pool.try_dispatch(ranges, move |tree, sub_range| {
+            RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID).count_ref()
+        });
+        self.finish_after_dispatch();
+        parts.into_iter().sum()
+    }
+
+    /// `for_each_ref`'s parallel counterpart. `visit` runs concurrently on
+    /// whichever pool workers pick up a sub-range's job (or, on the
+    /// sequential fallback, on the calling thread alone), so it must be a
+    /// `Fn`, not a `FnMut` — an accumulating visitor needs its own internal
+    /// synchronization (an atomic, a mutex, ...) rather than a bare captured
+    /// `&mut`, exactly as any other closure shared across threads would.
+    pub fn for_each_ref_parallel(
+        mut self,
+        pool: Option<&ScanWorkerPool<FAN_OUT, NUM_RECORDS, Key, Payload>>,
+        visit: impl Fn(Key, &Payload) + Send + Sync + 'static,
+    ) {
+        let ranges = pool.and_then(|pool| pool.evenly_split_ranges(self.range));
+        let Some((pool, ranges)) = pool.zip(ranges) else {
+            return self.for_each_ref(visit);
+        };
+        let version = self.snapshot();
+        pool.try_dispatch(ranges, move |tree, sub_range| {
+            RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID)
+                .for_each_ref(&visit);
+        });
+        self.finish_after_dispatch();
+    }
+
+    /// `fold_ref`'s parallel counterpart. Since each sub-range needs its own
+    /// independent accumulator to fold into (there's no shared mutable state
+    /// to fold through across threads), this takes `init` — an accumulator
+    /// *factory*, called once per dispatched sub-range — instead of a single
+    /// initial value, plus `merge` to combine the resulting per-sub-range
+    /// accumulators back into one, in `pool.try_dispatch`'s (arbitrary,
+    /// worker-scheduling-dependent) result order — so `merge` must be
+    /// order-independent (e.g. `+`, not `-`) for the overall result to be
+    /// deterministic.
+    pub fn fold_ref_parallel<Acc: Send + 'static>(
+        mut self,
+        pool: Option<&ScanWorkerPool<FAN_OUT, NUM_RECORDS, Key, Payload>>,
+        init: impl Fn() -> Acc + Send + Sync + 'static,
+        fold: impl Fn(Acc, Key, &Payload) -> Acc + Send + Sync + 'static,
+        merge: impl Fn(Acc, Acc) -> Acc,
+    ) -> Acc {
+        let ranges = pool.and_then(|pool| pool.evenly_split_ranges(self.range));
+        let Some((pool, ranges)) = pool.zip(ranges) else {
+            return self.fold_ref(init(), fold);
+        };
+        let version = self.snapshot();
+        let parts = pool.try_dispatch(ranges, move |tree, sub_range| {
+            RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID)
+                .fold_ref(init(), &fold)
+        });
+        self.finish_after_dispatch();
+        parts.into_iter().reduce(merge).expect(
+            "try_dispatch returns one result per dispatched range, and evenly_split_ranges \
+             never returns an empty Vec (fair_query_fanout requires a fanout of at least 2)",
+        )
     }
 }

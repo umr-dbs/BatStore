@@ -48,14 +48,17 @@
 //! completes. When `fair_query_fanout` returns `None` (too many expected
 //! callers to divide the pool meaningfully), a query skips the pool
 //! entirely and just scans directly on the calling thread — see that
-//! method's doc. Otherwise, `q1_parallel`/`q6_parallel` go through
-//! `ScanWorkerPool::try_dispatch`, not `dispatch`, so a pool with no spare
-//! slice available *right now* also runs every one of a query's blocks on
-//! the calling thread instead of queuing behind other callers — see that
-//! method's doc.
+//! method's doc. `q1_parallel`/`q6_parallel` get both of these — the fair-
+//! share check and the try-or-run-inline fallback — for free from
+//! `ScanWorkerPool::dispatch_by_fair_share`, which they hand
+//! `partition_order_line_range` to as its partitioner rather than
+//! re-deriving that control flow themselves; it dispatches through
+//! `try_dispatch`, not `dispatch`, so a pool with no spare slice available
+//! *right now* also runs every one of a query's blocks on the calling
+//! thread instead of queuing behind other callers — see that method's doc.
 
 use crate::bat_bench::tpcc_schema::{
-    Table, TpccDatabase, TpccKey, TpccScanWorkerPool as ScanWorkerPool, TpccTree, k_order_line,
+    TpccDatabase, TpccKey, TpccScanWorkerPool as ScanWorkerPool, TpccTree, k_order_line,
     order_line_table_range,
 };
 use crate::bat_bench::tpcc_txn::TpccTxn;
@@ -182,16 +185,11 @@ pub fn q1_parallel(
         groups
     };
 
-    let partials = match pool.fair_query_fanout() {
-        Some(fanout) => {
-            let ranges = partition_order_line_range(num_warehouses, fanout);
-            pool.try_dispatch(ranges, reducer)
-        }
-        // No fair share available (too many expected concurrent callers to
-        // divide this pool meaningfully) — skip pool machinery entirely,
-        // same outcome `try_dispatch`'s own busy fallback would reach.
-        None => vec![reducer(&db.tree_for(Table::OrderLine), order_line_table_range())],
-    };
+    let partials = pool.dispatch_by_fair_share(
+        order_line_table_range(),
+        |fanout| partition_order_line_range(num_warehouses, fanout),
+        reducer,
+    );
     tx.commit();
 
     let mut total = empty_groups();
@@ -233,13 +231,14 @@ pub fn q6_parallel(
         revenue
     };
 
-    let revenue: f64 = match pool.fair_query_fanout() {
-        Some(fanout) => {
-            let ranges = partition_order_line_range(num_warehouses, fanout);
-            pool.try_dispatch(ranges, reducer).into_iter().sum()
-        }
-        None => reducer(&db.tree_for(Table::OrderLine), order_line_table_range()),
-    };
+    let revenue: f64 = pool
+        .dispatch_by_fair_share(
+            order_line_table_range(),
+            |fanout| partition_order_line_range(num_warehouses, fanout),
+            reducer,
+        )
+        .into_iter()
+        .sum();
     tx.commit();
     (revenue, ts_start)
 }

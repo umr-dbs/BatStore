@@ -498,6 +498,51 @@ fn enable_scan_pool_assigns_a_working_pool_and_disable_scan_pool_removes_it() {
     assert!(db.scan_pool(Table::OrderLine).is_none(), "disable_scan_pool should have cleared it");
 }
 
+/// The whole point of wiring parallel dispatch into `RangeQueryIter` itself
+/// (`collect_parallel`/`count_ref_parallel`) rather than a hand-rolled
+/// per-caller helper like `q1_parallel`/`q6_parallel`: a plain
+/// `TpccTxn::range`/`range_count` call on `Table::OrderLine` should already
+/// come out correct whether or not a pool happens to be assigned to it —
+/// the caller here never mentions pools, fanout, or splitting at all.
+/// `order_line_table_range()` is the key's full sentinel domain, so
+/// `RangeSplit::approx_len` clears `MIN_LEN_FOR_SPLIT_DISPATCH` regardless
+/// of how few rows are actually populated — this really does exercise the
+/// pool-dispatch branch, not just the small-range fallback (see
+/// `tests/interval_range_split_tests.rs`'s identical "correct but
+/// imbalanced" case for `TpccKey`'s full range).
+#[test]
+fn tpcc_txn_range_and_range_count_transparently_use_the_order_line_scan_pool_when_one_is_assigned() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    let num_warehouses = 5;
+    populate_multi_warehouse_order_lines(&db, num_warehouses);
+    let full_range = order_line_table_range();
+
+    let mut tx_before = TpccTxn::begin(&db);
+    let expected_count = tx_before.range_count(Table::OrderLine, full_range);
+    let expected_rows = match tx_before.range(Table::OrderLine, full_range, true) {
+        CRUDOperationResult::MatchedRecords(v) => v.len(),
+        other => panic!("unexpected range result: {other}"),
+    };
+    tx_before.commit();
+    assert_eq!(expected_count, 2 * num_warehouses as usize, "sanity: 2 order-lines inserted per warehouse");
+    assert_eq!(expected_rows, expected_count);
+
+    db.enable_scan_pool(Table::OrderLine, 4, None);
+
+    let mut tx_after = TpccTxn::begin(&db);
+    let actual_count = tx_after.range_count(Table::OrderLine, full_range);
+    let actual_rows = match tx_after.range(Table::OrderLine, full_range, true) {
+        CRUDOperationResult::MatchedRecords(v) => v.len(),
+        other => panic!("unexpected range result: {other}"),
+    };
+    tx_after.commit();
+
+    assert_eq!(actual_count, expected_count, "range_count must agree whether or not a pool is assigned");
+    assert_eq!(actual_rows, expected_rows, "range must agree whether or not a pool is assigned");
+
+    db.disable_scan_pool(Table::OrderLine);
+}
+
 /// The whole point of the redesigned pool (see `scan_pool::ScanWorkerPool`'s
 /// doc) is that several concurrent callers can share one pool without their
 /// jobs' results getting mixed up — the old per-query-exclusive design

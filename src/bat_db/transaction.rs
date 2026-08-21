@@ -275,19 +275,28 @@ pub(crate) fn point_on_tree<
 }
 
 /// See `insert_on_tree`'s doc. Always eager, same as `DbTransaction::range`.
+///
+/// `pool` — this table's shared scan-worker pool, if it has one, e.g. from
+/// `TpccDatabase::scan_pool` — is handed straight to `RangeQueryIter::
+/// collect_parallel`, which decides on its own whether `range` is even
+/// worth splitting across it; `None` always takes the plain sequential
+/// path. See `iter_query::RangeQueryIter`'s `*_parallel` methods' doc for
+/// why that decision lives there rather than being re-derived by every
+/// caller of this function.
 pub(crate) fn range_on_tree<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
-    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
-    Payload: Display + Clone + Default + Sync + 'static + WalPayload,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + crate::bat_query::interval::RangeSplit + 'static,
+    Payload: Display + Clone + Default + Sync + Send + 'static + WalPayload,
 >(
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     ts_start: Version,
     range: Interval<Key>,
+    pool: Option<&crate::bat_tree::scan_pool::ScanWorkerPool<FAN_OUT, NUM_RECORDS, Key, Payload>>,
 ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
     let scan = RangeQueryIter::new(tree, ts_start, range, false, worker_id);
-    CRUDOperationResult::MatchedRecords(scan.collect())
+    CRUDOperationResult::MatchedRecords(scan.collect_parallel(pool))
 }
 
 /// See `insert_on_tree`'s doc; see `DbTransaction::range_min`'s doc for why

@@ -239,6 +239,32 @@ impl<
             ranges.into_iter().map(|range| make_job(&self.tree, range)).collect()
         }
     }
+
+    /// Dispatches `reducer` across `partition(fanout)`'s ranges — this
+    /// query's fair share of the pool — falling back to running `reducer`
+    /// once over the whole `full_range`, on the calling thread, when no fair
+    /// share is available right now (`fair_query_fanout` returning `None`,
+    /// same reasoning as `dispatch_evenly`'s identical fallback). Unlike
+    /// `dispatch_evenly`, this needs no `RangeSplit` bound on `Key`: it's for
+    /// a caller that already has (or needs) its own domain-aware partitioner
+    /// — e.g. `bat_bench::parallel_scan::partition_order_line_range`, for a
+    /// bit-packed key `RangeSplit`'s generic numeric bisection isn't safe
+    /// over (see that trait's doc). Centralizes the "ask for a fair share,
+    /// dispatch across it, or just run inline" decision so a caller with its
+    /// own partitioner doesn't have to re-derive that control flow itself —
+    /// see `iter_query::RangeQueryIter`'s own `*_parallel` methods for the
+    /// equivalent, `RangeSplit`-based version of the same idea.
+    pub fn dispatch_by_fair_share<R: Send + 'static>(
+        &self,
+        full_range: Interval<Key>,
+        partition: impl FnOnce(usize) -> Vec<Interval<Key>>,
+        reducer: impl Fn(&MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>, Interval<Key>) -> R + Send + Sync + 'static,
+    ) -> Vec<R> {
+        match self.fair_query_fanout() {
+            Some(fanout) => self.try_dispatch(partition(fanout), reducer),
+            None => vec![reducer(&self.tree, full_range)],
+        }
+    }
 }
 
 /// A separate `impl` block, bounded by `Key: RangeSplit` — unlike every
@@ -276,17 +302,31 @@ impl<
     /// small would spend more on channel/oneshot overhead than it could
     /// possibly save (an unknown length, `approx_len` returning `None`, is
     /// *not* treated as "too small" — see that method's doc).
+    ///
+    /// Split out as [`Self::evenly_split_ranges`] so a caller that needs to
+    /// know *whether* this would dispatch before committing to build (or
+    /// move) a reducer closure — e.g. `RangeQueryIter`'s own `*_parallel`
+    /// methods, which fall back to consuming `self` sequentially rather
+    /// than through this call — can check that first instead of losing the
+    /// closure it already handed over on a `None` outcome.
     pub fn dispatch_evenly<R: Send + 'static>(
         &self,
         range: Interval<Key>,
         reducer: impl Fn(&MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>, Interval<Key>) -> R + Send + Sync + 'static,
     ) -> Option<Vec<R>> {
+        let ranges = self.evenly_split_ranges(range)?;
+        Some(self.try_dispatch(ranges, reducer))
+    }
+
+    /// The sub-ranges `dispatch_evenly` would dispatch `range` across right
+    /// now, or `None` for exactly the reasons documented on that method —
+    /// without needing a reducer at all.
+    pub fn evenly_split_ranges(&self, range: Interval<Key>) -> Option<Vec<Interval<Key>>> {
         if Key::approx_len(range).is_some_and(|len| len < MIN_LEN_FOR_SPLIT_DISPATCH) {
             return None;
         }
         let fanout = self.fair_query_fanout()?;
-        let ranges = Key::split_evenly(range, fanout)?;
-        Some(self.try_dispatch(ranges, reducer))
+        Key::split_evenly(range, fanout)
     }
 }
 
