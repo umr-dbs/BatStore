@@ -952,16 +952,39 @@ impl<
     }
 
     /// Writes `records` (already in the physical order they should land in)
-    /// onto `page`.
+    /// onto `page`, computing its zone map (see `LeafZoneMap`'s doc) fresh
+    /// from exactly `records` — *not* seeded from whichever source leaf(s)
+    /// they were split/merged out of. Seeding from a source's own (already
+    /// wider) zone map was tried first and measured to be a near-total loss
+    /// of pruning power for the common "monotonically increasing key,
+    /// correlated tracked column" case (e.g. `ORDER_LINE`'s `o_id`/
+    /// `ol_delivery_d`): under that access pattern, every leaf lives on the
+    /// same repeatedly-right-split lineage, so seeding-from-source lets
+    /// each split's low end permanently "leak" into every descendant that
+    /// keeps growing to its right — after enough splits, effectively every
+    /// leaf's `lo` gets stuck near the tree's oldest key forever, since
+    /// `LeafZoneMap` only ever widens. Recomputing exactly here costs one
+    /// more pass over `records`, already being iterated once to build
+    /// `page` anyway.
     fn push_records_onto(
         &self,
         page: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
         records: Vec<RecordPoint<Key, Payload>>,
     ) -> usize {
         let count = records.len();
-        page.unsafe_borrow_mut()
-            .as_leaf_page()
-            .bulk_push_owned(records);
+        let zone_map = match self.cold.zone_map_projection.get() {
+            Some(&project) => records.iter().fold(
+                crate::bat_page_model::leaf_page::LeafZoneMap::empty(),
+                |mut zm, r| {
+                    zm.widen(project(r.payload()));
+                    zm
+                },
+            ),
+            None => crate::bat_page_model::leaf_page::LeafZoneMap::empty(),
+        };
+        let leaf = page.unsafe_borrow_mut().as_leaf_page();
+        leaf.bulk_push_owned(records);
+        leaf.seed_zone_map(zone_map);
         count
     }
 

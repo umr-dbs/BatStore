@@ -305,7 +305,7 @@ fn pick_big<'x, T>(table: Table, warehouse: &'x Arc<T>, district: &'x Arc<T>) ->
     }
 }
 
-/// Spawns `TpccDatabase::enable_idle_compaction`'s big-tree sweep thread,
+/// Spawns `TpccDatabase::set_vacuum`'s big-tree sweep thread,
 /// generic over whichever concrete `FAN_OUT`/`NUM_RECORDS` the caller's
 /// `BigTrees` arm resolved to — one function serves all 8 variants, same
 /// rationale as `pick_big`. Loops `warehouse`/`district` directly (not
@@ -321,6 +321,7 @@ fn spawn_big_idle_compaction_thread<const FAN_OUT: usize, const NUM_RECORDS: usi
     let warehouse = warehouse.clone();
     let district = district.clone();
     thread::spawn(move || {
+        crate::bat_db::database::lower_current_thread_priority();
         while !stop.load(Relaxed) {
             warehouse.compact_idle_pass(dead_ratio_threshold);
             if stop.load(Relaxed) {
@@ -569,8 +570,8 @@ pub struct TpccDatabase {
     /// `BigTreeSize` this database was built with — see `BigTrees`'s doc.
     pub(crate) big_trees: BigTrees,
     /// The currently-running big-tree idle-compaction sweep thread's stop
-    /// flag (see `enable_idle_compaction`), or `None` if it's off. `db`'s
-    /// own `enable_idle_compaction`/`disable_idle_compaction` (see
+    /// flag (see `set_vacuum`), or `None` if it's off. `db`'s
+    /// own `set_vacuum` (see
     /// `bat_db::Database`) already covers every *standard* table; this
     /// covers `Table::Warehouse`/`Table::District` specifically, since
     /// `big_trees` lives outside `db`'s table list entirely and needs its
@@ -707,8 +708,11 @@ impl TpccDatabase {
         let mut table_ids = [0 as TableId; 14];
         for t in Table::ALL {
             if t.class() == TreeClass::Standard {
-                table_ids[t as usize] = db
-                    .create_table(t.as_str())
+                let tree = db.create_table(t.as_str());
+                if t == Table::OrderLine {
+                    tree.set_zone_map_projection(order_line_delivery_d_zone_map_projection);
+                }
+                table_ids[t as usize] = tree
                     .table_id()
                     .expect("bat_db::Database::create_table always assigns its new table a TableId");
             }
@@ -894,8 +898,12 @@ impl TpccDatabase {
     /// standard table (see `make_big_trees`), so leaving their own
     /// `block_reclaim_enabled` out of step would be exactly the unsound
     /// half-toggled state `MVBTSt::enable_gc`'s doc warns about.
-    pub fn enable_gc(&self, update_in_place: bool) {
-        self.db.enable_gc(update_in_place);
+    pub fn enable_gc(&self, update_in_place: bool, vacuum: Option<(f64, Duration)>) {
+        // `vacuum`'s own thread(s) are started separately, below, via
+        // `set_vacuum` — it has to cover both `db`'s standard tables and
+        // this struct's own `big_trees`, which `db.enable_gc` alone can't
+        // reach (see `set_vacuum`'s doc).
+        self.db.enable_gc(update_in_place, None);
         match &self.big_trees {
             BigTrees::KiB1 {
                 warehouse,
@@ -954,6 +962,7 @@ impl TpccDatabase {
                 district.enable_gc(update_in_place);
             }
         }
+        self.set_vacuum(vacuum);
     }
 
     pub fn disable_gc(&self) {
@@ -1016,25 +1025,35 @@ impl TpccDatabase {
                 district.disable_gc();
             }
         }
+        self.set_vacuum(None);
     }
 
-    /// Idle/proactive compaction across all 14 tables — see
-    /// `bat_db::Database::enable_idle_compaction`'s doc for the mechanism
-    /// and its "created once, at database-init time" table-snapshot
-    /// assumption, which applies here identically. `db.enable_idle_compaction`
-    /// already covers the 12 standard tables; this additionally spawns its
-    /// own sweep thread for `Table::Warehouse`/`Table::District`
-    /// specifically, since `big_trees` lives outside `db`'s table list
-    /// entirely (see `TreeClass`'s doc) and so isn't reached by `db`'s own
-    /// sweep. Calling this again (or `disable_idle_compaction`) first stops
-    /// any previously running big-tree sweep thread.
+    /// Starts or stops idle/proactive compaction across all 14 tables — GC's
+    /// background half (see `bat_db::Database::set_vacuum`'s doc), not a
+    /// separately toggled feature, so this is the single entry point
+    /// `enable_gc`/`disable_gc` themselves call as well as what a caller
+    /// reaches for when it needs the vacuum sweep's lifecycle to diverge
+    /// from GC's own (see `bat_db::Database::set_vacuum`'s doc for why that
+    /// comes up in practice). `Some((dead_ratio_threshold, sweep_interval))`
+    /// (re)starts both sweep threads with those parameters; `None` stops
+    /// whichever are running. `db.set_vacuum` alone only reaches the 12
+    /// standard tables; this additionally starts/stops its own sweep thread
+    /// for `Table::Warehouse`/`Table::District` specifically, since
+    /// `big_trees` lives outside `db`'s table list entirely (see
+    /// `TreeClass`'s doc). Snapshots the *current* `big_trees` set once, at
+    /// call time, the same "tables/trees are created once, at
+    /// database-init time" assumption `db.set_vacuum` itself relies on.
     ///
-    /// Two background threads total, each a permanent `WorkerId` — this
-    /// one plus `db.enable_idle_compaction`'s own — see that method's doc.
-    pub fn enable_idle_compaction(&self, dead_ratio_threshold: f64, sweep_interval: Duration) {
-        self.db.enable_idle_compaction(dead_ratio_threshold, sweep_interval);
-
+    /// Up to two background threads total when `Some`, each a permanent
+    /// `WorkerId` — this one plus `db.set_vacuum`'s own — see that method's
+    /// doc.
+    pub fn set_vacuum(&self, vacuum: Option<(f64, Duration)>) {
+        self.db.set_vacuum(vacuum);
         self.disable_big_idle_compaction();
+
+        let Some((dead_ratio_threshold, sweep_interval)) = vacuum else {
+            return;
+        };
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         *self.idle_compaction_stop.lock().unwrap() = Some(stop.clone());
 
@@ -1064,16 +1083,6 @@ impl TpccDatabase {
                 spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
             }
         }
-    }
-
-    /// Stops both idle-compaction sweep threads started by
-    /// `enable_idle_compaction` (this database's own big-tree thread, and
-    /// `db`'s standard-table one) — a no-op for either that isn't running.
-    /// See `bat_db::Database::disable_idle_compaction`'s doc: signals and
-    /// returns immediately, doesn't wait for either thread's current sweep.
-    pub fn disable_idle_compaction(&self) {
-        self.db.disable_idle_compaction();
-        self.disable_big_idle_compaction();
     }
 
     fn disable_big_idle_compaction(&self) {
@@ -1626,6 +1635,28 @@ pub struct OrderLine {
     pub ol_quantity: u8,
     pub ol_amount: f64,
     pub ol_dist_info: String,
+}
+
+/// Order-preserving `i64 -> u64` encoding for `MVBTSt::set_zone_map_projection`
+/// / `RangeQueryIter::with_zone_predicate` (both require a `u64`-space
+/// bound): flips the sign bit so `i64::MIN..=i64::MAX`'s ordering survives
+/// the reinterpretation as `u64`, the standard trick for embedding a signed
+/// total order into an unsigned one. Shared between `order_line_delivery_d_
+/// zone_map_projection` (the write side, called from `create_all_tables`)
+/// and `bat_bench::tpch_queries`'s Q1/Q6 (the read side) — both *must* use
+/// this exact same encoding, or a leaf's zone map and a query's predicate
+/// would silently disagree about what a given bound means.
+pub(crate) fn encode_signed_zone_value(v: i64) -> u64 {
+    (v as u64) ^ (1u64 << 63)
+}
+
+/// `ORDER_LINE`'s zone-map projection, tracking `ol_delivery_d` — the exact
+/// column CH-benCHmark Q1/Q6 filter on (see `bat_bench::parallel_scan`'s
+/// `q1_parallel`/`q6_parallel`). `None` (undelivered) doesn't widen the
+/// zone map at all, which is what lets an all-undelivered leaf be skipped
+/// outright for a delivered-date predicate — see `LeafZoneMap`'s doc.
+fn order_line_delivery_d_zone_map_projection(row: &TpccRow) -> Option<u64> {
+    row.as_order_line().ol_delivery_d.map(encode_signed_zone_value)
 }
 
 #[derive(Clone, Debug)]

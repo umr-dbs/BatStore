@@ -478,6 +478,27 @@ impl TxContext {
         self.live_snapshots().max()
     }
 
+    /// Whether any worker is currently between `begin_snapshot_registration`
+    /// and `end_snapshot_registration` right now — i.e. has already drawn
+    /// its real `ts_start` from `global_clock` (or is about to) but hasn't
+    /// published it to `live_tx` yet. `MVBTSt::decide_update_in_place_record`
+    /// uses this as an additional, conservative veto alongside
+    /// `newest_live_si`: a registering worker's real `ts_start` is only
+    /// known to be *at least* `in_flight_bound`'s published value (see that
+    /// field's doc — the bound is read *before* the real timestamp is
+    /// drawn), never bounded from above. So a low bound here doesn't rule
+    /// out a real `ts_start` that's already past some version's own
+    /// insertion timestamp; the only sound response to "a registration is
+    /// in flight at all" is to skip the in-place fast path for this call
+    /// and fall back to the always-safe versioned path, not to reason
+    /// further about the specific bound value.
+    #[inline]
+    pub(crate) fn has_in_flight_registration(&self) -> bool {
+        self.in_flight_bound
+            .iter()
+            .any(|slot| slot.load(Acquire) != NOT_IN_FLIGHT)
+    }
+
     /// Is `ts_start` a currently-registered (not yet committed/aborted)
     /// transaction? `MVBTSt::record_survives_gc` uses it to keep a *deleted*
     /// record physically present while its deleting transaction might

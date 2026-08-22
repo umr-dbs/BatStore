@@ -58,8 +58,8 @@
 //! thread instead of queuing behind other callers — see that method's doc.
 
 use crate::bat_bench::tpcc_schema::{
-    TpccDatabase, TpccKey, TpccScanWorkerPool as ScanWorkerPool, TpccTree, k_order_line,
-    order_line_table_range,
+    TpccDatabase, TpccKey, TpccScanWorkerPool as ScanWorkerPool, TpccTree, encode_signed_zone_value,
+    k_order_line, order_line_table_range,
 };
 use crate::bat_bench::tpcc_txn::TpccTxn;
 use crate::bat_bench::tpch_queries::OrderLineSummary;
@@ -169,19 +169,24 @@ pub fn q1_parallel(
 
     let reducer = move |tree: &TpccTree, range| {
         let mut groups = empty_groups();
-        RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref(|key, row| {
-            let ol = row.as_order_line();
-            let Some(delivered) = ol.ol_delivery_d else {
-                return;
-            };
-            if delivered > delivered_before {
-                return;
-            }
-            let g = &mut groups[crate::bat_bench::tpcc_schema::decode_order_line_number(key) as usize];
-            g.count += 1;
-            g.sum_qty += ol.ol_quantity as u64;
-            g.sum_amount += ol.ol_amount;
-        });
+        // `delivered <= delivered_before` (and `ol_delivery_d.is_some()`)
+        // is exactly `RangeQueryIter`'s automatic zone-map filter below —
+        // see `RangeQueryIter::with_zone_predicate`'s doc — so this
+        // closure no longer re-checks it; every row `visit` sees here
+        // already satisfies it.
+        RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID)
+            .with_zone_predicate(
+                encode_signed_zone_value(i64::MIN),
+                encode_signed_zone_value(delivered_before),
+            )
+            .for_each_ref(|key, row| {
+                let ol = row.as_order_line();
+                let g = &mut groups
+                    [crate::bat_bench::tpcc_schema::decode_order_line_number(key) as usize];
+                g.count += 1;
+                g.sum_qty += ol.ol_quantity as u64;
+                g.sum_amount += ol.ol_amount;
+            });
         groups
     };
 
@@ -220,14 +225,26 @@ pub fn q6_parallel(
 
     let reducer = move |tree: &TpccTree, range| {
         let mut revenue = 0.0;
-        RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref(|_, row| {
-            let ol = row.as_order_line();
-            if ol.ol_delivery_d.is_some_and(|delivered| {
-                delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty
-            }) {
-                revenue += ol.ol_amount;
-            }
-        });
+        // `date_hi - 1` makes the zone predicate's inclusive upper bound
+        // exactly equivalent to the original `delivered < date_hi` (dates
+        // are integer-valued) — `saturating_sub` only matters for the
+        // degenerate `date_hi == i64::MIN` case, where nothing can ever be
+        // `< date_hi` anyway, and the resulting `lo > hi` bound correctly
+        // matches nothing. With that, the zone-map filter (see
+        // `RangeQueryIter::with_zone_predicate`'s doc) already enforces the
+        // whole delivered-date range automatically; only `ol_quantity`
+        // (not a zone-mapped column) still needs a manual check here.
+        RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID)
+            .with_zone_predicate(
+                encode_signed_zone_value(date_lo),
+                encode_signed_zone_value(date_hi.saturating_sub(1)),
+            )
+            .for_each_ref(|_, row| {
+                let ol = row.as_order_line();
+                if ol.ol_quantity < max_qty {
+                    revenue += ol.ol_amount;
+                }
+            });
         revenue
     };
 

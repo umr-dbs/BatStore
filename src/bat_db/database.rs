@@ -19,6 +19,27 @@ use crate::bat_wal::backend::WalBackend;
 use crate::bat_wal::record::{TableId, WalPayload};
 use crate::bat_wal::recovery;
 
+/// Best-effort lowers the calling thread's OS scheduling priority to the
+/// lowest niceness Linux allows (`19`, via `setpriority(PRIO_PROCESS, tid,
+/// ..)` on the thread's own kernel tid — Linux gives each thread, not just
+/// each process, its own schedulable priority under `PRIO_PROCESS`). Meant
+/// to be called once, at the very start of a background housekeeping
+/// thread's body (currently only the vacuum thread `start_vacuum_thread`
+/// spawns) — makes the OS scheduler yield that thread's CPU time to
+/// foreground transaction threads under contention, rather than sharing it
+/// evenly, so background compaction can't degrade foreground latency just
+/// by running at the wrong moment. A no-op (never fails loudly) on any
+/// non-Linux target or if the syscalls themselves fail — this is a
+/// best-effort scheduling hint, not a correctness requirement, so a
+/// platform without it just runs the thread at normal priority.
+pub(crate) fn lower_current_thread_priority() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
+        libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, 19);
+    }
+}
+
 /// How many tables' worth of `TableEntry` are stored inline inside
 /// `Database::tables`' own `Arc` allocation, rather than in a second,
 /// separately-heap-allocated buffer the way a plain `Vec` always would be —
@@ -120,9 +141,9 @@ pub struct Database<
     /// table created afterwards); `None` (GC off) otherwise.
     gc: ArcSwapOption<bool>,
     /// The currently-running idle-compaction sweep thread's stop flag (see
-    /// `enable_idle_compaction`), or `None` if it's off. Swapped to a fresh
-    /// flag on every `enable_idle_compaction` call and to `None` on
-    /// `disable_idle_compaction`, so at most one sweep thread is ever
+    /// `start_vacuum_thread`), or `None` if it's off. Swapped to a fresh
+    /// flag on every `start_vacuum_thread` call and to `None` on
+    /// `stop_vacuum_thread`, so at most one sweep thread is ever
     /// running for this database at a time.
     idle_compaction_stop: ArcSwapOption<AtomicBool>,
     /// Per-table shared scan-worker pools (see `bat_tree::scan_pool::
@@ -368,11 +389,20 @@ impl<
     /// — see `MVBTSt::enable_gc`'s doc for why partial/per-table toggling
     /// would make pruning the shared commit logs unsound (every table
     /// shares this database's one `TxContext`).
-    pub fn enable_gc(&self, update_in_place: bool) {
+    /// `vacuum`, when `Some((dead_ratio_threshold, sweep_interval))`, also
+    /// (re)starts the background vacuum thread (see `start_vacuum_thread`'s
+    /// doc) with those parameters; `None` stops it if one is running. The
+    /// vacuum thread only ever reclaims space GC has made collectible in
+    /// the first place, so it's exposed here as GC's own background half
+    /// rather than as a separately toggled feature — one call turns both on
+    /// or off together.
+    pub fn enable_gc(&self, update_in_place: bool, vacuum: Option<(f64, Duration)>) {
         for entry in self.tables.load().iter() {
             entry.tree.enable_gc(update_in_place);
         }
         self.gc.store(Some(sync::Arc::new(update_in_place)));
+
+        self.set_vacuum(vacuum);
     }
 
     pub fn disable_gc(&self) {
@@ -380,6 +410,27 @@ impl<
             entry.tree.disable_gc();
         }
         self.gc.store(None);
+        self.set_vacuum(None);
+    }
+
+    /// Starts or stops the vacuum thread on its own, independent of the
+    /// per-tree GC flag `enable_gc`/`disable_gc` toggle — e.g. for a caller
+    /// that wants GC's inline reclaim on for a whole run but the vacuum
+    /// sweep only during a specific measured window
+    /// (`bat_bench::tpcc_driver::run_tpcc`'s load-vs-timed-phase split is
+    /// exactly this). `enable_gc`/`disable_gc` are the common-case wrapper
+    /// that keeps both toggled together; this is the escape hatch for when
+    /// their lifecycles need to diverge. `Some((dead_ratio_threshold,
+    /// sweep_interval))` (re)starts the sweep thread with those parameters
+    /// (see `start_vacuum_thread`'s doc); `None` stops it if one is
+    /// running.
+    pub fn set_vacuum(&self, vacuum: Option<(f64, Duration)>) {
+        match vacuum {
+            Some((dead_ratio_threshold, sweep_interval)) => {
+                self.start_vacuum_thread(dead_ratio_threshold, sweep_interval)
+            }
+            None => self.stop_vacuum_thread(),
+        }
     }
 
     /// Uniformly disables GC and configures whether historic
@@ -401,14 +452,24 @@ impl<
     /// the fix for a read-heavy table (few, infrequent writes to any one
     /// leaf) otherwise sitting at a garbage-inflated ratio indefinitely,
     /// since nothing on the ordinary write path ever revisits such a leaf.
+    /// This is GC's background half, not a separate feature — it only ever
+    /// reclaims space GC's own bookkeeping (`active_dead_count`) has
+    /// already made collectible — so it's started/stopped through
+    /// `enable_gc`/`disable_gc`'s `vacuum` parameter rather than its own
+    /// public on/off switch.
+    ///
+    /// Runs at the lowest OS scheduling priority this platform supports
+    /// (see `lower_current_thread_priority`'s doc) — a vacuum sweep
+    /// competing with foreground transaction threads for CPU would defeat
+    /// its own "idle" premise, so it's set to yield to them under
+    /// contention rather than share evenly.
     ///
     /// Snapshots the *current* table list once, at call time, the same
     /// "tables are created once, at database-init time" assumption
     /// `enable_gc`/this struct's own doc already rely on — a table created
-    /// afterwards isn't picked up until the next `enable_idle_compaction`
-    /// call. Calling this again (or `disable_idle_compaction`) first stops
-    /// any previously running sweep thread, so at most one ever runs at a
-    /// time.
+    /// afterwards isn't picked up until the next `start_vacuum_thread`
+    /// call. Calling this again (or `stop_vacuum_thread`) first stops any
+    /// previously running sweep thread, so at most one ever runs at a time.
     ///
     /// The spawned thread permanently consumes one `WorkerId` from this
     /// database's fixed worker pool the moment its first sweep actually
@@ -416,18 +477,18 @@ impl<
     /// callers sizing `max_workers` (`new_with_max_workers`) need to budget
     /// for it. It also outlives `&self` — it holds its own `Arc` clone of
     /// each table's tree, not a reference back to this `Database` — so a
-    /// caller that drops this database without calling
-    /// `disable_idle_compaction` first leaves the thread running forever,
-    /// keeping those trees (and this database's `ctx`) alive through its
-    /// own clones.
-    pub fn enable_idle_compaction(&self, dead_ratio_threshold: f64, sweep_interval: Duration) {
-        self.disable_idle_compaction();
+    /// caller that drops this database without calling `disable_gc` first
+    /// leaves the thread running forever, keeping those trees (and this
+    /// database's `ctx`) alive through its own clones.
+    fn start_vacuum_thread(&self, dead_ratio_threshold: f64, sweep_interval: Duration) {
+        self.stop_vacuum_thread();
 
         let stop = sync::Arc::new(AtomicBool::new(false));
         self.idle_compaction_stop.store(Some(stop.clone()));
 
         let trees: Vec<_> = self.tables.load().iter().map(|entry| entry.tree.clone()).collect();
         thread::spawn(move || {
+            lower_current_thread_priority();
             while !stop.load(Relaxed) {
                 for tree in &trees {
                     tree.compact_idle_pass(dead_ratio_threshold);
@@ -440,12 +501,12 @@ impl<
         });
     }
 
-    /// Stops the background sweep thread started by `enable_idle_compaction`,
+    /// Stops the background sweep thread started by `start_vacuum_thread`,
     /// if one is running — a no-op otherwise. Signals the thread to exit and
     /// returns immediately; it does not wait for the thread's current
     /// sleep/sweep to finish, since this is best-effort housekeeping, not
     /// something callers need to synchronize with.
-    pub fn disable_idle_compaction(&self) {
+    fn stop_vacuum_thread(&self) {
         if let Some(stop) = self.idle_compaction_stop.swap(None) {
             stop.store(true, Relaxed);
         }

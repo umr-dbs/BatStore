@@ -37,10 +37,20 @@ impl<
     /// `*Rand` operations (`UpdateRand` here) are used purely for
     /// benchmark/data-generation workloads, never logged to the WAL, and so
     /// are free to take this fast path whenever the heuristic says so. The
-    /// WAL-relevant `Update` arm additionally gates this off entirely
-    /// whenever a WAL is attached — see the call site.
+    /// WAL-relevant `Update` arm also takes it when a WAL is attached, but
+    /// still logs an ordinary `Update` record through the ordinary commit
+    /// protocol (`wal_start_commit`/`commit_tx`/`wal_log_commit`) — see the
+    /// call site's doc for why that's sound even though the *live* tree
+    /// never mints a second version for it.
+    ///
+    /// Also vetoed by `TxContext::has_in_flight_registration` — a worker
+    /// mid-registration (drawn a real `ts_start` but not yet published to
+    /// `live_tx`) is invisible to `newest_live_si` below, and its real
+    /// `ts_start` can't be ruled out as newer than `version`'s own (see
+    /// that method's doc); the only sound response is to skip the fast
+    /// path whenever any registration is in flight at all.
     pub(crate) fn decide_update_in_place_record(&self, version: &VersionInfo) -> bool {
-        if !self.has_update_in_place() {
+        if !self.has_update_in_place() || self.ctx.has_in_flight_registration() {
             return false;
         }
 
@@ -79,11 +89,32 @@ impl<
         }
 
         let payload = make_payload(leaf_page.payload_at(position));
-        if matches!(self.cold.wal.as_ref(), WalBackend::Off)
-            && self.decide_update_in_place_record(leaf_page.version_at(position))
-        {
+        let zone_widen = self.cold.zone_map_projection.get().and_then(|f| f(&payload));
+        // In-place mutation never mints a version, so it stays sound under a
+        // WAL exactly the same way it's sound live: `decide_update_in_place_
+        // record` already proved no live-or-registering snapshot's `ts_start`
+        // falls between the target version's own insertion and now, so any
+        // future observer sees the same outcome whether this is logged as an
+        // ordinary `Update` (replay mints its own fresh version, one more
+        // than the live tree ever had — `bat_wal::recovery`'s doc already
+        // treats that as an acceptable divergence) or applied truly in
+        // place. So the WAL-off short-circuit below is purely a perf
+        // shortcut (skip the commit protocol entirely) — WAL-on still takes
+        // this branch, just pays for a real commit stamp and log record.
+        if self.decide_update_in_place_record(leaf_page.version_at(position)) {
+            if matches!(self.cold.wal.as_ref(), WalBackend::Off) {
+                leaf_page.set_payload_at(position, payload);
+                leaf_page.widen_zone_map(zone_widen);
+                return CRUDOperationResult::Updated(self.current_version());
+            }
+
+            let stamp = self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
             leaf_page.set_payload_at(position, payload);
-            return CRUDOperationResult::Updated(self.current_version());
+            leaf_page.widen_zone_map(zone_widen);
+            let ts_commit = self.commit_tx(stamp.worker_id());
+            drop(leaf_guard);
+            self.wal_log_commit(stamp, ts_commit);
+            return CRUDOperationResult::Updated(stamp.ts_start());
         }
 
         let stamp = self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
@@ -95,6 +126,7 @@ impl<
             RecordPoint::new(key, VersionInfo::new(stamp), payload),
             current_len,
         );
+        leaf_page.widen_zone_map(zone_widen);
         leaf_page.commit_delta(0, 1);
         let ts_commit = self.commit_tx(stamp.worker_id());
         drop(leaf_guard);
@@ -124,7 +156,9 @@ impl<
                 let leaf_deref_mut = leaf_guard.deref_mut();
 
                 let leaf_page = leaf_deref_mut.as_leaf_page();
+                let zone_widen = self.cold.zone_map_projection.get().and_then(|f| f(&payload));
 
+                let mut existing_dead_position = None;
                 if let Some(position) = leaf_page.latest_position(key, true) {
                     let version = leaf_page.version_at(position);
                     if version.is_live() {
@@ -140,6 +174,41 @@ impl<
                             CRUDOperationResult::Conflict
                         };
                     }
+                    existing_dead_position = Some(position);
+                }
+
+                // Re-inserting over a tombstoned record can revive it in
+                // place instead of minting a new version, for exactly the
+                // reason `Update`'s own in-place branch gets to (see
+                // `decide_update_in_place_record`'s doc): a version that's
+                // provably invisible to every live-or-registering snapshot
+                // can be safely repurposed, since no observer can tell a
+                // reused version from a freshly-minted one. Same WAL
+                // handling as `Update`'s in-place branch too — WAL-off skips
+                // the commit protocol entirely, WAL-on still logs an
+                // ordinary `Insert` record (replay mints its own fresh
+                // version either way).
+                if let Some(position) = existing_dead_position {
+                    if self.decide_update_in_place_record(leaf_page.version_at(position)) {
+                        if matches!(self.cold.wal.as_ref(), WalBackend::Off) {
+                            leaf_page.version_mut_at(position).undelete();
+                            leaf_page.set_payload_at(position, payload);
+                            leaf_page.widen_zone_map(zone_widen);
+                            leaf_page.commit_delta(1, -1);
+                            return CRUDOperationResult::Inserted(self.current_version());
+                        }
+
+                        let stamp =
+                            self.wal_start_commit(|_| CRUDOperation::Insert(key, payload.clone()));
+                        leaf_page.version_mut_at(position).undelete();
+                        leaf_page.set_payload_at(position, payload);
+                        leaf_page.widen_zone_map(zone_widen);
+                        leaf_page.commit_delta(1, -1);
+                        let ts_commit = self.commit_tx(stamp.worker_id());
+                        drop(leaf_guard);
+                        self.wal_log_commit(stamp, ts_commit);
+                        return CRUDOperationResult::Inserted(stamp.ts_start());
+                    }
                 }
 
                 let current_len = leaf_page.len();
@@ -150,6 +219,7 @@ impl<
                     RecordPoint::new(key, VersionInfo::new(stamp), payload),
                     current_len,
                 );
+                leaf_page.widen_zone_map(zone_widen);
 
                 leaf_page.commit_delta(1, 0);
 
@@ -186,26 +256,48 @@ impl<
                 let leaf_deref_mut = leaf_guard.deref_mut();
 
                 let leaf_page = leaf_deref_mut.as_leaf_page();
+                let zone_widen = self.cold.zone_map_projection.get().and_then(|f| f(&payload));
 
                 let current_len = leaf_page.len();
 
-                // The in-place fast path never mints a version, which can't be
-                // represented in the WAL (one CRUDOperation = one version = one log
-                // record), so it's skipped entirely whenever a WAL is attached —
-                // every logged Update always takes the normal versioned path below.
+                // In-place mutation never mints a version, but that's fine
+                // under a WAL too: `decide_update_in_place_record` already
+                // proved no live-or-registering snapshot needs to
+                // distinguish the old payload from the new one, so logging
+                // this as an ordinary `Update` (replay mints its own fresh
+                // version) produces the same observable outcome as any
+                // future reader would see either way — see `update_with`'s
+                // doc for the full argument. WAL-off keeps the old
+                // zero-commit-protocol shortcut; WAL-on pays for a real
+                // stamp and log record but still skips growing the version
+                // chain on the live tree.
                 let latest_position = leaf_page.latest_position(key, false);
                 if let Some(position) = latest_position {
-                    if matches!(self.cold.wal.as_ref(), WalBackend::Off)
-                        && self.decide_update_in_place_record(leaf_page.version_at(position))
-                    {
-                        leaf_page.set_payload_at(position, payload);
-                        if leaf_page.version_at(position).is_deleted() {
-                            leaf_page.version_mut_at(position).undelete();
+                    if self.decide_update_in_place_record(leaf_page.version_at(position)) {
+                        if matches!(self.cold.wal.as_ref(), WalBackend::Off) {
+                            leaf_page.set_payload_at(position, payload);
+                            leaf_page.widen_zone_map(zone_widen);
+                            if leaf_page.version_at(position).is_deleted() {
+                                leaf_page.version_mut_at(position).undelete();
+                                leaf_page.commit_delta(1, -1);
+                            }
 
-                            leaf_page.commit_delta(1, -1);
+                            return CRUDOperationResult::Updated(self.current_version());
                         }
 
-                        return CRUDOperationResult::Updated(self.current_version());
+                        let stamp =
+                            self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
+                        leaf_page.set_payload_at(position, payload);
+                        leaf_page.widen_zone_map(zone_widen);
+                        if leaf_page.version_at(position).is_deleted() {
+                            leaf_page.version_mut_at(position).undelete();
+                            leaf_page.commit_delta(1, -1);
+                        }
+                        let ts_commit = self.commit_tx(stamp.worker_id());
+                        drop(leaf_guard);
+                        self.wal_log_commit(stamp, ts_commit);
+
+                        return CRUDOperationResult::Updated(stamp.ts_start());
                     }
                 }
 
@@ -231,6 +323,7 @@ impl<
                             RecordPoint::new(key, VersionInfo::new(stamp), payload),
                             current_len,
                         );
+                        leaf_page.widen_zone_map(zone_widen);
 
                         leaf_page.commit_delta(0, 1);
                         let ts_commit = self.commit_tx(stamp.worker_id());

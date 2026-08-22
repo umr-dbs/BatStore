@@ -32,6 +32,7 @@ use crate::bat_bench::tpcc_schema::TpccConfig;
 use crate::bat_bench::tpcc_schema::TpccDatabase;
 use crate::bat_bench::tpcc_txn::{self, TxnOutcome};
 use crate::bat_root::index_root::RootIndexType;
+use crate::bat_tree::idle_compaction::{DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL};
 
 pub struct DriverConfig {
     pub tpcc: TpccConfig,
@@ -268,7 +269,7 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     let olap_thread_cost = 1;
 
     // Two more permanent `WorkerId`s if idle compaction is enabled — see
-    // `DriverConfig::idle_compaction`'s and `TpccDatabase::enable_idle_compaction`'s
+    // `DriverConfig::idle_compaction`'s and `TpccDatabase::set_vacuum`'s
     // docs: one sweep thread for the 12 standard tables (`Database`'s own),
     // one for `Table::Warehouse`/`Table::District` (`TpccDatabase`'s own,
     // since `big_trees` lives outside `Database`'s table list entirely).
@@ -314,7 +315,7 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
         ),
     });
     if cfg.gc {
-        db.enable_gc(cfg.update_in_place);
+        db.enable_gc(cfg.update_in_place, None);
     }
 
 
@@ -452,14 +453,17 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     // load time entirely.
     barrier.wait();
 
-    // `TpccDatabase::enable_idle_compaction`'s own background thread(s) —
-    // see `DriverConfig::idle_compaction`'s doc — started right as the
-    // timed phase begins, same as everything else measured in it, and
-    // stopped right as it ends, below, so a caller that runs `run_tpcc`
-    // more than once in the same process (`bat_bench::suite`) never leaves
-    // a stale sweep thread running against an about-to-be-dropped `db`.
+    // `TpccDatabase::set_vacuum`'s own background thread(s) — see
+    // `DriverConfig::idle_compaction`'s doc — started right as the timed
+    // phase begins, same as everything else measured in it, and stopped
+    // right as it ends, below, so a caller that runs `run_tpcc` more than
+    // once in the same process (`bat_bench::suite`) never leaves a stale
+    // sweep thread running against an about-to-be-dropped `db`. Set
+    // independently of `enable_gc`'s own `vacuum` parameter above since GC
+    // itself (if on) should stay on through both load and timed phases,
+    // while the vacuum sweep is only meant to run during the timed one.
     if let Some((dead_ratio_threshold, sweep_interval)) = cfg.idle_compaction {
-        db.enable_idle_compaction(dead_ratio_threshold, sweep_interval);
+        db.set_vacuum(Some((dead_ratio_threshold, sweep_interval)));
     }
     if let Some(num_workers) = cfg.scan_pool_workers.filter(|&n| n > 0) {
         db.enable_scan_pool(crate::bat_bench::tpcc_schema::Table::OrderLine, num_workers, Some(num_olap));
@@ -469,7 +473,7 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     println!("Loading done. Running timed phase for {duration:?}...");
     thread::sleep(duration);
     stop.store(true, Relaxed);
-    db.disable_idle_compaction();
+    db.set_vacuum(None);
     db.disable_scan_pool(crate::bat_bench::tpcc_schema::Table::OrderLine);
 
     let terminal_stats: Vec<TerminalStats> = terminal_handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -743,12 +747,19 @@ pub fn main_tpcc(parms: Vec<String>) {
             Ok(n) => Some(n.max(2)),
         },
     };
-    // Idle/proactive compaction (`bat_tree::idle_compaction`, `DriverConfig::idle_compaction`'s
-    // doc) — `0.0` (default) means "disabled", since a real dead ratio is
-    // always `> 0.0` once any garbage exists, so a `0.0` threshold could
-    // never mean "opt-in but never trigger" the way it does here.
-    let idle_compaction_dead_ratio: f64 = arg(&parms, 23, 0.0);
-    let idle_compaction_sweep_secs: f64 = arg(&parms, 24, 5.0);
+    // Idle/proactive compaction (`bat_tree::idle_compaction`,
+    // `DriverConfig::idle_compaction`'s doc) — GC's own background vacuum
+    // thread, on by default at `DEFAULT_VACUUM_DEAD_RATIO`/
+    // `DEFAULT_VACUUM_SWEEP_INTERVAL` whenever GC itself is on, since
+    // nothing on the ordinary write path ever revisits a read-heavy leaf's
+    // garbage otherwise (see that module's doc). `0.0` explicitly passed
+    // for arg 23 opts back out — a real dead ratio is always `> 0.0` once
+    // any garbage exists, so `0.0` could never mean "opt-in but never
+    // trigger" the way it does here.
+    let idle_compaction_dead_ratio: f64 =
+        arg(&parms, 23, if gc { DEFAULT_VACUUM_DEAD_RATIO } else { 0.0 });
+    let idle_compaction_sweep_secs: f64 =
+        arg(&parms, 24, DEFAULT_VACUUM_SWEEP_INTERVAL.as_secs_f64());
     let idle_compaction = (idle_compaction_dead_ratio > 0.0)
         .then(|| (idle_compaction_dead_ratio, Duration::from_secs_f64(idle_compaction_sweep_secs)));
 
@@ -841,7 +852,7 @@ fn standard_driver_config(
         wal: None,
         wal_lockfree_batch_size: None,
         htap_baseline,
-        idle_compaction: None,
+        idle_compaction: Some((DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
         scan_pool_workers: None,
         output_dir: PathBuf::from("."),
     }

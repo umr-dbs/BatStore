@@ -49,6 +49,7 @@ fn config(num_threads: usize, wal_path: PathBuf, batch_size: Option<usize>) -> D
         output_dir: std::env::temp_dir().join("batstore_ycsb_wal_perf_test_out"),
         // Workload A never scans, so this would auto-decide to `None` anyway.
         scan_pool_workers: None,
+        idle_compaction: None,
     }
 }
 

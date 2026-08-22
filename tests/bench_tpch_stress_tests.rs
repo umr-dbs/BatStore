@@ -147,7 +147,7 @@ fn olap_worker(db: Arc<TpccDatabase>, region_name: &str, stop: Arc<AtomicBool>) 
 fn concurrent_oltp_and_ch_benchmark_queries_never_observe_corrupt_aggregates() {
     let cfg = stress_cfg();
     let db = Arc::new(TpccDatabase::new(RootIndexType::default()));
-    db.enable_gc(false);
+    db.enable_gc(false, None);
 
     populate_regions_and_nations(&db);
     populate_suppliers(&db, &cfg);

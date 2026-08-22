@@ -120,6 +120,62 @@ fn q1_groups_and_sums_delivered_order_lines_by_ol_number() {
     assert!((groups[1].sum_amount - 60.0).abs() < 1e-9);
 }
 
+/// `q1`'s cutoff is inclusive (`delivered <= delivered_before`), and its
+/// closure no longer checks that itself at all — the automatic zone-map
+/// filter (`RangeQueryIter::with_zone_predicate`, bound `[i64::MIN,
+/// delivered_before]`) is the *only* thing enforcing it now. This exists
+/// specifically to catch an off-by-one there: a row delivered exactly *on*
+/// `delivered_before` must be included, one delivered the instant after
+/// must not, and `i64::MIN` itself (the encoded lower bound's literal
+/// edge) must not be accidentally excluded by the sign-bit-flip encoding.
+#[test]
+fn q1_includes_a_row_delivered_exactly_on_the_inclusive_cutoff() {
+    let db = TpccDatabase::new(RootIndexType::default());
+
+    // The earliest representable date: must not be excluded by the
+    // encoded lower bound (`encode_signed_zone_value(i64::MIN)`).
+    insert(
+        &db,
+        Table::OrderLine,
+        k_order_line(1, 1, 1, 1),
+        order_line(1, 1, Some(i64::MIN), 1, 1.0),
+    );
+    // Exactly at the cutoff: included (`<=`, not `<`).
+    insert(
+        &db,
+        Table::OrderLine,
+        k_order_line(1, 1, 2, 1),
+        order_line(1, 1, Some(100), 1, 10.0),
+    );
+    // One past the cutoff: excluded.
+    insert(
+        &db,
+        Table::OrderLine,
+        k_order_line(1, 1, 3, 1),
+        order_line(1, 1, Some(101), 1, 1_000_000.0),
+    );
+
+    let (groups, _ts) = q1(&db, 100);
+    let total_count: u64 = groups.iter().map(|g| g.count).sum();
+    let total_amount: f64 = groups.iter().map(|g| g.sum_amount).sum();
+
+    assert_eq!(total_count, 2, "expected exactly the MIN-date and on-cutoff rows");
+    assert!(
+        (total_amount - 11.0).abs() < 1e-9,
+        "expected 1.0 + 10.0 = 11.0, got {total_amount}"
+    );
+
+    db.enable_scan_pool(Table::OrderLine, 2, None);
+    let pool = db.scan_pool(Table::OrderLine).unwrap();
+    let (groups_parallel, _ts) = q1_parallel(&db, &pool, 1, 100);
+    let total_count_parallel: u64 = groups_parallel.iter().map(|g| g.count).sum();
+    assert_eq!(
+        total_count_parallel, 2,
+        "q1_parallel disagreed with q1 on the inclusive cutoff"
+    );
+    db.disable_scan_pool(Table::OrderLine);
+}
+
 /// q6 sums the amount of delivered-in-range order-lines below a quantity
 /// threshold.
 #[test]
@@ -164,6 +220,59 @@ fn q6_sums_revenue_for_delivered_low_quantity_lines_in_date_range() {
         (revenue - 1159.0).abs() < 1e-9,
         "expected 100 + 60 + 999, got {revenue}"
     );
+}
+
+/// `q6`'s date range is `[date_lo, date_hi)` — upper-*exclusive* — but the
+/// automatic zone-map filter (`RangeQueryIter::with_zone_predicate`) that
+/// now does this filtering is bound-*inclusive* on both ends (see
+/// `LeafZoneMap::may_intersect`). `q6_parallel`/`q6` bridge that gap by
+/// passing `date_hi.saturating_sub(1)` as the inclusive upper bound — this
+/// test exists specifically to catch an off-by-one in that bridge: a row
+/// delivered exactly *on* `date_hi` must still be excluded (the automatic
+/// filter is the only thing checking the date range now, since both
+/// `q6`/`q6_parallel` dropped their manual date check), while one delivered
+/// at `date_lo` (inclusive) and one at `date_hi - 1` (the last still-valid
+/// instant) must both be included.
+#[test]
+fn q6_excludes_a_row_delivered_exactly_on_the_exclusive_upper_bound() {
+    let db = TpccDatabase::new(RootIndexType::default());
+
+    // Exactly at date_lo: included.
+    insert(
+        &db,
+        Table::OrderLine,
+        k_order_line(1, 1, 1, 1),
+        order_line(1, 1, Some(0), 5, 7.0),
+    );
+    // Exactly at date_hi - 1: included (last valid instant).
+    insert(
+        &db,
+        Table::OrderLine,
+        k_order_line(1, 1, 2, 1),
+        order_line(1, 1, Some(99), 5, 11.0),
+    );
+    // Exactly at date_hi: excluded (upper bound is exclusive).
+    insert(
+        &db,
+        Table::OrderLine,
+        k_order_line(1, 1, 3, 1),
+        order_line(1, 1, Some(100), 5, 1_000_000.0),
+    );
+
+    let (revenue, _ts) = q6(&db, 0, 100, 6);
+    assert!(
+        (revenue - 18.0).abs() < 1e-9,
+        "expected exactly 7 + 11 = 18 (the date_hi row must be excluded), got {revenue}"
+    );
+
+    db.enable_scan_pool(Table::OrderLine, 2, None);
+    let pool = db.scan_pool(Table::OrderLine).unwrap();
+    let (revenue_parallel, _ts) = q6_parallel(&db, &pool, 1, 0, 100, 6);
+    assert!(
+        (revenue_parallel - 18.0).abs() < 1e-9,
+        "q6_parallel disagreed with q6 on the exclusive upper bound: got {revenue_parallel}"
+    );
+    db.disable_scan_pool(Table::OrderLine);
 }
 
 /// q4 counts, grouped by `o_ol_cnt`, orders entered in range that have at
@@ -791,6 +900,79 @@ fn scan_pool_vs_sequential_crossover() {
 
         db.disable_scan_pool(Table::OrderLine);
     }
+}
+
+/// Not a correctness check but kept as a permanent perf probe (same
+/// convention as `scan_pool_vs_sequential_crossover` just above): measures
+/// how much `q1`'s automatic zone-map predicate (`RangeQueryIter::
+/// with_zone_predicate`, wired to `ol_delivery_d` in `create_all_tables`)
+/// actually saves versus visiting every leaf. `ol_delivery_d` is set equal
+/// to `i` here specifically so it's strongly correlated with insertion
+/// (and therefore physical leaf) order, mirroring real TPC-C data where
+/// `ol_delivery_d` tracks order age — the scenario this feature targets.
+/// A `NARROW` cutoff keeps only the earliest ~2% of each warehouse's dates,
+/// so almost every leaf's `[lo, hi]` should fall entirely above it and get
+/// skipped outright; `FULL` covers every row, so nothing should be
+/// prunable. Prints wall-clock timing (`--nocapture` to see it); see this
+/// session's own report for the matching leaf-visited/skipped counts,
+/// gathered separately via `bat_test::SCAN_TRACE` (off by default, so not
+/// asserted on here).
+#[test]
+fn zone_map_pruning_speeds_up_a_narrow_q1_predicate() {
+    let num_warehouses = 8u32;
+    let rows_per_warehouse = 20_000usize;
+    let repeats = 20usize;
+
+    let db = TpccDatabase::new(RootIndexType::default());
+    for w in 1..=num_warehouses {
+        for i in 0..rows_per_warehouse {
+            insert(
+                &db,
+                Table::OrderLine,
+                k_order_line(w, 1, i as u32, ((i % 15) + 1) as u8),
+                order_line(1, w, Some(i as i64), 5, 10.0),
+            );
+        }
+    }
+
+    let full_cutoff = rows_per_warehouse as i64;
+    let narrow_cutoff = rows_per_warehouse as i64 / 50;
+
+    // Warm up both paths once before timing either.
+    let (full_result, _) = q1(&db, full_cutoff);
+    let (narrow_result, _) = q1(&db, narrow_cutoff);
+
+    let full_start = Instant::now();
+    for _ in 0..repeats {
+        let _ = q1(&db, full_cutoff);
+    }
+    let full_us = full_start.elapsed().as_micros() as f64 / repeats as f64;
+
+    let narrow_start = Instant::now();
+    for _ in 0..repeats {
+        let _ = q1(&db, narrow_cutoff);
+    }
+    let narrow_us = narrow_start.elapsed().as_micros() as f64 / repeats as f64;
+
+    println!(
+        "\n=== zone-map pruning: q1 over {} rows, cutoff covering 100% vs ~2% of dates ===",
+        rows_per_warehouse * num_warehouses as usize
+    );
+    println!(
+        "full_cutoff={full_cutoff} -> {full_us:.1}us/call, {} matched rows",
+        full_result.iter().map(|g| g.count).sum::<u64>()
+    );
+    println!(
+        "narrow_cutoff={narrow_cutoff} -> {narrow_us:.1}us/call, {} matched rows",
+        narrow_result.iter().map(|g| g.count).sum::<u64>()
+    );
+    println!("narrow/full time ratio: {:.3}", narrow_us / full_us);
+
+    assert!(
+        narrow_result.iter().map(|g| g.count).sum::<u64>()
+            < full_result.iter().map(|g| g.count).sum::<u64>(),
+        "the narrow cutoff should match strictly fewer rows than the full one"
+    );
 }
 
 /// Splits `order_line_table_range()` into `fanout` contiguous warehouse

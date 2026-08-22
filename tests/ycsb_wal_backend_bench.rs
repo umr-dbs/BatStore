@@ -59,6 +59,7 @@ fn config(
         output_dir: std::env::temp_dir().join("batstore_ycsb_wal_bench_out"),
         // Workload A never scans, so this would auto-decide to `None` anyway.
         scan_pool_workers: None,
+        idle_compaction: None,
     }
 }
 

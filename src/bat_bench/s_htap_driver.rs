@@ -13,9 +13,11 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Barrier};
+use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use triomphe::Arc;
 
 use crate::bat_bench::mem_stats::{DEFAULT_SAMPLE_INTERVAL, MemSampler};
 use crate::bat_bench::s_htap_random::{
@@ -61,6 +63,9 @@ pub struct DriverConfig {
     pub wal: Option<(PathBuf, Duration)>,
     pub wal_lockfree_batch_size: Option<usize>,
     pub output_dir: PathBuf,
+    /// See `ycsb_driver::DriverConfig::idle_compaction`'s doc — same
+    /// mechanism/semantics for this driver's one bare tree.
+    pub idle_compaction: Option<(f64, Duration)>,
 }
 
 pub struct SHtapRunSummary {
@@ -231,6 +236,15 @@ pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
     if cfg.gc {
         tree.enable_gc(cfg.update_in_place);
     }
+    let vacuum_stop = std::sync::Arc::new(AtomicBool::new(false));
+    if let Some((dead_ratio_threshold, sweep_interval)) = cfg.idle_compaction.filter(|_| cfg.gc) {
+        crate::bat_tree::idle_compaction::spawn_vacuum_thread(
+            tree.clone(),
+            dead_ratio_threshold,
+            sweep_interval,
+            vacuum_stop.clone(),
+        );
+    }
 
     println!(
         "S-HTAP benchmark\n\
@@ -355,6 +369,7 @@ pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
     println!("Loading done. Running timed phase for {duration:?}...");
     thread::sleep(duration);
     stop.store(true, Relaxed);
+    vacuum_stop.store(true, Relaxed);
 
     let write_stats: Vec<WriteWorkerStats> =
         write_handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -556,6 +571,20 @@ pub fn main_s_htap(parms: Vec<String>) {
             panic!("s_htap: invalid execution mode '{other}' (expected atomic or transaction)")
         }
     };
+    // Same "0.0 explicitly opts out, otherwise defaults on whenever GC is
+    // on" convention as `tpcc_driver::main_tpcc`'s idle-compaction args.
+    let idle_compaction_dead_ratio: f64 = arg(
+        &parms,
+        23,
+        if gc { crate::bat_tree::idle_compaction::DEFAULT_VACUUM_DEAD_RATIO } else { 0.0 },
+    );
+    let idle_compaction_sweep_secs: f64 = arg(
+        &parms,
+        24,
+        crate::bat_tree::idle_compaction::DEFAULT_VACUUM_SWEEP_INTERVAL.as_secs_f64(),
+    );
+    let idle_compaction = (idle_compaction_dead_ratio > 0.0)
+        .then(|| (idle_compaction_dead_ratio, Duration::from_secs_f64(idle_compaction_sweep_secs)));
 
     run_s_htap(DriverConfig {
         ycsb: YcsbConfig {
@@ -589,5 +618,6 @@ pub fn main_s_htap(parms: Vec<String>) {
         }),
         wal_lockfree_batch_size: None,
         output_dir: PathBuf::from("."),
+        idle_compaction,
     });
 }
