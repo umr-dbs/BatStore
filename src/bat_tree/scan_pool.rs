@@ -29,15 +29,14 @@
 //! Threads are spawned detached (`thread::spawn`, each looping on the
 //! shared job queue — see `spawn`), not scoped to a `std::thread::Scope`,
 //! so the pool can outlive whichever call enabled it — the same
-//! `Arc`-clone-instead-of-borrow pattern `bat_db::Database::
-//! start_vacuum_thread` already uses for its own background thread, and
-//! for the same reason: a scoped thread must be joined before its scope
-//! returns, which is incompatible with a pool meant to live for a
-//! database's whole run. Dropping a `ScanWorkerPool` drops its one job
-//! sender; every worker's blocking `recv()` then returns `Err` once the
-//! channel disconnects and the thread exits on its own — no explicit stop
-//! flag needed, and (matching `stop_vacuum_thread`'s own doc) nothing
-//! here waits for that exit.
+//! `Arc`-clone-instead-of-borrow pattern `bat_db::Database::set_vacuum`
+//! already uses for its own background thread, and for the same reason: a
+//! scoped thread must be joined before its scope returns, which is
+//! incompatible with a pool meant to live for a database's whole run.
+//! Dropping a `ScanWorkerPool` drops its one job sender; every worker's
+//! blocking `recv()` then returns `Err` once the channel disconnects and
+//! the thread exits on its own — no explicit stop flag needed, and
+//! (matching `set_vacuum`'s own doc) nothing here waits for that exit.
 //!
 //! ## No `WorkerId` cost, so this can freely oversubscribe
 //!
