@@ -70,6 +70,13 @@ pub struct DriverConfig {
     /// actually issues scans (`mix.scan > 0.0`) and the population is large
     /// enough for the pool to pay off, with no flag required to opt in.
     pub scan_pool_workers: Option<usize>,
+    /// GC's own background vacuum sweep for this driver's one bare tree —
+    /// see `bat_tree::idle_compaction::spawn_vacuum_thread`'s doc for the
+    /// mechanism (`tpcc_driver::DriverConfig::idle_compaction` is the same
+    /// concept for a `bat_db::Database`-backed workload). `Some((
+    /// dead_ratio_threshold, sweep_interval))` runs it for the whole timed
+    /// phase; `None` disables it — has no effect unless `gc` is also `true`.
+    pub idle_compaction: Option<(f64, Duration)>,
 }
 
 /// Auto-sizes `DriverConfig::scan_pool_workers`: `Some(default_max_workers)`
@@ -275,6 +282,15 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     if cfg.gc {
         tree.enable_gc(cfg.update_in_place);
     }
+    let vacuum_stop = std::sync::Arc::new(AtomicBool::new(false));
+    if let Some((dead_ratio_threshold, sweep_interval)) = cfg.idle_compaction.filter(|_| cfg.gc) {
+        crate::bat_tree::idle_compaction::spawn_vacuum_thread(
+            tree.clone(),
+            dead_ratio_threshold,
+            sweep_interval,
+            vacuum_stop.clone(),
+        );
+    }
 
     // See `DriverConfig::scan_pool_workers`'s doc: a pool worker thread
     // never calls `tree.worker_id()` (it only ever runs jobs built around
@@ -388,6 +404,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     println!("Loading done. Running timed phase for {duration:?}...");
     thread::sleep(duration);
     stop.store(true, Relaxed);
+    vacuum_stop.store(true, Relaxed);
 
     let stats: Vec<WorkerStats> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     let actual_wall = run_start.elapsed();
@@ -569,6 +586,20 @@ pub fn main_ycsb(parms: Vec<String>) {
             Ok(n) => Some(n.max(2)),
         },
     };
+    // Same "0.0 explicitly opts out, otherwise defaults on whenever GC is
+    // on" convention as `tpcc_driver::main_tpcc`'s idle-compaction args.
+    let idle_compaction_dead_ratio: f64 = arg(
+        &parms,
+        21,
+        if gc { crate::bat_tree::idle_compaction::DEFAULT_VACUUM_DEAD_RATIO } else { 0.0 },
+    );
+    let idle_compaction_sweep_secs: f64 = arg(
+        &parms,
+        22,
+        crate::bat_tree::idle_compaction::DEFAULT_VACUUM_SWEEP_INTERVAL.as_secs_f64(),
+    );
+    let idle_compaction = (idle_compaction_dead_ratio > 0.0)
+        .then(|| (idle_compaction_dead_ratio, Duration::from_secs_f64(idle_compaction_sweep_secs)));
 
     run_ycsb(DriverConfig {
         ycsb: YcsbConfig {
@@ -596,5 +627,6 @@ pub fn main_ycsb(parms: Vec<String>) {
         wal_lockfree_batch_size: None,
         output_dir: PathBuf::from("."),
         scan_pool_workers,
+        idle_compaction,
     });
 }

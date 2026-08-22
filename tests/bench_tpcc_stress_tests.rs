@@ -225,7 +225,7 @@ fn run_stress_and_check_invariants_gc(
     let db_id = db.as_ref() as *const TpccDatabase as usize;
     tpcc_txn::set_diagnostics_enabled(&db, true);
     if let Some(gc_update_in_place) = gc_update_in_place {
-        db.enable_gc(gc_update_in_place);
+        db.enable_gc(gc_update_in_place, None);
     }
 
     populate_items(&db, &cfg);
@@ -454,7 +454,7 @@ fn diag_single_thread_no_gc_still_checks_invariants() {
 fn diag_single_thread_district_duplicate_key_check() {
     let cfg = stress_cfg();
     let db = Arc::new(TpccDatabase::new(RootIndexType::default()));
-    db.enable_gc(false);
+    db.enable_gc(false, None);
 
     populate_items(&db, &cfg);
     let history_seq = Arc::new(AtomicU64::new(0));
@@ -513,7 +513,7 @@ fn diag_single_thread_gc_on_max_o_id_cross_check() {
     let db = Arc::new(TpccDatabase::new(RootIndexType::default()));
     let db_id = db.as_ref() as *const TpccDatabase as usize;
     tpcc_txn::set_diagnostics_enabled(&db, true);
-    db.enable_gc(true);
+    db.enable_gc(true, None);
 
     populate_items(&db, &cfg);
     let history_seq = Arc::new(AtomicU64::new(0));

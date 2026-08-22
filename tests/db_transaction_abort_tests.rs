@@ -556,7 +556,7 @@ fn explicit_abort_write_does_not_resurface_after_recovery() {
 fn explicit_abort_releases_the_snapshot_for_gc() {
     let db = new_db();
     let t = db.create_table("t").table_id().unwrap();
-    db.enable_gc(false);
+    db.enable_gc(false, None);
 
     assert_eq!(db.ctx.live_min_snapshot(), None, "no transaction open yet");
 

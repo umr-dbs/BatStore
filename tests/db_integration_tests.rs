@@ -89,7 +89,7 @@ fn db_transaction_zero_copy_range_terminals_share_its_snapshot() {
 fn old_snapshot_reads_retired_pre_split_blocks_while_gc_reuse_is_enabled() {
     let db = Arc::new(new_db());
     let table = db.create_table("history").table_id().unwrap();
-    db.enable_gc(false);
+    db.enable_gc(false, None);
 
     let mut setup = DbTransaction::begin(&db);
     assert!(matches!(
@@ -476,7 +476,7 @@ fn dynamic_table_created_after_wal_and_gc_enabled_inherits_both() {
 
     let db = new_db_with_wal(&path);
     db.create_table("existing");
-    db.enable_gc(false);
+    db.enable_gc(false, None);
 
     // Created strictly after WAL/GC were turned on.
     let late = db.create_table("late");

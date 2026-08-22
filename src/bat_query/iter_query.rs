@@ -91,6 +91,18 @@ pub struct RangeQueryIter<
     is_completed: bool,
     register_reader_si: bool,
     worker_id: WorkerId,
+    /// Optional `[lo, hi]` bound, in the same caller-encoded `u64` space as
+    /// `bat_tree::mvbt::MVBTSt::set_zone_map_projection`'s projection, over
+    /// the column that projection tracks. When set, `try_for_each_ref` both
+    /// (a) skips a whole leaf outright once its `LeafZoneMap` proves it
+    /// can't hold a matching value (`LeafZoneMap::may_intersect`), and (b)
+    /// automatically excludes any individual record whose own projected
+    /// value falls outside the bound — the caller's `visit` no longer needs
+    /// to re-check that column itself; it's applied as part of the normal
+    /// range/visibility filter. `None` (the default) means "no predicate at
+    /// all" — every leaf is visited and every record passed to `visit`
+    /// exactly as before.
+    zone_predicate: Option<(u64, u64)>,
 }
 
 impl<
@@ -154,7 +166,41 @@ impl<
             is_completed: false,
             register_reader_si,
             worker_id,
+            zone_predicate: None,
         }
+    }
+
+    /// Opts this scan into an automatic predicate over the tree's own
+    /// zone-mapped column (see `LeafZoneMap`'s doc): `[query_lo, query_hi]`
+    /// must be encoded exactly the way the tree's `set_zone_map_projection`
+    /// callback encodes its tracked column (e.g. the same sign-bit flip for
+    /// a signed column). This does two things together, from one bound and
+    /// one source of truth (the tree's own registered projection), so they
+    /// can never disagree with each other:
+    /// - skips a whole leaf outright once its `LeafZoneMap` proves it can't
+    ///   hold a matching value;
+    /// - for every leaf that isn't skipped, automatically excludes any
+    ///   record whose own projected value falls outside the bound — the
+    ///   caller's `visit` closure doesn't need to (and shouldn't
+    ///   redundantly) re-check that column itself.
+    ///
+    /// Only meaningful against a tree that actually has a matching
+    /// `set_zone_map_projection` configured for the column `[query_lo,
+    /// query_hi]` refers to — `try_for_each_ref` cross-checks
+    /// `tree.cold.zone_map_projection.get().is_some()` before ever consulting a
+    /// leaf's zone map or calling the projection, specifically so calling
+    /// this against a tree with no projection (or the wrong one) degrades
+    /// to "no predicate at all" instead of silently treating every leaf's
+    /// unpopulated zone map as "definitely no match" and dropping real
+    /// results.
+    ///
+    /// Only `try_for_each_ref` (and everything built on it — `for_each_ref`,
+    /// `count_ref`, and the `*_parallel` methods) actually checks this;
+    /// plain `Iterator`/`refill`-based consumption ignores it.
+    #[inline(always)]
+    pub fn with_zone_predicate(mut self, query_lo: u64, query_hi: u64) -> Self {
+        self.zone_predicate = Some((query_lo, query_hi));
+        self
     }
 
     #[inline(always)]
@@ -350,6 +396,22 @@ impl<
         let mut visit_error = None;
         let full_key_range =
             self.range.lower == tree.cold.min_key && self.range.upper == tree.cold.max_key;
+        // Guarded against the tree's own config, not just this call's own
+        // `with_zone_predicate` — see that method's doc for why an
+        // unconfigured tree must fall back to "no pruning/filtering" rather
+        // than trusting every leaf's unpopulated (all-zero) zone map, or
+        // calling a projection that doesn't exist. Bundles the tree's own
+        // projection alongside the bounds so both the leaf-skip check below
+        // and the per-record filter use the exact same function — there's
+        // no way for "what gets pruned" and "what gets filtered" to
+        // disagree, since they're driven by the same `(project, lo, hi)`.
+        let zone_check: Option<(fn(&Payload) -> Option<u64>, u64, u64)> =
+            self.zone_predicate.and_then(|(lo, hi)| {
+                tree.cold
+                    .zone_map_projection
+                    .get()
+                    .map(|&project| (project, lo, hi))
+            });
 
         tree.with_snapshot_cache_and_logs(|cache, commit_logs| {
             let mut is_visible = |stamp| {
@@ -381,32 +443,53 @@ impl<
                             prefetch_next_leaf(&self.path, inc(curr_fence.upper), si);
                         }
 
-                        let records = leaf_page.as_records();
-                        let mut matched = 0;
-                        if full_key_range {
-                            for record in records {
-                                if record.version().matches(&mut is_visible) {
-                                    matched += 1;
-                                    if let Err(error) = visit(record.key(), record.payload()) {
-                                        visit_error = Some(error);
-                                        return;
+                        let skip_leaf = zone_check.is_some_and(|(_, query_lo, query_hi)| {
+                            !leaf_page.zone_map().may_intersect(query_lo, query_hi)
+                        });
+
+                        // Whether `record`'s own projected value falls in
+                        // the configured bounds — `true` (never excludes
+                        // anything) when no zone check is configured at
+                        // all, so this is a pure no-op addition to the
+                        // existing range/visibility filter below when the
+                        // caller never opted in.
+                        let passes_zone_check = |payload: &Payload| {
+                            zone_check.is_none_or(|(project, query_lo, query_hi)| {
+                                project(payload).is_some_and(|v| v >= query_lo && v <= query_hi)
+                            })
+                        };
+
+                        if !skip_leaf {
+                            let records = leaf_page.as_records();
+                            let mut matched = 0;
+                            if full_key_range {
+                                for record in records {
+                                    if record.version().matches(&mut is_visible)
+                                        && passes_zone_check(record.payload())
+                                    {
+                                        matched += 1;
+                                        if let Err(error) = visit(record.key(), record.payload()) {
+                                            visit_error = Some(error);
+                                            return;
+                                        }
+                                    }
+                                }
+                            } else {
+                                for record in records {
+                                    if self.range.contains(record.key())
+                                        && record.version().matches(&mut is_visible)
+                                        && passes_zone_check(record.payload())
+                                    {
+                                        matched += 1;
+                                        if let Err(error) = visit(record.key(), record.payload()) {
+                                            visit_error = Some(error);
+                                            return;
+                                        }
                                     }
                                 }
                             }
-                        } else {
-                            for record in records {
-                                if self.range.contains(record.key())
-                                    && record.version().matches(&mut is_visible)
-                                {
-                                    matched += 1;
-                                    if let Err(error) = visit(record.key(), record.payload()) {
-                                        visit_error = Some(error);
-                                        return;
-                                    }
-                                }
-                            }
+                            crate::bat_test::record_leaf_scan(tree as *const _ as usize, records.len(), matched);
                         }
-                        crate::bat_test::record_leaf_scan(tree as *const _ as usize, records.len(), matched);
 
                         self.path.pop();
                         if reached_end {
@@ -614,8 +697,13 @@ impl<
             return self.collect();
         };
         let version = self.snapshot();
+        let zone_predicate = self.zone_predicate;
         let parts = pool.try_dispatch(ranges, move |tree, sub_range| {
-            RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID).collect::<Vec<_>>()
+            let mut it = RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID);
+            if let Some((lo, hi)) = zone_predicate {
+                it = it.with_zone_predicate(lo, hi);
+            }
+            it.collect::<Vec<_>>()
         });
         self.finish_after_dispatch();
         parts.into_iter().flatten().collect()
@@ -631,8 +719,13 @@ impl<
             return self.count_ref();
         };
         let version = self.snapshot();
+        let zone_predicate = self.zone_predicate;
         let parts = pool.try_dispatch(ranges, move |tree, sub_range| {
-            RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID).count_ref()
+            let mut it = RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID);
+            if let Some((lo, hi)) = zone_predicate {
+                it = it.with_zone_predicate(lo, hi);
+            }
+            it.count_ref()
         });
         self.finish_after_dispatch();
         parts.into_iter().sum()
@@ -654,9 +747,13 @@ impl<
             return self.for_each_ref(visit);
         };
         let version = self.snapshot();
+        let zone_predicate = self.zone_predicate;
         pool.try_dispatch(ranges, move |tree, sub_range| {
-            RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID)
-                .for_each_ref(&visit);
+            let mut it = RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID);
+            if let Some((lo, hi)) = zone_predicate {
+                it = it.with_zone_predicate(lo, hi);
+            }
+            it.for_each_ref(&visit);
         });
         self.finish_after_dispatch();
     }
@@ -682,9 +779,13 @@ impl<
             return self.fold_ref(init(), fold);
         };
         let version = self.snapshot();
+        let zone_predicate = self.zone_predicate;
         let parts = pool.try_dispatch(ranges, move |tree, sub_range| {
-            RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID)
-                .fold_ref(init(), &fold)
+            let mut it = RangeQueryIter::new(tree, version, sub_range, false, READ_ONLY_SCAN_WORKER_ID);
+            if let Some((lo, hi)) = zone_predicate {
+                it = it.with_zone_predicate(lo, hi);
+            }
+            it.fold_ref(init(), &fold)
         });
         self.finish_after_dispatch();
         parts.into_iter().reduce(merge).expect(

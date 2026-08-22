@@ -40,6 +40,7 @@ use crate::bat_bench::ycsb_driver;
 use crate::bat_bench::ycsb_random::YcsbMix;
 use crate::bat_bench::ycsb_schema::YcsbConfig;
 use crate::bat_root::index_root::RootIndexType;
+use crate::bat_tree::idle_compaction::{DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scale {
@@ -180,7 +181,7 @@ fn run_one(
                 wal: None,
                 wal_lockfree_batch_size: None,
                 htap_baseline: None,
-                idle_compaction: None,
+                idle_compaction: gc.then(|| (DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
                 scan_pool_workers: None,
                 output_dir: out_dir,
             });
@@ -210,7 +211,7 @@ fn run_one(
                 wal: None,
                 wal_lockfree_batch_size: None,
                 htap_baseline,
-                idle_compaction: None,
+                idle_compaction: gc.then(|| (DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
                 scan_pool_workers: None,
                 output_dir: out_dir,
             });
@@ -245,6 +246,7 @@ fn run_one(
                     scale.ycsb_record_count(),
                     &mix,
                 ),
+                idle_compaction: gc.then(|| (DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
             });
             ("ops_per_sec", summary.throughput_ops_sec, None)
         }

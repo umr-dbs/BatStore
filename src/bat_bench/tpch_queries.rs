@@ -81,19 +81,23 @@ pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, V
         ..Default::default()
     });
 
-    tx.range_for_each(Table::OrderLine, order_line_table_range(), |key, row| {
-        let ol = row.as_order_line();
-        let Some(delivered) = ol.ol_delivery_d else {
-            return;
-        };
-        if delivered > delivered_before {
-            return;
-        }
-        let g = &mut groups[decode_order_line_number(key) as usize];
-        g.count += 1;
-        g.sum_qty += ol.ol_quantity as u64;
-        g.sum_amount += ol.ol_amount;
-    });
+    // The `delivered <= delivered_before` (and non-`None`) check is exactly
+    // `RangeQueryIter`'s automatic zone-map filter — see
+    // `RangeQueryIter::with_zone_predicate`'s doc — so this closure doesn't
+    // re-check it; every row reaching it already satisfies it.
+    tx.range_for_each_zone_pruned(
+        Table::OrderLine,
+        order_line_table_range(),
+        encode_signed_zone_value(i64::MIN),
+        encode_signed_zone_value(delivered_before),
+        |key, row| {
+            let ol = row.as_order_line();
+            let g = &mut groups[decode_order_line_number(key) as usize];
+            g.count += 1;
+            g.sum_qty += ol.ol_quantity as u64;
+            g.sum_amount += ol.ol_amount;
+        },
+    );
     tx.commit();
 
     let mut out: Vec<_> = groups.into_iter().filter(|g| g.count > 0).collect();
@@ -109,14 +113,22 @@ pub fn q6(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, V
     let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
     let mut revenue = 0.0;
-    tx.range_for_each(Table::OrderLine, order_line_table_range(), |_, row| {
-        let ol = row.as_order_line();
-        if ol.ol_delivery_d.is_some_and(|delivered| {
-            delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty
-        }) {
-            revenue += ol.ol_amount;
-        }
-    });
+    // `date_hi - 1` (saturating) makes the zone predicate's inclusive upper
+    // bound exactly `delivered < date_hi` for integer-valued dates — see
+    // `parallel_scan::q6_parallel`'s identical comment. That leaves only
+    // `ol_quantity` (not a zone-mapped column) for this closure to check.
+    tx.range_for_each_zone_pruned(
+        Table::OrderLine,
+        order_line_table_range(),
+        encode_signed_zone_value(date_lo),
+        encode_signed_zone_value(date_hi.saturating_sub(1)),
+        |_, row| {
+            let ol = row.as_order_line();
+            if ol.ol_quantity < max_qty {
+                revenue += ol.ol_amount;
+            }
+        },
+    );
     tx.commit();
     (revenue, ts_start)
 }

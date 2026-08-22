@@ -25,10 +25,68 @@
 
 use std::fmt::Display;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::thread;
+use std::time::Duration;
 
 use crate::bat_query::interval::Interval;
 use crate::bat_query::iter_query::RangeQueryIter;
 use crate::bat_tree::mvbt::MVBTSt;
+
+/// The dead-ratio threshold workloads default to when GC is on and no
+/// caller-supplied value overrides it: a leaf qualifies for a forced
+/// compaction once at least half its raw slots are dead. Low enough that a
+/// realistic write pattern actually crosses it (see this module's own doc
+/// on why a read-heavy leaf can otherwise sit at a garbage-inflated ratio
+/// indefinitely), high enough that a sparsely-updated leaf isn't churned by
+/// every sweep for a handful of dead entries.
+pub const DEFAULT_VACUUM_DEAD_RATIO: f64 = 0.5;
+
+/// The sweep interval workloads default to alongside
+/// `DEFAULT_VACUUM_DEAD_RATIO`: frequent enough that a leaf crossing the
+/// threshold doesn't sit ratio-inflated for long, infrequent enough that
+/// the sweep itself (already lowest-OS-priority, see
+/// `bat_db::database::lower_current_thread_priority`) stays a small
+/// fraction of overall background CPU.
+pub const DEFAULT_VACUUM_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Spawns a background vacuum thread for a single, bare (not
+/// `bat_db::Database`-owned) tree — for a driver like `ycsb_driver`/
+/// `s_htap_driver` that runs one standalone `MVBTSt` rather than a
+/// multi-table `Database`, so `bat_db::database::Database::set_vacuum`'s
+/// own multi-table sweep doesn't apply. Same mechanism otherwise: repeatedly
+/// calls `compact_idle_pass(dead_ratio_threshold)`, sleeping
+/// `sweep_interval` between sweeps, until `stop` is set, at the same
+/// lowest-OS-priority `bat_db::database::lower_current_thread_priority`
+/// gives every other vacuum thread in this codebase. Callers own `stop` and
+/// are responsible for setting it (and, if they care about a clean
+/// shutdown, joining the returned handle) — this doesn't wait for anything
+/// on its own. Takes `triomphe::Arc` specifically, the one `Arc` every
+/// workload driver's tree handle uses (see `tpcc_driver`/`ycsb_driver`/
+/// `s_htap_driver`, all `use triomphe::Arc`), same as `bat_db::Database`'s
+/// own table storage.
+pub fn spawn_vacuum_thread<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static,
+>(
+    tree: triomphe::Arc<MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>>,
+    dead_ratio_threshold: f64,
+    sweep_interval: Duration,
+    stop: std::sync::Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        crate::bat_db::database::lower_current_thread_priority();
+        while !stop.load(Relaxed) {
+            tree.compact_idle_pass(dead_ratio_threshold);
+            if stop.load(Relaxed) {
+                break;
+            }
+            thread::sleep(sweep_interval);
+        }
+    })
+}
 
 impl<
     const FAN_OUT: usize,

@@ -360,6 +360,38 @@ impl<'a> TpccTxn<'a> {
         }
     }
 
+    /// Like `range_for_each`, but additionally opts the scan into leaf-level
+    /// zone-map pruning (`RangeQueryIter::with_zone_predicate`) over
+    /// `[zone_lo, zone_hi]` — see that method's doc for the encoding
+    /// contract, and `bat_bench::tpcc_schema::encode_signed_zone_value` for
+    /// `ORDER_LINE`'s specific one. `table` must be `TreeClass::Standard`
+    /// (the only class `MVBTSt::set_zone_map_projection` can be configured
+    /// on) — `Big`-class tables (`Warehouse`/`District`) never need this,
+    /// they're not scanned by CH-benCHmark's date-filtered queries.
+    pub fn range_for_each_zone_pruned(
+        &mut self,
+        table: Table,
+        range: Interval<TpccKey>,
+        zone_lo: u64,
+        zone_hi: u64,
+        mut visit: impl FnMut(TpccKey, &TpccRow),
+    ) {
+        assert_eq!(
+            table.class(),
+            TreeClass::Standard,
+            "TpccTxn::range_for_each_zone_pruned: {table:?} is a TreeClass::Big table"
+        );
+        RangeQueryIter::new(
+            &self.db.tree_for(table),
+            self.ts_start,
+            range,
+            false,
+            self.worker_id,
+        )
+        .with_zone_predicate(zone_lo, zone_hi)
+        .for_each_ref(&mut visit)
+    }
+
     /// Zero-copy left fold over a snapshot-consistent table range.
     pub fn range_fold<Acc>(
         &mut self,

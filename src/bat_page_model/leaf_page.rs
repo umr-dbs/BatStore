@@ -15,6 +15,78 @@ struct LeafData<Payload> {
     payload: PayloadSlot<Payload>,
 }
 
+/// An optional, inline min/max synopsis over one caller-chosen projected
+/// `u64` column (order-preserving-encoded by the caller if the real column
+/// isn't already a `u64` — e.g. `(d as u64) ^ (1u64 << 63)` for an `i64`
+/// date), used to skip a whole leaf during a range scan without visiting a
+/// single record. Occupies the 24B of `LeafPage` that would otherwise sit
+/// as pure padding inside `Node`'s union (see `bat_tree::mvbt`'s top-of-file
+/// doc on `FAN_OUT`/`NUM_RECORDS` sizing) — confirmed empirically to cost
+/// nothing up to 24B; 32B would push `OptCell<Block<..>>` off its current
+/// page-aligned jemalloc size class.
+///
+/// `[lo, hi]` is a *safe superset* of every value ever projected out of a
+/// record physically stored in this leaf, including stale/dead MVCC
+/// versions not yet GC'd — it only ever widens (`widen`), never shrinks, so
+/// it can never cause a scan to skip a leaf that actually contains a
+/// matching row; it can only fail to skip one it safely could have.
+/// `lo > hi` is the empty/vacuous state (nothing projected yet), needing no
+/// separate flag. `non_null_count` lets an all-null leaf (e.g. every
+/// `ol_delivery_d` still `None`) be recognized even before its first widen,
+/// independent of the `lo`/`hi` sentinel convention.
+#[derive(Clone, Copy)]
+pub(crate) struct LeafZoneMap {
+    lo: u64,
+    hi: u64,
+    non_null_count: u64,
+}
+
+impl LeafZoneMap {
+    #[inline(always)]
+    pub(crate) const fn empty() -> Self {
+        Self {
+            lo: u64::MAX,
+            hi: 0,
+            non_null_count: 0,
+        }
+    }
+
+    /// Folds one more projected value into this zone map. `None` (the
+    /// projection found no value for this record, e.g. a `NULL` column)
+    /// leaves the map unchanged.
+    #[inline(always)]
+    pub(crate) fn widen(&mut self, projected: Option<u64>) {
+        if let Some(v) = projected {
+            if v < self.lo {
+                self.lo = v;
+            }
+            if v > self.hi {
+                self.hi = v;
+            }
+            self.non_null_count += 1;
+        }
+    }
+
+    /// Whether this leaf *might* contain a record whose projected value
+    /// falls in `[query_lo, query_hi]` — `false` means it definitely
+    /// doesn't, and the leaf can be skipped outright.
+    #[inline(always)]
+    pub(crate) fn may_intersect(&self, query_lo: u64, query_hi: u64) -> bool {
+        self.non_null_count > 0 && self.lo <= query_hi && self.hi >= query_lo
+    }
+
+    /// Widens `self` to also cover everything `other` covers — used to seed
+    /// a freshly built leaf (split/merge) from one or more source leaves'
+    /// zone maps, none of which need to be precise for the new, narrower
+    /// leaf, only a safe superset of it.
+    #[inline(always)]
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.lo = self.lo.min(other.lo);
+        self.hi = self.hi.max(other.hi);
+        self.non_null_count = self.non_null_count.max(other.non_null_count);
+    }
+}
+
 /// Borrowed, zero-copy view of one structure-of-arrays leaf slot.
 #[derive(Clone, Copy)]
 pub struct LeafRecordRef<'a, Key, Payload> {
@@ -220,6 +292,7 @@ pub struct LeafPage<
     pub(crate) len: PageLenField,
     key_region: [MaybeUninit<Key>; NUM_RECORDS],
     data_region: [MaybeUninit<LeafData<Payload>>; NUM_RECORDS],
+    zone_map: LeafZoneMap,
 }
 
 impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default> Default
@@ -251,6 +324,13 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
         let mut p = Self::new();
         let records: Vec<_> = other.as_records().iter().collect();
         p.bulk_push(records);
+        // `p`'s records are a subset of `other`'s (a plain clone copies all
+        // of them; nothing here narrows the set further), so `other`'s zone
+        // map — a safe superset of its own records' projected values — is
+        // still a safe (if possibly loose) superset of `p`'s. Carrying it
+        // forward avoids `LeafPage` needing any knowledge of the owning
+        // tree's projection function at all.
+        p.zone_map = other.zone_map;
         p
     }
     #[inline]
@@ -259,7 +339,30 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
             len: PageLenField::new(0),
             key_region: unsafe { MaybeUninit::uninit().assume_init() },
             data_region: unsafe { MaybeUninit::uninit().assume_init() },
+            zone_map: LeafZoneMap::empty(),
         }
+    }
+    #[inline(always)]
+    pub(crate) fn zone_map(&self) -> LeafZoneMap {
+        self.zone_map
+    }
+    /// Seeds this (freshly built, not-yet-published, still-empty) leaf's
+    /// zone map — used by split/merge (`bat_tree::smo::push_records_onto`)
+    /// after computing `from` fresh from exactly the records landing in
+    /// this leaf (*not* carried forward from whichever source leaf(s) they
+    /// came from — see that function's doc for why recomputing exactly,
+    /// not just inheriting a looser superset, turned out to matter).
+    #[inline(always)]
+    pub(crate) fn seed_zone_map(&mut self, from: LeafZoneMap) {
+        self.zone_map.absorb(from);
+    }
+    /// Folds one more record's projected column value into this leaf's zone
+    /// map — called by the write path right after a new record is actually
+    /// stored (`None` if the tree has no zone-map projection configured, or
+    /// the projection found no value for this particular record).
+    #[inline(always)]
+    pub(crate) fn widen_zone_map(&mut self, projected: Option<u64>) {
+        self.zone_map.widen(projected);
     }
     #[inline(always)]
     pub fn len(&self) -> usize {
@@ -628,4 +731,76 @@ pub(crate) enum AbortOutcome {
     Invalidated,
     Undeleted,
     NotFound,
+}
+
+#[cfg(test)]
+mod zone_map_tests {
+    use super::LeafZoneMap;
+
+    #[test]
+    fn empty_map_never_intersects_and_always_has_zero_non_null_count() {
+        let zm = LeafZoneMap::empty();
+        assert!(!zm.may_intersect(0, u64::MAX));
+        assert!(!zm.may_intersect(5, 5));
+    }
+
+    #[test]
+    fn widen_none_is_a_no_op() {
+        let mut zm = LeafZoneMap::empty();
+        zm.widen(None);
+        assert!(!zm.may_intersect(0, u64::MAX));
+    }
+
+    #[test]
+    fn widen_narrows_the_never_prunes_wrongly_property() {
+        let mut zm = LeafZoneMap::empty();
+        zm.widen(Some(10));
+        zm.widen(Some(20));
+        zm.widen(Some(15));
+
+        // Real range is [10, 20]; every window overlapping it must be seen
+        // as a possible match, every window strictly outside it must not.
+        assert!(zm.may_intersect(10, 20));
+        assert!(zm.may_intersect(0, 10));
+        assert!(zm.may_intersect(20, 30));
+        assert!(zm.may_intersect(12, 12));
+        assert!(!zm.may_intersect(0, 9));
+        assert!(!zm.may_intersect(21, 100));
+    }
+
+    #[test]
+    fn absorb_produces_the_union_of_two_ranges() {
+        let mut a = LeafZoneMap::empty();
+        a.widen(Some(5));
+        a.widen(Some(10));
+        let mut b = LeafZoneMap::empty();
+        b.widen(Some(50));
+        b.widen(Some(60));
+
+        a.absorb(b);
+
+        // Union [5,10] u [50,60]: must still claim it might match anything
+        // inside either original sub-range, and must not claim to match
+        // something in the gap strictly between them was ever excluded --
+        // absorb only ever widens, so the gap "generously" reads as a
+        // possible match too (that's fine: a false positive here just costs
+        // one wasted per-record pass, never a wrong answer).
+        assert!(a.may_intersect(5, 10));
+        assert!(a.may_intersect(50, 60));
+        assert!(!a.may_intersect(0, 4));
+        assert!(!a.may_intersect(61, 100));
+    }
+
+    #[test]
+    fn absorb_of_an_empty_map_is_a_no_op() {
+        let mut a = LeafZoneMap::empty();
+        a.widen(Some(5));
+        a.widen(Some(10));
+        let b = LeafZoneMap::empty();
+
+        a.absorb(b);
+
+        assert!(a.may_intersect(5, 10));
+        assert!(!a.may_intersect(0, 4));
+    }
 }

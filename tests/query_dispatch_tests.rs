@@ -193,7 +193,7 @@ fn repeated_failed_updates_do_not_corrupt_later_state() {
 /// while a WAL is attached — every Update must go through the normal
 /// versioned path and get a fresh version instead.
 #[test]
-fn update_in_place_disabled_while_wal_attached() {
+fn update_in_place_still_logs_a_fresh_stamp_while_wal_attached() {
     let path = std::env::temp_dir().join(format!(
         "batstore_dispatch_wal_test_{}.log",
         std::process::id()
@@ -211,10 +211,15 @@ fn update_in_place_disabled_while_wal_attached() {
         panic!("expected Inserted");
     };
 
-    // No live readers registered, and GC+update-in-place is on: with no
-    // WAL this would take the in-place fast path (see
-    // wal_disabled_path_unaffected in wal_integration_tests.rs) and reuse
-    // the current version. With a WAL attached it must mint a fresh one.
+    // No live readers registered, and GC+update-in-place is on: this still
+    // takes the in-place fast path (skips growing the live tree's version
+    // chain — see `MVBTSt::update_with`'s doc), but with a WAL attached it
+    // now goes through the ordinary commit protocol to log a real `Update`
+    // record, which mints a fresh stamp for the WAL/replay's sake even
+    // though the live leaf record's own version is left untouched. With no
+    // WAL (see `wal_disabled_path_unaffected` in wal_integration_tests.rs)
+    // no stamp is drawn at all and the reported version is just the current
+    // clock position.
     let CRUDOperationResult::Updated(update_version) =
         tree.dispatch_crud(CRUDOperation::Update(1, 200))
     else {
@@ -222,7 +227,7 @@ fn update_in_place_disabled_while_wal_attached() {
     };
     assert!(
         update_version > insert_version,
-        "Update must mint a fresh version while a WAL is attached"
+        "Update must report a fresh version while a WAL is attached, even on the in-place path"
     );
 
     let _ = std::fs::remove_file(&path);

@@ -59,6 +59,23 @@ pub(crate) struct MVBTCold<Key, Payload> {
     pub(crate) max_key: Key,
     pub(crate) wal: Arc<WalBackend<Key, Payload>>,
     pub(crate) table_id: Option<crate::bat_wal::record::TableId>,
+    /// Optional, caller-supplied projection used to maintain each leaf's
+    /// inline `LeafZoneMap` (see that type's doc) — unset (the default) is
+    /// a complete no-op: no leaf ever mutates or consults its zone map, and
+    /// `try_for_each_ref`'s pruning check is unreachable without a matching
+    /// `RangeQueryIter::with_zone_predicate` call, which nothing sets up
+    /// unless this is set. One projection per tree, matching how each table
+    /// here already is one physically homogeneous `Payload` variant (see
+    /// `set_zone_map_projection`'s doc for the encoding contract).
+    ///
+    /// `OnceLock`, not a plain field: `Database::create_table_unpublished`
+    /// configures a tree through a shared `Arc<MVBTSt<..>>` (mirroring
+    /// `enable_gc`'s `&self`-based setters), by which point there's no
+    /// exclusive `&mut MVBTSt` to hand out any more — `OnceLock::set` is the
+    /// same "write once, read many, no lock on the read path" shape as
+    /// those atomic flags, just for a `Copy` function pointer instead of a
+    /// `bool`.
+    pub(crate) zone_map_projection: std::sync::OnceLock<fn(&Payload) -> Option<u64>>,
 }
 
 pub struct MVBTSt<
@@ -315,6 +332,7 @@ impl<
         self.block_manager
             .tracker()
             .set_block_reclaim_enabled(false);
+        self.block_manager.set_update_in_place(false);
         self.ctx.set_block_reclaim_enabled(false);
     }
 
@@ -402,8 +420,32 @@ impl<
                 max_key,
                 wal,
                 table_id,
+                zone_map_projection: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Opts this tree into maintaining a small inline min/max synopsis
+    /// (`LeafZoneMap`) per leaf, over one caller-chosen scalar column of
+    /// `Payload`. Off by default (unset) — call this once, right after
+    /// construction, to turn it on; a second call is a silent no-op (see
+    /// `OnceLock::set`), not an error, since every real call site only ever
+    /// wants "configure once at setup time."
+    ///
+    /// `projection` must return an order-preserving `u64` encoding of the
+    /// real column value, or `None` if this record has no value for it
+    /// (e.g. a nullable field that's currently unset) — the zone map treats
+    /// `None` as "doesn't widen the range," not as a value of `0`. A signed
+    /// column (e.g. an `i64` timestamp) should flip its sign bit to stay
+    /// correctly ordered as `u64`: `(v as u64) ^ (1u64 << 63)`.
+    ///
+    /// Once enabled, every leaf's zone map only ever widens (see
+    /// `LeafZoneMap`'s doc) — it's a safe-but-possibly-loose superset of
+    /// every value ever inserted into that leaf, never a precise one, and
+    /// pruning against it (`RangeQueryIter::with_zone_predicate`) can only
+    /// skip a leaf it's certain can't match, never one that might.
+    pub fn set_zone_map_projection(&self, projection: fn(&Payload) -> Option<u64>) {
+        let _ = self.cold.zone_map_projection.set(projection);
     }
 }
 
