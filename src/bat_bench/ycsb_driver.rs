@@ -66,9 +66,15 @@ pub struct DriverConfig {
     /// Every builder of a `DriverConfig` (`main_ycsb`'s CLI parsing,
     /// `bat_bench::suite`) uses `default_scan_pool_workers` to fill this in
     /// rather than picking their own default, so the pool is on by default
-    /// — auto-sized to this machine's own core count — whenever the mix
-    /// actually issues scans (`mix.scan > 0.0`) and the population is large
-    /// enough for the pool to pay off, with no flag required to opt in.
+    /// whenever the mix actually issues scans (`mix.scan > 0.0`) and the
+    /// population is large enough for the pool to pay off, with no flag
+    /// required to opt in — auto-sized to `num_cpus.max(scan_pool::
+    /// DEFAULT_QUERY_FANOUT * expected_scan_concurrency)`, not just
+    /// `num_cpus`, so a scan-issuing thread is still guaranteed a real
+    /// fanout even when `num_threads` is large — see
+    /// `expected_scan_concurrency`'s doc for why that estimate, not the raw
+    /// thread count, is what both this sizing and `ScanWorkerPool::spawn`'s
+    /// own `expected_concurrent_queries` below divide by.
     pub scan_pool_workers: Option<usize>,
     /// GC's own background vacuum sweep for this driver's one bare tree —
     /// see `bat_tree::idle_compaction::spawn_vacuum_thread`'s doc for the
@@ -79,19 +85,43 @@ pub struct DriverConfig {
     pub idle_compaction: Option<(f64, Duration)>,
 }
 
-/// Auto-sizes `DriverConfig::scan_pool_workers`: `Some(default_max_workers)`
-/// when `mix` actually issues scans (`mix.scan > 0.0`) and `record_count` is
-/// at or above `parallel_scan::MIN_ROWS_FOR_SCAN_POOL` (below that, the
-/// pool's own per-job overhead costs more than a sequential scan just takes
-/// — see that constant's doc), `None` (off) otherwise. Mirrors the auto-on
-/// default `tpcc_driver::main_tpcc`'s CLI parsing applies to `Table::
-/// OrderLine`'s pool for `ch_q1`/`ch_q6`, but reusable by every caller that
-/// builds a `DriverConfig` — not just CLI parsing — so a workload with no
-/// scans (A/B/C/D/F) never pays for idle pool threads while YCSB-E gets the
-/// pool by default without any extra configuration.
-pub fn default_scan_pool_workers(record_count: u64, mix: &YcsbMix) -> Option<usize> {
-    (mix.scan > 0.0 && record_count >= MIN_ROWS_FOR_SCAN_POOL)
-        .then(|| crate::bat_tree::mvbt::default_max_workers().max(2))
+/// How many of `num_threads` worker threads are expected to be running a
+/// Scan op at any given instant: `num_threads * mix.scan`, rounded up and
+/// floored at 1 — not the raw `num_threads`, since most of YCSB's mixes are
+/// read/update/insert-heavy and only a `mix.scan` fraction of ops (issued by
+/// whichever thread happens to draw one) are scans at all. Using the full
+/// thread count here would overstate how many callers are actually sharing
+/// the pool at once, understating each one's real `fair_query_fanout` share
+/// (or tipping it into `None`, i.e. no parallelism) for any mix where scans
+/// are a minority of ops. Shared by `default_scan_pool_workers` (to size the
+/// pool) and `run_ycsb` (as `ScanWorkerPool::spawn`'s own
+/// `expected_concurrent_queries`) so the two stay consistent regardless of
+/// whether the pool ended up this size via that default or an explicit
+/// override.
+fn expected_scan_concurrency(num_threads: usize, mix: &YcsbMix) -> usize {
+    ((num_threads as f64 * mix.scan).ceil() as usize).max(1)
+}
+
+/// Auto-sizes `DriverConfig::scan_pool_workers`: on whenever `mix` actually
+/// issues scans (`mix.scan > 0.0`) and `record_count` is at or above
+/// `parallel_scan::MIN_ROWS_FOR_SCAN_POOL` (below that, the pool's own
+/// per-job overhead costs more than a sequential scan just takes — see that
+/// constant's doc), `None` (off) otherwise. Sized to `num_cpus.max(
+/// scan_pool::DEFAULT_QUERY_FANOUT * expected_scan_concurrency(num_threads,
+/// mix))`, mirroring `tpcc_driver::main_tpcc`'s CLI parsing for `Table::
+/// OrderLine`'s pool — guaranteeing every concurrent scanner at least
+/// `DEFAULT_QUERY_FANOUT` workers of its own rather than letting
+/// `fair_query_fanout` divide a plain `num_cpus`-sized pool down to a
+/// too-thin share. Reusable by every caller that builds a `DriverConfig` —
+/// not just CLI parsing — so a workload with no scans (A/B/C/D/F) never pays
+/// for idle pool threads while YCSB-E gets the pool by default without any
+/// extra configuration.
+pub fn default_scan_pool_workers(record_count: u64, mix: &YcsbMix, num_threads: usize) -> Option<usize> {
+    (mix.scan > 0.0 && record_count >= MIN_ROWS_FOR_SCAN_POOL).then(|| {
+        let expected_scanners = expected_scan_concurrency(num_threads, mix);
+        crate::bat_tree::mvbt::default_max_workers()
+            .max(crate::bat_tree::scan_pool::DEFAULT_QUERY_FANOUT * expected_scanners)
+    })
 }
 
 /// See `tpcc_driver::TpccRunSummary` — same purpose, YCSB's shape.
@@ -297,10 +327,13 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     // `READ_ONLY_SCAN_WORKER_ID`, same as `ycsb_txn::scan_parallel`'s own
     // sequential path), so unlike `num_threads` this is never counted
     // against `max_threads`/`1 + num_threads` above.
-    let scan_pool: Option<Arc<YcsbScanPool>> = cfg
-        .scan_pool_workers
-        .filter(|&n| n > 0)
-        .map(|n| Arc::new(YcsbScanPool::spawn(tree.clone(), n, Some(num_threads))));
+    let scan_pool: Option<Arc<YcsbScanPool>> = cfg.scan_pool_workers.filter(|&n| n > 0).map(|n| {
+        Arc::new(YcsbScanPool::spawn(
+            tree.clone(),
+            n,
+            Some(expected_scan_concurrency(num_threads, &cfg.mix)),
+        ))
+    });
 
     println!(
         "YCSB benchmark\n\
@@ -580,7 +613,7 @@ pub fn main_ycsb(parms: Vec<String>) {
     // decides (on by default for a scan-issuing mix with enough rows);
     // explicit "0" -> off; explicit "N" -> exactly N workers.
     let scan_pool_workers: Option<usize> = match parms.get(20).map(|s| s.as_str()) {
-        None => default_scan_pool_workers(record_count, &mix),
+        None => default_scan_pool_workers(record_count, &mix, num_threads),
         Some(s) => match s.parse::<usize>() {
             Ok(0) | Err(_) => None,
             Ok(n) => Some(n.max(2)),

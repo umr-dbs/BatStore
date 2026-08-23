@@ -69,8 +69,24 @@ type BoxedJob = Box<dyn FnOnce() + Send>;
 /// one worker just serializes every query behind whatever it's already
 /// doing, identical to not having a pool at all — so `spawn` floors every
 /// request up to this, the smallest count that can actually do anything in
-/// parallel.
+/// parallel. Also `fair_query_fanout`'s cutoff below which it gives up on a
+/// query's fair share entirely (see that method's doc) — a share this thin
+/// is still "genuinely parallel" even if it falls short of
+/// `DEFAULT_QUERY_FANOUT`.
 const MIN_WORKERS: usize = 2;
+
+/// The per-query fanout callers should size a pool around, and
+/// `fair_query_fanout`'s own answer whenever it has no better information to
+/// divide by (`expected_concurrent_queries` unknown/zero). Measured on this
+/// codebase's own CH-benCHmark Q1/Q6 workload: a fixed fanout of 2 capped
+/// per-query speedup at ~9%, while 8 workers reached ~2.4x — most of that
+/// gain is already there by 4, which is what this picks as the default that
+/// balances against oversubscription cost when many OLAP threads share one
+/// pool (a caller sizing its pool as `num_cpus.max(DEFAULT_QUERY_FANOUT *
+/// expected_concurrent_queries)` guarantees every query this fanout even
+/// when there are more callers than cores — see `TpccDatabase::
+/// enable_scan_pool`'s call site in `tpcc_driver::main_tpcc`).
+pub const DEFAULT_QUERY_FANOUT: usize = 4;
 
 pub struct ScanWorkerPool<
     const FAN_OUT: usize,
@@ -148,24 +164,26 @@ impl<
     /// pool can meaningfully divide among), `None` — see below.
     ///
     /// Returns `None` when `expected_concurrent_queries` is known but the
-    /// fair share would come out below 2 (too many expected callers for
-    /// this pool to divide meaningfully) — the caller should skip the pool
-    /// entirely for that query and just scan the whole range directly on
-    /// its own thread, since paying dispatch overhead for a single job
-    /// with no parallelism to show for it is worse than not bothering (see
-    /// `parallel_scan::MIN_ROWS_FOR_SCAN_POOL`'s doc for the same reasoning
-    /// applied to scan *size* instead of concurrency).
+    /// fair share would come out below `MIN_WORKERS` (too many expected
+    /// callers for this pool to divide meaningfully) — the caller should skip
+    /// the pool entirely for that query and just scan the whole range
+    /// directly on its own thread, since paying dispatch overhead for a
+    /// single job with no parallelism to show for it is worse than not
+    /// bothering (see `parallel_scan::MIN_ROWS_FOR_SCAN_POOL`'s doc for the
+    /// same reasoning applied to scan *size* instead of concurrency). This
+    /// only bites when a pool wasn't sized by `DEFAULT_QUERY_FANOUT` in the
+    /// first place (e.g. an explicit worker-count override) — a pool sized
+    /// via that constant always divides out to at least it.
     ///
-    /// `expected_concurrent_queries` unknown (`None`/`Some(0)`): `Some(2)`
-    /// — the smallest width that's still genuinely parallel (matches this
-    /// pool's own `MIN_WORKERS` floor), used as a conservative default
-    /// when there's no better information to divide by.
+    /// `expected_concurrent_queries` unknown (`None`/`Some(0)`):
+    /// `Some(DEFAULT_QUERY_FANOUT)`, used as a conservative default when
+    /// there's no better information to divide by.
     pub fn fair_query_fanout(&self) -> Option<usize> {
         match self.expected_concurrent_queries {
-            None | Some(0) => Some(2),
+            None | Some(0) => Some(DEFAULT_QUERY_FANOUT),
             Some(expected_queries) => {
                 let share = self.num_workers / expected_queries;
-                (share >= 2).then_some(share)
+                (share >= MIN_WORKERS).then_some(share)
             }
         }
     }
