@@ -176,11 +176,13 @@ impl<
     /// via that constant always divides out to at least it.
     ///
     /// `expected_concurrent_queries` unknown (`None`/`Some(0)`):
-    /// `Some(DEFAULT_QUERY_FANOUT)`, used as a conservative default when
-    /// there's no better information to divide by.
+    /// `Some(min(DEFAULT_QUERY_FANOUT, num_workers))`, used as a conservative
+    /// default when there's no better information to divide by. The cap avoids
+    /// splitting into more jobs than a deliberately small explicit pool can
+    /// execute concurrently.
     pub fn fair_query_fanout(&self) -> Option<usize> {
         match self.expected_concurrent_queries {
-            None | Some(0) => Some(DEFAULT_QUERY_FANOUT),
+            None | Some(0) => Some(DEFAULT_QUERY_FANOUT.min(self.num_workers)),
             Some(expected_queries) => {
                 let share = self.num_workers / expected_queries;
                 (share >= MIN_WORKERS).then_some(share)

@@ -213,7 +213,8 @@ Options:
                             postgres, vweaver_ermia, vweaver_ermia_frugal, libmdbx
                             (default: all seven)
   --workloads LIST           comma-separated subset of: tpcc, ycsb_a..ycsb_f, htap_q1,
-                            htap_q6 (default: all)
+                            htap_q6, htap_q1_variant, htap_q6_variant, s_htap. The query
+                            variants are selectable but excluded from the default run.
   --ycsb-payload MODE        standard (default: 10 fields x 100 bytes) or u64 (one
                             8-byte value), applied consistently to every YCSB engine
   --ycsb-key-only            only establish key/visibility matches; by default point
@@ -338,7 +339,18 @@ this rather than papering over it:
   references them, with no separate toggle either. LeanStore/WiredTiger/libmdbx always
   report gc="n/a" and run once per (workload, threads) regardless of --gc.
 
-- HTAP/CH-benCHmark (htap_q1/htap_q6): CH-benCHmark has 22 standard analytical queries;
+- HTAP/CH-benCHmark (htap_q1/htap_q6): these names now execute the SQL predicates from
+  pinned BenchBase commit 33c00473807ebd49304d114a6d769d2d2b2bbb34 exactly: Q1 uses
+  `ol_delivery_d > 2007-01-02`, and Q6 uses the half-open 1999-01-01..2020-01-01 date
+  window plus inclusive quantity 1..100000. BatStore applies its delivery-date zone map
+  to both canonical queries. Because the loaders use present-day timestamps, exact Q6
+  normally has an empty input today; that is also what PostgreSQL/BenchBase executes.
+  The former engine-local predicates remain selectable as htap_q1_variant and
+  htap_q6_variant. They intentionally preserve the old behavior and are not suitable for
+  cross-engine result comparisons (PostgreSQL's variant aliases equal canonical because
+  it already ran the BenchBase SQL).
+
+  CH-benCHmark has 22 standard analytical queries;
   only Q1 ("Pricing Summary Report") and Q6 ("Forecasting Revenue Change") are
   implemented across the engines that support this at all - these two happen to be the
   only pure-aggregation, no-join queries in the set, which is why they're the ones that
@@ -353,8 +365,9 @@ this rather than papering over it:
   OLAP thread rotating them - see that module's docs). Both vWeaver_ermia variants got it
   too, via patches/vweaver_ermia_chbenchmark.patch (`RunChQ1`/`RunChQ6` in ERMIA's own
   benchmarks/tpcc.cc, a real `ORDER_LINE` table scan against ERMIA's own transaction/Scan
-  API, plus a dedicated `tpcc_bench_runner::StartHtapThread` OLAP thread - same "N OLTP + 1
-  OLAP thread" convention as every other engine here) - see engines/vweaver_ermia.py's
+  API, plus the requested number of dedicated `tpcc_bench_runner::StartHtapThread` OLAP
+  threads - the same "N OLTP + M OLAP" convention as every other engine here) - see
+  engines/vweaver_ermia.py's
   module docstring for the full writeup, including a real heap-corruption bug (an
   unbounded table scan overflowing str_arena's fixed 128MB reservation, silent in a
   Release build) hit and fixed during development. Applies identically to both
@@ -583,7 +596,8 @@ manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
 
     engine                batstore | leanstore | wiredtiger | postgres | vweaver_ermia |
                             vweaver_ermia_frugal | libmdbx
-    workload               tpcc | ycsb_a..ycsb_f | htap_q1 | htap_q6
+    workload               tpcc | ycsb_a..ycsb_f | htap_q1 | htap_q6 |
+                            htap_q1_variant | htap_q6_variant | s_htap
     config_label            scale label ("tiny" or "server")
     threads                 thread/terminal count for this row
     gc_enabled               on | off | n/a

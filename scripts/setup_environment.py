@@ -333,8 +333,8 @@ def step_vweaver_ermia() -> None:
             f"definition + disabled HYU_SKIPLIST GC branch - no-op for this Vweaver build, "
             f"needed by the separate vweaver_ermia_frugal build below)")
         run(["git", "apply", str(VWEAVER_FRUGAL_PATCH_PATH)], cwd=VWEAVER_REPO)
-        log(f"Applying {VWEAVER_CHBENCHMARK_PATCH_PATH.name} (adds CH-benCHmark Q1/Q6 - "
-            f"htap_q1/htap_q6 - support to both build variants)")
+        log(f"Applying {VWEAVER_CHBENCHMARK_PATCH_PATH.name} (adds exact BenchBase Q1/Q6, "
+            f"retained query variants, and multi-OLAP-thread support to both builds)")
         run(["git", "apply", str(VWEAVER_CHBENCHMARK_PATCH_PATH)], cwd=VWEAVER_REPO)
     if subprocess.run(["git", "apply", "--reverse", "--check", str(VWEAVER_YCSB_PAYLOAD_PATCH_PATH)],
                       cwd=VWEAVER_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:

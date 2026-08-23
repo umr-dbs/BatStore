@@ -107,6 +107,12 @@ pub enum OlapMode {
         max_qty: u8,
         num_warehouses: u32,
     },
+    /// Exact pinned-BenchBase CH-benCHmark Q1 SQL semantics. Its fixed delivery-date
+    /// predicate is zone-map pruned by [`tpch_queries::q1_benchbase`].
+    BenchbaseQ1,
+    /// Exact pinned-BenchBase CH-benCHmark Q6 SQL semantics. Its fixed delivery-date
+    /// interval is zone-map pruned by [`tpch_queries::q6_benchbase`].
+    BenchbaseQ6,
 }
 
 fn sleep_checking_stop(dur: Duration, stop: &AtomicBool) {
@@ -289,7 +295,7 @@ fn ch_q1_once(db: &TpccDatabase, delivered_before: i64, run_start: Instant) -> S
     let start = Instant::now();
     let (q1, ts_start) = tpch_queries::q1(db, delivered_before);
     ScanResult {
-        mode: "ch_q1_pricing_summary",
+        mode: "ch_q1_variant",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
         delay_secs: 0.0,
         snapshot: ts_start,
@@ -313,7 +319,7 @@ fn ch_q1_parallel_once(
     let (q1, ts_start) =
         crate::bat_bench::parallel_scan::q1_parallel(db, pool, num_warehouses, delivered_before);
     ScanResult {
-        mode: "ch_q1_pricing_summary",
+        mode: "ch_q1_variant",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
         delay_secs: 0.0,
         snapshot: ts_start,
@@ -339,7 +345,7 @@ fn ch_q6_parallel_once(
     let (q6, ts_start) =
         crate::bat_bench::parallel_scan::q6_parallel(db, pool, num_warehouses, date_lo, date_hi, max_qty);
     ScanResult {
-        mode: "ch_q6_forecast_revenue",
+        mode: "ch_q6_variant",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
         delay_secs: 0.0,
         snapshot: ts_start,
@@ -359,6 +365,36 @@ fn ch_q6_once(
 ) -> ScanResult {
     let start = Instant::now();
     let (q6, ts_start) = tpch_queries::q6(db, date_lo, date_hi, max_qty);
+    ScanResult {
+        mode: "ch_q6_variant",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        delay_secs: 0.0,
+        snapshot: ts_start,
+        scanned_tuples: 1,
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q6),
+        staleness_versions: Some(db.current_version().saturating_sub(ts_start)),
+    }
+}
+
+fn benchbase_q1_once(db: &TpccDatabase, run_start: Instant) -> ScanResult {
+    let start = Instant::now();
+    let (q1, ts_start) = tpch_queries::q1_benchbase(db);
+    ScanResult {
+        mode: "ch_q1_pricing_summary",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        delay_secs: 0.0,
+        snapshot: ts_start,
+        scanned_tuples: q1.len(),
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q1.iter().map(|g| g.sum_amount).sum()),
+        staleness_versions: Some(db.current_version().saturating_sub(ts_start)),
+    }
+}
+
+fn benchbase_q6_once(db: &TpccDatabase, run_start: Instant) -> ScanResult {
+    let start = Instant::now();
+    let (q6, ts_start) = tpch_queries::q6_benchbase(db);
     ScanResult {
         mode: "ch_q6_forecast_revenue",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
@@ -459,5 +495,15 @@ pub fn run_olap_worker(
                 }
             }
         },
+        OlapMode::BenchbaseQ1 => {
+            while !stop.load(Relaxed) {
+                let _ = results.send(benchbase_q1_once(db, run_start));
+            }
+        }
+        OlapMode::BenchbaseQ6 => {
+            while !stop.load(Relaxed) {
+                let _ = results.send(benchbase_q6_once(db, run_start));
+            }
+        }
     }
 }

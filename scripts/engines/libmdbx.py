@@ -119,7 +119,12 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     elif workload in common.HTAP_WORKLOADS:
         # mdbx_tpcc.rs writes the requested query's rows into tpcc_scan.csv (see
         # MdbxScanResult's doc there), using the same mode-column convention as BatStore.
-        mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
+        mode = {
+            "htap_q1": "ch_q1_pricing_summary",
+            "htap_q6": "ch_q6_forecast_revenue",
+            "htap_q1_variant": "ch_q1_variant",
+            "htap_q6_variant": "ch_q6_variant",
+        }[workload]
         latency = common.percentiles_from_samples(
             output_dir / "tpcc_scan.csv", "latency_ns", filter_column="mode", filter_value=mode,
         )

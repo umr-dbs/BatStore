@@ -39,6 +39,8 @@ POSTGRES_KEEP_PATTERNS = {
     "tpcc": ("*.results.NewOrder.csv",),
     "htap_q1": ("*.results.NewOrder.csv", "*.results.Q1.csv"),
     "htap_q6": ("*.results.NewOrder.csv", "*.results.Q6.csv"),
+    "htap_q1_variant": ("*.results.NewOrder.csv", "*.results.Q1.csv"),
+    "htap_q6_variant": ("*.results.NewOrder.csv", "*.results.Q6.csv"),
     "s_htap": ("*.results.csv", "*.results.OlapScan.csv"),
     "ycsb_e": ("*.results.csv", "*.results.ScanRecord.csv"),
 }

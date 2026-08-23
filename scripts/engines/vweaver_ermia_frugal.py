@@ -86,8 +86,12 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         threads = scale.tpcc_terminals
         benchmark_options = "--workload-mix=45,43,0,4,4,4,0,0 --warehouse-spread=0"
         if workload in common.HTAP_WORKLOADS:
-            query_flag = "--chbenchmark-q1" if workload == "htap_q1" else "--chbenchmark-q6"
-            benchmark_options += f" --enable-chbenchmark {query_flag}"
+            query_flag = "--chbenchmark-q1" if "q1" in workload else "--chbenchmark-q6"
+            variant_flag = " --chbenchmark-variant" if workload.endswith("_variant") else ""
+            benchmark_options += (
+                f" --enable-chbenchmark {query_flag}{variant_flag}"
+                f" --chbenchmark-threads={scale.htap_olap_threads}"
+            )
         args = [
             str(BINARY), "-verbose", "-benchmark", "tpcc",
             "-threads", str(threads), "-scale_factor", str(scale.tpcc_warehouses),
@@ -139,7 +143,12 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
 
     latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if workload in common.HTAP_WORKLOADS:
-        mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
+        mode = {
+            "htap_q1": "ch_q1_pricing_summary",
+            "htap_q6": "ch_q6_forecast_revenue",
+            "htap_q1_variant": "ch_q1_variant",
+            "htap_q6_variant": "ch_q6_variant",
+        }[workload]
         scan_csv = _write_htap_scan_csv(stdout_path, output_dir)
         latency = common.percentiles_from_samples(
             scan_csv, "latency_ns", filter_column="mode", filter_value=mode,

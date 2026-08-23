@@ -82,6 +82,14 @@ pub const TPCC_NUM_RECORDS: usize = crate::bat_tree::mvbt::NUM_RECORDS;
 /// map physically selective because neighboring leaves cover neighboring date intervals.
 pub const INITIAL_ORDER_HISTORY_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
 
+/// Fixed predicates from BenchBase's CH-benCHmark Q1/Q6 SQL. Timestamps are UTC Unix
+/// milliseconds for 2007-01-02, 1999-01-01, and 2020-01-01 respectively.
+pub const BENCHBASE_Q1_DELIVERY_AFTER_MILLIS: i64 = 1_167_696_000_000;
+pub const BENCHBASE_Q6_DATE_LO_MILLIS: i64 = 915_148_800_000;
+pub const BENCHBASE_Q6_DATE_HI_MILLIS: i64 = 1_577_836_800_000;
+pub const BENCHBASE_Q6_QUANTITY_LO: u32 = 1;
+pub const BENCHBASE_Q6_QUANTITY_HI: u32 = 100_000;
+
 /// Timestamp for a zero-based initial order ordinal in a monotonically distributed history.
 pub(crate) fn initial_order_timestamp(anchor_millis: i64, ordinal: u32, count: u32) -> i64 {
     let denominator = count.saturating_sub(1).max(1) as i128;

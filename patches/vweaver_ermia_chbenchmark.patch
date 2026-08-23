@@ -35,6 +35,25 @@
    static std::vector<bench_worker *> workers;
  
    // For command log shipping only
+--- a/benchmarks/tpcc.h
++++ b/benchmarks/tpcc.h
+@@ -74,6 +74,6 @@
+ #define OORDER_VALUE_FIELDS(x, y)                                 \
+   x(int32_t, o_c_id) y(int32_t, o_carrier_id) y(int8_t, o_ol_cnt) \
+-      y(bool, o_all_local) y(uint32_t, o_entry_d)
++      y(bool, o_all_local) y(uint64_t, o_entry_d)
+ DO_STRUCT(oorder, OORDER_KEY_FIELDS, OORDER_VALUE_FIELDS)
+ 
+ #define OORDER_C_ID_IDX_KEY_FIELDS(x, y) \
+@@ -87,7 +87,7 @@
+   x(int32_t, ol_w_id) y(int32_t, ol_d_id) y(int32_t, ol_o_id) \
+       y(int32_t, ol_number)
+ #define ORDER_LINE_VALUE_FIELDS(x, y)                                \
+-  x(int32_t, ol_i_id) y(uint32_t, ol_delivery_d) y(float, ol_amount) \
++  x(int32_t, ol_i_id) y(uint64_t, ol_delivery_d) y(float, ol_amount) \
+       y(int32_t, ol_supply_w_id) y(int8_t, ol_quantity)
+ DO_STRUCT(order_line, ORDER_LINE_KEY_FIELDS, ORDER_LINE_VALUE_FIELDS)
+ 
 --- a/benchmarks/tpcc.cc
 +++ b/benchmarks/tpcc.cc
 @@ -16,11 +16,15 @@
@@ -53,19 +72,59 @@
  
  #include "bench.h"
  #include "tpcc.h"
-@@ -47,6 +51,11 @@
+@@ -47,6 +51,13 @@
  static int g_uniform_item_dist = 0;
  static int g_order_status_scan_hack = 0;
  static int g_wh_temperature = 0;
-+// Runs one dedicated query-specific CH-benCHmark thread (see RunChQ1/RunChQ6
++// Runs dedicated query-specific CH-benCHmark threads (see RunChQ1/RunChQ6
 +// and tpcc_bench_runner::StartHtapThread below) concurrently with the normal
 +// OLTP tpcc_worker threads - see scripts/engines/vweaver_ermia.py.
 +static int g_enable_chbenchmark = 0;
 +static int g_chbenchmark_query = 0;  // 0=rotate both (legacy), 1=Q1 only, 6=Q6 only
++static int g_chbenchmark_threads = 1;
++static int g_chbenchmark_variant = 0;
  static uint g_microbench_rows = 10;  // this many rows
  // can't have both ratio and rows at the same time
  static int g_microbench_wr_rows = 0;  // this number of rows to write
-@@ -2916,6 +2925,155 @@
+@@ -201,15 +212,9 @@
+ 
+  public:
+-  static inline uint32_t GetCurrentTimeMillis() {
+-    // struct timeval tv;
+-    // ALWAYS_ASSERT(gettimeofday(&tv, 0) == 0);
+-    // return tv.tv_sec * 1000;
+-
+-    // XXX(stephentu): implement a scalable GetCurrentTimeMillis()
+-    // for now, we just give each core an increasing number
+-
+-    static thread_local uint32_t tl_hack = 0;
+-    return tl_hack++;
++  static inline uint64_t GetCurrentTimeMillis() {
++    return std::chrono::duration_cast<std::chrono::milliseconds>(
++               std::chrono::system_clock::now().time_since_epoch())
++        .count();
+   }
+ 
+   // utils for generating random #s and strings
+@@ -1793,7 +1799,7 @@
+ rc_t tpcc_worker::txn_delivery() {
+   const uint warehouse_id = pick_wh(r);
+   const uint o_carrier_id = RandomNumber(r, 1, NumDistrictsPerWarehouse());
+-  const uint32_t ts = GetCurrentTimeMillis();
++  const uint64_t ts = GetCurrentTimeMillis();
+ 
+   // worst case txn profile:
+   //   10 times:
+@@ -2569,7 +2575,7 @@
+     } while (customerWarehouseID == warehouse_id);
+   }
+   const float paymentAmount = (float)(RandomNumber(r, 100, 500000) / 100.0);
+-  const uint32_t ts = GetCurrentTimeMillis();
++  const uint64_t ts = GetCurrentTimeMillis();
+   ASSERT(!g_disable_xpartition_txn || customerWarehouseID == warehouse_id);
+ 
+   // output from txn counters:
+@@ -2916,6 +2922,155 @@
    std::unordered_map<uint, bool> s_i_ids;
  };
  
@@ -74,8 +133,8 @@
 +// BatStore harness for the reference implementation every engine there
 +// ports) - run from a dedicated thread (tpcc_bench_runner::StartHtapThread,
 +// below) rather than mixed into the normal per-transaction weighted workload
-+// the way Query2/txn_query2 above is: this matches the "N OLTP threads + 1
-+// always-on dedicated OLAP thread" convention every other engine in that
++// the way Query2/txn_query2 above is: this matches the "N OLTP threads + M
++// always-on dedicated OLAP threads" convention every other engine in that
 +// harness already uses for htap_q1/htap_q6, so OLTP thread counts stay
 +// directly comparable to a plain "tpcc" run at the same worker_threads.
 +//
@@ -90,12 +149,9 @@
 +// warehouse into one still-open scope would.
 +//
 +// ol_delivery_d == 0 means "not delivered yet" (see NewOrder/Delivery/the
-+// loader, all of which use exactly this sentinel). GetCurrentTimeMillis()
-+// (used to stamp it) is a per-thread monotonic counter here, not a real
-+// wall-clock (see its own comment above) - so unlike the sibling harness's
-+// engines, there is no meaningful absolute date range to filter on;
-+// delivered_before/date_lo/date_hi are always wide open (see
-+// tpcc_bench_runner::HtapThreadMain).
++// loader, all of which use exactly this sentinel). The timestamp fields and
++// GetCurrentTimeMillis() are widened to Unix epoch milliseconds so the fixed
++// BenchBase Q1/Q6 date literals have identical meaning in this engine.
 +struct ch_q1_group {
 +  uint64_t count = 0;
 +  uint64_t sum_qty = 0;
@@ -117,9 +173,9 @@
 +// Invoke() instead needs only O(1) memory regardless of table size.
 +class ch_q1_scan_callback : public ermia::OrderedIndex::ScanCallback {
 + public:
-+  ch_q1_scan_callback(uint32_t delivered_before, ch_q1_group (&groups)[16],
++  ch_q1_scan_callback(uint64_t delivered_after, ch_q1_group (&groups)[16],
 +                      size_t &scanned_tuples)
-+      : delivered_before_(delivered_before),
++      : delivered_after_(delivered_after),
 +        groups_(groups),
 +        scanned_tuples_(scanned_tuples) {}
 +  virtual bool Invoke(const char *keyp, size_t keylen,
@@ -130,7 +186,7 @@
 +    const order_line::key *k = Decode(keyp, k_temp);
 +    order_line::value v_temp;
 +    const order_line::value *v = Decode(value, v_temp);
-+    if (v->ol_delivery_d == 0 || v->ol_delivery_d > delivered_before_)
++    if (v->ol_delivery_d == 0 || v->ol_delivery_d <= delivered_after_)
 +      return true;
 +    ch_q1_group &g = groups_[k->ol_number];
 +    g.count++;
@@ -139,7 +195,7 @@
 +    scanned_tuples_++;
 +    return true;
 +  }
-+  uint32_t delivered_before_;
++  uint64_t delivered_after_;
 +  ch_q1_group (&groups_)[16];
 +  size_t &scanned_tuples_;
 +};
@@ -147,14 +203,14 @@
 +static rc_t RunChQ1(ermia::Engine *db, ermia::str_arena &arena,
 +                    ermia::transaction *txn_buf,
 +                    const std::vector<ermia::OrderedIndex *> &order_line_tables,
-+                    uint32_t delivered_before, ch_q1_group (&groups)[16],
++                    uint64_t delivered_after, ch_q1_group (&groups)[16],
 +                    size_t &scanned_tuples) {
 +  const uint64_t read_only_mask = ermia::config::enable_safesnap
 +                                      ? ermia::transaction::TXN_FLAG_READ_ONLY
 +                                      : 0;
 +  ermia::transaction *txn = db->NewTransaction(read_only_mask, arena, txn_buf);
 +
-+  ch_q1_scan_callback cb(delivered_before, groups, scanned_tuples);
++  ch_q1_scan_callback cb(delivered_after, groups, scanned_tuples);
 +  for (uint w = 1; w <= NumWarehouses(); w++) {
 +    ermia::scoped_str_arena s_arena(arena);
 +    const order_line::key k_lo(w, 0, 0, 0);
@@ -171,10 +227,12 @@
 +// (unbounded ORDER_LINE scan, fixed-size str_arena, ASSERT compiled out).
 +class ch_q6_scan_callback : public ermia::OrderedIndex::ScanCallback {
 + public:
-+  ch_q6_scan_callback(uint32_t date_lo, uint32_t date_hi, int32_t max_qty,
++  ch_q6_scan_callback(uint64_t date_lo, uint64_t date_hi, int32_t min_qty,
++                      int32_t max_qty,
 +                      double &revenue)
 +      : date_lo_(date_lo),
 +        date_hi_(date_hi),
++        min_qty_(min_qty),
 +        max_qty_(max_qty),
 +        revenue_(revenue) {}
 +  virtual bool Invoke(const char *keyp, size_t keylen,
@@ -186,26 +244,27 @@
 +    const order_line::value *v = Decode(value, v_temp);
 +    if (v->ol_delivery_d == 0) return true;
 +    if (v->ol_delivery_d < date_lo_ || v->ol_delivery_d >= date_hi_) return true;
-+    if (v->ol_quantity >= max_qty_) return true;
++    if (v->ol_quantity < min_qty_ || v->ol_quantity > max_qty_) return true;
 +    revenue_ += v->ol_amount;
 +    return true;
 +  }
-+  uint32_t date_lo_, date_hi_;
-+  int32_t max_qty_;
++  uint64_t date_lo_, date_hi_;
++  int32_t min_qty_, max_qty_;
 +  double &revenue_;
 +};
 +
 +static rc_t RunChQ6(ermia::Engine *db, ermia::str_arena &arena,
 +                    ermia::transaction *txn_buf,
 +                    const std::vector<ermia::OrderedIndex *> &order_line_tables,
-+                    uint32_t date_lo, uint32_t date_hi, int32_t max_qty,
++                    uint64_t date_lo, uint64_t date_hi, int32_t min_qty,
++                    int32_t max_qty,
 +                    double &revenue) {
 +  const uint64_t read_only_mask = ermia::config::enable_safesnap
 +                                      ? ermia::transaction::TXN_FLAG_READ_ONLY
 +                                      : 0;
 +  ermia::transaction *txn = db->NewTransaction(read_only_mask, arena, txn_buf);
 +
-+  ch_q6_scan_callback cb(date_lo, date_hi, max_qty, revenue);
++  ch_q6_scan_callback cb(date_lo, date_hi, min_qty, max_qty, revenue);
 +  for (uint w = 1; w <= NumWarehouses(); w++) {
 +    ermia::scoped_str_arena s_arena(arena);
 +    const order_line::key k_lo(w, 0, 0, 0);
@@ -221,7 +280,7 @@
  rc_t tpcc_worker::txn_stock_level() {
    const uint warehouse_id = pick_wh(r);
    const uint threshold = RandomNumber(r, 10, 20);
-@@ -3534,10 +3692,102 @@
+@@ -3534,10 +3688,117 @@
      return ret;
    }
  
@@ -229,16 +288,18 @@
 +  // this benchmark overrides these, for CH-benCHmark Q1/Q6.
 +  virtual void StartHtapThread() {
 +    if (!g_enable_chbenchmark) return;
-+    htap_thread_ = std::thread(&tpcc_bench_runner::HtapThreadMain, this);
++    for (int i = 0; i < g_chbenchmark_threads; ++i)
++      htap_threads_.emplace_back(&tpcc_bench_runner::HtapThreadMain, this);
 +  }
 +
 +  virtual void JoinHtapThread() {
-+    if (htap_thread_.joinable()) htap_thread_.join();
++    for (auto &thread : htap_threads_)
++      if (thread.joinable()) thread.join();
 +  }
 +
   private:
 +  void HtapThreadMain();
-+  std::thread htap_thread_;
++  std::vector<std::thread> htap_threads_;
    std::map<std::string, std::vector<ermia::OrderedIndex *>> partitions;
  };
  
@@ -282,20 +343,27 @@
 +    ch_q1_group groups[16] = {};
 +    size_t scanned_tuples = 0;
 +    auto q1_start = std::chrono::steady_clock::now();
-+    // Wide open by design - see the CH-benCHmark Q1/Q6 module doc above
-+    // RunChQ1/RunChQ6 (ol_delivery_d isn't a real wall-clock timestamp here).
 +    rc_t rc = RunChQ1(db, arena, txn_buf, order_line_tables,
-+                      std::numeric_limits<uint32_t>::max(), groups,
++                      g_chbenchmark_variant ? UINT64_C(0)
++                                           : UINT64_C(1167696000000),
++                      groups,
 +                      scanned_tuples);
 +    if (!rc.IsAbort()) {
 +      auto latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
 +                            std::chrono::steady_clock::now() - q1_start)
 +                            .count();
-+      double total_revenue = 0.0;
-+      for (auto &g : groups) total_revenue += g.sum_amount;
-+      printf("HTAP_SCAN,ch_q1_pricing_summary,%.3f,%zu,%lld,%.2f\n",
++      // Materialize every projected Q1 aggregate (SUM/AVG/COUNT), and expose
++      // one checksum so an optimizing build cannot discard any of them.
++      double result_checksum = 0.0;
++      for (auto &g : groups) {
++        if (!g.count) continue;
++        result_checksum += g.sum_qty + g.sum_amount + g.count +
++                           (double)g.sum_qty / g.count + g.sum_amount / g.count;
++      }
++      printf("HTAP_SCAN,%s,%.3f,%zu,%lld,%.2f\n",
++             g_chbenchmark_variant ? "ch_q1_variant" : "ch_q1_pricing_summary",
 +             elapsed_secs(), scanned_tuples, (long long)latency_ns,
-+             total_revenue);
++             result_checksum);
 +    }
 +    }
 +    if (!running) break;
@@ -304,13 +372,19 @@
 +
 +    double revenue = 0.0;
 +    auto q6_start = std::chrono::steady_clock::now();
-+    rc_t rc = RunChQ6(db, arena, txn_buf, order_line_tables, 0,
-+                std::numeric_limits<uint32_t>::max(), 24, revenue);
++    rc_t rc = RunChQ6(
++        db, arena, txn_buf, order_line_tables,
++        g_chbenchmark_variant ? 0 : UINT64_C(915148800000),
++        g_chbenchmark_variant ? std::numeric_limits<uint64_t>::max()
++                             : UINT64_C(1577836800000),
++        g_chbenchmark_variant ? std::numeric_limits<int32_t>::min() : 1,
++        g_chbenchmark_variant ? 23 : 100000, revenue);
 +    if (!rc.IsAbort()) {
 +      auto latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
 +                            std::chrono::steady_clock::now() - q6_start)
 +                            .count();
-+      printf("HTAP_SCAN,ch_q6_forecast_revenue,%.3f,%d,%lld,%.2f\n",
++      printf("HTAP_SCAN,%s,%.3f,%d,%lld,%.2f\n",
++             g_chbenchmark_variant ? "ch_q6_variant" : "ch_q6_forecast_revenue",
 +             elapsed_secs(), 1, (long long)latency_ns, revenue);
 +    }
 +    }
@@ -324,13 +398,53 @@
  void tpcc_do_test(ermia::Engine *db, int argc, char **argv) {
    // parse options
    optind = 1;
-@@ -3552,6 +3802,9 @@
+@@ -3552,6 +3813,11 @@
          {"new-order-fast-id-gen", no_argument, &g_new_order_fast_id_gen, 1},
          {"uniform-item-dist", no_argument, &g_uniform_item_dist, 1},
          {"order-status-scan-hack", no_argument, &g_order_status_scan_hack, 1},
 +        {"enable-chbenchmark", no_argument, &g_enable_chbenchmark, 1},
 +        {"chbenchmark-q1", no_argument, &g_chbenchmark_query, 1},
 +        {"chbenchmark-q6", no_argument, &g_chbenchmark_query, 6},
++        {"chbenchmark-variant", no_argument, &g_chbenchmark_variant, 1},
++        {"chbenchmark-threads", required_argument, 0, 'a'},
          {"workload-mix", required_argument, 0, 'w'},
          {"warehouse-spread", required_argument, 0, 's'},
          {"80-20-dist", no_argument, &g_wh_temperature, 't'},
+@@ -3562,7 +3828,7 @@
+         {0, 0, 0, 0}};
+     int option_index = 0;
+     int c =
+-        getopt_long(argc, argv, "r:w:s:t:n:p:q:z", long_options, &option_index);
++        getopt_long(argc, argv, "a:r:w:s:t:n:p:q:z", long_options, &option_index);
+     if (c == -1) break;
+     switch (c) {
+     case 0:
+@@ -3574,6 +3840,11 @@
+       abort();
+       break;
+ 
++    case 'a':
++      g_chbenchmark_threads = strtoul(optarg, NULL, 10);
++      ALWAYS_ASSERT(g_chbenchmark_threads > 0);
++      break;
++
+     case 's':
+       g_wh_spread = strtoul(optarg, NULL, 10) / 100.00;
+       break;
+@@ -3885,6 +4156,6 @@
+ rc_t tpcc_cmdlog_redoer::txn_delivery(uint warehouse_id) {
+   const uint o_carrier_id = RandomNumber(r, 1, NumDistrictsPerWarehouse());
+-  const uint32_t ts = GetCurrentTimeMillis();
++  const uint64_t ts = GetCurrentTimeMillis();
+ 
+   // worst case txn profile:
+   //   10 times:
+@@ -4028,7 +4299,7 @@
+     } while (customerWarehouseID == warehouse_id);
+   }
+   const float paymentAmount = (float)(RandomNumber(r, 100, 500000) / 100.0);
+-  const uint32_t ts = GetCurrentTimeMillis();
++  const uint64_t ts = GetCurrentTimeMillis();
+   ASSERT(!g_disable_xpartition_txn || customerWarehouseID == warehouse_id);
+ 
+   // output from txn counters:

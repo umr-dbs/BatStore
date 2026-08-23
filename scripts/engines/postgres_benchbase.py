@@ -98,6 +98,10 @@ TPCC_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 CHBENCHMARK_WEIGHTS = {
     "htap_q1": "100," + ",".join(["0"] * 21),
     "htap_q6": ",".join(["0"] * 5) + ",100," + ",".join(["0"] * 16),
+    # PostgreSQL already used BenchBase's canonical SQL. Its retained variant
+    # aliases therefore intentionally execute the same Q1/Q6.
+    "htap_q1_variant": "100," + ",".join(["0"] * 21),
+    "htap_q6_variant": ",".join(["0"] * 5) + ",100," + ",".join(["0"] * 16),
 }
 
 CHBENCHMARK_CONFIG_TEMPLATE = """<?xml version="1.0"?>
@@ -465,7 +469,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         ))
         bench_type = "tpcc"
         metric_name = "new_order_per_sec"
-    elif workload in ("htap_q1", "htap_q6"):
+    elif workload in common.HTAP_WORKLOADS:
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
         config_path.write_text(CHBENCHMARK_CONFIG_TEMPLATE.format(
@@ -554,7 +558,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
             notes=notes,
         )
 
-    if workload in ("tpcc", "htap_q1", "htap_q6"):
+    if workload in (["tpcc"] + common.HTAP_WORKLOADS):
         # New-Order-only, for tpmC parity with the other 3 engines (see leanstore.py/wiredtiger.py) -
         # also the OLTP-side metric for htap_q1/htap_q6, directly comparable to plain "tpcc"
         # at the same threads/gc for an interference% computation (see plot_compare.py).
@@ -569,8 +573,8 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if workload == "ycsb_e":
         latency = _latency_from_results(results_dir, "ScanRecord")
-    elif workload in ("htap_q1", "htap_q6"):
-        latency = _latency_from_results(results_dir, "Q1" if workload == "htap_q1" else "Q6")
+    elif workload in common.HTAP_WORKLOADS:
+        latency = _latency_from_results(results_dir, "Q1" if "q1" in workload else "Q6")
     elif workload == "s_htap":
         latency = _latency_from_results(results_dir, "OlapScan")
 

@@ -421,16 +421,20 @@ YCSB_WORKLOADS = ["ycsb_a", "ycsb_b", "ycsb_c", "ycsb_d", "ycsb_e", "ycsb_f"]
 # patches/vweaver_ermia_chbenchmark.patch's RunChQ1/RunChQ6 in ERMIA's own
 # benchmarks/tpcc.cc (see manual.txt section 5) - though vweaver_ermia_frugal has a
 # separate, pre-existing KNOWN ISSUE (also section 5) that crashes it on any sustained
-# workload, htap_q1/htap_q6 included. Each is one full ORDER_LINE table scan (pure
-# aggregation for Q1, filtered aggregation for Q6), no joins - see
-# src/bat_bench/tpch_queries.rs::q1/q6, the reference implementation every engine's own port
-# (including libmdbx's and both vWeaver_ermia variants') mirrors function-for-function.
-HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
+# workload, htap_q1/htap_q6 included. Each is one ORDER_LINE scan (pure aggregation for
+# Q1, filtered aggregation for Q6), no joins. The canonical functions are
+# tpch_queries::q1_benchbase/q6_benchbase; q1/q6 retain BatStore's former variants.
+HTAP_CANONICAL_WORKLOADS = ["htap_q1", "htap_q6"]
+# Each engine's pre-existing custom predicates are retained as explicit variants
+# now that htap_q1/htap_q6 mean the pinned BenchBase SQL exactly.
+HTAP_VARIANT_WORKLOADS = ["htap_q1_variant", "htap_q6_variant"]
+HTAP_WORKLOADS = HTAP_CANONICAL_WORKLOADS + HTAP_VARIANT_WORKLOADS
 # "S-HTAP" streaming workload (see Scale's s_htap_* fields' doc) - one name, no
 # lettered variants (unlike YCSB A-F): the interesting axis here is the hot_window/
 # olap_lag/olap_span shape, not a fixed menu of op-mix presets, so it stays a single
 # workload tuned via those Scale fields / compare_engines.py flags instead.
 ALL_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_WORKLOADS + ["s_htap"]
+DEFAULT_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_CANONICAL_WORKLOADS + ["s_htap"]
 ENGINES = ["batstore", "leanstore", "wiredtiger", "postgres", "vweaver_ermia", "vweaver_ermia_frugal", "libmdbx"]
 
 
