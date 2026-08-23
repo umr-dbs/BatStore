@@ -153,11 +153,24 @@ python3 scripts/plot_compare.py \
   --run-dir comparison_results/run_YYYYMMDD_HHMMSS
 ```
 
+For multi-engine runs, every `htap_q1` or `htap_q6` workload in the manifest produces
+`threads_sweep_htap_q1.{svg,pdf}` or `threads_sweep_htap_q6.{svg,pdf}`. Each
+figure keeps OLTP throughput (New-Order transactions/sec) and aggregate OLAP
+throughput (completed queries/sec) in separate panels, both against the swept
+number of OLTP threads/terminals. The analytical thread count remains fixed at
+`--htap-olap-threads` for this comparison sweep.
+
+Multi-engine runs also produce `all_engines_workload_overview.{svg,pdf}`. It
+uses one consistent color per engine and marker shapes for GC state, with rows
+for every workload and columns for throughput, HTAP OLAP throughput, p99
+scan/query latency, and peak memory.
+
 For a run containing only one engine, the plotter automatically creates a
 single `single_engine_overview` figure instead of cross-engine charts. Every
 workload present gets throughput, scan/query latency, and peak-memory panels
-across the measured thread counts and GC modes. This keeps partial runs such as
-BatStore with only `htap_q1`, `htap_q6`, and `ycsb_e` meaningful.
+across the measured thread counts and GC modes. HTAP rows include separate OLTP
+and aggregate OLAP throughput panels inside this overview. This keeps partial
+runs such as BatStore with only `htap_q1`, `htap_q6`, and `ycsb_e` meaningful.
 
 Select the same single-engine view from a run containing several engines with:
 
