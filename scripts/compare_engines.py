@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-root", default="comparison_results")
     p.add_argument("--engines", default=",".join(common.ENGINES),
                    help=f"comma-separated subset of {common.ENGINES}")
-    p.add_argument("--workloads", default=",".join(common.ALL_WORKLOADS),
+    p.add_argument("--workloads", default=",".join(common.DEFAULT_WORKLOADS),
                    help=f"comma-separated subset of {common.ALL_WORKLOADS}")
     p.add_argument("--tiny", action="store_true", help="use TINY_SCALE (smoke test) instead of the server scale")
     p.add_argument("--skip-build", action="store_true", help="skip each engine's ensure_built() step")

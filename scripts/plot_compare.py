@@ -61,7 +61,7 @@ ENGINE_COLORS = {
     "vweaver_ermia": "tab:purple", "vweaver_ermia_frugal": "tab:pink", "libmdbx": "tab:brown",
 }
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
-HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
+HTAP_WORKLOADS = ["htap_q1", "htap_q6", "htap_q1_variant", "htap_q6_variant"]
 # Engines with a real, working GC on/off toggle (see engines/*.py's SUPPORTS_GC_TOGGLE) -
 # leanstore/wiredtiger only ever report gc_enabled="n/a" (no working toggle in this
 # checkout, see the plan's Context section), so they're excluded from GC-comparison plots.

@@ -105,6 +105,38 @@ pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, V
     (out, ts_start)
 }
 
+/// Exact predicate and aggregation used by BenchBase CH-benCHmark Q1. Unlike [`q1`]'s
+/// selective historical variant, this keeps delivered rows strictly newer than the fixed
+/// 2007-01-02 cutoff. The zone-map range starts one millisecond after that cutoff because
+/// ORDER_LINE timestamps are integer milliseconds and BenchBase uses a strict `>`.
+pub fn q1_benchbase(db: &TpccDatabase) -> (Vec<OrderLineSummary>, Version) {
+    let mut tx = TpccTxn::begin(db);
+    let ts_start = tx.ts_start();
+    let mut groups: [OrderLineSummary; 16] = std::array::from_fn(|i| OrderLineSummary {
+        ol_number: i as u8,
+        ..Default::default()
+    });
+
+    tx.range_for_each_zone_pruned(
+        Table::OrderLine,
+        order_line_table_range(),
+        encode_signed_zone_value(BENCHBASE_Q1_DELIVERY_AFTER_MILLIS.saturating_add(1)),
+        encode_signed_zone_value(i64::MAX),
+        |key, row| {
+            let ol = row.as_order_line();
+            let g = &mut groups[decode_order_line_number(key) as usize];
+            g.count += 1;
+            g.sum_qty += ol.ol_quantity as u64;
+            g.sum_amount += ol.ol_amount;
+        },
+    );
+    tx.commit();
+
+    let mut out: Vec<_> = groups.into_iter().filter(|g| g.count > 0).collect();
+    out.sort_by_key(|g| g.ol_number);
+    (out, ts_start)
+}
+
 /// CH-benCHmark Q6 ("Forecasting Revenue Change", adapted from TPC-H Q6):
 /// total revenue (`sum(ol_amount)`) from order-lines delivered within
 /// `[date_lo, date_hi)` whose quantity is below `max_qty`. Logically scans the full
@@ -125,6 +157,31 @@ pub fn q6(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, V
         |_, row| {
             let ol = row.as_order_line();
             if ol.ol_quantity < max_qty {
+                revenue += ol.ol_amount;
+            }
+        },
+    );
+    tx.commit();
+    (revenue, ts_start)
+}
+
+/// Exact BenchBase CH-benCHmark Q6 predicate: delivery date in
+/// `[1999-01-01, 2020-01-01)` and quantity in the inclusive range `1..=100000`.
+/// `OrderLine::ol_quantity` is a `u8`, but the explicit comparison preserves the SQL
+/// semantics if that field is widened later. Delivery-date bounds use the zone map.
+pub fn q6_benchbase(db: &TpccDatabase) -> (f64, Version) {
+    let mut tx = TpccTxn::begin(db);
+    let ts_start = tx.ts_start();
+    let mut revenue = 0.0;
+    tx.range_for_each_zone_pruned(
+        Table::OrderLine,
+        order_line_table_range(),
+        encode_signed_zone_value(BENCHBASE_Q6_DATE_LO_MILLIS),
+        encode_signed_zone_value(BENCHBASE_Q6_DATE_HI_MILLIS.saturating_sub(1)),
+        |_, row| {
+            let ol = row.as_order_line();
+            let qty = ol.ol_quantity as u32;
+            if (BENCHBASE_Q6_QUANTITY_LO..=BENCHBASE_Q6_QUANTITY_HI).contains(&qty) {
                 revenue += ol.ol_amount;
             }
         },

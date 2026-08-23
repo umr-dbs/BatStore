@@ -96,12 +96,12 @@ def run(
         ]
         metric_name = "new_order_per_sec"
         ts_file, ts_column = "tpcc_oltp_timeseries.csv", "new_order_committed"
-    elif workload in ("htap_q1", "htap_q6"):
+    elif workload in common.HTAP_WORKLOADS:
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
         # Run exactly the query named by the workload. The old shared "ch" mode rotates
         # Q1/Q6/Q4/Q5 and therefore made both points pay for unrelated Q4/Q5 joins.
-        olap_mode = "ch_q1" if workload == "htap_q1" else "ch_q6"
+        olap_mode = workload.replace("htap_", "ch_", 1)
         args = [
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
             "false", gc_bool, "false", "fg", olap_mode, str(scale.htap_olap_threads), "10.0",
@@ -191,8 +191,13 @@ def run(
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
     elif workload == "s_htap":
         latency = common.read_latency_summary(output_dir / "s_htap_scan_latency_summary.csv")
-    elif workload in ("htap_q1", "htap_q6"):
-        mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
+    elif workload in common.HTAP_WORKLOADS:
+        mode = {
+            "htap_q1": "ch_q1_pricing_summary",
+            "htap_q6": "ch_q6_forecast_revenue",
+            "htap_q1_variant": "ch_q1_variant",
+            "htap_q6_variant": "ch_q6_variant",
+        }[workload]
         latency = common.percentiles_from_samples(
             output_dir / "tpcc_scan.csv", "latency_ns", filter_column="mode", filter_value=mode,
         )

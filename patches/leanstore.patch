@@ -101,7 +101,20 @@ index 575cc43..33a31eb 100644
     Integer urandexcept(Integer low, Integer high, Integer v)
     {
        if (high <= low)
-@@ -1062,8 +1074,77 @@ class TPCCWorkload
+@@ -137,7 +149,11 @@ class TPCCWorkload
+       return nurand(255, 0, 999, C_LAST_LOAD_C);
+    }
+    // -------------------------------------------------------------------------------------
+-   Timestamp currentTimestamp() { return 1; }
++   Timestamp currentTimestamp()
++   {
++      return std::chrono::duration_cast<std::chrono::milliseconds>(
++          std::chrono::system_clock::now().time_since_epoch()).count();
++   }
+    // -------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------------------
+    // run
+@@ -1062,8 +1078,78 @@ class TPCCWorkload
            key, [&](const typename Relation::Key&, const Relation&) { return true; }, [&]() {});
     }
     // -------------------------------------------------------------------------------------
@@ -116,24 +129,14 @@ index 575cc43..33a31eb 100644
 +   // -------------------------------------------------------------------------------------
     void analyticalQuery(s32 query_no = 0)
     {
-+      // query_no 101/106 are this harness's real CH-benCHmark Q1/Q6 (see
-+      // BatStore's src/bat_bench/tpch_queries.rs::q1/q6, the reference implementation this
-+      // ports) - deliberately not "1"/"6" to avoid colliding with the pre-existing debug
-+      // sanity-check scans below (query_no 0-4/44/99), which predate any real CH
-+      // integration and are left untouched for backward compatibility.
-+      if (query_no == 101 || query_no == 106) {
++      // 101/106 are the literal pinned-BenchBase predicates; 201/206 retain this
++      // engine's former wide-date / quantity<24 behavior as explicit variants.
++      // These IDs avoid colliding with the pre-existing debug scans below.
++      if (query_no == 101 || query_no == 106 || query_no == 201 || query_no == 206) {
 +         const auto query_start = std::chrono::high_resolution_clock::now();
-+         if (query_no == 101) {
-+            // CH-benCHmark Q1 ("Pricing Summary Report", adapted from TPC-H Q1): groups
-+            // every *delivered* order-line by its position within the order (ol_number,
-+            // 1..=15 - this schema's stand-in for TPC-H lineitem's
-+            // l_returnflag/l_linestatus), aggregating count/sum(quantity)/sum(amount).
-+            // One full ORDER_LINE table scan. Wide-open "delivered before" threshold,
-+            // matching this harness's default date range (see the module doc on the
-+            // Rust reference implementation for why an unrestricted range is correct
-+            // here: every row's date fields are stamped with the load's actual
-+            // wall-clock time, not spread across years like a real TPC-H date filter
-+            // would assume).
++         double result_summary = 0;
++         if (query_no == 101 || query_no == 201) {
++            // Q1 groups matching rows by ol_number and computes SUM/AVG/COUNT.
 +            struct OrderLineSummary {
 +               u64 count = 0;
 +               double sum_qty = 0;
@@ -143,7 +146,10 @@ index 575cc43..33a31eb 100644
 +            orderline.scan(
 +                {0, 0, 0, 0},
 +                [&](const orderline_t::Key& key, const orderline_t& rec) {
-+                   if (rec.ol_delivery_d > 0) {
++                   const bool matches_date = query_no == 101
++                       ? rec.ol_delivery_d > 1167696000000LL
++                       : rec.ol_delivery_d > 0;
++                   if (matches_date) {
 +                      auto& g = groups[key.ol_number];
 +                      g.count++;
 +                      g.sum_qty += rec.ol_quantity;
@@ -152,24 +158,32 @@ index 575cc43..33a31eb 100644
 +                   return true;
 +                },
 +                [&]() {});
++            for (const auto& g : groups) {
++               if (g.count)
++                  result_summary += g.sum_qty + g.sum_amount + g.count +
++                                    g.sum_qty / g.count + g.sum_amount / g.count;
++            }
 +         } else {
-+            // CH-benCHmark Q6 ("Forecasting Revenue Change", adapted from TPC-H Q6):
-+            // total revenue (sum(ol_amount)) from delivered order-lines with quantity <
-+            // 24 - the one real filter here, matching the reference implementation's
-+            // `max_qty = 24` (the date range is wide-open by default, same reasoning as
-+            // Q1 above, so no separate date check is needed to match its behavior). One
-+            // full ORDER_LINE table scan.
++            // Q6 computes SUM(ol_amount) under the canonical or variant predicate.
 +            double revenue = 0;
 +            orderline.scan(
 +                {0, 0, 0, 0},
 +                [&](const orderline_t::Key&, const orderline_t& rec) {
-+                   if (rec.ol_delivery_d > 0 && rec.ol_quantity < 24) {
++                   const bool matches = query_no == 106
++                       ? rec.ol_delivery_d >= 915148800000LL &&
++                         rec.ol_delivery_d < 1577836800000LL &&
++                         rec.ol_quantity >= 1 && rec.ol_quantity <= 100000
++                       : rec.ol_delivery_d > 0 && rec.ol_quantity < 24;
++                   if (matches) {
 +                      revenue += rec.ol_amount;
 +                   }
 +                   return true;
 +                },
 +                [&]() {});
++            result_summary = revenue;
 +         }
++         volatile double observed_result = result_summary;
++         (void)observed_result;
 +         const auto latency_ns =
 +             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - query_start).count();
 +         std::lock_guard<std::mutex> guard(ch_query_latency_mutex);
@@ -179,7 +193,7 @@ index 575cc43..33a31eb 100644
        // TODO: implement CH analytical queries
        Integer sum = 0, last_w = 0, last_i = 0;
        if (query_no == 0) {
-@@ -1151,3 +1232,29 @@ class TPCCWorkload
+@@ -1151,3 +1225,29 @@ class TPCCWorkload
        }
     }
  };

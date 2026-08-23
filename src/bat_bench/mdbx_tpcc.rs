@@ -59,7 +59,7 @@ pub struct MdbxTpccConfig {
     pub duration: Duration,
     pub db_path: PathBuf,
     pub output_dir: PathBuf,
-    /// Runs one extra read-only OLAP thread repeating the selected [`mdbx_q1`] or [`mdbx_q6`]
+    /// Runs read-only OLAP threads repeating the selected [`mdbx_q1`] or [`mdbx_q6`]
     /// concurrently with the OLTP terminals - htap_q1/htap_q6's "run
     /// CH-benCHmark queries alongside OLTP" mechanism (mirrors
     /// `tpcc_driver.rs`'s `OlapMode::ChBenchmark`, minus Q4/Q5 - see module
@@ -79,6 +79,8 @@ pub enum MdbxHtapMode {
     None,
     Q1,
     Q6,
+    Q1Selective,
+    Q6Selective,
 }
 
 pub struct MdbxTpccRunSummary {
@@ -93,6 +95,7 @@ const SL: usize = 9;
 const DELIV_DISTRICTS: usize = 12;
 const DELIV_CONFLICTS: usize = 13;
 const NUM_COUNTERS: usize = 14;
+const MDBX_READER_HEADROOM: usize = 8;
 
 const COUNTER_NAMES: [&str; NUM_COUNTERS] = [
     "new_order_committed", "new_order_conflict", "new_order_user_abort",
@@ -126,15 +129,25 @@ fn record(totals: &mut [u64; NUM_COUNTERS], base: usize, outcome: TxnOutcome) {
 // transaction's lifetime, so it can't be cached across them anyway).
 // ---------------------------------------------------------------------
 
-fn open_db(path: &std::path::Path, num_terminals: usize) -> Database<WriteMap> {
+fn configured_max_readers(num_terminals: usize, num_olap_threads: usize) -> std::ffi::c_uint {
+    num_terminals
+        .checked_add(num_olap_threads)
+        .and_then(|readers| readers.checked_add(MDBX_READER_HEADROOM))
+        .and_then(|readers| readers.try_into().ok())
+        .expect("mdbx_tpcc: reader count exceeds the supported range")
+}
+
+fn open_db(path: &std::path::Path, num_terminals: usize, num_olap_threads: usize) -> Database<WriteMap> {
     fs::create_dir_all(path).unwrap_or_else(|e| panic!("mdbx_tpcc: failed to create db dir {}: {e}", path.display()));
     // libmdbx's reader-slot table defaults to 61 (MDBX_READERS_FULL beyond that) -
     // below our own terminal-count sweep, which was silently aborting/hanging
     // worker threads via the `.expect` calls below. Size it to the actual
-    // terminal count plus headroom for the table-creation txn and any internal use.
+    // terminal and OLAP thread counts plus headroom for staleness probes and any
+    // internal use. Every OLAP thread holds a long-lived read transaction while
+    // scanning, so omitting them here causes MDBX_READERS_FULL under HTAP loads.
     let options = DatabaseOptions {
         max_tables: Some(Table::ALL.len() as u64),
-        max_readers: Some((num_terminals as std::ffi::c_uint).saturating_add(8)),
+        max_readers: Some(configured_max_readers(num_terminals, num_olap_threads)),
         mode: Mode::ReadWrite(ReadWriteOptions { sync_mode: SyncMode::UtterlyNoSync, ..Default::default() }),
         ..Default::default()
     };
@@ -257,6 +270,40 @@ fn mdbx_q6(db: &Database<WriteMap>, date_lo: i64, date_hi: i64, max_qty: u8) -> 
             (delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty).then_some(ol.ol_amount)
         })
         .sum();
+    (revenue, ts_start)
+}
+
+fn mdbx_q1_benchbase(db: &Database<WriteMap>) -> (Vec<OrderLineSummary>, u64) {
+    let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (BenchBase q1)");
+    let ts_start = txn.id();
+    let lines = range_rows(&txn, Table::OrderLine, TpccKey::MIN, TpccKey::MAX);
+    let mut groups: [OrderLineSummary; 16] =
+        std::array::from_fn(|i| OrderLineSummary { ol_number: i as u8, ..Default::default() });
+    for (key, row) in &lines {
+        let ol = row.as_order_line();
+        if ol.ol_delivery_d.is_some_and(|d| d > BENCHBASE_Q1_DELIVERY_AFTER_MILLIS) {
+            let g = &mut groups[decode_order_line_number(*key) as usize];
+            g.count += 1;
+            g.sum_qty += ol.ol_quantity as u64;
+            g.sum_amount += ol.ol_amount;
+        }
+    }
+    (groups.into_iter().filter(|g| g.count > 0).collect(), ts_start)
+}
+
+fn mdbx_q6_benchbase(db: &Database<WriteMap>) -> (f64, u64) {
+    let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (BenchBase q6)");
+    let ts_start = txn.id();
+    let lines = range_rows(&txn, Table::OrderLine, TpccKey::MIN, TpccKey::MAX);
+    let revenue = lines.iter().filter_map(|(_, row)| {
+        let ol = row.as_order_line();
+        let delivered = ol.ol_delivery_d?;
+        let qty = ol.ol_quantity as u32;
+        (delivered >= BENCHBASE_Q6_DATE_LO_MILLIS
+            && delivered < BENCHBASE_Q6_DATE_HI_MILLIS
+            && (BENCHBASE_Q6_QUANTITY_LO..=BENCHBASE_Q6_QUANTITY_HI).contains(&qty))
+            .then_some(ol.ol_amount)
+    }).sum();
     (revenue, ts_start)
 }
 
@@ -743,16 +790,25 @@ struct MdbxScanResult {
 /// read-only transaction opened immediately after the query finishes, diffed
 /// against the query's own transaction id - "how many committed writer
 /// transactions happened while this analytical answer was being computed."
-fn ch_q1_once(db: &Database<WriteMap>, date_hi: i64, run_start: Instant) -> MdbxScanResult {
+fn ch_q1_once(
+    db: &Database<WriteMap>,
+    date_hi: i64,
+    run_start: Instant,
+    selective: bool,
+) -> MdbxScanResult {
     let staleness = |ts_start: u64| {
         let fresh = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (staleness probe)");
         fresh.id().saturating_sub(ts_start)
     };
 
     let start = Instant::now();
-    let (q1, ts_start) = mdbx_q1(db, date_hi);
+    let (q1, ts_start) = if selective {
+        mdbx_q1(db, date_hi)
+    } else {
+        mdbx_q1_benchbase(db)
+    };
     MdbxScanResult {
-        mode: "ch_q1_pricing_summary",
+        mode: if selective { "ch_q1_variant" } else { "ch_q1_pricing_summary" },
         elapsed_secs: run_start.elapsed().as_secs_f64(),
         snapshot: ts_start,
         scanned_tuples: q1.len(),
@@ -762,15 +818,25 @@ fn ch_q1_once(db: &Database<WriteMap>, date_hi: i64, run_start: Instant) -> Mdbx
     }
 }
 
-fn ch_q6_once(db: &Database<WriteMap>, date_lo: i64, date_hi: i64, run_start: Instant) -> MdbxScanResult {
+fn ch_q6_once(
+    db: &Database<WriteMap>,
+    date_lo: i64,
+    date_hi: i64,
+    run_start: Instant,
+    selective: bool,
+) -> MdbxScanResult {
     let staleness = |ts_start: u64| {
         let fresh = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (staleness probe)");
         fresh.id().saturating_sub(ts_start)
     };
     let start = Instant::now();
-    let (q6, ts_start) = mdbx_q6(db, date_lo, date_hi, 24);
+    let (q6, ts_start) = if selective {
+        mdbx_q6(db, date_lo, date_hi, 24)
+    } else {
+        mdbx_q6_benchbase(db)
+    };
     MdbxScanResult {
-        mode: "ch_q6_forecast_revenue",
+        mode: if selective { "ch_q6_variant" } else { "ch_q6_forecast_revenue" },
         elapsed_secs: run_start.elapsed().as_secs_f64(),
         snapshot: ts_start,
         scanned_tuples: 1,
@@ -780,11 +846,10 @@ fn ch_q6_once(db: &Database<WriteMap>, date_lo: i64, date_hi: i64, run_start: In
     }
 }
 
-/// The one HTAP OLAP thread's whole run - repeats the selected query until `stop`,
+/// One HTAP OLAP thread's whole run - repeats the selected query until `stop`,
 /// streaming every completed query's result into the returned `Vec`
 /// (joined back in `run_mdbx_tpcc`, mirrors `terminal_thread`'s
-/// join-and-collect shape rather than `tpcc_driver.rs`'s channel-based
-/// multi-thread fan-in, since there's always exactly one of these).
+/// join-and-collect shape rather than `tpcc_driver.rs`'s channel-based fan-in.
 fn olap_thread(
     db: Arc<Database<WriteMap>>,
     date_lo: i64,
@@ -799,8 +864,10 @@ fn olap_thread(
 
     while !stop.load(Relaxed) {
         out.push(match mode {
-            MdbxHtapMode::Q1 => ch_q1_once(&db, date_hi, run_start),
-            MdbxHtapMode::Q6 => ch_q6_once(&db, date_lo, date_hi, run_start),
+            MdbxHtapMode::Q1 => ch_q1_once(&db, date_hi, run_start, false),
+            MdbxHtapMode::Q6 => ch_q6_once(&db, date_lo, date_hi, run_start, false),
+            MdbxHtapMode::Q1Selective => ch_q1_once(&db, date_hi, run_start, true),
+            MdbxHtapMode::Q6Selective => ch_q6_once(&db, date_lo, date_hi, run_start, true),
             MdbxHtapMode::None => break,
         });
     }
@@ -861,7 +928,8 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
     let num_terminals = cfg.num_terminals.max(1);
-    let db = Arc::new(open_db(&cfg.db_path, num_terminals));
+    let num_olap_threads = if cfg.htap_mode == MdbxHtapMode::None { 0 } else { cfg.num_olap_threads };
+    let db = Arc::new(open_db(&cfg.db_path, num_terminals, num_olap_threads));
 
     println!(
         "libmdbx TPC-C benchmark\n\
@@ -886,7 +954,6 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     // num_olap_threads OLAP threads when htap_mode is set - same "every distinct thread
     // permanently owns a barrier slot" shape as tpcc_driver.rs's num_terminals +
     // num_olap_threads (see that module's threading-constraint doc).
-    let num_olap_threads = if cfg.htap_mode == MdbxHtapMode::None { 0 } else { cfg.num_olap_threads };
     let barrier = Arc::new(Barrier::new(num_terminals + 1 + num_olap_threads));
     let stop = Arc::new(AtomicBool::new(false));
     let duration = cfg.duration;
@@ -906,8 +973,8 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
         let stop = stop.clone();
         let barrier = barrier.clone();
         let (date_lo, date_hi) = match cfg.htap_mode {
-            MdbxHtapMode::Q1 => (i64::MIN, q1_cutoff),
-            MdbxHtapMode::Q6 => (q6_date_lo, q6_date_hi),
+            MdbxHtapMode::Q1 | MdbxHtapMode::Q1Selective => (i64::MIN, q1_cutoff),
+            MdbxHtapMode::Q6 | MdbxHtapMode::Q6Selective => (q6_date_lo, q6_date_hi),
             MdbxHtapMode::None => (i64::MIN, i64::MAX),
         };
         thread::spawn(move || olap_thread(db, date_lo, date_hi, stop, barrier, cfg.htap_mode))
@@ -995,7 +1062,7 @@ pub fn main_mdbx_tpcc(parms: Vec<String>) {
     // update_in_place, root_star_index, WAL) - see mdbx_ycsb.rs/
     // scripts/engines/libmdbx.py for the same convention. `htap_mode` (position 9) is the
     // one piece of tpcc_driver.rs's OLAP/HTAP surface this file does port - "none"
-    // (default), "ch_q1", or "ch_q6" - dropping
+    // (default), canonical "ch_q1"/"ch_q6", or their "*_variant" forms - dropping
     // tpcc_driver.rs's other olap_mode_str variants (sleep/fresh/scan-delay-sweep) and
     // ch's own region_name/num_suppliers knobs, neither of which apply to Q1/Q6.
     let num_warehouses: u32 = arg(&parms, 2, 4);
@@ -1008,6 +1075,8 @@ pub fn main_mdbx_tpcc(parms: Vec<String>) {
     let htap_mode = match parms.get(9).map(|s| s.as_str()).unwrap_or("none") {
         "ch_q1" => MdbxHtapMode::Q1,
         "ch_q6" => MdbxHtapMode::Q6,
+        "ch_q1_variant" => MdbxHtapMode::Q1Selective,
+        "ch_q6_variant" => MdbxHtapMode::Q6Selective,
         _ => MdbxHtapMode::None,
     };
     let num_olap_threads: usize = arg(&parms, 10, 1);
@@ -1029,4 +1098,25 @@ pub fn main_mdbx_tpcc(parms: Vec<String>) {
         db_path: PathBuf::from(db_path),
         output_dir: PathBuf::from("."),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MDBX_READER_HEADROOM, configured_max_readers};
+
+    #[test]
+    fn htap_reader_capacity_includes_oltp_and_all_olap_threads() {
+        assert_eq!(
+            configured_max_readers(2, 120),
+            (2 + 120 + MDBX_READER_HEADROOM) as std::ffi::c_uint,
+        );
+    }
+
+    #[test]
+    fn oltp_only_reader_capacity_does_not_reserve_disabled_olap_threads() {
+        assert_eq!(
+            configured_max_readers(2, 0),
+            (2 + MDBX_READER_HEADROOM) as std::ffi::c_uint,
+        );
+    }
 }

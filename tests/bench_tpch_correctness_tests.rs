@@ -13,12 +13,13 @@
 use crate::bat_bench::tpcc_load::populate_regions_and_nations;
 use crate::bat_bench::tpcc_schema::{
     BigTreeSize, Order, OrderLine, Stock, Supplier, Table, TpccDatabase, TpccKey, TpccRow, TpccTree, k_order,
-    k_order_line, k_stock, order_line_table_range,
+    k_order_line, k_stock, order_line_table_range, BENCHBASE_Q1_DELIVERY_AFTER_MILLIS,
+    BENCHBASE_Q6_DATE_HI_MILLIS, BENCHBASE_Q6_DATE_LO_MILLIS,
 };
 use crate::bat_bench::parallel_scan::{q1_parallel, q6_parallel};
 use crate::bat_bench::tpcc_schema::TpccScanWorkerPool as ScanWorkerPool;
 use crate::bat_bench::tpcc_txn::TpccTxn;
-use crate::bat_bench::tpch_queries::{q1, q4, q5, q6};
+use crate::bat_bench::tpch_queries::{q1, q1_benchbase, q4, q5, q6, q6_benchbase};
 use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
 use crate::bat_crud_model::crud_operation::CRUDOperation;
 use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
@@ -26,6 +27,7 @@ use crate::bat_query::interval::Interval;
 use crate::bat_query::iter_query::RangeQueryIter;
 use crate::bat_root::index_root::RootIndexType;
 use crate::bat_sync::worker::READ_ONLY_SCAN_WORKER_ID;
+use crate::bat_tree::scan_pool::DEFAULT_QUERY_FANOUT;
 use std::time::{Duration, Instant};
 
 fn insert(db: &TpccDatabase, table: Table, key: u64, row: TpccRow) {
@@ -176,6 +178,27 @@ fn q1_includes_a_row_delivered_exactly_on_the_inclusive_cutoff() {
     db.disable_scan_pool(Table::OrderLine);
 }
 
+#[test]
+fn benchbase_q1_uses_the_strict_fixed_cutoff_with_zone_pruning() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    for (order_id, delivered, amount) in [
+        (1, BENCHBASE_Q1_DELIVERY_AFTER_MILLIS, 1_000_000.0),
+        (2, BENCHBASE_Q1_DELIVERY_AFTER_MILLIS + 1, 7.0),
+    ] {
+        insert(
+            &db,
+            Table::OrderLine,
+            k_order_line(1, 1, order_id, 1),
+            order_line(1, 1, Some(delivered), 3, amount),
+        );
+    }
+
+    let (groups, _) = q1_benchbase(&db);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].count, 1);
+    assert!((groups[0].sum_amount - 7.0).abs() < 1e-9);
+}
+
 /// q6 sums the amount of delivered-in-range order-lines below a quantity
 /// threshold.
 #[test]
@@ -273,6 +296,26 @@ fn q6_excludes_a_row_delivered_exactly_on_the_exclusive_upper_bound() {
         "q6_parallel disagreed with q6 on the exclusive upper bound: got {revenue_parallel}"
     );
     db.disable_scan_pool(Table::OrderLine);
+}
+
+#[test]
+fn benchbase_q6_uses_fixed_half_open_dates_and_inclusive_quantity() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    for (order_id, delivered, quantity, amount) in [
+        (1, BENCHBASE_Q6_DATE_LO_MILLIS, 1, 5.0),
+        (2, BENCHBASE_Q6_DATE_HI_MILLIS - 1, 100, 7.0),
+        (3, BENCHBASE_Q6_DATE_HI_MILLIS, 1, 1_000_000.0),
+    ] {
+        insert(
+            &db,
+            Table::OrderLine,
+            k_order_line(1, 1, order_id, 1),
+            order_line(1, 1, Some(delivered), quantity, amount),
+        );
+    }
+
+    let (revenue, _) = q6_benchbase(&db);
+    assert!((revenue - 12.0).abs() < 1e-9);
 }
 
 /// q4 counts, grouped by `o_ol_cnt`, orders entered in range that have at
@@ -776,7 +819,7 @@ fn scan_pool_can_oversubscribe_past_max_workers_without_registering() {
 
     // `Some(1)` makes `fair_query_fanout` hand the whole 10-worker pool to
     // this test's one caller, so the query below actually exercises all 10
-    // pool threads rather than just its `Some(2)` "unknown" default.
+    // pool threads rather than just its `Some(4)` "unknown" default.
     db.enable_scan_pool(Table::OrderLine, 10, Some(1));
     let pool = db.scan_pool(Table::OrderLine).expect("enable_scan_pool should have assigned one");
     assert_eq!(pool.num_workers(), 10, "far more workers than max_workers=2");
@@ -1112,16 +1155,23 @@ fn scan_pool_fanout_scaling() {
 /// field's doc) — checked directly rather than only indirectly through
 /// `q1_parallel`/`q6_parallel`'s own use of it.
 #[test]
-fn fair_query_fanout_returns_two_when_expected_concurrent_queries_is_unknown() {
+fn fair_query_fanout_uses_the_default_when_expected_concurrent_queries_is_unknown() {
     let db = TpccDatabase::new(RootIndexType::default());
     let pool = ScanWorkerPool::spawn(db.tree_for(Table::OrderLine), 10, None);
-    assert_eq!(pool.fair_query_fanout(), Some(2));
+    assert_eq!(pool.fair_query_fanout(), Some(DEFAULT_QUERY_FANOUT));
 }
 
 #[test]
 fn fair_query_fanout_treats_zero_expected_callers_as_unknown() {
     let db = TpccDatabase::new(RootIndexType::default());
     let pool = ScanWorkerPool::spawn(db.tree_for(Table::OrderLine), 10, Some(0));
+    assert_eq!(pool.fair_query_fanout(), Some(DEFAULT_QUERY_FANOUT));
+}
+
+#[test]
+fn fair_query_fanout_caps_the_unknown_default_at_pool_capacity() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    let pool = ScanWorkerPool::spawn(db.tree_for(Table::OrderLine), 2, None);
     assert_eq!(pool.fair_query_fanout(), Some(2));
 }
 

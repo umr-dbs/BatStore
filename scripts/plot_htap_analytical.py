@@ -33,8 +33,13 @@ ENGINE_COLORS = {
     "batstore": "tab:green", "leanstore": "tab:blue", "wiredtiger": "tab:orange", "postgres": "tab:red",
     "vweaver_ermia": "tab:purple", "vweaver_ermia_frugal": "tab:pink", "libmdbx": "tab:brown",
 }
-HTAP_WORKLOADS = ["htap_q1", "htap_q6"]
-HTAP_LABELS = {"htap_q1": "CH-benCHmark Q1 (Pricing Summary Report)", "htap_q6": "CH-benCHmark Q6 (Forecasting Revenue Change)"}
+HTAP_WORKLOADS = ["htap_q1", "htap_q6", "htap_q1_variant", "htap_q6_variant"]
+HTAP_LABELS = {
+    "htap_q1": "CH-benCHmark Q1 (Pricing Summary Report)",
+    "htap_q6": "CH-benCHmark Q6 (Forecasting Revenue Change)",
+    "htap_q1_variant": "Q1 predicate variant",
+    "htap_q6_variant": "Q6 predicate variant",
+}
 
 _OLAP_RE = re.compile(r"olap_threads=(\d+)")
 

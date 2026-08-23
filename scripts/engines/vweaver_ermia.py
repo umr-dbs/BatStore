@@ -7,14 +7,16 @@ benchmarks/ycsb.cc, matching the textbook read/update/insert/scan/rmw ratios exa
 approximation needed, unlike LeanStore's separate-ratio-flags mapping) and a real
 multi-table TPC-C (benchmarks/tpcc.cc).
 
-htap_q1/htap_q6: upstream had no CH-benCHmark/HTAP support at all - added in
+htap_q1/htap_q6 (exact BenchBase predicates) and htap_q1_variant/htap_q6_variant
+(the former engine-local predicates): upstream had no CH-benCHmark/HTAP support at all - added in
 patches/vweaver_ermia_chbenchmark.patch (`RunChQ1`/`RunChQ6` in benchmarks/tpcc.cc, ported
 from `bat_bench::tpch_queries::q1`/`q6` in the sibling BatStore harness - a full
 `ORDER_LINE` table scan, pure aggregation, no joins, see that patch's inline comments for
 why only these 2 of CH-benCHmark's 22 queries). Passing `--enable-chbenchmark` in
-`-benchmark_options` spawns one dedicated thread (`tpcc_bench_runner::StartHtapThread`)
-repeating only the requested query concurrently with the normal OLTP `tpcc_worker` threads - the same
-"N OLTP threads + 1 always-on OLAP thread" convention every other engine here already uses
+`-benchmark_options` spawns the requested number of dedicated threads
+(`tpcc_bench_runner::StartHtapThread`) repeating only the requested query concurrently
+with the normal OLTP `tpcc_worker` threads - the same
+"N OLTP threads + M always-on OLAP threads" convention every other engine here uses
 for htap_q1/htap_q6 - and prints one `HTAP_SCAN,<mode>,<elapsed_secs>,<scanned_tuples>,
 <latency_ns>,<summary>` line per completed query to stdout (parsed by `_parse_htap_scan`
 below into the same tpcc_scan.csv shape batstore.py/libmdbx.py already produce - ERMIA has no
@@ -137,12 +139,16 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         threads = scale.tpcc_terminals
         # Standard TPC-C mix (NewOrder/Payment/OrderStatus/Delivery/StockLevel), no
         # warehouse-spread skew - matches benchmarks/run.sh's own plain "tpcc" default.
-        # --enable-chbenchmark (htap_q1/htap_q6 only) spawns the dedicated query-specific OLAP
-        # thread - see this module's own doc and patches/vweaver_ermia_chbenchmark.patch.
+        # --enable-chbenchmark spawns the requested query-specific OLAP threads - see
+        # this module's own doc and patches/vweaver_ermia_chbenchmark.patch.
         benchmark_options = "--workload-mix=45,43,0,4,4,4,0,0 --warehouse-spread=0"
         if workload in common.HTAP_WORKLOADS:
-            query_flag = "--chbenchmark-q1" if workload == "htap_q1" else "--chbenchmark-q6"
-            benchmark_options += f" --enable-chbenchmark {query_flag}"
+            query_flag = "--chbenchmark-q1" if "q1" in workload else "--chbenchmark-q6"
+            variant_flag = " --chbenchmark-variant" if workload.endswith("_variant") else ""
+            benchmark_options += (
+                f" --enable-chbenchmark {query_flag}{variant_flag}"
+                f" --chbenchmark-threads={scale.htap_olap_threads}"
+            )
         args = [
             str(BINARY), "-verbose", "-benchmark", "tpcc",
             "-threads", str(threads), "-scale_factor", str(scale.tpcc_warehouses),
@@ -201,7 +207,12 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
 
     latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if workload in common.HTAP_WORKLOADS:
-        mode = "ch_q1_pricing_summary" if workload == "htap_q1" else "ch_q6_forecast_revenue"
+        mode = {
+            "htap_q1": "ch_q1_pricing_summary",
+            "htap_q6": "ch_q6_forecast_revenue",
+            "htap_q1_variant": "ch_q1_variant",
+            "htap_q6_variant": "ch_q6_variant",
+        }[workload]
         scan_csv = _write_htap_scan_csv(stdout_path, output_dir)
         latency = common.percentiles_from_samples(
             scan_csv, "latency_ns", filter_column="mode", filter_value=mode,

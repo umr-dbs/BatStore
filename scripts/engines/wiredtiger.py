@@ -81,10 +81,13 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
             "--isolation_level=si", "--print_header",
         ]
         metric_name, metric_column = "new_order_per_sec", "oltp_new_order_committed"
-    elif workload in ("htap_q1", "htap_q6"):
+    elif workload in common.HTAP_WORKLOADS:
         duration = scale.tpcc_duration
         threads = scale.tpcc_terminals
-        query_no = 101 if workload == "htap_q1" else 106
+        query_no = {
+            "htap_q1": 101, "htap_q6": 106,
+            "htap_q1_variant": 201, "htap_q6_variant": 206,
+        }[workload]
         # +olap_threads workers: same reasoning as leanstore.py's htap_q1/htap_q6 branch -
         # this adapter carves ch_a_threads out of worker_threads too (see wiredtiger_tpcc.cpp).
         args = [
@@ -164,7 +167,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
     elif workload == "s_htap":
         latency = common.read_latency_summary(output_dir / "s_htap_scan_latency_summary.csv")
-    elif workload in ("htap_q1", "htap_q6"):
+    elif workload in common.HTAP_WORKLOADS:
         latency = common.read_latency_summary(output_dir / "ch_query_latency_summary.csv")
 
     return common.NormalizedResult(

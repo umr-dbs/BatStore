@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-root", default="htap_analytical_results")
     p.add_argument("--engines", default=",".join(common.ENGINES),
                    help=f"comma-separated subset of {common.ENGINES}")
-    p.add_argument("--workloads", default=",".join(common.HTAP_WORKLOADS),
+    p.add_argument("--workloads", default=",".join(common.HTAP_CANONICAL_WORKLOADS),
                    help=f"comma-separated subset of {common.HTAP_WORKLOADS}")
     p.add_argument("--olap-threads", default=",".join(str(t) for t in DEFAULT_OLAP_THREADS),
                    help=f"comma-separated analytical thread counts to sweep (default {DEFAULT_OLAP_THREADS})")
@@ -151,7 +151,9 @@ def main() -> None:
     print(f"OLTP (fixed)    : warehouses={args.warehouses}, terminals={args.oltp_terminals}, "
           f"duration={args.tpcc_duration}s")
     print(f"OLAP threads    : {olap_thread_list}")
-    print("BatStore dates  : 30-day ordered history; Q1 oldest 50%; Q6 25%-50% slice")
+    print("canonical dates : BenchBase Q1 > 2007-01-02; Q6 [1999-01-01, 2020-01-01)")
+    if any(workload.endswith("_variant") for workload in workloads):
+        print("query variants  : engine-local former predicates (not cross-engine comparable)")
     print(f"gc sweep        : {gc_list} (engines with no working GC toggle always run once)")
     if args.scan_pool_workers is None:
         print("scan pool       : auto (BatStore default - enabled when the population is large "
