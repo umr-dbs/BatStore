@@ -33,9 +33,10 @@ The threads-sweep plots (x=threads, y=throughput, one line per engine - the whol
 of compare_engines.py's thread sweep) are split by workload group rather than one giant
 figure or one-file-per-workload: threads_sweep_tpcc.svg (TPC-C, its own figure),
 threads_sweep_ycsb.svg (ONE figure, all loaded YCSB A-F workloads as subplots, so the
-whole YCSB sweep reads off a single file), and threads_sweep_htap_q1.svg /
-threads_sweep_htap_q6.svg. Each HTAP figure has separate OLTP-throughput and
-OLAP-throughput panels; see plot_throughput_vs_threads_htap's docstring.
+whole YCSB sweep reads off a single file), and GC-specific HTAP files such as
+threads_sweep_htap_q1_gc_on.svg and threads_sweep_htap_q1_gc_off.svg. Each HTAP
+figure has separate OLTP-throughput and OLAP-throughput panels, and GC states are never
+overlaid; see plot_throughput_vs_threads_htap's docstring.
 
 Requires: pandas, matplotlib (see requirements.txt).
 """
@@ -257,6 +258,17 @@ def _plot_engine_lines(ax, df: pd.DataFrame, value_col: str = "primary_metric_va
     ax.grid(alpha=0.3)
 
 
+def _gc_plot_slices(df: pd.DataFrame):
+    """Yield GC-specific slices, including non-toggle engines in each comparison."""
+    gc_values = set(df["gc_enabled"])
+    choices = [gc for gc in ("on", "off") if gc in gc_values]
+    if choices:
+        for gc in choices:
+            yield gc, df[df["gc_enabled"].isin([gc, "n/a"])]
+    elif "n/a" in gc_values:
+        yield "na", df[df["gc_enabled"] == "n/a"]
+
+
 def plot_throughput_vs_threads_tpcc(manifest: pd.DataFrame, out_dir: Path):
     """TPC-C: one figure, x=threads, y=new_order_per_sec, one line per engine."""
     df = manifest[manifest["workload"] == "tpcc"]
@@ -305,7 +317,7 @@ def plot_throughput_vs_threads_ycsb(manifest: pd.DataFrame, out_dir: Path):
 
 
 def plot_throughput_vs_threads_htap(manifest: pd.DataFrame, out_dir: Path):
-    """HTAP: one figure per query with OLTP and OLAP throughput in separate panels.
+    """HTAP: one figure per query and GC state, with separate OLTP/OLAP panels.
 
     The comparison harness sweeps the number of OLTP terminals while keeping
     ``htap_olap_threads`` fixed. Consequently, x is the manifest's ``threads`` value,
@@ -319,21 +331,29 @@ def plot_throughput_vs_threads_htap(manifest: pd.DataFrame, out_dir: Path):
         if df.empty:
             print(f"No {workload} rows in manifest.csv — skipping HTAP threads-sweep plot.")
             continue
-        duration = pd.to_numeric(df["duration_secs"], errors="coerce").replace(0, float("nan"))
-        df["olap_queries_per_sec"] = pd.to_numeric(df["scan_count"], errors="coerce") / duration
+        for gc_choice, gc_df in _gc_plot_slices(df):
+            gc_df = gc_df.copy()
+            duration = pd.to_numeric(
+                gc_df["duration_secs"], errors="coerce",
+            ).replace(0, float("nan"))
+            gc_df["olap_queries_per_sec"] = (
+                pd.to_numeric(gc_df["scan_count"], errors="coerce") / duration
+            )
 
-        fig, (ax_oltp, ax_olap) = plt.subplots(1, 2, figsize=(12, 5.5))
-        _plot_engine_lines(ax_oltp, df)
-        _plot_engine_lines(ax_olap, df, "olap_queries_per_sec")
+            fig, (ax_oltp, ax_olap) = plt.subplots(1, 2, figsize=(12, 5.5))
+            _plot_engine_lines(ax_oltp, gc_df)
+            _plot_engine_lines(ax_olap, gc_df, "olap_queries_per_sec")
 
-        ax_oltp.set_ylabel("New-Order transactions / sec")
-        ax_oltp.set_title("OLTP throughput")
-        ax_olap.set_ylabel("Completed analytical queries / sec")
-        ax_olap.set_title("OLAP throughput")
-        ax_oltp.legend(fontsize=8)
-        ax_olap.legend(fontsize=8)
-        fig.suptitle(f"{workload}: HTAP throughput vs. number of OLTP threads")
-        _save(fig, out_dir, f"threads_sweep_{workload}")
+            ax_oltp.set_ylabel("New-Order transactions / sec")
+            ax_oltp.set_title("OLTP throughput")
+            ax_olap.set_ylabel("Completed analytical queries / sec")
+            ax_olap.set_title("OLAP throughput")
+            ax_oltp.legend(fontsize=8)
+            ax_olap.legend(fontsize=8)
+            fig.suptitle(
+                f"{workload}: HTAP throughput vs. number of OLTP threads (GC {gc_choice})"
+            )
+            _save(fig, out_dir, f"threads_sweep_{workload}_gc_{gc_choice}")
 
 
 def plot_gc_comparison(manifest: pd.DataFrame, ref_threads: int, out_dir: Path):

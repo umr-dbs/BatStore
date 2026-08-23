@@ -538,12 +538,13 @@ default.
 8. PLOTTING
 -------------
 
-    python3 scripts/plot_compare.py --run-dir <output-root>/run_<timestamp>
+    python3 scripts/plot.py <output-root>/run_<timestamp>
 
-(or omit --run-dir to auto-pick the most recently modified run_* directory under
---results-root, default comparison_results). Needs the venv's pandas/matplotlib - either
-activate it (`source scripts/.venv/bin/activate`) or invoke its interpreter directly
-(`scripts/.venv/bin/python3 scripts/plot_compare.py ...`).
+The script detects comparison, benchmark-suite, HTAP analytical, skew-sweep, and raw
+CSV directories automatically. Omit the directory only to plot recognized CSVs in the
+current directory. It needs the venv's pandas/matplotlib - either activate it
+(`source scripts/.venv/bin/activate`) or invoke its interpreter directly
+(`scripts/.venv/bin/python3 scripts/plot.py ...`).
 
 Every figure is written as both PDF and SVG into <run-dir>/plots/. Figures produced:
 
@@ -553,7 +554,9 @@ Every figure is written as both PDF and SVG into <run-dir>/plots/. Figures produ
                                   includes its actual server process-tree memory)
   summary_all_workloads            Every workload's primary metric, log-scaled, one chart
   threads_sweep_<workload>         Throughput vs. thread count, one line per engine (and
-                                  per GC variant where applicable) - one file per workload
+                                  per GC variant where applicable) - one file per workload;
+                                  HTAP emits separate ..._gc_on/..._gc_off files so the
+                                  two GC states are never overlaid
   gc_on_vs_off                     GC-on vs GC-off throughput, batstore/postgres only (the
                                   only two with a real toggle - see section 5)
   ycsb_e_scan_latency              YCSB-E scan-op latency (p50/p95/p99), across engines

@@ -118,6 +118,7 @@ pub fn populate_items(db: &TpccDatabase, cfg: &TpccConfig) {
 /// its per-item stock. `history_seq` is a process-wide counter shared by
 /// every loader thread so History keys never collide across warehouses.
 pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, history_seq: &AtomicU64) {
+    let history_anchor = now_millis();
     insert_big(db, Table::Warehouse, k_warehouse(w_id), TpccRow::Warehouse(Box::new(Warehouse {
         w_name: rnd_astring(6, 10),
         w_street_1: rnd_astring(10, 20),
@@ -194,6 +195,9 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
 
         for o_ord in 0..cfg.initial_orders_per_district {
             let o_id = o_ord + 1;
+            let order_timestamp = initial_order_timestamp(
+                history_anchor, o_ord, cfg.initial_orders_per_district,
+            );
             let c_id = c_ids[o_ord as usize];
             let ol_cnt = with_fast_rng(|rng| rng.u8(5..=15));
             let is_new = o_id > new_order_floor;
@@ -201,7 +205,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
 
             insert(&db.tree_for(Table::Orders), k_order(w_id, d_id, o_id), TpccRow::Order(Box::new(Order {
                 o_c_id: c_id,
-                o_entry_d: now_millis(),
+                o_entry_d: order_timestamp,
                 o_carrier_id,
                 o_ol_cnt: ol_cnt,
                 o_all_local: true,
@@ -213,7 +217,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
                 let (ol_delivery_d, ol_amount) = if is_new {
                     (None, with_fast_rng(|rng| rng.i32(100..=999_999)) as f64 / 100.0)
                 } else {
-                    (Some(now_millis()), 0.0)
+                    (Some(order_timestamp), 0.0)
                 };
 
                 insert(&db.tree_for(Table::OrderLine), k_order_line(w_id, d_id, o_id, ol_number), TpccRow::OrderLine(Box::new(OrderLine {

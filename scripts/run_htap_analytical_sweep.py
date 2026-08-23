@@ -47,7 +47,10 @@ DEFAULT_OLAP_THREADS = [1, 2, 4, 8, 16, 32]
 # only thing changing across this sweep is analytical pressure - matches the "TPC-C part
 # should be scaled down, more focus on the analytical part" ask this script implements.
 DEFAULT_OLTP_TERMINALS = 4
-DEFAULT_WAREHOUSES = 2
+# At least four populated warehouse ranges are needed for BatStore's default per-query
+# scan-pool fanout to have four useful jobs. Eight also keeps this analytical-focused
+# sweep smaller than a full server-scale run while avoiding the old two-way partition cap.
+DEFAULT_WAREHOUSES = 8
 DEFAULT_GC = ["on", "off"]
 
 
@@ -136,6 +139,9 @@ def main() -> None:
         "olap_threads": olap_thread_list, "oltp_terminals": args.oltp_terminals,
         "warehouses": args.warehouses, "workloads": workloads, "engines": engines,
         "scan_pool_workers": args.scan_pool_workers,
+        "batstore_initial_history_days": 30,
+        "batstore_q1_history_slice": "oldest_50_percent",
+        "batstore_q6_history_slice": "25_to_50_percent",
     }, indent=2) + "\n")
 
     print("\n########## HTAP analytical-thread sweep ##########")
@@ -145,6 +151,7 @@ def main() -> None:
     print(f"OLTP (fixed)    : warehouses={args.warehouses}, terminals={args.oltp_terminals}, "
           f"duration={args.tpcc_duration}s")
     print(f"OLAP threads    : {olap_thread_list}")
+    print("BatStore dates  : 30-day ordered history; Q1 oldest 50%; Q6 25%-50% slice")
     print(f"gc sweep        : {gc_list} (engines with no working GC toggle always run once)")
     if args.scan_pool_workers is None:
         print("scan pool       : auto (BatStore default - enabled when the population is large "
@@ -210,7 +217,7 @@ def main() -> None:
 
     print("\n########## HTAP analytical sweep complete ##########")
     print(f"manifest : {manifest_path}")
-    print(f"plot with: python3 scripts/plot_htap_analytical.py --run-dir {run_dir}")
+    print(f"plot with: python3 scripts/plot.py {run_dir}")
     print("######################################################\n")
 
 

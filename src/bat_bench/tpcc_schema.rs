@@ -76,6 +76,31 @@ pub type TpccKey = u64;
 pub const TPCC_FAN_OUT: usize = FAN_OUT;
 pub const TPCC_NUM_RECORDS: usize = crate::bat_tree::mvbt::NUM_RECORDS;
 
+/// Initial TPC-C orders are laid out monotonically over this historical interval instead
+/// of all receiving the loader's current wall-clock timestamp. Besides being a more useful
+/// analytical data set, ordering history by `o_id` makes `ORDER_LINE`'s delivery-date zone
+/// map physically selective because neighboring leaves cover neighboring date intervals.
+pub const INITIAL_ORDER_HISTORY_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
+
+/// Timestamp for a zero-based initial order ordinal in a monotonically distributed history.
+pub(crate) fn initial_order_timestamp(anchor_millis: i64, ordinal: u32, count: u32) -> i64 {
+    let denominator = count.saturating_sub(1).max(1) as i128;
+    let offset = INITIAL_ORDER_HISTORY_MILLIS as i128 * ordinal as i128 / denominator;
+    anchor_millis
+        .saturating_sub(INITIAL_ORDER_HISTORY_MILLIS)
+        .saturating_add(offset as i64)
+}
+
+/// Selective HTAP date predicates over the history produced above. Q1 includes the older
+/// half of initial orders; Q6 selects the quarter immediately before that cutoff. Both
+/// bounds align with `o_id`-ordered leaf ranges, allowing the delivery-date zone map to
+/// reject whole leaves instead of merely filtering records after visiting them.
+pub(crate) fn htap_query_date_bounds(anchor_millis: i64) -> (i64, i64, i64) {
+    let q1_cutoff = anchor_millis.saturating_sub(INITIAL_ORDER_HISTORY_MILLIS / 2);
+    let q6_lo = anchor_millis.saturating_sub(INITIAL_ORDER_HISTORY_MILLIS * 3 / 4);
+    (q1_cutoff, q6_lo, q1_cutoff)
+}
+
 pub type TpccTree = crate::bat_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 /// `TpccDatabase::enable_scan_pool`/`scan_pool`'s pool type — a
 /// `bat_tree::scan_pool::ScanWorkerPool` fixed to `TpccTree`'s own type
@@ -475,6 +500,32 @@ impl Default for TpccConfig {
             initial_new_orders: 900,
             num_suppliers: 10_000,
         }
+    }
+}
+
+#[cfg(test)]
+mod htap_date_tests {
+    use super::*;
+
+    #[test]
+    fn initial_order_dates_span_history_monotonically() {
+        let anchor = 10 * INITIAL_ORDER_HISTORY_MILLIS;
+        let dates: Vec<_> = (0..5)
+            .map(|ordinal| initial_order_timestamp(anchor, ordinal, 5))
+            .collect();
+        assert_eq!(dates[0], anchor - INITIAL_ORDER_HISTORY_MILLIS);
+        assert_eq!(dates[4], anchor);
+        assert!(dates.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn htap_bounds_select_distinct_history_slices() {
+        let anchor = 10 * INITIAL_ORDER_HISTORY_MILLIS;
+        let (q1_cutoff, q6_lo, q6_hi) = htap_query_date_bounds(anchor);
+        assert_eq!(q1_cutoff, anchor - INITIAL_ORDER_HISTORY_MILLIS / 2);
+        assert_eq!(q6_lo, anchor - INITIAL_ORDER_HISTORY_MILLIS * 3 / 4);
+        assert_eq!(q6_hi, q1_cutoff);
+        assert!(q6_lo < q6_hi);
     }
 }
 
