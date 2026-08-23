@@ -34,8 +34,8 @@ of compare_engines.py's thread sweep) are split by workload group rather than on
 figure or one-file-per-workload: threads_sweep_tpcc.svg (TPC-C, its own figure),
 threads_sweep_ycsb.svg (ONE figure, all loaded YCSB A-F workloads as subplots, so the
 whole YCSB sweep reads off a single file), and threads_sweep_htap_q1.svg /
-threads_sweep_htap_q6.svg (HTAP, kept as separate figures per query rather than combined -
-see plot_throughput_vs_threads_htap's docstring).
+threads_sweep_htap_q6.svg. Each HTAP figure has separate OLTP-throughput and
+OLAP-throughput panels; see plot_throughput_vs_threads_htap's docstring.
 
 Requires: pandas, matplotlib (see requirements.txt).
 """
@@ -44,6 +44,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from matplotlib.lines import Line2D
 
 ENGINE_ORDER = [
     "batstore", "leanstore", "wiredtiger", "postgres", "vweaver_ermia",
@@ -227,8 +228,8 @@ def plot_summary_all(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str, 
     _save(fig, out_dir, f"summary_all_workloads_gc_{gc_choice}")
 
 
-def _plot_engine_lines(ax, df: pd.DataFrame):
-    """x=threads, y=primary_metric_value, one line per engine/gc_enabled combo (solid for
+def _plot_engine_lines(ax, df: pd.DataFrame, value_col: str = "primary_metric_value"):
+    """x=threads, y=value_col, one line per engine/gc_enabled combo (solid for
     gc=on/n/a, dashed for gc=off) drawn onto `ax` - the shared building block behind every
     threads_sweep_* figure below, so a single workload's worth of lines can be placed
     either on its own figure (TPC-C, HTAP) or as one subplot among several (YCSB)."""
@@ -241,7 +242,7 @@ def _plot_engine_lines(ax, df: pd.DataFrame):
             label = ENGINE_LABELS.get(engine, engine)
             if gc_variant == "off":
                 label += " (gc off)"
-            ax.plot(gdf["threads"], gdf["primary_metric_value"], marker="o", linestyle=linestyle,
+            ax.plot(gdf["threads"], gdf[value_col], marker="o", linestyle=linestyle,
                     label=label, color=ENGINE_COLORS.get(engine, "tab:gray"))
     ax.set_xscale("log", base=2)
     # Tick locations/labels pinned to the actual thread counts in `df` (e.g. 2,4,8,...128)
@@ -304,20 +305,34 @@ def plot_throughput_vs_threads_ycsb(manifest: pd.DataFrame, out_dir: Path):
 
 
 def plot_throughput_vs_threads_htap(manifest: pd.DataFrame, out_dir: Path):
-    """HTAP: one figure per query (htap_q1, htap_q6) - x=threads, y=new_order_per_sec (the
-    OLTP side of the mix), one line per engine. Kept as separate figures rather than one
-    combined plot since each query's own interference/scan-cost profile is what's
-    interesting here, not a side-by-side average."""
+    """HTAP: one figure per query with OLTP and OLAP throughput in separate panels.
+
+    The comparison harness sweeps the number of OLTP terminals while keeping
+    ``htap_olap_threads`` fixed. Consequently, x is the manifest's ``threads`` value,
+    OLTP throughput is the normalized primary metric (New-Order/sec), and aggregate OLAP
+    throughput is the number of completed Q1/Q6 scans divided by measured run duration.
+    Separate panels avoid forcing these differently-scaled metrics onto a misleading
+    shared y-axis.
+    """
     for workload in HTAP_WORKLOADS:
-        df = manifest[manifest["workload"] == workload]
+        df = manifest[manifest["workload"] == workload].copy()
         if df.empty:
             print(f"No {workload} rows in manifest.csv — skipping HTAP threads-sweep plot.")
             continue
-        fig, ax = plt.subplots(figsize=(8, 5.5))
-        _plot_engine_lines(ax, df)
-        ax.set_ylabel(df["primary_metric_name"].iloc[0])
-        ax.set_title(f"{workload}: throughput vs. thread count")
-        ax.legend(fontsize=8)
+        duration = pd.to_numeric(df["duration_secs"], errors="coerce").replace(0, float("nan"))
+        df["olap_queries_per_sec"] = pd.to_numeric(df["scan_count"], errors="coerce") / duration
+
+        fig, (ax_oltp, ax_olap) = plt.subplots(1, 2, figsize=(12, 5.5))
+        _plot_engine_lines(ax_oltp, df)
+        _plot_engine_lines(ax_olap, df, "olap_queries_per_sec")
+
+        ax_oltp.set_ylabel("New-Order transactions / sec")
+        ax_oltp.set_title("OLTP throughput")
+        ax_olap.set_ylabel("Completed analytical queries / sec")
+        ax_olap.set_title("OLAP throughput")
+        ax_oltp.legend(fontsize=8)
+        ax_olap.legend(fontsize=8)
+        fig.suptitle(f"{workload}: HTAP throughput vs. number of OLTP threads")
         _save(fig, out_dir, f"threads_sweep_{workload}")
 
 
@@ -511,7 +526,12 @@ def _set_measurement_thread_axis(ax, thread_values) -> None:
 def plot_single_engine_overview(
     manifest: pd.DataFrame, out_dir: Path, output_name: str = "single_engine_overview",
 ) -> bool:
-    """Plot workload rows by throughput, latency, and memory for one engine."""
+    """Plot workload rows by throughput, latency, and memory for one engine.
+
+    HTAP rows get distinct OLTP and aggregate OLAP throughput panels. Non-HTAP
+    workloads leave the OLAP-only column unused because ``scan_count / duration`` is not
+    their primary throughput measurement.
+    """
     engines = list(manifest["engine"].dropna().unique())
     if len(engines) != 1:
         return False
@@ -524,7 +544,7 @@ def plot_single_engine_overview(
         return True
 
     fig, axes = plt.subplots(
-        len(workloads), 3, figsize=(15, max(4.2, 3.8 * len(workloads))), squeeze=False,
+        len(workloads), 4, figsize=(20, max(4.2, 3.8 * len(workloads))), squeeze=False,
     )
     gc_styles = {
         "on": ("-", "gc=on"), "n/a": ("-", "gc=n/a"), "off": ("--", "gc=off"),
@@ -547,7 +567,32 @@ def plot_single_engine_overview(
         _set_measurement_thread_axis(throughput_ax, thread_values)
         throughput_ax.legend(fontsize=8)
 
-        latency_ax = axes[row][1]
+        olap_throughput_ax = axes[row][1]
+        if workload in HTAP_WORKLOADS:
+            duration = pd.to_numeric(wdf["duration_secs"], errors="coerce").replace(
+                0, float("nan"),
+            )
+            wdf = wdf.copy()
+            wdf["olap_queries_per_sec"] = (
+                pd.to_numeric(wdf["scan_count"], errors="coerce") / duration
+            )
+            for gc_variant, (linestyle, label) in gc_styles.items():
+                gdf = wdf[wdf["gc_enabled"] == gc_variant].sort_values("threads")
+                if not gdf.empty:
+                    olap_throughput_ax.plot(
+                        gdf["threads"], gdf["olap_queries_per_sec"], marker="o",
+                        linestyle=linestyle, label=label,
+                    )
+            olap_throughput_ax.set_ylabel("Completed analytical queries / sec")
+            olap_throughput_ax.set_title(f"{workload}: OLAP throughput")
+            _set_measurement_thread_axis(olap_throughput_ax, thread_values)
+            olap_throughput_ax.legend(fontsize=8)
+            throughput_ax.set_ylabel("New-Order transactions / sec")
+            throughput_ax.set_title(f"{workload}: OLTP throughput")
+        else:
+            olap_throughput_ax.set_axis_off()
+
+        latency_ax = axes[row][2]
         latency_df = wdf[wdf["scan_count"] > 0]
         latency_gc = next(
             (gc for gc in ("on", "n/a", "off") if gc in set(latency_df["gc_enabled"])), None,
@@ -574,7 +619,7 @@ def plot_single_engine_overview(
             _set_measurement_thread_axis(latency_ax, latency_df["threads"].unique())
             latency_ax.legend(fontsize=8)
 
-        memory_ax = axes[row][2]
+        memory_ax = axes[row][3]
         for gc_variant, (linestyle, label) in gc_styles.items():
             gdf = wdf[wdf["gc_enabled"] == gc_variant].sort_values("threads")
             if not gdf.empty:
@@ -588,6 +633,111 @@ def plot_single_engine_overview(
         memory_ax.legend(fontsize=8)
 
     fig.suptitle(f"{ENGINE_LABELS.get(engine, engine)}: single-engine workload overview")
+    _save(fig, out_dir, output_name)
+    return True
+
+
+def plot_all_engines_workload_overview(
+    manifest: pd.DataFrame, out_dir: Path, output_name: str = "all_engines_workload_overview",
+) -> bool:
+    """Plot every engine in one workload-by-metric overview.
+
+    A line's color identifies its engine and its marker identifies the GC state. HTAP rows
+    contain separate OLTP and aggregate OLAP throughput panels; the remaining panels show
+    p99 scan/query latency and peak RSS. Showing p99 alone keeps the multi-engine latency
+    panel readable instead of multiplying every engine/GC line by three percentiles.
+    """
+    engines = sorted(manifest["engine"].dropna().unique(), key=_engine_sort_key)
+    if len(engines) < 2:
+        return False
+
+    valid = manifest[~manifest["failed"]].copy()
+    workloads = sorted(valid["workload"].dropna().unique(), key=_workload_sort_key)
+    if not workloads:
+        print("No successful measurements — skipping all-engines workload overview.")
+        return True
+
+    gc_markers = {"on": "o", "off": "s", "n/a": "D"}
+    gc_labels = {"on": "GC on", "off": "GC off", "n/a": "GC n/a"}
+    fig, axes = plt.subplots(
+        len(workloads), 4, figsize=(20, max(4.2, 3.8 * len(workloads))), squeeze=False,
+    )
+
+    def plot_metric(ax, wdf: pd.DataFrame, value_col: str) -> None:
+        for engine in engines:
+            edf = wdf[wdf["engine"] == engine]
+            for gc_variant in ("on", "off", "n/a"):
+                gdf = edf[edf["gc_enabled"] == gc_variant].sort_values("threads")
+                if gdf.empty:
+                    continue
+                ax.plot(
+                    gdf["threads"], gdf[value_col],
+                    color=ENGINE_COLORS.get(engine, "tab:gray"),
+                    marker=gc_markers[gc_variant], linestyle="-", markersize=5,
+                )
+
+    for row, workload in enumerate(workloads):
+        wdf = valid[valid["workload"] == workload].copy()
+        thread_values = sorted(wdf["threads"].unique())
+
+        throughput_ax = axes[row][0]
+        plot_metric(throughput_ax, wdf, "primary_metric_value")
+        throughput_ax.set_ylabel(wdf["primary_metric_name"].iloc[0])
+        throughput_ax.set_title(f"{workload}: throughput")
+        _set_measurement_thread_axis(throughput_ax, thread_values)
+
+        olap_throughput_ax = axes[row][1]
+        if workload in HTAP_WORKLOADS:
+            duration = pd.to_numeric(wdf["duration_secs"], errors="coerce").replace(
+                0, float("nan"),
+            )
+            wdf["olap_queries_per_sec"] = (
+                pd.to_numeric(wdf["scan_count"], errors="coerce") / duration
+            )
+            plot_metric(olap_throughput_ax, wdf, "olap_queries_per_sec")
+            olap_throughput_ax.set_ylabel("Completed analytical queries / sec")
+            olap_throughput_ax.set_title(f"{workload}: OLAP throughput")
+            _set_measurement_thread_axis(olap_throughput_ax, thread_values)
+            throughput_ax.set_ylabel("New-Order transactions / sec")
+            throughput_ax.set_title(f"{workload}: OLTP throughput")
+        else:
+            olap_throughput_ax.set_axis_off()
+
+        latency_ax = axes[row][2]
+        latency_df = wdf[wdf["scan_count"] > 0]
+        if latency_df.empty:
+            latency_ax.text(
+                0.5, 0.5, "No latency measurements", ha="center", va="center",
+                transform=latency_ax.transAxes,
+            )
+            latency_ax.set_axis_off()
+        else:
+            plot_metric(latency_ax, latency_df, "scan_p99_us")
+            latency_ax.set_ylabel("p99 latency (microseconds)")
+            latency_ax.set_title(f"{workload}: p99 latency")
+            _set_measurement_thread_axis(latency_ax, latency_df["threads"].unique())
+
+        memory_ax = axes[row][3]
+        plot_metric(memory_ax, wdf, "peak_rss_mb")
+        memory_ax.set_ylabel("Peak RSS (MB)")
+        memory_ax.set_title(f"{workload}: memory")
+        _set_measurement_thread_axis(memory_ax, thread_values)
+
+    engine_handles = [
+        Line2D([0], [0], color=ENGINE_COLORS.get(engine, "tab:gray"), label=ENGINE_LABELS.get(engine, engine))
+        for engine in engines
+    ]
+    gc_values = [gc for gc in ("on", "off", "n/a") if gc in set(valid["gc_enabled"])]
+    gc_handles = [
+        Line2D([0], [0], color="black", marker=gc_markers[gc], linestyle="-", label=gc_labels[gc])
+        for gc in gc_values
+    ]
+    axes[0][0].legend(
+        handles=engine_handles + gc_handles, fontsize=7, ncol=2,
+        title="Color = engine; marker = GC", title_fontsize=8,
+    )
+
+    fig.suptitle("All engines: workload overview")
     _save(fig, out_dir, output_name)
     return True
 
@@ -625,6 +775,8 @@ def main():
     if plot_single_engine_overview(manifest, out_dir, overview_name):
         print(f"\nSingle-engine overview written to {out_dir}")
         return
+
+    plot_all_engines_workload_overview(manifest, out_dir)
 
     ref_threads = 0
     for gc_choice in ("on", "off"):
