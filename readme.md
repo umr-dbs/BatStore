@@ -149,15 +149,15 @@ are documented in detail in [manual.txt](manual.txt).
 The harness prints the exact run directory when it finishes. Plot it with:
 
 ```bash
-python3 scripts/plot_compare.py \
-  --run-dir comparison_results/run_YYYYMMDD_HHMMSS
+python3 scripts/plot.py comparison_results/run_YYYYMMDD_HHMMSS
 ```
 
 For multi-engine runs, every `htap_q1` or `htap_q6` workload in the manifest produces
-`threads_sweep_htap_q1.{svg,pdf}` or `threads_sweep_htap_q6.{svg,pdf}`. Each
-figure keeps OLTP throughput (New-Order transactions/sec) and aggregate OLAP
-throughput (completed queries/sec) in separate panels, both against the swept
-number of OLTP threads/terminals. The analytical thread count remains fixed at
+GC-specific files such as `threads_sweep_htap_q1_gc_on.{svg,pdf}` and
+`threads_sweep_htap_q1_gc_off.{svg,pdf}`. Each figure keeps OLTP throughput
+(New-Order transactions/sec) and aggregate OLAP throughput (completed queries/sec) in
+separate panels, both against the swept number of OLTP threads/terminals. GC-on and
+GC-off measurements are never overlaid. The analytical thread count remains fixed at
 `--htap-olap-threads` for this comparison sweep.
 
 Multi-engine runs also produce `all_engines_workload_overview.{svg,pdf}`. It
@@ -175,9 +175,7 @@ runs such as BatStore with only `htap_q1`, `htap_q6`, and `ycsb_e` meaningful.
 Select the same single-engine view from a run containing several engines with:
 
 ```bash
-python3 scripts/plot_compare.py \
-  --run-dir comparison_results/run_YYYYMMDD_HHMMSS \
-  --engine batstore
+python3 scripts/plot.py comparison_results/run_YYYYMMDD_HHMMSS --engine batstore
 ```
 
 This writes `single_engine_overview_batstore.{svg,pdf}`, so selecting another
@@ -246,7 +244,7 @@ The suite prints the exact result directory when it finishes. Plot a completed
 run with:
 
 ```bash
-python3 scripts/plot_suite.py --run-dir benchmark_results/run_YYYYMMDD_HHMMSS
+python3 scripts/plot.py benchmark_results/run_YYYYMMDD_HHMMSS
 ```
 
 ### YCSB
@@ -434,7 +432,7 @@ Plot all recognized CSV files produced by a benchmark in the current
 directory:
 
 ```bash
-python3 scripts/plot_results.py auto --dir . --out-dir plots
+python3 scripts/plot.py .
 ```
 
 Useful focused plots include:

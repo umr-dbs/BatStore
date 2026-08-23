@@ -267,6 +267,7 @@ fn mdbx_q6(db: &Database<WriteMap>, date_lo: i64, date_hi: i64, max_qty: u8) -> 
 
 fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, history_seq: &AtomicU64) {
     let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (load)");
+    let history_anchor = now_millis();
 
     put_row(&txn, Table::Warehouse, k_warehouse(w_id), &TpccRow::Warehouse(Box::new(Warehouse {
         w_name: rnd_astring(6, 10),
@@ -342,6 +343,9 @@ fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, hist
 
         for o_ord in 0..cfg.initial_orders_per_district {
             let o_id = o_ord + 1;
+            let order_timestamp = initial_order_timestamp(
+                history_anchor, o_ord, cfg.initial_orders_per_district,
+            );
             let c_id = c_ids[o_ord as usize];
             let ol_cnt = rand::rng().random_range(5..=15u8);
             let is_new = o_id > new_order_floor;
@@ -349,7 +353,7 @@ fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, hist
 
             put_row(&txn, Table::Orders, k_order(w_id, d_id, o_id), &TpccRow::Order(Box::new(Order {
                 o_c_id: c_id,
-                o_entry_d: now_millis(),
+                o_entry_d: order_timestamp,
                 o_carrier_id,
                 o_ol_cnt: ol_cnt,
                 o_all_local: true,
@@ -361,7 +365,7 @@ fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, hist
                 let (ol_delivery_d, ol_amount) = if is_new {
                     (None, rand::rng().random_range(100..=999_999) as f64 / 100.0)
                 } else {
-                    (Some(now_millis()), 0.0)
+                    (Some(order_timestamp), 0.0)
                 };
 
                 put_row(&txn, Table::OrderLine, k_order_line(w_id, d_id, o_id, ol_number), &TpccRow::OrderLine(Box::new(OrderLine {
@@ -896,16 +900,17 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
         thread::spawn(move || terminal_thread(db, cfg, duration, stop, barrier, history_seq))
     }).collect();
 
-    // Wide-open by default, same as tpcc_driver.rs's "ch" olap_mode: every row
-    // loaded gets stamped with the load's own real wall-clock time (see
-    // tpcc_random::now_millis), not a simulated TPC-H date range, so an
-    // unrestricted [MIN, MAX) filter is what makes Q1/Q6 see the whole loaded
-    // data set.
+    let (q1_cutoff, q6_date_lo, q6_date_hi) = htap_query_date_bounds(now_millis());
     let olap_handles: Vec<_> = (0..num_olap_threads).map(|_| {
         let db = db.clone();
         let stop = stop.clone();
         let barrier = barrier.clone();
-        thread::spawn(move || olap_thread(db, i64::MIN, i64::MAX, stop, barrier, cfg.htap_mode))
+        let (date_lo, date_hi) = match cfg.htap_mode {
+            MdbxHtapMode::Q1 => (i64::MIN, q1_cutoff),
+            MdbxHtapMode::Q6 => (q6_date_lo, q6_date_hi),
+            MdbxHtapMode::None => (i64::MIN, i64::MAX),
+        };
+        thread::spawn(move || olap_thread(db, date_lo, date_hi, stop, barrier, cfg.htap_mode))
     }).collect();
 
     barrier.wait();

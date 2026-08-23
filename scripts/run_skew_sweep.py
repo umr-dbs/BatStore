@@ -184,7 +184,7 @@ def main() -> None:
 
     print("\n########## skew sweep complete ##########")
     print(f"manifest : {manifest_path}")
-    print(f"plot with: python3 scripts/plot_skew_sweep.py --run-dir {run_dir}")
+    print(f"plot with: python3 scripts/plot.py {run_dir}")
     print("##########################################\n")
 
 

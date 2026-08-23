@@ -28,8 +28,8 @@ use rand::prelude::*;
 use crate::bat_bench::mem_stats::{MemSampler, DEFAULT_SAMPLE_INTERVAL};
 use crate::bat_bench::olap_scan::{run_olap_worker, OlapMode, ScanResult};
 use crate::bat_bench::tpcc_load::{populate_items, populate_regions_and_nations, populate_suppliers, populate_warehouse};
-use crate::bat_bench::tpcc_schema::TpccConfig;
-use crate::bat_bench::tpcc_schema::TpccDatabase;
+use crate::bat_bench::tpcc_schema::{TpccConfig, TpccDatabase, htap_query_date_bounds};
+use crate::bat_bench::tpcc_random::now_millis;
 use crate::bat_bench::tpcc_txn::{self, TxnOutcome};
 use crate::bat_root::index_root::RootIndexType;
 use crate::bat_tree::idle_compaction::{DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL};
@@ -777,28 +777,22 @@ pub fn main_tpcc(parms: Vec<String>) {
     let idle_compaction = (idle_compaction_dead_ratio > 0.0)
         .then(|| (idle_compaction_dead_ratio, Duration::from_secs_f64(idle_compaction_sweep_secs)));
 
+    let (q1_cutoff, q6_date_lo, q6_date_hi) = htap_query_date_bounds(now_millis());
     let (olap_mode, num_olap_threads) = match olap_mode_str.as_str() {
         "none" => (OlapMode::RepeatedFreshFullScan, 0),
         "sleep" => (OlapMode::OpenAndSleep { hold: Duration::from_secs_f64(olap_param) }, num_olap_threads),
         "fresh" => (OlapMode::RepeatedFreshFullScan, num_olap_threads),
-        // Wide-open by default: every row loaded gets its date fields
-        // (`o_entry_d`, `ol_delivery_d`, ...) stamped with the load's actual
-        // wall-clock time (see `tpcc_random::now_millis`), not spread across
-        // the simulated years a real TPC-H date filter would assume — so an
-        // unrestricted range is what makes these queries see the whole
-        // loaded data set by default. Pass a real i64-millis range here to
-        // exercise actual date selectivity instead.
         "ch" => (
-            OlapMode::ChBenchmark { region_name: ch_region, date_lo: i64::MIN, date_hi: i64::MAX },
+            OlapMode::ChBenchmark { region_name: ch_region, date_lo: q6_date_lo, date_hi: q6_date_hi },
             num_olap_threads,
         ),
         "ch_q1" => (
-            OlapMode::ChQ1 { delivered_before: i64::MAX, num_warehouses },
+            OlapMode::ChQ1 { delivered_before: q1_cutoff, num_warehouses },
             num_olap_threads,
         ),
         "ch_q6" => (OlapMode::ChQ6 {
-            date_lo: i64::MIN,
-            date_hi: i64::MAX,
+            date_lo: q6_date_lo,
+            date_hi: q6_date_hi,
             max_qty: 24,
             num_warehouses,
         }, num_olap_threads),

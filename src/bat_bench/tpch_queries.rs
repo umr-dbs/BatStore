@@ -71,8 +71,8 @@ impl OrderLineSummary {
 /// every delivered order-line by its position within the order (`ol_number`,
 /// 1..=15 — this schema's stand-in for TPC-H `lineitem`'s
 /// `l_returnflag`/`l_linestatus`, since `order_line` has no such column),
-/// aggregating count/sum(quantity)/sum(amount). One full `ORDER_LINE`
-/// table scan.
+/// aggregating count/sum(quantity)/sum(amount). Logically scans the full `ORDER_LINE`
+/// key range, but its delivery-date zone predicate can reject nonmatching leaves.
 pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, Version) {
     let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
@@ -107,8 +107,8 @@ pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, V
 
 /// CH-benCHmark Q6 ("Forecasting Revenue Change", adapted from TPC-H Q6):
 /// total revenue (`sum(ol_amount)`) from order-lines delivered within
-/// `[date_lo, date_hi)` whose quantity is below `max_qty`. One full
-/// `ORDER_LINE` table scan.
+/// `[date_lo, date_hi)` whose quantity is below `max_qty`. Logically scans the full
+/// `ORDER_LINE` key range, while the date interval prunes leaves through the zone map.
 pub fn q6(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, Version) {
     let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
