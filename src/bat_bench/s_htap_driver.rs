@@ -26,7 +26,7 @@ use crate::bat_bench::s_htap_random::{
 };
 use crate::bat_bench::s_htap_txn;
 use crate::bat_bench::ycsb_load::populate;
-use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbTree};
+use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbScanPool, YcsbTree};
 use crate::bat_bench::ycsb_txn::{self, YcsbExecutionMode};
 use crate::bat_root::index_root::RootIndexType;
 
@@ -63,6 +63,17 @@ pub struct DriverConfig {
     pub wal: Option<(PathBuf, Duration)>,
     pub wal_lockfree_batch_size: Option<usize>,
     pub output_dir: PathBuf,
+    /// Assigns the usertable a shared scan-worker pool (see
+    /// `bat_tree::scan_pool::ScanWorkerPool`'s doc) for `olap_worker_thread`
+    /// to fan its scans out across via `ycsb_txn::scan_parallel` instead of
+    /// walking each one on its own thread — same feature/semantics as
+    /// `ycsb_driver::DriverConfig::scan_pool_workers`, except every OLAP
+    /// thread here is *always* scanning (unlike YCSB's mixed workload), so
+    /// `expected_concurrent_queries` is simply `num_olap_threads`, not an
+    /// estimate weighted by an op-mix fraction. `None`/`Some(0)` disables it
+    /// entirely: every OLAP thread scans sequentially, unchanged from every
+    /// prior behavior.
+    pub scan_pool_workers: Option<usize>,
     /// See `ycsb_driver::DriverConfig::idle_compaction`'s doc — same
     /// mechanism/semantics for this driver's one bare tree.
     pub idle_compaction: Option<(f64, Duration)>,
@@ -144,6 +155,7 @@ struct OlapWorkerStats {
 
 fn olap_worker_thread(
     tree: Arc<YcsbTree>,
+    scan_pool: Option<Arc<YcsbScanPool>>,
     current_max_key: Arc<AtomicU64>,
     olap_lag: u64,
     olap_span: u64,
@@ -162,7 +174,8 @@ fn olap_worker_thread(
         let (lo, len) = olap_scan_bounds(current_max_key.load(Relaxed), olap_lag, olap_span);
         let ts_before = tree.current_version();
         let scan_start = Instant::now();
-        scanned_tuples += ycsb_txn::scan_with_mode(&tree, lo, len, read_payload) as u64;
+        scanned_tuples +=
+            ycsb_txn::scan_parallel(scan_pool.as_deref(), &tree, lo, len, read_payload) as u64;
         scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
         staleness_versions.push(tree.current_version().saturating_sub(ts_before));
         scans_completed += 1;
@@ -246,6 +259,14 @@ pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
         );
     }
 
+    // See `DriverConfig::scan_pool_workers`'s doc: never counted against
+    // `max_threads`/`total_workers` above — a pool worker thread never
+    // calls `tree.worker_id()` (see `ycsb_driver::run_ycsb`'s identical
+    // pool setup for the same reasoning).
+    let scan_pool: Option<Arc<YcsbScanPool>> = cfg.scan_pool_workers.filter(|&n| n > 0).map(|n| {
+        Arc::new(YcsbScanPool::spawn(tree.clone(), n, Some(num_olap_threads)))
+    });
+
     println!(
         "S-HTAP benchmark\n\
          - cold record_count   = {}\n\
@@ -263,7 +284,8 @@ pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
          - execution_mode      = {:?}\n\
          - GC                  = {} (update_in_place={})\n\
          - WAL                 = {}\n\
-         - root*               = {}",
+         - root*               = {}\n\
+         - scan_pool           = {}",
         cfg.ycsb.record_count,
         cfg.ycsb.field_count,
         cfg.ycsb.field_length,
@@ -290,6 +312,10 @@ pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
             (None, _) => "Off".to_string(),
         },
         cfg.root_star_index,
+        match &scan_pool {
+            Some(p) => format!("On, {} workers", p.num_workers()),
+            None => "Off".to_string(),
+        },
     );
 
     println!("Loading {} cold records...", cfg.ycsb.record_count);
@@ -345,12 +371,14 @@ pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
     let olap_handles: Vec<_> = (0..num_olap_threads)
         .map(|_| {
             let tree = tree.clone();
+            let scan_pool = scan_pool.clone();
             let current_max_key = current_max_key.clone();
             let stop = stop.clone();
             let barrier = barrier.clone();
             thread::spawn(move || {
                 olap_worker_thread(
                     tree,
+                    scan_pool,
                     current_max_key,
                     olap_lag,
                     olap_span,
@@ -586,6 +614,25 @@ pub fn main_s_htap(parms: Vec<String>) {
     let idle_compaction = (idle_compaction_dead_ratio > 0.0)
         .then(|| (idle_compaction_dead_ratio, Duration::from_secs_f64(idle_compaction_sweep_secs)));
 
+    // Same 3-way convention as `tpcc_driver::main_tpcc`'s `scan_pool_workers`
+    // arg: omitted entirely -> on by default, sized to
+    // `num_cpus.max(DEFAULT_QUERY_FANOUT * num_olap_threads)`, whenever the
+    // cold corpus clears `MIN_ROWS_FOR_SCAN_POOL`; explicit "0" -> off;
+    // explicit "N" -> exactly N workers. Every OLAP thread here always
+    // scans (unlike YCSB's mixed workload), so `num_olap_threads` itself is
+    // the right `expected_concurrent_queries` — no op-mix weighting needed.
+    let scan_pool_workers: Option<usize> = match parms.get(25).map(|s| s.as_str()) {
+        None if record_count >= crate::bat_bench::parallel_scan::MIN_ROWS_FOR_SCAN_POOL => {
+            let fair_share_floor = crate::bat_tree::scan_pool::DEFAULT_QUERY_FANOUT * num_olap_threads;
+            Some(crate::bat_tree::mvbt::default_max_workers().max(fair_share_floor).max(2))
+        }
+        None => None,
+        Some(s) => match s.parse::<usize>() {
+            Ok(0) | Err(_) => None,
+            Ok(n) => Some(n.max(2)),
+        },
+    };
+
     run_s_htap(DriverConfig {
         ycsb: YcsbConfig {
             record_count,
@@ -618,6 +665,7 @@ pub fn main_s_htap(parms: Vec<String>) {
         }),
         wal_lockfree_batch_size: None,
         output_dir: PathBuf::from("."),
+        scan_pool_workers,
         idle_compaction,
     });
 }

@@ -245,6 +245,7 @@ fn run_one(
                 scan_pool_workers: ycsb_driver::default_scan_pool_workers(
                     scale.ycsb_record_count(),
                     &mix,
+                    scale.ycsb_threads(),
                 ),
                 idle_compaction: gc.then(|| (DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
             });

@@ -90,8 +90,9 @@ pub struct DriverConfig {
     pub idle_compaction: Option<(f64, Duration)>,
     /// Assigns `Table::OrderLine` a shared scan-worker pool (see
     /// `scan_pool::ScanWorkerPool`'s and `TpccDatabase::enable_scan_pool`'s
-    /// docs) of this many *total* threads, for `OlapMode::ChQ1`/`ChQ6` to
-    /// fan their queries out across — see those variants' docs. This is
+    /// docs) of this many *total* threads, for any OLAP mode that scans
+    /// `OrderLine` (via `TpccTxn::range`/`range_count`, or `OlapMode::ChQ1`/
+    /// `ChQ6`'s own partitioners) to fan its queries out across. This is
     /// the pool's whole capacity, not what any one query asks for: `run_tpcc`
     /// also tells the pool how many OLAP threads (`num_olap_threads`, after
     /// clamping) are expected to share it, so `ScanWorkerPool::
@@ -101,16 +102,21 @@ pub struct DriverConfig {
     /// `None`/`Some(0)` disables it entirely: no pool, every query runs
     /// sequentially, unchanged from every prior behavior — this struct's
     /// own field-by-field construction means there's no single "unset"
-    /// default here, but `main_tpcc`'s CLI parsing auto-sizes this to the
-    /// machine's own core count (`bat_tree::mvbt::default_max_workers`)
-    /// whenever its own arg is omitted entirely, the mode is `ch_q1`/
-    /// `ch_q6`, *and* the population is estimated large enough for the
-    /// pool to actually pay off (`parallel_scan::MIN_ROWS_FOR_SCAN_POOL` —
-    /// below that, the pool's own per-job overhead costs more than
-    /// sequential just takes, see that constant's doc for the
-    /// measurement). Any `Some(n)` is floored to 2 (a "pool" of 1 buys no
-    /// parallelism over the sequential path, see `ScanWorkerPool::spawn`'s
-    /// doc).
+    /// default here, but `main_tpcc`'s CLI parsing auto-sizes this whenever
+    /// its own arg is omitted entirely, there's at least one OLAP thread,
+    /// *and* the population is estimated large enough for the pool to
+    /// actually pay off (`parallel_scan::MIN_ROWS_FOR_SCAN_POOL` — below
+    /// that, the pool's own per-job overhead costs more than sequential
+    /// just takes, see that constant's doc for the measurement). That
+    /// auto-sizing is `num_cpus.max(scan_pool::DEFAULT_QUERY_FANOUT *
+    /// num_olap_threads)`, not just `num_cpus` — guaranteeing every OLAP
+    /// thread at least `DEFAULT_QUERY_FANOUT` workers of its own even when
+    /// there are more OLAP threads than cores, rather than letting
+    /// `fair_query_fanout` divide a `num_cpus`-sized pool down to a
+    /// too-thin (or, past `num_cpus / 2` callers, `None`, i.e. no
+    /// parallelism at all) share. Any `Some(n)` is floored to 2 (a "pool" of
+    /// 1 buys no parallelism over the sequential path, see
+    /// `ScanWorkerPool::spawn`'s doc).
     ///
     /// Unlike every other thread `run_tpcc` budgets, this one is
     /// deliberately *not* counted against `max_workers`: a pool worker
@@ -685,27 +691,33 @@ pub fn main_tpcc(parms: Vec<String>) {
     };
     // `Table::OrderLine`'s shared scan pool (see `DriverConfig::
     // scan_pool_workers`'s and `scan_pool::ScanWorkerPool`'s docs), used by
-    // `ch_q1`/`ch_q6` to fan a query out across several threads instead of
-    // scanning sequentially. Sized independently of how many workers any
-    // one query actually asks for — see `enable_scan_pool`'s call below,
-    // which passes `num_olap` as `expected_concurrent_queries` so
-    // `ScanWorkerPool::fair_query_fanout` can divide this pool's capacity
+    // any OLAP mode that ends up calling `TpccTxn::range`/`range_count`
+    // against `OrderLine` (i.e. every mode except `OpenAndSleep`, whose
+    // `sleep`/`none` scan warehouse/district — `Big`-class trees the pool
+    // can't be attached to at all) to fan a query out across several threads
+    // instead of scanning sequentially. Sized independently of how many
+    // workers any one query actually asks for — see `enable_scan_pool`'s
+    // call below, which passes `num_olap` as `expected_concurrent_queries`
+    // so `ScanWorkerPool::fair_query_fanout` can divide this pool's capacity
     // evenly across however many OLAP threads are actually sharing it,
     // rather than every query grabbing the same fixed slice. Three ways to
     // say how many total workers the pool itself gets, by whether/what
     // position 22 holds:
-    //   - omitted entirely (fewer than 23 positional args given at all): if
-    //     the mode is `ch_q1`/`ch_q6` *and* this population is estimated to
-    //     be large enough for the pool to actually help (see
-    //     `estimated_order_line_rows`/`parallel_scan::MIN_ROWS_FOR_SCAN_POOL`
-    //     below), sized to this machine's own core count
-    //     (`default_max_workers`) — "make the pool large, the number of CPU
-    //     threads, by default" and "the info [OLAP thread count] is usually
-    //     there when a workload begins" is what `fair_query_fanout` then
-    //     divides that by. Left at `None`/off for every other mode (nothing
-    //     would ever look the pool up) or a too-small population (the pool
-    //     would just be net-negative — see `MIN_ROWS_FOR_SCAN_POOL`'s doc
-    //     for the measurement behind that).
+    //   - omitted entirely (fewer than 23 positional args given at all): on
+    //     by default whenever there's at least one OLAP thread to use it and
+    //     this population is estimated large enough for the pool to
+    //     actually help (see `estimated_order_line_rows`/
+    //     `parallel_scan::MIN_ROWS_FOR_SCAN_POOL` below) — sized to
+    //     `num_cpus.max(scan_pool::DEFAULT_QUERY_FANOUT * num_olap_threads)`
+    //     so every OLAP thread is guaranteed at least
+    //     `DEFAULT_QUERY_FANOUT` workers of its own even when there are more
+    //     OLAP threads than cores, rather than the plain `num_cpus` sizing
+    //     `fair_query_fanout` could divide down to a too-thin (or, past
+    //     `num_cpus / 2` callers, `None`/no-parallelism-at-all) share. Left
+    //     at `None`/off for zero OLAP threads (nothing would ever look the
+    //     pool up) or a too-small population (the pool would just be
+    //     net-negative — see `MIN_ROWS_FOR_SCAN_POOL`'s doc for the
+    //     measurement behind that).
     //   - explicit `"0"`: off, matching every prior sequential behavior
     //     exactly (this is what every engines/batstore.py-driven run sends
     //     by default, so scripted sweeps keep an unambiguous off baseline) —
@@ -719,10 +731,11 @@ pub fn main_tpcc(parms: Vec<String>) {
     // none of this is clamped against `max_workers` below — pool worker
     // threads never register a `WorkerId` at all (see
     // `bat_sync::worker::READ_ONLY_SCAN_WORKER_ID`'s doc), so oversubscribing
-    // this past the machine's core count is deliberately allowed: a query's
-    // *own* fanout is bounded by `fair_query_fanout` regardless of how large
-    // the pool itself is, so a bigger-than-necessary pool costs nothing but
-    // idle, blocked (not spinning) threads — see that method's doc.
+    // this past the machine's core count is deliberately allowed: the pool
+    // is memory-latency-bound leaf traversal, not compute-bound, so more
+    // in-flight workers than cores hides that latency instead of just adding
+    // contention — a bigger-than-necessary pool otherwise costs nothing but
+    // idle, blocked (not spinning) threads — see `fair_query_fanout`'s doc.
     //
     // `estimated_order_line_rows`: `districts_per_warehouse` is fixed at 10
     // here (see the `TpccConfig` literal below) and `populate_warehouse`
@@ -736,10 +749,11 @@ pub fn main_tpcc(parms: Vec<String>) {
         * initial_orders_per_district as u64
         * AVG_ORDER_LINES_PER_ORDER as u64;
     let scan_pool_workers: Option<usize> = match parms.get(22).map(|s| s.as_str()) {
-        None if matches!(olap_mode_str.as_str(), "ch_q1" | "ch_q6")
+        None if num_olap_threads > 0
             && estimated_order_line_rows >= crate::bat_bench::parallel_scan::MIN_ROWS_FOR_SCAN_POOL =>
         {
-            Some(crate::bat_tree::mvbt::default_max_workers().max(2))
+            let fair_share_floor = crate::bat_tree::scan_pool::DEFAULT_QUERY_FANOUT * num_olap_threads;
+            Some(crate::bat_tree::mvbt::default_max_workers().max(fair_share_floor).max(2))
         }
         None => None,
         Some(s) => match s.parse::<usize>() {
