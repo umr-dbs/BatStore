@@ -145,14 +145,20 @@ fn open_db(path: &std::path::Path, num_terminals: usize, num_olap_threads: usize
     // terminal and OLAP thread counts plus headroom for staleness probes and any
     // internal use. Every OLAP thread holds a long-lived read transaction while
     // scanning, so omitting them here causes MDBX_READERS_FULL under HTAP loads.
+    let max_readers = configured_max_readers(num_terminals, num_olap_threads);
     let options = DatabaseOptions {
         max_tables: Some(Table::ALL.len() as u64),
-        max_readers: Some(configured_max_readers(num_terminals, num_olap_threads)),
+        max_readers: Some(max_readers),
         mode: Mode::ReadWrite(ReadWriteOptions { sync_mode: SyncMode::UtterlyNoSync, ..Default::default() }),
         ..Default::default()
     };
     let db = Database::<WriteMap>::open_with_options(path, options)
         .unwrap_or_else(|e| panic!("mdbx_tpcc: failed to open database at {}: {e}", path.display()));
+    let actual_max_readers = db.info().expect("mdbx_tpcc: read database info").max_readers();
+    assert!(
+        actual_max_readers >= max_readers as usize,
+        "mdbx_tpcc: requested {max_readers} reader slots but MDBX opened with only {actual_max_readers}"
+    );
     let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (table creation)");
     for t in Table::ALL {
         txn.create_table(Some(t.as_str()), TableFlags::empty()).expect("mdbx_tpcc: create_table");
@@ -930,11 +936,13 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     let num_terminals = cfg.num_terminals.max(1);
     let num_olap_threads = if cfg.htap_mode == MdbxHtapMode::None { 0 } else { cfg.num_olap_threads };
     let db = Arc::new(open_db(&cfg.db_path, num_terminals, num_olap_threads));
+    let mdbx_reader_slots = db.info().expect("mdbx_tpcc: read database info").max_readers();
 
     println!(
         "libmdbx TPC-C benchmark\n\
          - warehouses            = {}\n\
          - terminals (OLTP)      = {num_terminals}\n\
+         - reader slots (MDBX)   = {mdbx_reader_slots}\n\
          - duration              = {:?}\n\
          - db_path               = {}\n\
          - items/customers/orders per district = {}/{}/{}",
