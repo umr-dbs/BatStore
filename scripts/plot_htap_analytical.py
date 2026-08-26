@@ -4,10 +4,10 @@ analytical (OLAP) threads, with two separate y-axis series per engine - OLTP thr
 (new_order_per_sec, from the fixed-size TPC-C population/terminal pool) and OLAP
 throughput (CH-benCHmark Q1/Q6 queries/sec, summed across all analytical threads) - drawn
 as two side-by-side subplots (OLTP left, OLAP right) so the OLTP-interference and the
-OLAP-scaling stories are each readable on their own axis, per htap_q1/htap_q6 workload,
-one figure per engine plus an all-engines overlay. GC-on and GC-off measurements are
-written to separate figures; engines without a GC toggle (``gc_enabled=n/a``) are shown
-in both comparison sets.
+OLAP-scaling stories are each readable on their own axis. It also plots analytical-query
+p50/p95/p99 latency over the thread sweep. Each workload gets per-engine figures and an
+all-engines overlay. GC-on and GC-off measurements are written to separate figures;
+engines without a GC toggle (``gc_enabled=n/a``) are shown in both comparison sets.
 
 Reads <run_dir>/manifest.csv, written by run_htap_analytical_sweep.py - same schema as
 compare_engines.py's manifest, with the analytical thread count stamped into
@@ -25,14 +25,15 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-ENGINE_LABELS = {
-    "batstore": "BatStore", "leanstore": "LeanStore", "wiredtiger": "WiredTiger", "postgres": "PostgreSQL",
-    "vweaver_ermia": "vWeaver/ERMIA", "vweaver_ermia_frugal": "Frugal/ERMIA", "libmdbx": "libmdbx",
-}
-ENGINE_COLORS = {
-    "batstore": "tab:green", "leanstore": "tab:blue", "wiredtiger": "tab:orange", "postgres": "tab:red",
-    "vweaver_ermia": "tab:purple", "vweaver_ermia_frugal": "tab:pink", "libmdbx": "tab:brown",
-}
+from plot_styles import (
+    ENGINE_LABELS,
+    engine_line_style,
+    engine_sort_key,
+    latency_line_style,
+    measurement_positions,
+    measurement_values,
+    set_measurement_axis,
+)
 HTAP_WORKLOADS = ["htap_q1", "htap_q6", "htap_q1_variant", "htap_q6_variant"]
 HTAP_LABELS = {
     "htap_q1": "CH-benCHmark Q1 (Pricing Summary Report)",
@@ -51,7 +52,20 @@ def olap_threads_of(config_label: str) -> int:
 
 def load_manifest(run_dir: Path) -> pd.DataFrame:
     df = pd.read_csv(run_dir / "manifest.csv")
-    df = df[df["notes"].fillna("") == ""].copy()
+    # A note is not necessarily a failed measurement.  In particular, PostgreSQL
+    # records a useful throughput/latency row with a peak-RSS warning when the
+    # postmaster PID cannot be located.  The old blanket filter silently removed
+    # those points from every HTAP plot.
+    notes = df["notes"].fillna("")
+    harmless_note = notes.str.startswith("peak_rss unavailable")
+    usable = (notes == "") | harmless_note
+    for _, row in df[~usable].iterrows():
+        print(
+            "Skipping unsuccessful HTAP point: "
+            f"engine={row.get('engine', '?')}, workload={row.get('workload', '?')}, "
+            f"config={row.get('config_label', '?')} - {row.get('notes', '')}"
+        )
+    df = df[usable].copy()
     df["gc_enabled"] = df["gc_enabled"].fillna("n/a")
     df["olap_threads"] = df["config_label"].map(olap_threads_of)
     df["olap_qps"] = df["scan_count"] / df["duration_secs"].replace(0, float("nan"))
@@ -69,9 +83,39 @@ def gc_slices(df: pd.DataFrame):
         yield "na", df[df["gc_enabled"] == "n/a"]
 
 
-def _plot_pair(ax_oltp, ax_olap, xs, oltp_series, olap_series, label, color=None):
-    ax_oltp.plot(xs, oltp_series, marker="o", label=label, color=color)
-    ax_olap.plot(xs, olap_series, marker="o", label=label, color=color)
+def _save(fig, out_dir: Path, name: str) -> None:
+    """Save PDFs in plots/ and SVGs in plots/svg/."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for ext in ("pdf", "svg"):
+        destination = out_dir / "svg" if ext == "svg" else out_dir
+        destination.mkdir(parents=True, exist_ok=True)
+        path = destination / f"{name}.{ext}"
+        fig.savefig(path)
+        print(f"Wrote {path}")
+
+
+def _set_olap_thread_axis(ax, thread_values) -> None:
+    """Label evenly spaced positions with the measured OLAP thread counts."""
+    set_measurement_axis(ax, thread_values, "Number of analytical (OLAP) threads")
+
+
+def _olap_thread_values(thread_values) -> list[int]:
+    return measurement_values(thread_values)
+
+
+def _olap_thread_positions(thread_values, axis_values) -> list[int]:
+    """Map real thread counts to equally spaced categorical positions."""
+    return measurement_positions(thread_values, axis_values)
+
+
+def _plot_pair(
+    ax_oltp, ax_olap, thread_values, axis_values,
+    oltp_series, olap_series, engine,
+):
+    label = ENGINE_LABELS.get(engine, engine)
+    positions = _olap_thread_positions(thread_values, axis_values)
+    ax_oltp.plot(positions, oltp_series, label=label, **engine_line_style(engine))
+    ax_olap.plot(positions, olap_series, label=label, **engine_line_style(engine))
 
 
 def plot_workload_per_engine(
@@ -80,25 +124,26 @@ def plot_workload_per_engine(
     sub = df[df["workload"] == workload]
     if sub.empty:
         return
-    for engine in sorted(sub["engine"].unique()):
+    for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
         esub = sub[sub["engine"] == engine].sort_values("olap_threads")
+        thread_values = _olap_thread_values(esub["olap_threads"])
         fig, (ax_oltp, ax_olap) = plt.subplots(1, 2, figsize=(12, 5))
-        _plot_pair(ax_oltp, ax_olap, esub["olap_threads"], esub["primary_metric_value"], esub["olap_qps"],
-                   ENGINE_LABELS.get(engine, engine), ENGINE_COLORS.get(engine))
+        _plot_pair(
+            ax_oltp, ax_olap, esub["olap_threads"], thread_values,
+            esub["primary_metric_value"], esub["olap_qps"], engine,
+        )
         ax_oltp.set_title("OLTP throughput (fixed OLTP terminals)")
         ax_oltp.set_ylabel("new_order/sec")
         ax_olap.set_title("OLAP throughput (all analytical threads)")
         ax_olap.set_ylabel("queries/sec")
         for ax in (ax_oltp, ax_olap):
-            ax.set_xlabel("Number of analytical (OLAP) threads")
-            ax.grid(True, alpha=0.3)
+            _set_olap_thread_axis(ax, thread_values)
         fig.suptitle(
             f"{ENGINE_LABELS.get(engine, engine)} - "
             f"{HTAP_LABELS.get(workload, workload)} - GC {gc_choice}"
         )
         fig.tight_layout()
-        for ext in ("pdf", "svg"):
-            fig.savefig(out_dir / f"htap_analytical_{workload}_{engine}_gc_{gc_choice}.{ext}")
+        _save(fig, out_dir, f"htap_analytical_{workload}_{engine}_gc_{gc_choice}")
         plt.close(fig)
 
 
@@ -108,23 +153,105 @@ def plot_workload_all_engines(
     sub = df[df["workload"] == workload]
     if sub.empty:
         return
+    thread_values = _olap_thread_values(sub["olap_threads"])
     fig, (ax_oltp, ax_olap) = plt.subplots(1, 2, figsize=(12, 5))
-    for engine in sorted(sub["engine"].unique()):
+    for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
         esub = sub[sub["engine"] == engine].sort_values("olap_threads")
-        _plot_pair(ax_oltp, ax_olap, esub["olap_threads"], esub["primary_metric_value"], esub["olap_qps"],
-                   ENGINE_LABELS.get(engine, engine), ENGINE_COLORS.get(engine))
+        _plot_pair(
+            ax_oltp, ax_olap, esub["olap_threads"], thread_values,
+            esub["primary_metric_value"], esub["olap_qps"], engine,
+        )
     ax_oltp.set_title("OLTP throughput (fixed OLTP terminals)")
     ax_oltp.set_ylabel("new_order/sec")
     ax_olap.set_title("OLAP throughput (all analytical threads)")
     ax_olap.set_ylabel("queries/sec")
     for ax in (ax_oltp, ax_olap):
-        ax.set_xlabel("Number of analytical (OLAP) threads")
-        ax.grid(True, alpha=0.3)
+        _set_olap_thread_axis(ax, thread_values)
         ax.legend(fontsize="small")
     fig.suptitle(f"{HTAP_LABELS.get(workload, workload)} - GC {gc_choice}")
     fig.tight_layout()
-    for ext in ("pdf", "svg"):
-        fig.savefig(out_dir / f"htap_analytical_{workload}_all_engines_gc_{gc_choice}.{ext}")
+    _save(fig, out_dir, f"htap_analytical_{workload}_all_engines_gc_{gc_choice}")
+    plt.close(fig)
+
+
+def _latency_rows(df: pd.DataFrame, workload: str) -> pd.DataFrame:
+    """Return rows containing an actual analytical-query latency sample."""
+    sub = df[(df["workload"] == workload) & (df["scan_count"] > 0)].copy()
+    latency_columns = ["scan_p50_us", "scan_p95_us", "scan_p99_us"]
+    for column in latency_columns:
+        sub[column] = pd.to_numeric(sub[column], errors="coerce")
+    return sub.dropna(subset=latency_columns, how="all")
+
+
+def plot_workload_latency_per_engine(
+    df: pd.DataFrame, workload: str, gc_choice: str, out_dir: Path,
+) -> None:
+    """Plot p50/p95/p99 query latency over the OLAP-thread sweep per engine."""
+    sub = _latency_rows(df, workload)
+    for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
+        esub = sub[sub["engine"] == engine].sort_values("olap_threads")
+        thread_values = _olap_thread_values(esub["olap_threads"])
+        positions = _olap_thread_positions(esub["olap_threads"], thread_values)
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.fill_between(
+            positions,
+            esub["scan_p50_us"].tolist(),
+            esub["scan_p99_us"].tolist(),
+            color="#777777", alpha=0.12, linewidth=0, label="p50-p99 range",
+        )
+        for column, label in (
+            ("scan_p50_us", "p50"),
+            ("scan_p95_us", "p95"),
+            ("scan_p99_us", "p99"),
+        ):
+            ax.plot(positions, esub[column], label=label, **latency_line_style(label))
+        _set_olap_thread_axis(ax, thread_values)
+        ax.set_ylabel("Query latency (microseconds)")
+        ax.set_title(
+            f"{ENGINE_LABELS.get(engine, engine)} - "
+            f"{HTAP_LABELS.get(workload, workload)} latency - GC {gc_choice}"
+        )
+        ax.legend(frameon=True, framealpha=0.9, ncol=2)
+        fig.tight_layout()
+        _save(
+            fig, out_dir,
+            f"htap_analytical_{workload}_{engine}_latency_gc_{gc_choice}",
+        )
+        plt.close(fig)
+
+
+def plot_workload_latency_all_engines(
+    df: pd.DataFrame, workload: str, gc_choice: str, out_dir: Path,
+) -> None:
+    """Plot each latency percentile across engines without mixing percentile lines."""
+    sub = _latency_rows(df, workload)
+    if sub.empty:
+        print(f"No {workload} latency rows for gc={gc_choice} - skipping latency plot.")
+        return
+
+    thread_values = _olap_thread_values(sub["olap_threads"])
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5), sharex=True)
+    for ax, (column, percentile) in zip(
+        axes,
+        (("scan_p50_us", "p50"), ("scan_p95_us", "p95"), ("scan_p99_us", "p99")),
+    ):
+        for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
+            esub = sub[sub["engine"] == engine].sort_values("olap_threads")
+            ax.plot(
+                _olap_thread_positions(esub["olap_threads"], thread_values), esub[column],
+                label=ENGINE_LABELS.get(engine, engine), **engine_line_style(engine),
+            )
+        _set_olap_thread_axis(ax, thread_values)
+        ax.set_ylabel("Query latency (microseconds)")
+        ax.set_title(percentile.upper(), fontweight="bold")
+        if ax is axes[0]:
+            ax.legend(fontsize="small", frameon=True, framealpha=0.9)
+    fig.suptitle(f"{HTAP_LABELS.get(workload, workload)} latency - GC {gc_choice}")
+    fig.tight_layout()
+    _save(
+        fig, out_dir,
+        f"htap_analytical_{workload}_all_engines_latency_gc_{gc_choice}",
+    )
     plt.close(fig)
 
 
@@ -142,6 +269,8 @@ def main() -> None:
         for gc_choice, gc_df in gc_slices(workload_df):
             plot_workload_per_engine(gc_df, workload, gc_choice, out_dir)
             plot_workload_all_engines(gc_df, workload, gc_choice, out_dir)
+            plot_workload_latency_per_engine(gc_df, workload, gc_choice, out_dir)
+            plot_workload_latency_all_engines(gc_df, workload, gc_choice, out_dir)
 
     print(f"Wrote plots to {out_dir}")
 

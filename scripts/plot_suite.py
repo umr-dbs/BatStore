@@ -62,9 +62,10 @@ def _experiment_sort_key(name: str):
 
 
 def _save(fig, out_dir: Path, name: str):
-    out_dir.mkdir(parents=True, exist_ok=True)
+    svg_dir = out_dir / "svg"
+    svg_dir.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
-    path = out_dir / f"{name}.svg"
+    path = svg_dir / f"{name}.svg"
     fig.savefig(path)
     print(f"Wrote {path}")
     plt.close(fig)
