@@ -114,6 +114,12 @@ def plot_htap(run_dir: Path) -> None:
             plot_htap_analytical.plot_workload_all_engines(
                 gc_df, workload, gc_choice, out_dir
             )
+            plot_htap_analytical.plot_workload_latency_per_engine(
+                gc_df, workload, gc_choice, out_dir
+            )
+            plot_htap_analytical.plot_workload_latency_all_engines(
+                gc_df, workload, gc_choice, out_dir
+            )
 
 
 def plot_skew(run_dir: Path, requested_ref_threads: int | None) -> None:

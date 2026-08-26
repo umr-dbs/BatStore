@@ -47,19 +47,18 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.lines import Line2D
 
-ENGINE_ORDER = [
-    "batstore", "leanstore", "wiredtiger", "postgres", "vweaver_ermia",
-    "vweaver_ermia_frugal", "libmdbx",
-]
-ENGINE_LABELS = {
-    "batstore": "BatStore", "leanstore": "LeanStore", "wiredtiger": "WiredTiger", "postgres": "PostgreSQL",
-    "vweaver_ermia": "vWeaver/ERMIA", "vweaver_ermia_frugal": "Frugal/ERMIA",
-    "libmdbx": "libmdbx",
-}
-ENGINE_COLORS = {
-    "batstore": "tab:green", "leanstore": "tab:blue", "wiredtiger": "tab:orange", "postgres": "tab:red",
-    "vweaver_ermia": "tab:purple", "vweaver_ermia_frugal": "tab:pink", "libmdbx": "tab:brown",
-}
+from plot_styles import (
+    ENGINE_COLORS,
+    ENGINE_HATCHES,
+    ENGINE_LABELS,
+    LATENCY_PERCENTILE_STYLES,
+    engine_line_style,
+    engine_sort_key,
+    latency_line_style,
+    measurement_positions,
+    measurement_values,
+    set_measurement_axis,
+)
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
 HTAP_WORKLOADS = ["htap_q1", "htap_q6", "htap_q1_variant", "htap_q6_variant"]
 # Engines with a real, working GC on/off toggle (see engines/*.py's SUPPORTS_GC_TOGGLE) -
@@ -69,14 +68,16 @@ GC_TOGGLE_ENGINES = ["batstore", "postgres", "vweaver_ermia", "vweaver_ermia_fru
 
 
 def _engine_sort_key(name: str):
-    return ENGINE_ORDER.index(name) if name in ENGINE_ORDER else len(ENGINE_ORDER)
+    return engine_sort_key(name)
 
 
 def _save(fig, out_dir: Path, name: str):
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     for suffix in ("svg", "pdf"):
-        path = out_dir / f"{name}.{suffix}"
+        destination = out_dir / "svg" if suffix == "svg" else out_dir
+        destination.mkdir(parents=True, exist_ok=True)
+        path = destination / f"{name}.{suffix}"
         fig.savefig(path)
         print(f"Wrote {path}")
     plt.close(fig)
@@ -122,8 +123,13 @@ def pick_reference_slice(manifest: pd.DataFrame, gc_choice: str) -> tuple:
 def _bar_by_engine(ax, df: pd.DataFrame, value_col: str):
     engines_present = sorted(df["engine"].unique(), key=_engine_sort_key)
     values = [df.loc[df["engine"] == e, value_col].iloc[0] if e in df["engine"].values else 0 for e in engines_present]
-    colors = [ENGINE_COLORS.get(e, "tab:gray") for e in engines_present]
-    bars = ax.bar(range(len(engines_present)), values, color=colors)
+    colors = [ENGINE_COLORS.get(e, "#777777") for e in engines_present]
+    bars = ax.bar(
+        range(len(engines_present)), values, color=colors,
+        edgecolor="#333333", linewidth=0.6,
+    )
+    for bar, engine in zip(bars, engines_present):
+        bar.set_hatch(ENGINE_HATCHES.get(engine, ""))
     ax.set_xticks(range(len(engines_present)))
     ax.set_xticklabels([ENGINE_LABELS.get(e, e) for e in engines_present])
     for bar, e in zip(bars, engines_present):
@@ -163,7 +169,11 @@ def plot_ycsb_throughput(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: s
         sub = df[df["engine"] == engine].set_index("workload_label")
         values = [sub["primary_metric_value"].get(w, 0) for w in workloads_present]
         offsets = [xi + (i - (n - 1) / 2) * width for xi in x]
-        ax.bar(offsets, values, width, label=ENGINE_LABELS.get(engine, engine), color=ENGINE_COLORS.get(engine, "tab:gray"))
+        ax.bar(
+            offsets, values, width, label=ENGINE_LABELS.get(engine, engine),
+            color=ENGINE_COLORS.get(engine, "#777777"),
+            hatch=ENGINE_HATCHES.get(engine, ""), edgecolor="#333333", linewidth=0.6,
+        )
 
     ax.set_xticks(list(x))
     ax.set_xticklabels(workloads_present)
@@ -217,7 +227,11 @@ def plot_summary_all(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str, 
         sub = df[df["engine"] == engine].set_index("workload")
         values = [max(sub["primary_metric_value"].get(w, 0), 0.01) for w in workloads]
         offsets = [xi + (i - (n - 1) / 2) * width for xi in x]
-        ax.bar(offsets, values, width, label=ENGINE_LABELS.get(engine, engine), color=ENGINE_COLORS.get(engine, "tab:gray"))
+        ax.bar(
+            offsets, values, width, label=ENGINE_LABELS.get(engine, engine),
+            color=ENGINE_COLORS.get(engine, "#777777"),
+            hatch=ENGINE_HATCHES.get(engine, ""), edgecolor="#333333", linewidth=0.6,
+        )
 
     ax.set_xticks(list(x))
     ax.set_xticklabels(workloads, rotation=30, ha="right")
@@ -234,6 +248,7 @@ def _plot_engine_lines(ax, df: pd.DataFrame, value_col: str = "primary_metric_va
     gc=on/n/a, dashed for gc=off) drawn onto `ax` - the shared building block behind every
     threads_sweep_* figure below, so a single workload's worth of lines can be placed
     either on its own figure (TPC-C, HTAP) or as one subplot among several (YCSB)."""
+    thread_values = measurement_values(df["threads"])
     for engine in sorted(df["engine"].unique(), key=_engine_sort_key):
         edf = df[df["engine"] == engine]
         for gc_variant, linestyle in (("on", "-"), ("n/a", "-"), ("off", "--")):
@@ -243,19 +258,12 @@ def _plot_engine_lines(ax, df: pd.DataFrame, value_col: str = "primary_metric_va
             label = ENGINE_LABELS.get(engine, engine)
             if gc_variant == "off":
                 label += " (gc off)"
-            ax.plot(gdf["threads"], gdf[value_col], marker="o", linestyle=linestyle,
-                    label=label, color=ENGINE_COLORS.get(engine, "tab:gray"))
-    ax.set_xscale("log", base=2)
-    # Tick locations/labels pinned to the actual thread counts in `df` (e.g. 2,4,8,...128)
-    # rather than matplotlib's default log-scale formatter, which would otherwise render
-    # them as "2^1", "2^2", ... - plain integers read directly as the thread counts they are.
-    thread_values = sorted(df["threads"].unique())
-    if thread_values:
-        ax.set_xticks(thread_values)
-        ax.set_xticklabels([str(int(t)) for t in thread_values])
-        ax.minorticks_off()
-    ax.set_xlabel("Threads / terminals")
-    ax.grid(alpha=0.3)
+            ax.plot(
+                measurement_positions(gdf["threads"], thread_values), gdf[value_col],
+                linestyle=linestyle, label=label,
+                **engine_line_style(engine),
+            )
+    set_measurement_axis(ax, thread_values, "Threads / terminals")
 
 
 def _gc_plot_slices(df: pd.DataFrame):
@@ -412,12 +420,17 @@ def plot_scan_latency(manifest: pd.DataFrame, ref_threads: int, out_dir: Path):
     for i, (col, label) in enumerate([("scan_p50_us", "p50"), ("scan_p95_us", "p95"), ("scan_p99_us", "p99")]):
         values = [df[df["engine"] == e][col].iloc[0] if e in df["engine"].values else 0 for e in engines_present]
         offsets = [xi + (i - 1) * width for xi in x]
-        ax.bar(offsets, values, width, label=label)
+        style = LATENCY_PERCENTILE_STYLES[label]
+        ax.bar(
+            offsets, values, width, label=label,
+            color=style["color"], hatch=style["hatch"],
+            edgecolor="#333333", linewidth=0.6,
+        )
     ax.set_xticks(list(x))
     ax.set_xticklabels([ENGINE_LABELS.get(e, e) for e in engines_present])
     ax.set_ylabel("Scan-op latency (microseconds)")
     ax.set_title(f"YCSB-E scan latency by engine (threads={ref_threads})")
-    ax.legend()
+    ax.legend(title="Percentile", frameon=True, framealpha=0.9)
     ax.grid(alpha=0.3, axis="y")
     _save(fig, out_dir, "ycsb_e_scan_latency")
 
@@ -478,12 +491,17 @@ def plot_ch_query_latency(manifest: pd.DataFrame, ref_threads: int, out_dir: Pat
         for i, (col, label) in enumerate([("scan_p50_us", "p50"), ("scan_p95_us", "p95"), ("scan_p99_us", "p99")]):
             values = [wdf[wdf["engine"] == e][col].iloc[0] if e in wdf["engine"].values else 0 for e in engines_present]
             offsets = [xi + (i - 1) * width for xi in x]
-            ax.bar(offsets, values, width, label=label)
+            style = LATENCY_PERCENTILE_STYLES[label]
+            ax.bar(
+                offsets, values, width, label=label,
+                color=style["color"], hatch=style["hatch"],
+                edgecolor="#333333", linewidth=0.6,
+            )
         ax.set_xticks(list(x))
         ax.set_xticklabels([ENGINE_LABELS.get(e, e) for e in engines_present])
         ax.set_ylabel("Query latency (microseconds)")
         ax.set_title(title)
-        ax.legend(fontsize=8)
+        ax.legend(title="Percentile", fontsize=8, title_fontsize=8, frameon=True)
         ax.grid(alpha=0.3, axis="y")
     fig.suptitle(f"CH-benCHmark analytical query latency by engine (threads={ref_threads})")
     _save(fig, out_dir, "ch_query_latency")
@@ -507,7 +525,10 @@ def plot_batstore_olap_scan_latency(run_dir: Path, ref_threads: int, out_dir: Pa
     df["latency_us"] = df["latency_ns"] / 1000.0
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(df["delay_secs"], df["latency_us"], marker="o", color="tab:green")
+    ax.plot(
+        df["delay_secs"], df["latency_us"],
+        **engine_line_style("batstore"),
+    )
     ax.set_xlabel("OLAP scan delay / staleness target (seconds)")
     ax.set_ylabel("Scan latency (microseconds)")
     ax.set_title(f"BatStore: TPC-C concurrent OLAP-scan latency vs. staleness (threads={ref_threads})")
@@ -531,16 +552,7 @@ def _workload_sort_key(workload: str):
 
 
 def _set_measurement_thread_axis(ax, thread_values) -> None:
-    thread_values = sorted(set(thread_values))
-    if not thread_values:
-        return
-    if all(value > 0 for value in thread_values):
-        ax.set_xscale("log", base=2)
-    ax.set_xticks(thread_values)
-    ax.set_xticklabels([str(int(value)) for value in thread_values])
-    ax.minorticks_off()
-    ax.set_xlabel("Threads / terminals")
-    ax.grid(alpha=0.3)
+    set_measurement_axis(ax, thread_values, "Threads / terminals")
 
 
 def plot_single_engine_overview(
@@ -572,15 +584,16 @@ def plot_single_engine_overview(
 
     for row, workload in enumerate(workloads):
         wdf = valid[valid["workload"] == workload]
-        thread_values = sorted(wdf["threads"].unique())
+        thread_values = measurement_values(wdf["threads"])
 
         throughput_ax = axes[row][0]
         for gc_variant, (linestyle, label) in gc_styles.items():
             gdf = wdf[wdf["gc_enabled"] == gc_variant].sort_values("threads")
             if not gdf.empty:
                 throughput_ax.plot(
-                    gdf["threads"], gdf["primary_metric_value"], marker="o",
-                    linestyle=linestyle, label=label,
+                    measurement_positions(gdf["threads"], thread_values),
+                    gdf["primary_metric_value"], linestyle=linestyle, label=label,
+                    **engine_line_style(engine),
                 )
         throughput_ax.set_ylabel(wdf["primary_metric_name"].iloc[0])
         throughput_ax.set_title(f"{workload}: throughput")
@@ -600,8 +613,9 @@ def plot_single_engine_overview(
                 gdf = wdf[wdf["gc_enabled"] == gc_variant].sort_values("threads")
                 if not gdf.empty:
                     olap_throughput_ax.plot(
-                        gdf["threads"], gdf["olap_queries_per_sec"], marker="o",
-                        linestyle=linestyle, label=label,
+                        measurement_positions(gdf["threads"], thread_values),
+                        gdf["olap_queries_per_sec"], linestyle=linestyle, label=label,
+                        **engine_line_style(engine),
                     )
             olap_throughput_ax.set_ylabel("Completed analytical queries / sec")
             olap_throughput_ax.set_title(f"{workload}: OLAP throughput")
@@ -625,27 +639,38 @@ def plot_single_engine_overview(
             latency_ax.set_axis_off()
         else:
             latency_df = latency_df[latency_df["gc_enabled"] == latency_gc].sort_values("threads")
-            for col, label, linestyle in (
-                ("scan_p50_us", "p50", ":"),
-                ("scan_p95_us", "p95", "--"),
-                ("scan_p99_us", "p99", "-"),
+            latency_thread_values = measurement_values(latency_df["threads"])
+            latency_positions = measurement_positions(
+                latency_df["threads"], latency_thread_values,
+            )
+            latency_ax.fill_between(
+                latency_positions,
+                latency_df["scan_p50_us"].tolist(),
+                latency_df["scan_p99_us"].tolist(),
+                color="#777777", alpha=0.12, linewidth=0, label="p50-p99 range",
+            )
+            for col, label in (
+                ("scan_p50_us", "p50"),
+                ("scan_p95_us", "p95"),
+                ("scan_p99_us", "p99"),
             ):
                 latency_ax.plot(
-                    latency_df["threads"], latency_df[col], marker="o",
-                    linestyle=linestyle, label=label,
+                    latency_positions, latency_df[col], label=label,
+                    **latency_line_style(label),
                 )
             latency_ax.set_ylabel("Latency (microseconds)")
             latency_ax.set_title(f"{workload}: latency (gc={latency_gc})")
-            _set_measurement_thread_axis(latency_ax, latency_df["threads"].unique())
-            latency_ax.legend(fontsize=8)
+            _set_measurement_thread_axis(latency_ax, latency_thread_values)
+            latency_ax.legend(fontsize=7, frameon=True, framealpha=0.9, ncol=2)
 
         memory_ax = axes[row][3]
         for gc_variant, (linestyle, label) in gc_styles.items():
             gdf = wdf[wdf["gc_enabled"] == gc_variant].sort_values("threads")
             if not gdf.empty:
                 memory_ax.plot(
-                    gdf["threads"], gdf["peak_rss_mb"], marker="o",
-                    linestyle=linestyle, label=label,
+                    measurement_positions(gdf["threads"], thread_values),
+                    gdf["peak_rss_mb"], linestyle=linestyle, label=label,
+                    **engine_line_style(engine),
                 )
         memory_ax.set_ylabel("Peak RSS (MB)")
         memory_ax.set_title(f"{workload}: memory")
@@ -662,7 +687,7 @@ def plot_all_engines_workload_overview(
 ) -> bool:
     """Plot every engine in one workload-by-metric overview.
 
-    A line's color identifies its engine and its marker identifies the GC state. HTAP rows
+    A line's color and marker identify its engine; line style identifies the GC state. HTAP rows
     contain separate OLTP and aggregate OLAP throughput panels; the remaining panels show
     p99 scan/query latency and peak RSS. Showing p99 alone keeps the multi-engine latency
     panel readable instead of multiplying every engine/GC line by three percentiles.
@@ -677,13 +702,14 @@ def plot_all_engines_workload_overview(
         print("No successful measurements — skipping all-engines workload overview.")
         return True
 
-    gc_markers = {"on": "o", "off": "s", "n/a": "D"}
+    gc_linestyles = {"on": "-", "off": "--", "n/a": ":"}
     gc_labels = {"on": "GC on", "off": "GC off", "n/a": "GC n/a"}
     fig, axes = plt.subplots(
         len(workloads), 4, figsize=(20, max(4.2, 3.8 * len(workloads))), squeeze=False,
     )
 
     def plot_metric(ax, wdf: pd.DataFrame, value_col: str) -> None:
+        thread_values = measurement_values(wdf["threads"])
         for engine in engines:
             edf = wdf[wdf["engine"] == engine]
             for gc_variant in ("on", "off", "n/a"):
@@ -691,9 +717,9 @@ def plot_all_engines_workload_overview(
                 if gdf.empty:
                     continue
                 ax.plot(
-                    gdf["threads"], gdf[value_col],
-                    color=ENGINE_COLORS.get(engine, "tab:gray"),
-                    marker=gc_markers[gc_variant], linestyle="-", markersize=5,
+                    measurement_positions(gdf["threads"], thread_values), gdf[value_col],
+                    linestyle=gc_linestyles[gc_variant],
+                    **engine_line_style(engine),
                 )
 
     for row, workload in enumerate(workloads):
@@ -744,17 +770,20 @@ def plot_all_engines_workload_overview(
         _set_measurement_thread_axis(memory_ax, thread_values)
 
     engine_handles = [
-        Line2D([0], [0], color=ENGINE_COLORS.get(engine, "tab:gray"), label=ENGINE_LABELS.get(engine, engine))
+        Line2D(
+            [0], [0], label=ENGINE_LABELS.get(engine, engine),
+            **engine_line_style(engine),
+        )
         for engine in engines
     ]
     gc_values = [gc for gc in ("on", "off", "n/a") if gc in set(valid["gc_enabled"])]
     gc_handles = [
-        Line2D([0], [0], color="black", marker=gc_markers[gc], linestyle="-", label=gc_labels[gc])
+        Line2D([0], [0], color="black", linestyle=gc_linestyles[gc], label=gc_labels[gc])
         for gc in gc_values
     ]
     axes[0][0].legend(
         handles=engine_handles + gc_handles, fontsize=7, ncol=2,
-        title="Color = engine; marker = GC", title_fontsize=8,
+        title="Color/marker = engine; line = GC", title_fontsize=8,
     )
 
     fig.suptitle("All engines: workload overview")

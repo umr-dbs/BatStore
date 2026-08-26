@@ -21,14 +21,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-ENGINE_LABELS = {
-    "batstore": "BatStore", "leanstore": "LeanStore", "wiredtiger": "WiredTiger", "postgres": "PostgreSQL",
-    "vweaver_ermia": "vWeaver/ERMIA", "vweaver_ermia_frugal": "Frugal/ERMIA", "libmdbx": "libmdbx",
-}
-ENGINE_COLORS = {
-    "batstore": "tab:green", "leanstore": "tab:blue", "wiredtiger": "tab:orange", "postgres": "tab:red",
-    "vweaver_ermia": "tab:purple", "vweaver_ermia_frugal": "tab:pink", "libmdbx": "tab:brown",
-}
+from plot_styles import ENGINE_LABELS, engine_line_style, engine_sort_key
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
 
 _SKEW_RE = re.compile(r"skew=(\S+)")
@@ -50,11 +43,22 @@ def load_manifest(run_dir: Path) -> pd.DataFrame:
     return df
 
 
+def _save(fig, out_dir: Path, name: str) -> None:
+    """Save PDFs in plots/ and SVGs in plots/svg/."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for ext in ("pdf", "svg"):
+        destination = out_dir / "svg" if ext == "svg" else out_dir
+        destination.mkdir(parents=True, exist_ok=True)
+        path = destination / f"{name}.{ext}"
+        fig.savefig(path)
+        print(f"Wrote {path}")
+
+
 def plot_workload_per_engine(df: pd.DataFrame, workload: str, out_dir: Path) -> None:
     sub = df[df["workload"] == workload]
     if sub.empty:
         return
-    for engine in sorted(sub["engine"].unique()):
+    for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
         esub = sub[sub["engine"] == engine]
         skews = sorted(esub["skew"].unique(), key=skew_sort_key)
         fig, ax = plt.subplots(figsize=(7, 5))
@@ -67,8 +71,7 @@ def plot_workload_per_engine(df: pd.DataFrame, workload: str, out_dir: Path) -> 
         ax.legend(title="Threads", fontsize="small")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
-        for ext in ("pdf", "svg"):
-            fig.savefig(out_dir / f"skew_{workload}_{engine}.{ext}")
+        _save(fig, out_dir, f"skew_{workload}_{engine}")
         plt.close(fig)
 
 
@@ -77,20 +80,21 @@ def plot_workload_all_engines(df: pd.DataFrame, workload: str, out_dir: Path, re
     if sub.empty:
         return
     fig, ax = plt.subplots(figsize=(7, 5))
-    for engine in sorted(sub["engine"].unique()):
+    for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
         esub = sub[sub["engine"] == engine]
         skews = sorted(esub["skew"].unique(), key=skew_sort_key)
         esub = esub.set_index("skew").reindex(skews)
-        ax.plot(skews, esub["primary_metric_value"], marker="o",
-                label=ENGINE_LABELS.get(engine, engine), color=ENGINE_COLORS.get(engine))
+        ax.plot(
+            skews, esub["primary_metric_value"],
+            label=ENGINE_LABELS.get(engine, engine), **engine_line_style(engine),
+        )
     ax.set_xlabel("Skew factor (Zipfian theta; 'uniform' = theta 0.0)")
     ax.set_ylabel("Throughput (ops/sec)")
     ax.set_title(f"YCSB {workload.split('_')[1].upper()} vs. skew (threads={ref_threads})")
     ax.legend(fontsize="small")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    for ext in ("pdf", "svg"):
-        fig.savefig(out_dir / f"skew_{workload}_all_engines_threads{ref_threads}.{ext}")
+    _save(fig, out_dir, f"skew_{workload}_all_engines_threads{ref_threads}")
     plt.close(fig)
 
 
