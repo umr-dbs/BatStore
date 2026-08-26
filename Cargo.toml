@@ -1,6 +1,6 @@
 [package]
 name = "BatStore"
-version = "0.0.134"
+version = "0.0.135"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
 description = "BatStore Research Implementation"
@@ -96,6 +96,13 @@ triomphe = "0.1.16"
 
 [dev-dependencies]
 loom = "0.7"
+
+# libmdbx 0.6.6 exposes DatabaseOptions::max_readers but accidentally omits it
+# from open_with_options()'s option loop. Keep the tiny fix repository-local so
+# benchmark builds on other machines do not fall back to MDBX's page-rounded
+# default reader table (112 slots on a typical 4 KiB-page Linux host).
+[patch.crates-io]
+libmdbx = { path = "vendor/libmdbx" }
 
 [[test]]
 name = "loom_registration_ordering"
