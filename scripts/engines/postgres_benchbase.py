@@ -379,9 +379,10 @@ def _set_unsafe_durability() -> None:
     `full_page_writes=off` skips the extra page image written on first modification after a
     checkpoint - all three are PGC_SIGHUP (take effect on pg_reload_conf(), no restart
     needed), same mechanism as the existing autovacuum toggle below. Safe here because
-    PGDATA is tmpfs-backed (_verify_tmpfs_datadir already refused to run otherwise), and
-    compare_engines recreates the benchmark tables for every point - never do this against
-    a real database.
+    PGDATA is tmpfs-backed (_verify_tmpfs_datadir already refused to run otherwise) - or,
+    under common.NO_DURABILITY, because these settings are themselves what makes real
+    disk backing safe to use instead - and compare_engines recreates the benchmark
+    tables for every point - never do this against a real database.
     """
     env = os.environ.copy()
     env["PGPASSWORD"] = common.PG_PASSWORD
@@ -452,7 +453,11 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
                   "ZipfianGenerator singularity - no reasonable substitute)",
         )
     postmaster_pid = _verify_postmaster_numa_binding()
-    _verify_tmpfs_datadir()
+    # Under common.NO_DURABILITY (see compare_engines_new.py), the tmpfs guarantee below
+    # is redundant: _set_unsafe_durability()'s fsync=off already means PostgreSQL never
+    # blocks on a real disk write either way, so skip requiring tmpfs specifically for it.
+    if not common.NO_DURABILITY:
+        _verify_tmpfs_datadir()
     _set_unsafe_durability()
 
     output_dir.mkdir(parents=True, exist_ok=True)

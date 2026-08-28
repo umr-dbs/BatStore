@@ -70,6 +70,26 @@ NUMA_NODE = 0
 # distro by default.
 SCRATCH_ROOT = Path(os.environ.get("SCRATCH_ROOT", "/dev/shm/batstore_bench_scratch"))
 
+# Set by compare_engines_new.py (BEFORE importing this module, so this constant picks it
+# up at import time) instead of compare_engines.py's tmpfs-backed-but-fsync-paying
+# default above: every engine wrapper checks this flag to turn its own durability work
+# OFF at the config level (BatStore's WAL disabled outright, LeanStore's --wal_pwrite/
+# --wal_fsync gflags, PostgreSQL's tmpfs datadir check skipped since its fsync is already
+# off via _set_unsafe_durability) instead of relying on tmpfs to make paying that cost
+# harmless. libmdbx (SyncMode::UtterlyNoSync) and vWeaver_ermia/vweaver_ermia_frugal
+# (-null_log_device defaults to true upstream) already don't pay it either way - see
+# compare_engines_new.py's own docstring for the full per-engine rundown, including the
+# one holdout (WiredTiger's hardcoded C++ log config) left unchanged.
+NO_DURABILITY = os.environ.get("BATSTORE_BENCH_NO_DURABILITY", "0") == "1"
+
+# Real-disk root used by fresh_scratch_dir below instead of SCRATCH_ROOT when
+# NO_DURABILITY is set. Deliberately NOT required to be tmpfs - the whole point of
+# NO_DURABILITY is that no engine here still needs RAM-backing once its own fsync/WAL is
+# off - but still gets the same wiped-before-every-run treatment.
+NO_DURABILITY_SCRATCH_ROOT = Path(os.environ.get(
+    "NO_DURABILITY_SCRATCH_ROOT", str(WORKSPACE_ROOT / "no_durability_scratch"),
+))
+
 # Global allocator BatStore's own binary is built with - see Cargo.toml's `mimalloc`
 # feature and src/main.rs's global-allocator cfg (jemalloc is the crate's own default;
 # mimalloc measured a few % *worse* on TPC-C despite winning a few % on YCSB's WAL path,
@@ -159,17 +179,25 @@ def fresh_scratch_dir(name: str) -> Path:
     comparison_results/run_<ts>/ tree, on real disk) - that keeps holding the small
     per-run artifacts (stdout.log, result CSVs) worth preserving for post-hoc inspection;
     only the heavy data files live here.
+
+    Under NO_DURABILITY (see that flag's own doc), tmpfs isn't required at all: each
+    engine's own config has already turned off the work that would make real disk I/O
+    costly, so this returns a plain real-disk directory under NO_DURABILITY_SCRATCH_ROOT
+    instead - same wipe-and-recreate treatment, just skipping the tmpfs check entirely.
     """
-    fstype = _mount_fstype(SCRATCH_ROOT)
-    if fstype != "tmpfs":
-        sys.exit(
-            f"SCRATCH_ROOT={SCRATCH_ROOT} is not tmpfs-backed (mount fstype={fstype!r}) - refusing to "
-            f"run, since every engine's on-disk data directory must be RAM-backed for this harness's "
-            f"in-memory-only benchmarking (see manual.txt section 4). Either unset SCRATCH_ROOT to use "
-            f"the /dev/shm default, or point it at a tmpfs mount yourself, e.g. "
-            f"`sudo mount -t tmpfs -o size=64G tmpfs {SCRATCH_ROOT}` (mkdir it first)."
-        )
-    scratch_dir = SCRATCH_ROOT / name
+    if NO_DURABILITY:
+        scratch_dir = NO_DURABILITY_SCRATCH_ROOT / name
+    else:
+        fstype = _mount_fstype(SCRATCH_ROOT)
+        if fstype != "tmpfs":
+            sys.exit(
+                f"SCRATCH_ROOT={SCRATCH_ROOT} is not tmpfs-backed (mount fstype={fstype!r}) - refusing to "
+                f"run, since every engine's on-disk data directory must be RAM-backed for this harness's "
+                f"in-memory-only benchmarking (see manual.txt section 4). Either unset SCRATCH_ROOT to use "
+                f"the /dev/shm default, or point it at a tmpfs mount yourself, e.g. "
+                f"`sudo mount -t tmpfs -o size=64G tmpfs {SCRATCH_ROOT}` (mkdir it first)."
+            )
+        scratch_dir = SCRATCH_ROOT / name
     # Never ignore cleanup failures: reusing a partially stale database directory would
     # contaminate the next measurement, and a root-owned directory should produce an
     # actionable ownership error instead of failing later inside an engine.

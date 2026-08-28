@@ -264,6 +264,7 @@ def main() -> None:
         "ycsb_write_all_fields": args.ycsb_write_all_fields,
         "htap_cpu_budget": htap_cpu_budget,
         "batstore_scan_pool_workers_override": args.scan_pool_workers,
+        "no_durability": common.NO_DURABILITY,
     }, indent=2) + "\n")
 
     total_runs = 0
@@ -303,11 +304,19 @@ def main() -> None:
         f"auto, sized per-workload to ~4x its own estimated dataset (see common.dram_gib_for), "
         f"capped at {common.default_dram_gib()} (this machine's NUMA-node-safe ceiling)"
     )
-    print(f"in-memory only: SCRATCH_ROOT={common.SCRATCH_ROOT} (tmpfs-verified; LeanStore/WiredTiger/"
-          f"libmdbx/vWeaver_ermia/batstore data never touches a real disk) dram_gib: {dram_gib_desc} "
-          f"(LeanStore/WiredTiger buffer pool - not used by batstore, whose WAL is forced on but "
-          f"unbounded like every other in-memory structure here, or postgres, whose shared_buffers "
-          f"isn't managed by this script)")
+    if common.NO_DURABILITY:
+        print(f"durability    : OFF via each engine's own config (BATSTORE_BENCH_NO_DURABILITY=1, "
+              f"see compare_engines_new.py) - BatStore WAL disabled outright, LeanStore "
+              f"--wal_pwrite=false --wal_fsync=false, libmdbx/vWeaver_ermia already sync-free by "
+              f"default, PostgreSQL fsync/synchronous_commit/full_page_writes off (WiredTiger's own "
+              f"log module stays on - see compare_engines_new.py's docstring); scratch data lives on "
+              f"real disk at {common.NO_DURABILITY_SCRATCH_ROOT}, not tmpfs. dram_gib: {dram_gib_desc}")
+    else:
+        print(f"in-memory only: SCRATCH_ROOT={common.SCRATCH_ROOT} (tmpfs-verified; LeanStore/WiredTiger/"
+              f"libmdbx/vWeaver_ermia/batstore data never touches a real disk) dram_gib: {dram_gib_desc} "
+              f"(LeanStore/WiredTiger buffer pool - not used by batstore, whose WAL is forced on but "
+              f"unbounded like every other in-memory structure here, or postgres, whose shared_buffers "
+              f"isn't managed by this script)")
     print(f"planned runs  : {total_runs} (>= {total_secs / 60:.1f} min of measured time alone, "
           f"excluding load/build/BenchBase-client overhead)")
     print("#########################################################\n")
