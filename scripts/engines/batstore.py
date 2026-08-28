@@ -10,6 +10,11 @@ durable-logging engine against a non-durable one. Written to a tmpfs-backed
 scratch dir (common.fresh_scratch_dir), same treatment as every other engine's
 on-disk DATA - see common.SCRATCH_ROOT's docstring - so the only overhead this adds
 is genuine serialization/fsync cost, not real disk I/O.
+
+Under common.NO_DURABILITY (set by compare_engines_new.py), this instead switches WAL
+off entirely (wal_enabled_str below) rather than leaving it on with fsync suppressed -
+no such partial toggle exists in bat_wal/writer.rs - and common.fresh_scratch_dir then
+returns a plain real-disk directory instead of requiring tmpfs.
 """
 from __future__ import annotations
 
@@ -72,10 +77,17 @@ def run(
     output_dir.mkdir(parents=True, exist_ok=True)
     gc_bool = "false" if gc == "off" else "true"
     field_count, field_length = ((1, 8) if ycsb_payload == "u64" else (10, 100))
+    # Under common.NO_DURABILITY (see compare_engines_new.py), WAL is switched off
+    # entirely rather than left on with fsync somehow suppressed - no such partial toggle
+    # exists in bat_wal/writer.rs (its fsync/sync_data call is unconditional whenever WAL
+    # is on at all), so "off" here means the driver never opens/writes a WAL file, same as
+    # every other engine's own no-durability config in this harness.
+    wal_enabled_str = "false" if common.NO_DURABILITY else "true"
     # Fixed, wiped-before-every-run path (matches leanstore.py/wiredtiger.py's ssd_path
     # treatment) - the driver's own `fs::remove_file(wal_path)` before opening it means
     # this only needs to exist, not start empty, but wiping it here keeps behavior
-    # identical to every other engine's on-disk DATA dir regardless.
+    # identical to every other engine's on-disk DATA dir regardless. Still created even
+    # when wal_enabled_str is "false" - harmless, and keeps this codepath uniform.
     wal_path = common.fresh_scratch_dir("batstore_data") / "wal.log"
 
     if workload == "tpcc":
@@ -89,7 +101,7 @@ def run(
         args = [
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
             "false", gc_bool, "false", "fg", "none", "0", "10.0",
-            "100000", "3000", "3000", "true", str(wal_path), "5",
+            "100000", "3000", "3000", wal_enabled_str, str(wal_path), "5",
             # Positions 18-20 (ch_region/num_suppliers/htap_baseline_secs) filled with the
             # driver's own defaults so position 21 (big_tree_size) is reachable.
             "EUROPE", "10000", "0", big_tree_size,
@@ -105,7 +117,7 @@ def run(
         args = [
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
             "false", gc_bool, "false", "fg", olap_mode, str(scale.htap_olap_threads), "10.0",
-            "100000", "3000", "3000", "true", str(wal_path), "5", "EUROPE", "10000",
+            "100000", "3000", "3000", wal_enabled_str, str(wal_path), "5", "EUROPE", "10000",
             # Positions 20-21 (htap_baseline_secs/big_tree_size) filled with the driver's
             # own defaults so position 22 (scan_pool_workers) is reachable.
             "0", "32kib",
@@ -132,7 +144,7 @@ def run(
             str(scale.s_htap_theta), str(scale.s_htap_arrival_ratio),
             str(scale.s_htap_max_lateness), str(scale.s_htap_olap_lag),
             str(scale.s_htap_olap_span), str(field_count), str(field_length),
-            "false", str(read_payload).lower(), "fg", gc_bool, "false", "true",
+            "false", str(read_payload).lower(), "fg", gc_bool, "false", wal_enabled_str,
             str(wal_path), "5", os.environ.get("BATSTORE_YCSB_MODE", "atomic"),
         ]
         metric_name = "write_ops_per_sec"
@@ -148,7 +160,7 @@ def run(
         args = [
             str(BINARY), "ycsb", letter, str(scale.ycsb_records), str(threads),
             str(duration), "default", str(scale.ycsb_theta),
-            str(field_count), str(field_length), "100", "fg", gc_bool, "false", "true", str(wal_path), "5", "false",
+            str(field_count), str(field_length), "100", "fg", gc_bool, "false", wal_enabled_str, str(wal_path), "5", "false",
             str(read_payload).lower(),
             os.environ.get("BATSTORE_YCSB_MODE", "atomic"),
         ]
@@ -173,7 +185,7 @@ def run(
             notes=notes,
         )
 
-    if not wal_path.is_file() or wal_path.stat().st_size == 0:
+    if not common.NO_DURABILITY and (not wal_path.is_file() or wal_path.stat().st_size == 0):
         return common.NormalizedResult(
             "batstore", workload, scale.label, duration, metric_name, 0.0, 0.0,
             threads=threads, gc_enabled=gc,

@@ -2,6 +2,14 @@
 and parses LeanStore's own per-second profiling CSV (log_cr.csv's `tx` /
 `new_order_tx` columns - the latter added specifically for tpmC parity with
 BatStore, see frontend/tpc-c/tpcc.cpp).
+
+Under common.NO_DURABILITY (set by compare_engines_new.py), passes LeanStore's own
+--wal_pwrite=false --wal_fsync=false gflags explicitly (backend/leanstore/Config.cpp -
+both already default to false upstream, so this doesn't change behavior, it just makes
+the "off" state an explicit choice instead of an implicit dependency on that default).
+WAL logging itself (--wal) stays on - it's baked into the B-tree core (WALMacros.hpp)
+and can't be disabled - but with pwrite/fsync both off, no WAL bytes ever reach disk or
+get flushed, matching every other engine's own no-durability config in this harness.
 """
 from __future__ import annotations
 
@@ -33,6 +41,9 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
     ssd_path = common.fresh_scratch_dir("leanstore_data") / "ssd"
     csv_prefix = output_dir / "log"
     env = leanstore_build.run_env()
+    # See this module's own docstring - both already default to false upstream, made
+    # explicit here rather than silently relying on that default.
+    no_durability_flags = ["--wal_pwrite=false", "--wal_fsync=false"] if common.NO_DURABILITY else []
 
     if workload == "tpcc":
         duration = scale.tpcc_duration
@@ -46,6 +57,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
             f"--csv_path={csv_prefix}",
             f"--run_for_seconds={duration}",
             "--isolation_level=si", "--print_tx_console=false",
+            *no_durability_flags,
         ]
         metric_name, metric_column = "new_order_per_sec", "new_order_tx"
     elif workload in common.HTAP_WORKLOADS:
@@ -70,6 +82,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
             f"--csv_path={csv_prefix}",
             f"--run_for_seconds={duration}",
             "--isolation_level=si", "--print_tx_console=false",
+            *no_durability_flags,
         ]
         metric_name, metric_column = "new_order_per_sec", "new_order_tx"
     elif workload == "s_htap":
@@ -98,6 +111,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
             f"--csv_path={csv_prefix}",
             f"--run_for_seconds={duration}",
             "--isolation_level=si", "--print_tx_console=false",
+            *no_durability_flags,
         ]
         # "tx" (not an s_htap-specific counter): every write op here is one
         # commitTX(), same generic per-commit counter YCSB uses.
@@ -123,6 +137,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
             f"--csv_path={csv_prefix}",
             f"--run_for_seconds={duration}",
             "--isolation_level=si", "--print_tx_console=false",
+            *no_durability_flags,
         ]
         metric_name, metric_column = "ops_per_sec", "tx"
 
