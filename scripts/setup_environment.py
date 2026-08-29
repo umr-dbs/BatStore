@@ -702,6 +702,43 @@ def step_benchbase() -> None:
     run(["tar", "xzf", str(tgz)], cwd=BENCHBASE_REPO / "target")
 
 
+def _docker_available() -> bool:
+    return subprocess.run(["docker", "version"], capture_output=True).returncode == 0
+
+
+def step_umbra() -> None:
+    """Umbra (umbra-db.com, engines/umbra_benchbase.py) ships ONLY as a Docker image
+    (umbradb/umbra - no native package/tarball is published), unlike every other engine
+    here (a source checkout this script builds itself). So this step just needs Docker
+    itself installed and the pinned image (common.UMBRA_IMAGE) pulled once; the actual
+    per-run container lifecycle (start/stop/NUMA-cgroup/tmpfs bind mount) is entirely
+    engines/umbra_benchbase.py's own job, the same "fresh every run" model as every other
+    engine's own scratch data.
+
+    Adds the invoking user to the `docker` group so later benchmark runs (compare_engines.py)
+    don't need root/sudo for `docker run` - matches every other engine wrapper here, which
+    also run as a plain user. KNOWN LIMITATION, same category as step_postgres_tmpfs's own:
+    a fresh `docker` group membership only takes effect on your NEXT login/shell, not this
+    one - log out and back in (or `newgrp docker`) before running compare_engines.py for
+    the first time after a fresh setup.
+    """
+    log("Setting up Umbra (Docker image pull)")
+    if not shutil.which("docker"):
+        run(["sudo", "apt-get", "install", "docker.io"])
+        run(["sudo", "systemctl", "enable", "--now", "docker"])
+    elif not _docker_available():
+        run(["sudo", "systemctl", "enable", "--now", "docker"])
+
+    invoking_user = os.environ.get("SUDO_USER") or os.environ.get("USER", "")
+    if invoking_user and invoking_user != "root":
+        run(["sudo", "usermod", "-aG", "docker", invoking_user])
+
+    # `sudo docker` (not plain `docker`) - the `docker` group membership just added above
+    # only takes effect on the NEXT login/shell (see docstring), so this process's own
+    # group list is still stale; sudo guarantees the pull succeeds in THIS run regardless.
+    run(["sudo", "docker", "pull", common.UMBRA_IMAGE])
+
+
 def step_batstore() -> None:
     log("Setting up BatStore")
     if not BATSTORE_WORKSPACE_CLONE.exists():
@@ -756,6 +793,7 @@ def main() -> None:
     parser.add_argument("--skip-hugepages", action="store_true")
     parser.add_argument("--skip-postgres", action="store_true")
     parser.add_argument("--skip-benchbase", action="store_true")
+    parser.add_argument("--skip-umbra", action="store_true")
     parser.add_argument("--skip-batstore", "--skip-cmvbt", dest="skip_batstore", action="store_true")
     parser.add_argument("--skip-venv", action="store_true")
     parser.add_argument(
@@ -780,6 +818,7 @@ def main() -> None:
         ("vweaver-frugal", not args.full or args.skip_vweaver_frugal, step_vweaver_ermia_frugal),
         ("postgres", args.skip_postgres, step_postgres),
         ("benchbase", args.skip_benchbase, step_benchbase),
+        ("umbra", args.skip_umbra, step_umbra),
         ("batstore", args.skip_batstore, step_batstore),
         ("venv", args.skip_venv, step_python_venv),
     ]

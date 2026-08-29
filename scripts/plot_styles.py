@@ -6,7 +6,7 @@ colors look similar on a projector.
 """
 
 ENGINE_ORDER = [
-    "batstore", "leanstore", "wiredtiger", "postgres", "vweaver_ermia",
+    "batstore", "leanstore", "wiredtiger", "postgres", "umbra", "vweaver_ermia",
     "vweaver_ermia_frugal", "libmdbx",
 ]
 
@@ -15,6 +15,7 @@ ENGINE_LABELS = {
     "leanstore": "LeanStore",
     "wiredtiger": "WiredTiger",
     "postgres": "PostgreSQL",
+    "umbra": "Umbra",
     "vweaver_ermia": "vWeaver/ERMIA",
     "vweaver_ermia_frugal": "Frugal/ERMIA",
     "libmdbx": "libmdbx",
@@ -26,6 +27,7 @@ ENGINE_COLORS = {
     "leanstore": "#0072B2",            # blue
     "wiredtiger": "#E69F00",           # orange
     "postgres": "#D55E00",             # vermillion
+    "umbra": "#F0E442",                # yellow
     "vweaver_ermia": "#CC79A7",        # reddish purple
     "vweaver_ermia_frugal": "#56B4E9", # sky blue
     "libmdbx": "#222222",              # near black
@@ -36,6 +38,7 @@ ENGINE_MARKERS = {
     "leanstore": "s",
     "wiredtiger": "^",
     "postgres": "D",
+    "umbra": "*",
     "vweaver_ermia": "P",
     "vweaver_ermia_frugal": "X",
     "libmdbx": "v",
@@ -46,6 +49,7 @@ ENGINE_HATCHES = {
     "leanstore": "\\\\",
     "wiredtiger": "xx",
     "postgres": "..",
+    "umbra": "**",
     "vweaver_ermia": "++",
     "vweaver_ermia_frugal": "oo",
     "libmdbx": "--",
