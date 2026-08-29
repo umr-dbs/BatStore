@@ -21,7 +21,6 @@ common.run_and_track_rss.
 """
 from __future__ import annotations
 
-import csv
 import os
 import subprocess
 import sys
@@ -258,18 +257,6 @@ def _find_postmaster_pid() -> Optional[int]:
         return None
 
 
-def _expand_cpu_list(value: str) -> set[int]:
-    cpus: set[int] = set()
-    for part in value.strip().split(","):
-        if not part:
-            continue
-        bounds = part.split("-", 1)
-        start = int(bounds[0])
-        end = int(bounds[1]) if len(bounds) == 2 else start
-        cpus.update(range(start, end + 1))
-    return cpus
-
-
 def _verify_postmaster_numa_binding() -> int:
     """Return the postmaster PID, refusing a comparison unless its live effective CPU
     and memory-node masks are exactly the node used for every embedded engine."""
@@ -281,9 +268,9 @@ def _verify_postmaster_numa_binding() -> int:
         if ":" in line:
             key, value = line.split(":", 1)
             status[key] = value.strip()
-    expected_cpus = _expand_cpu_list(common.numa_node_cpu_list())
-    actual_cpus = _expand_cpu_list(status.get("Cpus_allowed_list", ""))
-    actual_nodes = _expand_cpu_list(status.get("Mems_allowed_list", ""))
+    expected_cpus = common.expand_cpu_list(common.numa_node_cpu_list())
+    actual_cpus = common.expand_cpu_list(status.get("Cpus_allowed_list", ""))
+    actual_nodes = common.expand_cpu_list(status.get("Mems_allowed_list", ""))
     if actual_cpus != expected_cpus or actual_nodes != {common.NUMA_NODE}:
         sys.exit(
             f"PostgreSQL postmaster PID {pid} is not pinned to NUMA node {common.NUMA_NODE}: "
@@ -394,41 +381,6 @@ def _set_unsafe_durability() -> None:
          "-c", "SELECT pg_reload_conf();"],
         env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
-
-
-def _latency_from_results(results_dir: Path, tx_type_name: str) -> dict:
-    """Reads BenchBase's per-transaction-type results CSV (same file pattern already used
-    below for TPC-C's NewOrder-only metric - `tx_type_name` is e.g. "ScanRecord", "Q1",
-    "Q6") for its periodic-window latency percentile columns (milliseconds - BenchBase
-    doesn't expose raw per-op samples, only these windowed summaries), converts to
-    microseconds, and averages across windows.
-    """
-    path = next(results_dir.glob(f"*.results.{tx_type_name}.csv"), None)
-    empty = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
-    if not path:
-        return empty
-    with open(path, newline="") as f:
-        rows = list(csv.DictReader(f))
-    if not rows:
-        return empty
-
-    def avg_ms(col: str) -> float:
-        vals = [float(r[col]) for r in rows if r.get(col)]
-        return sum(vals) / len(vals) if vals else 0.0
-
-    times = [float(r["Time (seconds)"]) for r in rows if r.get("Time (seconds)")]
-    window_secs = (times[1] - times[0]) if len(times) >= 2 else (times[0] if times else 0.0)
-    total_count = sum(
-        float(r["Throughput (requests/second)"]) * window_secs
-        for r in rows if r.get("Throughput (requests/second)")
-    )
-    return {
-        "p50": avg_ms("Median Latency (millisecond)") * 1000.0,
-        "p95": avg_ms("95th Percentile Latency (millisecond)") * 1000.0,
-        "p99": avg_ms("99th Percentile Latency (millisecond)") * 1000.0,
-        "avg": avg_ms("Average Latency (millisecond)") * 1000.0,
-        "count": round(total_count),
-    }
 
 
 def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True,
@@ -577,11 +529,11 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
 
     latency = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
     if workload == "ycsb_e":
-        latency = _latency_from_results(results_dir, "ScanRecord")
+        latency = common.latency_from_results(results_dir, "ScanRecord")
     elif workload in common.HTAP_WORKLOADS:
-        latency = _latency_from_results(results_dir, "Q1" if "q1" in workload else "Q6")
+        latency = common.latency_from_results(results_dir, "Q1" if "q1" in workload else "Q6")
     elif workload == "s_htap":
-        latency = _latency_from_results(results_dir, "OlapScan")
+        latency = common.latency_from_results(results_dir, "OlapScan")
 
     return common.NormalizedResult(
         "postgres", workload, scale.label, duration, metric_name, value, server_peak_rss_mb,

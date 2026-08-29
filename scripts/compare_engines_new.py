@@ -43,6 +43,15 @@ real-disk scratch directory (engines/common.NO_DURABILITY_SCRATCH_ROOT, default
     (log=(enabled=true)); fully disabling that needs a source patch and rebuild, not a
     script-level config knob, so it's left exactly as compare_engines.py runs it - just
     without the tmpfs requirement on its own ssd_path, like every other engine here.
+  - Umbra (engines/umbra_benchbase.py): NOT POSSIBLE AT ALL, unlike every engine above -
+    confirmed directly against a live umbra-server that neither `ALTER SYSTEM SET
+    fsync/synchronous_commit/...` nor plain `SET ...` can change any of those GUCs in
+    this build ("ALTER SYSTEM not implemented yet" / "cannot change configuration
+    parameter"), and there's no equivalent command-line flag either. So this script's
+    entire premise - real disk, relying on the engine's own fsync-off - has no safe
+    form for Umbra: run() reports every point SKIPPED instead of silently benchmarking
+    real-disk fsync cost under a flag whose whole point is "no durability cost". Use
+    compare_engines.py (tmpfs-backed) for Umbra numbers.
 
 Sets BATSTORE_BENCH_NO_DURABILITY=1 before importing compare_engines - every behavior
 difference above flows from engines/common.py's NO_DURABILITY flag (read once, at

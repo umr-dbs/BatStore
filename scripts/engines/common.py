@@ -53,6 +53,23 @@ PG_ROLE = os.environ.get("PG_ROLE", "admin")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "password")
 PG_DATABASE = os.environ.get("PG_DATABASE", "benchbase")
 
+# umbradb/umbra (see engines/umbra_benchbase.py) - a research OLTP+OLAP engine from TUM's
+# database group (db.in.tum.de) that speaks the PostgreSQL wire protocol, so it can be
+# driven through the exact same BenchBase POSTGRES JDBC target as engines/
+# postgres_benchbase.py, just pointed at a different port. Ships only as a Docker image
+# (no native package) - setup_environment.py::step_umbra pulls it; the engine wrapper
+# spawns/tears down one container per run(), unlike the always-running PostgreSQL
+# cluster service. Pinned to a specific calendar-versioned tag (not `latest`) for the same
+# reproducibility reason BENCHBASE_PATCH_COMMIT pins a commit in setup_environment.py.
+UMBRA_IMAGE = os.environ.get("UMBRA_IMAGE", "umbradb/umbra:26.08")
+# Not 5432: the real PostgreSQL cluster service (see PG_* above) already owns that port on
+# the same machine, and both engines can be benchmarked in the same environment.
+UMBRA_PORT = int(os.environ.get("UMBRA_PORT", "5433"))
+UMBRA_ROLE = os.environ.get("UMBRA_ROLE", "postgres")  # fixed by the image's own docker-entrypoint.sh
+UMBRA_PASSWORD = os.environ.get("UMBRA_PASSWORD", "postgres")  # ditto
+UMBRA_DATABASE = os.environ.get("UMBRA_DATABASE", "benchbase")
+UMBRA_CONTAINER_NAME = os.environ.get("UMBRA_CONTAINER_NAME", "batstore_bench_umbra")
+
 # This harness always pins to one NUMA node - matches the real server (2x AMD EPYC 7742,
 # 2 NUMA nodes) where cross-node traffic would otherwise confound every measurement here.
 # Deliberately unconditional: if `numactl` isn't installed, run_and_track_rss should fail
@@ -114,6 +131,23 @@ def batstore_cargo_build_args(*extra_features: str) -> list[str]:
 
 def numactl_prefix() -> list:
     return ["numactl", f"--cpubind={NUMA_NODE}", f"--membind={NUMA_NODE}"]
+
+
+def expand_cpu_list(value: str) -> set:
+    """Kernel CPU-list syntax (e.g. "0-3,7") to a set of individual CPU numbers - shared by
+    every engine wrapper that verifies a live process's /proc/<pid>/status
+    Cpus_allowed_list/Mems_allowed_list against numa_node_cpu_list() (see
+    postgres_benchbase.py's _verify_postmaster_numa_binding and umbra_benchbase.py's
+    equivalent container check)."""
+    cpus = set()
+    for part in value.strip().split(","):
+        if not part:
+            continue
+        bounds = part.split("-", 1)
+        start = int(bounds[0])
+        end = int(bounds[1]) if len(bounds) == 2 else start
+        cpus.update(range(start, end + 1))
+    return cpus
 
 
 def numa_node_cpu_list(node: int = NUMA_NODE) -> str:
@@ -463,7 +497,7 @@ HTAP_WORKLOADS = HTAP_CANONICAL_WORKLOADS + HTAP_VARIANT_WORKLOADS
 # workload tuned via those Scale fields / compare_engines.py flags instead.
 ALL_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_WORKLOADS + ["s_htap"]
 DEFAULT_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_CANONICAL_WORKLOADS + ["s_htap"]
-ENGINES = ["batstore", "leanstore", "wiredtiger", "postgres", "vweaver_ermia", "vweaver_ermia_frugal", "libmdbx"]
+ENGINES = ["batstore", "leanstore", "wiredtiger", "postgres", "umbra", "vweaver_ermia", "vweaver_ermia_frugal", "libmdbx"]
 
 
 def _read_vmhwm_kb(pid: int) -> float:
@@ -717,6 +751,42 @@ def percentiles_from_samples(csv_path: Path, column: str, filter_column: str = N
     return {
         "p50": _pct(0.50), "p95": _pct(0.95), "p99": _pct(0.99),
         "count": n, "avg": sum(values) / n,
+    }
+
+
+def latency_from_results(results_dir: Path, tx_type_name: str) -> dict:
+    """Reads BenchBase's per-transaction-type results CSV (e.g. tx_type_name="ScanRecord",
+    "Q1", "Q6") for its periodic-window latency percentile columns (milliseconds -
+    BenchBase doesn't expose raw per-op samples, only these windowed summaries), converts
+    to microseconds, and averages across windows. Shared by every BenchBase-driven engine
+    wrapper (postgres_benchbase.py, umbra_benchbase.py) - the CSV format is BenchBase's
+    own, independent of which backend it's driving.
+    """
+    path = next(results_dir.glob(f"*.results.{tx_type_name}.csv"), None)
+    empty = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
+    if not path:
+        return empty
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return empty
+
+    def avg_ms(col: str) -> float:
+        vals = [float(r[col]) for r in rows if r.get(col)]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    times = [float(r["Time (seconds)"]) for r in rows if r.get("Time (seconds)")]
+    window_secs = (times[1] - times[0]) if len(times) >= 2 else (times[0] if times else 0.0)
+    total_count = sum(
+        float(r["Throughput (requests/second)"]) * window_secs
+        for r in rows if r.get("Throughput (requests/second)")
+    )
+    return {
+        "p50": avg_ms("Median Latency (millisecond)") * 1000.0,
+        "p95": avg_ms("95th Percentile Latency (millisecond)") * 1000.0,
+        "p99": avg_ms("99th Percentile Latency (millisecond)") * 1000.0,
+        "avg": avg_ms("Average Latency (millisecond)") * 1000.0,
+        "count": round(total_count),
     }
 
 

@@ -1,9 +1,10 @@
 CROSS-ENGINE BENCHMARK HARNESS - MANUAL
 ========================================
 
-This harness runs matched TPC-C, YCSB (A-F), and HTAP/CH-benCHmark workloads against seven
+This harness runs matched TPC-C, YCSB (A-F), and HTAP/CH-benCHmark workloads against eight
 storage engines - BatStore (its own MVBTree, and a second libmdbx-backed comparison point),
-LeanStore, LeanStore's WiredTiger adapter, PostgreSQL (via BenchBase), and vWeaver_ermia
+LeanStore, LeanStore's WiredTiger adapter, PostgreSQL (via BenchBase), Umbra (umbra-db.com,
+also via BenchBase - see engines/umbra_benchbase.py), and vWeaver_ermia
 (ERMIA) built two ways: `-DCMAKE_BUILD_PARAM=Vweaver` (vWeaver's own "weaving" version-chain
 compaction, engines/vweaver_ermia.py) and `-DCMAKE_BUILD_PARAM=Eval_skiplist` (the plain
 frugal-list version chain with neither vWeaver nor its own compaction enabled, engines/
@@ -25,6 +26,8 @@ scripts work starting from nothing, on any machine:
                                           (Eval_skiplist) - one shared checkout, two builds
         batstore/                          only if umr-dbs/BatStore was reachable to clone
         scratch/<engine>/                 reused, wiped-before-every-run data directories
+                                          (Umbra has no checkout here - it ships only as a
+                                          Docker image, pulled directly; see section 2)
 
 
 1. REQUIREMENTS
@@ -43,6 +46,10 @@ scripts work starting from nothing, on any machine:
   pinned down to 21 via -Dmaven.compiler.source/target) + Maven (plain `mvn`, not
   BenchBase's bundled ./mvnw wrapper - see section on why).
 - PostgreSQL server + client (`postgresql`, `postgresql-contrib`).
+- Docker, for Umbra (umbradb/umbra - it ships only as a Docker image, no native package;
+  see section 2's step_umbra and engines/umbra_benchbase.py). Your user needs to be in
+  the `docker` group (setup_environment.py adds it, but a fresh login/shell is needed
+  before it takes effect - see step_umbra's docstring).
 - Python 3 with pandas + matplotlib (only needed for plot_compare.py - a venv is set up
   automatically, see below).
 
@@ -95,11 +102,15 @@ What it does, in order:
      ./mvnw). Before building, the script PATCHES BenchBase's pom.xml to strip out
      `com.spotify.fmt:fmt-maven-plugin` - see "MAVEN PLUGIN WORKAROUND" below. This step
      is idempotent too (safe to re-run, detects if the plugin block is already gone).
-  9. Attempts to clone BatStore itself (umr-dbs/BatStore) into the workspace; if that
+  9. Installs Docker (if missing), adds you to the `docker` group, and pulls the pinned
+     umbradb/umbra image (common.UMBRA_IMAGE) - see engines/umbra_benchbase.py, which
+     starts/stops one throwaway container per benchmark run rather than a checkout+build
+     this script performs itself (Umbra has no native package).
+  10. Attempts to clone BatStore itself (umr-dbs/BatStore) into the workspace; if that
      fails (e.g. the repo is private and you don't have access here), falls back to
      building the checkout this script is already part of instead - see "BATSTORE_REPO
      RESOLUTION" below for exactly how this is decided and a gotcha to know about.
-  10. Sets up the Python venv at scripts/.venv with pandas + matplotlib (needed only for
+  11. Sets up the Python venv at scripts/.venv with pandas + matplotlib (needed only for
      plot_compare.py, not for running experiments).
 
 By default the setup removes and freshly clones every setup-managed checkout under
@@ -109,8 +120,8 @@ builds. vWeaver and its hugepage setup remain excluded unless `--full` is passed
 Flags to skip individual steps:
 
     --skip-apt --skip-wiredtiger --skip-leanstore --skip-hugepages --skip-vweaver
-    --skip-vweaver-frugal --skip-postgres --skip-benchbase --skip-batstore --skip-venv
-    --skip-postgres-tmpfs
+    --skip-vweaver-frugal --skip-postgres --skip-benchbase --skip-umbra --skip-batstore
+    --skip-venv --skip-postgres-tmpfs
 
 Example: `python3 scripts/setup_environment.py --skip-postgres --skip-benchbase`
 
@@ -210,8 +221,8 @@ Options:
   --output-root DIR        where run_<timestamp>/ directories go (default:
                             comparison_results)
   --engines LIST            comma-separated subset of: batstore, leanstore, wiredtiger,
-                            postgres, vweaver_ermia, vweaver_ermia_frugal, libmdbx
-                            (default: all seven)
+                            postgres, umbra, vweaver_ermia, vweaver_ermia_frugal, libmdbx
+                            (default: all eight)
   --workloads LIST           comma-separated subset of: tpcc, ycsb_a..ycsb_f, htap_q1,
                             htap_q6, htap_q1_variant, htap_q6_variant, s_htap. The query
                             variants are selectable but excluded from the default run.
@@ -336,8 +347,13 @@ this rather than papering over it:
   - nothing in its B-tree actually branches on it), and the WiredTiger adapter has no
   equivalent at all (separate code path, doesn't touch LeanStore's MVCC machinery).
   libmdbx (like any real path-copying/CoW MVCC store) reclaims old pages once no reader
-  references them, with no separate toggle either. LeanStore/WiredTiger/libmdbx always
-  report gc="n/a" and run once per (workload, threads) regardless of --gc.
+  references them, with no separate toggle either. Umbra has an `autovacuum` GUC that
+  *reads* as on/off like PostgreSQL's, but this build refuses to change it at all - both
+  `ALTER SYSTEM SET autovacuum = ...` ("ALTER SYSTEM not implemented yet") and plain `SET
+  autovacuum = ...` ("cannot change configuration parameter") were tried directly against
+  a live umbra-server and both failed - so it's treated the same as LeanStore/WiredTiger/
+  libmdbx here. LeanStore/WiredTiger/libmdbx/Umbra always report gc="n/a" and run once per
+  (workload, threads) regardless of --gc.
 
 - HTAP/CH-benCHmark (htap_q1/htap_q6): these names now execute the SQL predicates from
   pinned BenchBase commit 33c00473807ebd49304d114a6d769d2d2b2bbb34 exactly: Q1 uses
@@ -443,6 +459,33 @@ this rather than papering over it:
   runs. Disabling GC lets a one-worker smoke test complete, but a two-worker test can hang
   after loading, so `--gc off` is not a general repair.
 
+- Umbra (umbra-db.com, engines/umbra_benchbase.py): TUM's db.in.tum.de research OLTP+OLAP
+  engine, driven through the exact same BenchBase `<type>POSTGRES</type>` JDBC target as
+  PostgreSQL - confirmed directly (DDL with FKs/composite PKs/CHAR/DECIMAL/TIMESTAMP,
+  prepared statements, JDBC-style batch inserts, multiple logical databases via `CREATE
+  DATABASE`) that its wire-protocol surface covers everything BenchBase's tpcc/ycsb/
+  chbenchmark DDL actually uses, before writing the wrapper. Ships ONLY as a Docker image
+  (umbradb/umbra - no native package/tarball), so unlike every source-built engine here,
+  setup_environment.py's step_umbra just installs Docker and pulls the pinned image; the
+  wrapper itself starts/stops one throwaway container per run() (bind-mounted onto a
+  fresh tmpfs scratch dir, NUMA-pinned via `docker run --cpuset-cpus/--cpuset-mems`,
+  verified against the live container's cgroup the same way the PostgreSQL wrapper
+  verifies the postmaster). Listens on port 5433 (not 5432 - PostgreSQL's own cluster
+  service already owns that port on the same machine), default role/password `postgres`/
+  `postgres` (set by the image's own docker-entrypoint.sh), database `benchbase` (created
+  fresh every run via `psql`, same as PostgreSQL's own one-time setup).
+  DURABILITY: this build (v0.2, "internal evaluation" license) exposes NO working way to
+  relax fsync/synchronous_commit/full_page_writes in software - confirmed directly that
+  `ALTER SYSTEM` is simply unimplemented and plain `SET` refuses every one of those GUCs,
+  and there's no command-line flag either (umbra-server --help lists only address/port/
+  createdb/readonly/SSL-cert options). So "memory-only" for Umbra means ONLY the
+  tmpfs-backed scratch directory every non-PostgreSQL engine already gets (section 4) -
+  its own fsync calls still happen, they just land on RAM, never real disk. This also
+  means compare_engines_new.py's NO_DURABILITY mode (real disk, relying on each engine's
+  own fsync-off) has no safe equivalent for Umbra: every point is reported SKIPPED there
+  instead of silently paying real-disk fsync cost under a flag whose whole point is "no
+  durability cost" - use compare_engines.py (tmpfs-backed) for Umbra numbers.
+
 - Peak memory (peak_rss_mb): tracks PostgreSQL's actual SERVER process tree now
   (postmaster + checkpointer + bgwriter + walwriter + every per-connection backend -
   summed current RSS, peak-tracked over the run), not the JDBC client's own memory (which
@@ -454,12 +497,18 @@ this rather than papering over it:
   `numactl --cpubind=0 --membind=0`. The PostgreSQL SERVER itself is a pre-existing
   system service, not spawned by this harness, so it is NOT NUMA-pinned by any of this -
   only the BenchBase JDBC client that talks to it is. Pinning the Postgres server itself
-  would need a systemd unit override, outside this harness's scope.
+  would need a systemd unit override, outside this harness's scope. Umbra's server IS
+  spawned by this harness (a fresh container per run) but numactl in front of `docker run`
+  itself would only pin the short-lived CLI invocation, not the actual server process the
+  Docker daemon spawns - so it's pinned instead via the container's own cgroup
+  (`--cpuset-cpus`/`--cpuset-mems`), verified against the live container's
+  /proc/<pid>/status after start.
 
-- In-memory only (section 4) and PostgreSQL: SCRATCH_ROOT's tmpfs guarantee covers
+- In-memory only (section 4), PostgreSQL, and Umbra: SCRATCH_ROOT's tmpfs guarantee covers
   LeanStore/WiredTiger/libmdbx/vWeaver_ermia because this harness owns their data
-  directories directly. The default setup's PostgreSQL tmpfs step stops the real
-  PostgreSQL service, moves its actual
+  directories directly, and Umbra the same way (its container's /var/db bind mount points
+  at a fresh tmpfs scratch dir every run - see the Umbra bullet above). The default
+  setup's PostgreSQL tmpfs step stops the real PostgreSQL service, moves its actual
   PGDATA onto tmpfs (preserving the original on real disk as `<PGDATA>.diskbackup`), and
   restarts it. With `--skip-postgres-tmpfs`, PostgreSQL's storage stays wherever it already was
   (almost certainly real disk) and is NOT part of the in-memory-only guarantee the other
@@ -594,8 +643,8 @@ were the default). Every such figure's title says which thread count it's pinned
 
 manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
 
-    engine                batstore | leanstore | wiredtiger | postgres | vweaver_ermia |
-                            vweaver_ermia_frugal | libmdbx
+    engine                batstore | leanstore | wiredtiger | postgres | umbra |
+                            vweaver_ermia | vweaver_ermia_frugal | libmdbx
     workload               tpcc | ycsb_a..ycsb_f | htap_q1 | htap_q6 |
                             htap_q1_variant | htap_q6_variant | s_htap
     config_label            scale label ("tiny" or "server")
@@ -604,8 +653,8 @@ manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
     duration_secs            requested run duration
     primary_metric_name       new_order_per_sec (tpcc/htap_q1/htap_q6) or ops_per_sec (ycsb)
     primary_metric_value
-    peak_rss_mb               postgres now reports its server process-tree's peak RSS
-                            (see section 5), not 0
+    peak_rss_mb               postgres/umbra report their server (process-tree/container)
+                            peak RSS (see section 5), not 0
     scan_p50_us / scan_p95_us / scan_p99_us / scan_avg_us / scan_count
                               scan/analytical-query latency (microseconds) - populated for
                               ycsb_e (scan ops), tpcc (BatStore's own HTAP scan-sweep only),

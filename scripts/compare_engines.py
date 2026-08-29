@@ -55,7 +55,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from engines import (
-    batstore, common, leanstore, libmdbx, postgres_benchbase, vweaver_ermia,
+    batstore, common, leanstore, libmdbx, postgres_benchbase, umbra_benchbase, vweaver_ermia,
     vweaver_ermia_frugal, wiredtiger,
 )
 from clean_leanstore_runs import clean_run as clean_engine_run
@@ -65,6 +65,7 @@ ENGINE_MODULES = {
     "leanstore": leanstore,
     "wiredtiger": wiredtiger,
     "postgres": postgres_benchbase,
+    "umbra": umbra_benchbase,
     "vweaver_ermia": vweaver_ermia,
     "vweaver_ermia_frugal": vweaver_ermia_frugal,
     "libmdbx": libmdbx,
@@ -296,8 +297,9 @@ def main() -> None:
     print(f"BatStore HTAP scan pool: {scan_pool_desc}")
     print(f"gc sweep      : {gc_list} (engines with no working GC toggle always run once, gc=n/a)")
     print(f"NUMA pinning  : node {common.NUMA_NODE} CPUs/memory for every engine; subprocesses use "
-          f"numactl --cpubind={common.NUMA_NODE} --membind={common.NUMA_NODE}, and PostgreSQL's "
-          f"cluster service uses matching cgroup CPU/memory-node constraints (verified per run)")
+          f"numactl --cpubind={common.NUMA_NODE} --membind={common.NUMA_NODE}; PostgreSQL's cluster "
+          f"service and Umbra's container both use matching cgroup CPU/memory-node constraints "
+          f"instead (verified per run)")
     dram_gib_desc = (
         f"--dram-gib={args.dram_gib} (explicit, applied to every workload/threads point unchanged)"
         if args.dram_gib is not None else
@@ -313,10 +315,12 @@ def main() -> None:
               f"real disk at {common.NO_DURABILITY_SCRATCH_ROOT}, not tmpfs. dram_gib: {dram_gib_desc}")
     else:
         print(f"in-memory only: SCRATCH_ROOT={common.SCRATCH_ROOT} (tmpfs-verified; LeanStore/WiredTiger/"
-              f"libmdbx/vWeaver_ermia/batstore data never touches a real disk) dram_gib: {dram_gib_desc} "
-              f"(LeanStore/WiredTiger buffer pool - not used by batstore, whose WAL is forced on but "
-              f"unbounded like every other in-memory structure here, or postgres, whose shared_buffers "
-              f"isn't managed by this script)")
+              f"libmdbx/vWeaver_ermia/batstore/Umbra data never touches a real disk - for Umbra this is "
+              f"the ONLY durability lever this script has, since its own fsync/synchronous_commit/"
+              f"autovacuum aren't software-toggleable, see engines/umbra_benchbase.py) dram_gib: "
+              f"{dram_gib_desc} (LeanStore/WiredTiger buffer pool - not used by batstore, whose WAL is "
+              f"forced on but unbounded like every other in-memory structure here, or postgres/umbra, "
+              f"whose buffer sizing isn't managed by this script)")
     print(f"planned runs  : {total_runs} (>= {total_secs / 60:.1f} min of measured time alone, "
           f"excluding load/build/BenchBase-client overhead)")
     print("#########################################################\n")
