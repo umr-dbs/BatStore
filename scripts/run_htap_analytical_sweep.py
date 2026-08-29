@@ -29,7 +29,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from engines import batstore, common, leanstore, libmdbx, postgres_benchbase, vweaver_ermia, vweaver_ermia_frugal, wiredtiger
+from engines import (
+    batstore, common, leanstore, libmdbx, postgres_benchbase, umbra_benchbase, vweaver_ermia,
+    vweaver_ermia_frugal, wiredtiger,
+)
 from clean_leanstore_runs import clean_run as clean_engine_run
 
 ENGINE_MODULES = {
@@ -37,6 +40,7 @@ ENGINE_MODULES = {
     "leanstore": leanstore,
     "wiredtiger": wiredtiger,
     "postgres": postgres_benchbase,
+    "umbra": umbra_benchbase,
     "vweaver_ermia": vweaver_ermia,
     "vweaver_ermia_frugal": vweaver_ermia_frugal,
     "libmdbx": libmdbx,
