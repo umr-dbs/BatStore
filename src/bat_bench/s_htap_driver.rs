@@ -200,17 +200,26 @@ pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
     let max_threads = crate::bat_tree::mvbt::default_max_workers().max(1);
     let mut num_write_threads = cfg.num_write_threads.max(1);
     let mut num_olap_threads = cfg.num_olap_threads.max(1);
+    // One more permanent WorkerId if idle compaction is enabled — see
+    // `ycsb_driver::run_ycsb`'s identical `idle_compaction_cost`: the
+    // vacuum thread `spawn_vacuum_thread` starts below calls
+    // `compact_idle_pass`, which acquires its own `WorkerId` via
+    // `self.worker_id()` just like any writer/OLAP thread, so it has to be
+    // budgeted here too or its first sweep panics the registry once the
+    // loader + writers + OLAP threads have already filled every other slot.
+    let idle_compaction_cost = if cfg.gc && cfg.idle_compaction.is_some() { 1 } else { 0 };
     // +1: the main thread also acquires a WorkerId, for the sequential
     // population phase before any worker thread is spawned (see ycsb_driver).
-    if 1 + num_write_threads + num_olap_threads > max_threads {
+    let fixed_cost = 1 + idle_compaction_cost;
+    if fixed_cost + num_write_threads + num_olap_threads > max_threads {
         println!(
-            "!! 1 loader + {num_write_threads} writers + {num_olap_threads} OLAP threads > max_workers ({max_threads} = num_cpus); clamping writers."
+            "!! {fixed_cost} loader/idle-compaction + {num_write_threads} writers + {num_olap_threads} OLAP threads > max_workers ({max_threads} = num_cpus); clamping writers."
         );
         num_write_threads = max_threads
-            .saturating_sub(1 + num_olap_threads)
+            .saturating_sub(fixed_cost + num_olap_threads)
             .max(1);
-        if 1 + num_write_threads + num_olap_threads > max_threads {
-            num_olap_threads = max_threads.saturating_sub(2).max(1);
+        if fixed_cost + num_write_threads + num_olap_threads > max_threads {
+            num_olap_threads = max_threads.saturating_sub(fixed_cost + 1).max(1);
         }
     }
 
@@ -225,7 +234,7 @@ pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
         DEFAULT_SAMPLE_INTERVAL,
     );
 
-    let total_workers = 1 + num_write_threads + num_olap_threads;
+    let total_workers = fixed_cost + num_write_threads + num_olap_threads;
     let tree = match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);

@@ -269,13 +269,22 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
 
     let max_threads = crate::bat_tree::mvbt::default_max_workers().max(1);
     let mut num_threads = cfg.num_threads.max(1);
+    // One more permanent WorkerId if idle compaction is enabled — see
+    // `tpcc_driver::run_tpcc`'s identical `idle_compaction_cost`: the
+    // vacuum thread `spawn_vacuum_thread` starts below calls
+    // `compact_idle_pass`, which acquires its own `WorkerId` via
+    // `self.worker_id()` just like any terminal thread, so it has to be
+    // budgeted here too or its first sweep panics the registry once the
+    // loader + workers have already filled every other slot.
+    let idle_compaction_cost = if cfg.gc && cfg.idle_compaction.is_some() { 1 } else { 0 };
     // +1: the main thread also acquires a WorkerId, for the sequential
     // population phase before any worker thread is spawned (see tpcc_driver).
-    if 1 + num_threads > max_threads {
+    let fixed_cost = 1 + idle_compaction_cost;
+    if fixed_cost + num_threads > max_threads {
         println!(
-            "!! 1 loader + {num_threads} workers > max_workers ({max_threads} = num_cpus); clamping."
+            "!! {fixed_cost} loader/idle-compaction + {num_threads} workers > max_workers ({max_threads} = num_cpus); clamping."
         );
-        num_threads = max_threads.saturating_sub(1).max(1);
+        num_threads = max_threads.saturating_sub(fixed_cost).max(1);
     }
 
     fs::create_dir_all(&cfg.output_dir).unwrap_or_else(|e| {
@@ -293,7 +302,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);
             let base =
-                YcsbTree::make_standard_with_max_workers(cfg.root_star_index, 1 + num_threads);
+                YcsbTree::make_standard_with_max_workers(cfg.root_star_index, fixed_cost + num_threads);
             Arc::new(
                 match cfg.wal_lockfree_batch_size {
                     Some(batch_size) => {
@@ -306,7 +315,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         }
         None => Arc::new(YcsbTree::make_standard_with_max_workers(
             cfg.root_star_index,
-            1 + num_threads,
+            fixed_cost + num_threads,
         )),
     };
     if cfg.gc {
@@ -326,7 +335,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     // never calls `tree.worker_id()` (it only ever runs jobs built around
     // `READ_ONLY_SCAN_WORKER_ID`, same as `ycsb_txn::scan_parallel`'s own
     // sequential path), so unlike `num_threads` this is never counted
-    // against `max_threads`/`1 + num_threads` above.
+    // against `max_threads`/`fixed_cost + num_threads` above.
     let scan_pool: Option<Arc<YcsbScanPool>> = cfg.scan_pool_workers.filter(|&n| n > 0).map(|n| {
         Arc::new(YcsbScanPool::spawn(
             tree.clone(),
