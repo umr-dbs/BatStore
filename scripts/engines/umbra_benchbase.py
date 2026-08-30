@@ -43,7 +43,6 @@ server's benchmark CPUs.
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -69,7 +68,7 @@ TPCC_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 <parameters>
     <type>POSTGRES</type>
     <driver>org.postgresql.Driver</driver>
-    <url>jdbc:postgresql://{host}:{port}/{database}?sslmode=disable&amp;ApplicationName=tpcc&amp;reWriteBatchedInserts=true</url>
+    <url>jdbc:postgresql://{host}:{port}/{database}?sslmode=disable&amp;ApplicationName=tpcc&amp;reWriteBatchedInserts=true&amp;currentSchema=public&amp;preferQueryMode=simple</url>
     <username>{username}</username>
     <password>{password}</password>
     <reconnectOnConnectionFailure>true</reconnectOnConnectionFailure>
@@ -100,7 +99,7 @@ CHBENCHMARK_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 <parameters>
     <type>POSTGRES</type>
     <driver>org.postgresql.Driver</driver>
-    <url>jdbc:postgresql://{host}:{port}/{database}?sslmode=disable&amp;ApplicationName=chbenchmark&amp;reWriteBatchedInserts=true</url>
+    <url>jdbc:postgresql://{host}:{port}/{database}?sslmode=disable&amp;ApplicationName=chbenchmark&amp;reWriteBatchedInserts=true&amp;currentSchema=public&amp;preferQueryMode=simple</url>
     <username>{username}</username>
     <password>{password}</password>
     <reconnectOnConnectionFailure>true</reconnectOnConnectionFailure>
@@ -157,10 +156,18 @@ YCSB_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 <parameters>
     <type>POSTGRES</type>
     <driver>org.postgresql.Driver</driver>
-    <url>jdbc:postgresql://{host}:{port}/{database}?sslmode=disable&amp;ApplicationName=ycsb&amp;reWriteBatchedInserts=true</url>
+    <url>jdbc:postgresql://{host}:{port}/{database}?sslmode=disable&amp;ApplicationName=ycsb&amp;reWriteBatchedInserts=true&amp;currentSchema=public&amp;preferQueryMode=simple</url>
     <username>{username}</username>
     <password>{password}</password>
     <reconnectOnConnectionFailure>true</reconnectOnConnectionFailure>
+    <!-- Umbra has no "FOR UPDATE" ("ERROR: locking specifier not implemented yet",
+         confirmed live) - workload f's ReadModifyWriteRecord would otherwise fail every
+         single execution. See patches/umbra_ycsb_rmw_no_lock_benchbase.patch's own
+         comment: this falls back to a plain read then a separate unlocked write, trading
+         away lost-update protection under concurrent writers to the same key for a
+         throughput number that isn't simply zero. Every other engine leaves this at
+         BenchBase's own default (true, the real locking "workload F"). -->
+    <selectForUpdate>false</selectForUpdate>
     <isolation>TRANSACTION_REPEATABLE_READ</isolation>
     <batchsize>128</batchsize>
     <scalefactor>{scalefactor}</scalefactor>
@@ -192,7 +199,7 @@ SHTAP_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 <parameters>
     <type>POSTGRES</type>
     <driver>org.postgresql.Driver</driver>
-    <url>jdbc:postgresql://{host}:{port}/{database}?sslmode=disable&amp;ApplicationName=s_htap&amp;reWriteBatchedInserts=true</url>
+    <url>jdbc:postgresql://{host}:{port}/{database}?sslmode=disable&amp;ApplicationName=s_htap&amp;reWriteBatchedInserts=true&amp;currentSchema=public&amp;preferQueryMode=simple</url>
     <username>{username}</username>
     <password>{password}</password>
     <reconnectOnConnectionFailure>true</reconnectOnConnectionFailure>
@@ -250,18 +257,23 @@ def _start_container(scratch_dir: Path) -> None:
     cgroup (cpuset), and publishes it on 127.0.0.1:common.UMBRA_PORT only (not 5432 -
     the real PostgreSQL cluster service already owns that port on the same machine).
 
-    `--user root`: the image's default `umbra:umbra` user may not have write access to
-    scratch_dir's host-side ownership (it's created by whichever user/root runs this
-    harness, not by the image's own UID) - root inside the container can always write a
-    bind mount regardless of host-side ownership, sidestepping a UID-matching dance for a
-    directory that's wiped and recreated before every single run anyway.
+    `--user {uid}:{gid}` (this process's own): the image's default `umbra:umbra` user may
+    not have write access to scratch_dir's host-side ownership (it's created by whichever
+    user/root runs this harness, not by the image's own UID). `--user root` (the original
+    approach here) also writes the bind mount fine, but leaves every file it creates
+    root-owned on the host - confirmed live this then makes the NEXT run's
+    common.fresh_scratch_dir() (shutil.rmtree, running as this same non-root user) raise
+    PermissionError on its very own leftovers, poisoning every run after the first one in
+    a sweep. Matching this process's real UID/GID instead sidesteps the UID-mismatch
+    problem AND keeps every file already correctly host-user-owned - confirmed live no
+    root is actually needed for the image's own bootstrap/createdb/serve steps.
 
     The `--ulimit` values match the image's own documented `docker run` example
     (https://hub.docker.com/r/umbradb/umbra).
     """
     _docker(
         "run", "-d", "--name", common.UMBRA_CONTAINER_NAME,
-        "--user", "root",
+        "--user", f"{os.getuid()}:{os.getgid()}",
         f"--cpuset-cpus={common.numa_node_cpu_list()}",
         f"--cpuset-mems={common.NUMA_NODE}",
         "--ulimit", "nofile=1048576:1048576",
@@ -273,17 +285,26 @@ def _start_container(scratch_dir: Path) -> None:
 
 
 def _wait_for_server(timeout: float = 30.0) -> bool:
-    """Polls a raw TCP connect (not a full wire-protocol handshake - just "is anything
-    listening yet") against the published port until it accepts or `timeout` elapses.
-    Needed because docker-entrypoint.sh's own createdb + self-signed-SSL-cert generation
-    takes a moment before umbra-server actually starts listening."""
+    """Polls a real `psql` query (not a bare TCP connect - confirmed live: Docker's own
+    `-p` port-forwarding accepts the TCP handshake instantly, well before umbra-server is
+    actually ready, so a bare `socket.create_connection` reports "ready" ~5-6s too early
+    and the very next real query gets "server closed the connection unexpectedly") against
+    the published port until it succeeds or `timeout` elapses. Needed because
+    docker-entrypoint.sh's own createdb + self-signed-SSL-cert generation takes a moment
+    before umbra-server actually starts listening for real."""
+    env = os.environ.copy()
+    env["PGPASSWORD"] = common.UMBRA_PASSWORD
+    env["PGSSLMODE"] = "disable"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", common.UMBRA_PORT), timeout=1.0):
-                return True
-        except OSError:
-            time.sleep(0.5)
+        result = subprocess.run(
+            ["psql", "-U", common.UMBRA_ROLE, "-h", "127.0.0.1", "-p", str(common.UMBRA_PORT),
+             "-d", "postgres", "-c", "SELECT 1;"],
+            env=env, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return True
+        time.sleep(0.5)
     return False
 
 
@@ -372,6 +393,46 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
             notes="SKIPPED: Umbra has no software fsync/durability toggle (confirmed: "
                   "ALTER SYSTEM/SET both refuse to change it in this build) - only "
                   "compare_engines.py's tmpfs-backed mode is safe for this engine.",
+        )
+
+    if workload == "tpcc" or workload in common.HTAP_WORKLOADS:
+        # NOT SUPPORTED - do not re-wire this without re-reading the history below.
+        #
+        # TPC-C's NewOrder transaction (the dominant transaction in both the plain "tpcc"
+        # mix and every HTAP workload's OLTP side) issues `SELECT ... FOR UPDATE` on the
+        # district/stock rows it's about to modify - a hardcoded, spec-required part of
+        # BenchBase's TPCCLoader/NewOrder.java, not something this wrapper's config
+        # controls. Confirmed live this build of Umbra rejects that clause outright
+        # ("ERROR: locking specifier not implemented yet"), so every NewOrder execution
+        # fails, and - unlike YCSB's ReadModifyWriteRecord, which fails the same way but
+        # still finishes cleanly (see patches/umbra_ycsb_rmw_no_lock_benchbase.patch,
+        # which drops the same clause there instead) - the whole BenchBase run then hangs
+        # indefinitely at "TERMINATE :: Waiting for all terminals to finish" instead of
+        # completing within the configured duration. That second failure mode's root
+        # cause was not identified, so unlike the YCSB case there is no equivalent
+        # unlocked-read workaround here: NewOrder's FOR UPDATE cannot simply be dropped
+        # without patching BenchBase's own TPCC transaction logic (a materially different,
+        # correctness-affecting change to what TPC-C measures, not attempted).
+        #
+        # Getting to this point took real, kept fixes along the way - all still in effect
+        # for every other Umbra workload: the _wait_for_server() startup-race fix above,
+        # the --user UID/GID fix in _start_container() (was `--user root`, which left
+        # root-owned files poisoning every later run's scratch-dir cleanup), and three
+        # BenchBase patches (patches/umbra_search_path_benchbase.patch,
+        # umbra_catalog_direct_benchbase.patch, umbra_isolation_level_benchbase.patch) that
+        # fix Umbra's JDBC catalog/schema-introspection gaps in general, not just for TPC-C
+        # - YCSB needs every one of them too. A per-workload custom DDL (stripping "ON
+        # DELETE CASCADE", which Umbra also does not implement) got schema creation and
+        # data loading working before the FOR UPDATE hang was found; that DDL is no longer
+        # wired in (see git history for scripts/engines/umbra_ddl/ if picking this back up).
+        return common.NormalizedResult(
+            "umbra", workload, scale.label, 0.0, "new_order_per_sec", 0.0, 0.0,
+            threads=scale.tpcc_terminals, gc_enabled=gc,
+            notes="SKIPPED: TPC-C's NewOrder requires SELECT ... FOR UPDATE, which this "
+                  "build of Umbra does not implement ('locking specifier not implemented "
+                  "yet') - every NewOrder execution fails and the run then hangs "
+                  "indefinitely at termination instead of completing (root cause not "
+                  "identified). See this function's own comment for what was tried.",
         )
 
     ycsb_theta = scale.ycsb_theta

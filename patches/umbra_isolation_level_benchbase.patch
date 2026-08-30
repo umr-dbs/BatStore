@@ -1,0 +1,29 @@
+diff --git a/src/main/java/com/oltpbenchmark/api/Worker.java b/src/main/java/com/oltpbenchmark/api/Worker.java
+index e50cbce..1061e3e 100644
+--- a/src/main/java/com/oltpbenchmark/api/Worker.java
++++ b/src/main/java/com/oltpbenchmark/api/Worker.java
+@@ -84,7 +84,23 @@ public abstract class Worker<T extends BenchmarkModule> implements Runnable {
+       try {
+         this.conn = this.benchmark.makeConnection();
+         this.conn.setAutoCommit(false);
+-        this.conn.setTransactionIsolation(this.configuration.getIsolationMode());
++        try {
++          this.conn.setTransactionIsolation(this.configuration.getIsolationMode());
++        } catch (SQLException ex) {
++          // Umbra (umbra-db.com), reached through this same POSTGRES JDBC target (see
++          // engines/umbra_benchbase.py), rejects pgjdbc's `SET TRANSACTION ISOLATION
++          // LEVEL ...` statement outright ("ERROR: Only setting variables to values is
++          // implemented") - confirmed live it only supports plain `SET var = value`/`SET
++          // var TO value` GUC assignments, not the separate SET TRANSACTION statement
++          // form. Every other engine here implements it and never hits this catch, so
++          // fall back to the connection's own default isolation level only when it
++          // genuinely isn't supported, rather than failing every worker connection.
++          LOG.warn(
++              "setTransactionIsolation({}) failed - continuing with the connection's "
++                  + "default isolation level: {}",
++              this.configuration.getIsolationMode(),
++              ex.getMessage());
++        }
+       } catch (SQLException ex) {
+         throw new RuntimeException("Failed to connect to database", ex);
+       }

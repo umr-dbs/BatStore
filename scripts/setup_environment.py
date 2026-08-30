@@ -67,6 +67,10 @@ BENCHBASE_URL = "https://github.com/cmu-db/benchbase.git"
 BENCHBASE_PATCH_COMMIT = "33c00473807ebd49304d114a6d769d2d2b2bbb34"
 BENCHBASE_YCSB_PAYLOAD_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_payload_benchbase.patch"
 BENCHBASE_YCSB_SKEW_FACTOR_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_skew_factor_benchbase.patch"
+BENCHBASE_UMBRA_SEARCH_PATH_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "umbra_search_path_benchbase.patch"
+BENCHBASE_UMBRA_CATALOG_DIRECT_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "umbra_catalog_direct_benchbase.patch"
+BENCHBASE_UMBRA_ISOLATION_LEVEL_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "umbra_isolation_level_benchbase.patch"
+BENCHBASE_UMBRA_YCSB_RMW_NO_LOCK_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "umbra_ycsb_rmw_no_lock_benchbase.patch"
 VWEAVER_URL = "https://github.com/SNU-DBXLab-papers/vWeaver_ermia.git"
 # Pinned so patches/vweaver_ermia.patch (removal of `sys/vtimes.h`, which is absent from
 # modern glibc, plus benchmark start-barrier and TPC-C extra-worker fixes) always applies
@@ -708,6 +712,63 @@ def step_benchbase() -> None:
     )
     if reverse.returncode != 0:
         run(["git", "apply", str(BENCHBASE_YCSB_SKEW_FACTOR_PATCH_PATH)], cwd=BENCHBASE_REPO)
+
+    # Makes BenchmarkModule.makeConnection() issue a runtime `SET search_path TO public`
+    # right after every JDBC connection opens - confirmed live that Umbra (see
+    # engines/umbra_benchbase.py) returns the literal unresolved "$user" token from
+    # current_schema() instead of resolving it, which otherwise makes every
+    # DatabaseMetaData.getTables() call (SQLUtil.py's getCatalogDirect(), used for every
+    # POSTGRES-type engine including the real PostgreSQL server) silently see no tables at
+    # all. Harmless for real PostgreSQL - see the patch's own comment.
+    reverse = subprocess.run(
+        ["git", "apply", "--reverse", "--check", str(BENCHBASE_UMBRA_SEARCH_PATH_PATCH_PATH)],
+        cwd=BENCHBASE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if reverse.returncode != 0:
+        run(["git", "apply", str(BENCHBASE_UMBRA_SEARCH_PATH_PATCH_PATH)], cwd=BENCHBASE_REPO)
+
+    # Two independent SQLUtil.getCatalogDirect() fixes for Umbra, confirmed live: (1) its
+    # getIndexInfo() has no working equivalent (missing
+    # information_schema._pg_expandarray()) - degrades to "no index metadata for this
+    # table" instead of failing the whole catalog build; (2) its getColumns() returns a
+    # duplicate row for every DECIMAL/NUMERIC column, which - left unfixed - inflates
+    # every later column's index and the generated INSERT statement's placeholder count
+    # past what any loader actually binds - de-duplicated by column name. See the patch's
+    # own comments; both are no-ops for every other engine, which never hits either
+    # condition this guards.
+    reverse = subprocess.run(
+        ["git", "apply", "--reverse", "--check", str(BENCHBASE_UMBRA_CATALOG_DIRECT_PATCH_PATH)],
+        cwd=BENCHBASE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if reverse.returncode != 0:
+        run(["git", "apply", str(BENCHBASE_UMBRA_CATALOG_DIRECT_PATCH_PATH)], cwd=BENCHBASE_REPO)
+
+    # Worker's constructor unconditionally calls Connection.setTransactionIsolation(),
+    # which pgjdbc implements as a `SET TRANSACTION ISOLATION LEVEL ...` statement - a form
+    # Umbra rejects outright ("ERROR: Only setting variables to values is implemented",
+    # confirmed live), unlike the plain `SET var = value`/`SET var TO value` GUC assignment
+    # form (e.g. the search_path patch above). Falls back to the connection's default
+    # isolation level there instead of failing every worker connection; a no-op for every
+    # other engine, which never hits the SQLException this guards.
+    reverse = subprocess.run(
+        ["git", "apply", "--reverse", "--check", str(BENCHBASE_UMBRA_ISOLATION_LEVEL_PATCH_PATH)],
+        cwd=BENCHBASE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if reverse.returncode != 0:
+        run(["git", "apply", str(BENCHBASE_UMBRA_ISOLATION_LEVEL_PATCH_PATH)], cwd=BENCHBASE_REPO)
+
+    # Adds a new <selectForUpdate>false</selectForUpdate> config option (default true, i.e. no
+    # behavior change for any engine that doesn't set it): when false, YCSB's
+    # ReadModifyWriteRecord drops "FOR UPDATE" from its read instead of failing outright - see
+    # the patch's own comment. Only engines/umbra_benchbase.py's YCSB config sets this false;
+    # every other engine (including the real PostgreSQL server) keeps the real, locking
+    # "workload F" semantics unchanged.
+    reverse = subprocess.run(
+        ["git", "apply", "--reverse", "--check", str(BENCHBASE_UMBRA_YCSB_RMW_NO_LOCK_PATCH_PATH)],
+        cwd=BENCHBASE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if reverse.returncode != 0:
+        run(["git", "apply", str(BENCHBASE_UMBRA_YCSB_RMW_NO_LOCK_PATCH_PATH)], cwd=BENCHBASE_REPO)
 
     _patch_benchbase_pom(BENCHBASE_REPO / "pom.xml")
 
