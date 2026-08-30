@@ -121,7 +121,7 @@ pub(crate) struct TxContext {
     /// not something real callers are expected to trigger.
     ///
     /// `CachePadded` for the same reason as `live_tx` — see that field's doc.
-    live_tx_depth: Vec<CachePadded<AtomicU32>>,
+    live_tx_depth: Box<[CachePadded<AtomicU32>]>,
     /// One slot per worker (`WorkerId`-indexed, sized to `max_workers` like
     /// `commit_logs`): each worker publishes its own conservative lower bound
     /// here — `global_clock.current_version()` read just *before* drawing
