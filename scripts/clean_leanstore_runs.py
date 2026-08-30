@@ -136,8 +136,9 @@ def clean_run(run_dir: Path, delete: bool, verbose: bool) -> Totals:
                 patterns = POSTGRES_KEEP_PATTERNS.get(
                     workload, POSTGRES_DEFAULT_KEEP_PATTERNS,
                 )
-                keep_file = lambda path, patterns=patterns: any(
-                    path.match(pattern) for pattern in patterns
+                keep_file = lambda path, patterns=patterns: (
+                    path.name in {"memory_stats.json", "server_config.json"}
+                    or any(path.match(pattern) for pattern in patterns)
                 )
             engine_specs.append((engine_name, engine_dir, keep_file))
     totals.engine_dirs = len(engine_specs)

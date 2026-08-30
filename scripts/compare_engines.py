@@ -2,8 +2,8 @@
 """Cross-engine benchmark harness: runs TPC-C, YCSB A-F, and HTAP/CH-benCHmark
 (htap_q1/htap_q6) against BatStore, LeanStore, LeanStore's WiredTiger adapter,
 and PostgreSQL (via BenchBase), sweeping thread/terminal count and GC on/off,
-all NUMA-pinned to one node (`numactl --cpubind=0 --membind=0`, see
-engines/common.py::run_and_track_rss), normalizing every result into one
+with engines NUMA-pinned to one node and external clients placed on another node when
+available (see engines/common.py), normalizing every result into one
 manifest.csv for scripts/plot_compare.py.
 
 Sized for the real server (2x AMD EPYC 7742, 64 cores/128 threads per socket,
@@ -296,10 +296,10 @@ def main() -> None:
     )
     print(f"BatStore HTAP scan pool: {scan_pool_desc}")
     print(f"gc sweep      : {gc_list} (engines with no working GC toggle always run once, gc=n/a)")
-    print(f"NUMA pinning  : node {common.NUMA_NODE} CPUs/memory for every engine; subprocesses use "
-          f"numactl --cpubind={common.NUMA_NODE} --membind={common.NUMA_NODE}; PostgreSQL's cluster "
-          f"service and Umbra's container both use matching cgroup CPU/memory-node constraints "
-          f"instead (verified per run)")
+    pg_client_node = common.external_client_numa_node()
+    print(f"NUMA pinning  : engines use node {common.NUMA_NODE}; PostgreSQL's cluster service and "
+          f"Umbra's container use matching cgroup CPU/memory-node constraints (verified per run). "
+          f"The external BenchBase client uses node {pg_client_node}")
     dram_gib_desc = (
         f"--dram-gib={args.dram_gib} (explicit, applied to every workload/threads point unchanged)"
         if args.dram_gib is not None else
@@ -320,7 +320,13 @@ def main() -> None:
               f"autovacuum aren't software-toggleable, see engines/umbra_benchbase.py) dram_gib: "
               f"{dram_gib_desc} (LeanStore/WiredTiger buffer pool - not used by batstore, whose WAL is "
               f"forced on but unbounded like every other in-memory structure here, or postgres/umbra, "
-              f"whose buffer sizing isn't managed by this script)")
+              f"whose buffer sizing is configured by setup_environment.py's fixed PostgreSQL "
+              f"memory budget)")
+        print("PostgreSQL durability: performance mode is active for every run: fsync=off, "
+              "synchronous_commit=off, full_page_writes=off (verified before execution)")
+    print(f"PostgreSQL    : {common.POSTGRES_MEMORY_BUDGET_GIB:g}GiB service memory budget; load is "
+          f"excluded from timed throughput and peak memory; peak memory is cgroup-charged total "
+          f"when cgroup v2 is available")
     print(f"planned runs  : {total_runs} (>= {total_secs / 60:.1f} min of measured time alone, "
           f"excluding load/build/BenchBase-client overhead)")
     print("#########################################################\n")

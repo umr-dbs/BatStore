@@ -52,6 +52,7 @@ VWEAVER_REPO = Path(os.environ.get("VWEAVER_REPO", str(WORKSPACE_ROOT / "vWeaver
 PG_ROLE = os.environ.get("PG_ROLE", "admin")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "password")
 PG_DATABASE = os.environ.get("PG_DATABASE", "benchbase")
+POSTGRES_MEMORY_BUDGET_GIB = float(os.environ.get("POSTGRES_MEMORY_BUDGET_GIB", "8"))
 
 # umbradb/umbra (see engines/umbra_benchbase.py) - a research OLTP+OLAP engine from TUM's
 # database group (db.in.tum.de) that speaks the PostgreSQL wire protocol, so it can be
@@ -129,8 +130,8 @@ def batstore_cargo_build_args(*extra_features: str) -> list[str]:
     return args
 
 
-def numactl_prefix() -> list:
-    return ["numactl", f"--cpubind={NUMA_NODE}", f"--membind={NUMA_NODE}"]
+def numactl_prefix(node: int = NUMA_NODE) -> list:
+    return ["numactl", f"--cpubind={node}", f"--membind={node}"]
 
 
 def expand_cpu_list(value: str) -> set:
@@ -159,6 +160,24 @@ def numa_node_cpu_list(node: int = NUMA_NODE) -> str:
     if not cpus:
         raise RuntimeError(f"cannot pin to NUMA node {node}: {path} is empty")
     return cpus
+
+
+def external_client_numa_node() -> int:
+    """NUMA node for an external benchmark client, separate from the engine if possible.
+
+    Native engines contain their load generator in the measured process. PostgreSQL and
+    Umbra instead have a separate Java/JDBC client; running that client on the database
+    server's node makes its JVM compete with the server for the same CPUs. On multi-node
+    machines use the next node for the external client. The environment override keeps
+    single-node and deliberately end-to-end experiments explicit.
+    """
+    override = os.environ.get("BENCHMARK_CLIENT_NUMA_NODE")
+    if override is not None:
+        node = int(override)
+        numa_node_cpu_list(node)  # validate before starting a long benchmark
+        return node
+    candidate = NUMA_NODE + 1
+    return candidate if Path(f"/sys/devices/system/node/node{candidate}").exists() else NUMA_NODE
 
 
 def default_subprocess_timeout(duration: float) -> float:
@@ -464,12 +483,14 @@ class NormalizedResult:
     scan_avg_us: float = 0.0
     scan_count: int = 0
     notes: str = ""
+    memory_source: str = "process_rss"
 
 
 MANIFEST_HEADER = [
     "engine", "workload", "config_label", "threads", "gc_enabled", "duration_secs",
     "primary_metric_name", "primary_metric_value", "peak_rss_mb",
     "scan_p50_us", "scan_p95_us", "scan_p99_us", "scan_avg_us", "scan_count", "notes",
+    "memory_source",
 ]
 
 YCSB_WORKLOADS = ["ycsb_a", "ycsb_b", "ycsb_c", "ycsb_d", "ycsb_e", "ycsb_f"]
@@ -579,9 +600,84 @@ def start_process_tree_sampler(root_pid: int, interval: float = 0.5):
     return stop, thread, peak_box
 
 
-def run_and_track_rss(cmd, cwd=None, env=None, stdout_path: Optional[Path] = None, timeout=None):
-    """Runs `cmd` to completion under `numactl --cpubind=0 --membind=0`, sampling peak RSS
-    via /proc every 0.5s.
+def _cgroup_v2_dir_for_pid(pid: int) -> Optional[Path]:
+    """Return the unified cgroup-v2 directory containing *pid*, when available."""
+    try:
+        lines = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            hierarchy, controllers, relative = line.split(":", 2)
+        except ValueError:
+            continue
+        if hierarchy == "0" and controllers == "":
+            path = Path("/sys/fs/cgroup") / relative.lstrip("/")
+            return path if (path / "memory.current").exists() else None
+    return None
+
+
+def _read_cgroup_memory_stat(cgroup_dir: Path) -> dict[str, int]:
+    values = {}
+    try:
+        for line in (cgroup_dir / "memory.stat").read_text().splitlines():
+            key, value = line.split(None, 1)
+            values[key] = int(value)
+    except (OSError, ValueError):
+        pass
+    return values
+
+
+def start_cgroup_memory_sampler(root_pid: int, interval: float = 0.5):
+    """Track total memory charged to *root_pid*'s cgroup-v2 memory controller.
+
+    Unlike summed process RSS, ``memory.current`` includes anonymous memory, shared
+    memory, filesystem cache, and tmpfs pages. This is useful only when the process is in
+    a dedicated cgroup (the PostgreSQL systemd service is); callers must not use it for a
+    process that shares its cgroup with unrelated work.
+
+    Returns the same ``(stop, thread, peak_box)`` shape as
+    :func:`start_process_tree_sampler`, or ``None`` when cgroup-v2 accounting is absent.
+    """
+    cgroup_dir = _cgroup_v2_dir_for_pid(root_pid)
+    if cgroup_dir is None:
+        return None
+
+    peak_box = {
+        "mb": 0.0,
+        "current_mb": 0.0,
+        "source": "cgroup_v2_memory.current",
+        "cgroup": str(cgroup_dir),
+        "stat": {},
+    }
+    stop = threading.Event()
+
+    def sample() -> None:
+        try:
+            current_mb = int((cgroup_dir / "memory.current").read_text()) / (1024 ** 2)
+        except (OSError, ValueError):
+            return
+        peak_box["current_mb"] = current_mb
+        if current_mb >= peak_box["mb"]:
+            peak_box["mb"] = current_mb
+            peak_box["stat"] = _read_cgroup_memory_stat(cgroup_dir)
+
+    def loop() -> None:
+        while not stop.is_set():
+            sample()
+            stop.wait(interval)
+        sample()
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    return stop, thread, peak_box
+
+
+def run_and_track_rss(
+    cmd, cwd=None, env=None, stdout_path: Optional[Path] = None, timeout=None,
+    numa_node: int = NUMA_NODE,
+):
+    """Runs `cmd` on ``numa_node`` under numactl, sampling peak RSS via /proc every 0.5s.
 
     Returns (returncode, peak_rss_mb). stdout+stderr are merged and written to
     stdout_path if given (for post-hoc debugging), else discarded.
@@ -599,7 +695,7 @@ def run_and_track_rss(cmd, cwd=None, env=None, stdout_path: Optional[Path] = Non
     specifically so this cleanup can reach any children numactl/the engine itself
     spawns, rather than relying on numactl having exec'd in place of forking.
     """
-    cmd = numactl_prefix() + [str(c) for c in cmd]
+    cmd = numactl_prefix(numa_node) + [str(c) for c in cmd]
     stdout_file = open(stdout_path, "wb") if stdout_path else subprocess.DEVNULL
     proc = subprocess.Popen(
         cmd, cwd=cwd, env=env, stdout=stdout_file, stderr=subprocess.STDOUT, start_new_session=True,
@@ -711,7 +807,7 @@ def append_manifest_row(manifest_path: Path, result: NormalizedResult) -> None:
             result.primary_metric_name, f"{result.primary_metric_value:.3f}",
             f"{result.peak_rss_mb:.2f}",
             f"{result.scan_p50_us:.2f}", f"{result.scan_p95_us:.2f}", f"{result.scan_p99_us:.2f}",
-            f"{result.scan_avg_us:.2f}", result.scan_count, result.notes,
+            f"{result.scan_avg_us:.2f}", result.scan_count, result.notes, result.memory_source,
         ])
 
 

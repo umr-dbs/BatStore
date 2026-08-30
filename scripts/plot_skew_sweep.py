@@ -4,7 +4,8 @@ x-axis = skew factor (uniform, then Zipfian theta 0.1/0.4/0.8/0.99/1.4), y-axis 
 throughput (ops/sec), with one line per thread count. One figure is produced per engine
 (so BatStore/libmdbx/PostgreSQL/WiredTiger each get their own file and can also be
 overlaid manually) plus an all-engines-overlaid variant per workload, at a single
-reference thread count, for a quick cross-engine skew comparison.
+reference thread count, for a quick cross-engine skew comparison. GC-on and GC-off
+measurements are written to separate figures.
 
 Reads <run_dir>/manifest.csv, written by run_skew_sweep.py - same schema as
 compare_engines.py's manifest, with the skew value stamped into config_label as
@@ -39,8 +40,24 @@ def skew_sort_key(skew: str):
 def load_manifest(run_dir: Path) -> pd.DataFrame:
     df = pd.read_csv(run_dir / "manifest.csv")
     df = df[df["notes"].fillna("") == ""]
+    df["gc_enabled"] = df["gc_enabled"].fillna("n/a")
+    if "memory_source" not in df:
+        df["memory_source"] = "process_rss"
+    else:
+        df["memory_source"] = df["memory_source"].fillna("process_rss")
     df["skew"] = df["config_label"].map(skew_label)
     return df
+
+
+def gc_slices(df: pd.DataFrame):
+    """Yield (label, rows) without putting GC-on and GC-off in one figure."""
+    gc_values = set(df["gc_enabled"])
+    choices = [gc for gc in ("on", "off") if gc in gc_values]
+    if choices:
+        for gc in choices:
+            yield gc, df[df["gc_enabled"].isin([gc, "n/a"])]
+    elif "n/a" in gc_values:
+        yield "na", df[df["gc_enabled"] == "n/a"]
 
 
 def _save(fig, out_dir: Path, name: str) -> None:
@@ -54,7 +71,9 @@ def _save(fig, out_dir: Path, name: str) -> None:
         print(f"Wrote {path}")
 
 
-def plot_workload_per_engine(df: pd.DataFrame, workload: str, out_dir: Path) -> None:
+def plot_workload_per_engine(
+    df: pd.DataFrame, workload: str, gc_choice: str, out_dir: Path,
+) -> None:
     sub = df[df["workload"] == workload]
     if sub.empty:
         return
@@ -67,15 +86,20 @@ def plot_workload_per_engine(df: pd.DataFrame, workload: str, out_dir: Path) -> 
             ax.plot(skews, tsub["primary_metric_value"], marker="o", label=f"{threads} threads")
         ax.set_xlabel("Skew factor (Zipfian theta; 'uniform' = theta 0.0)")
         ax.set_ylabel("Throughput (ops/sec)")
-        ax.set_title(f"{ENGINE_LABELS.get(engine, engine)} - YCSB {workload.split('_')[1].upper()} vs. skew")
+        ax.set_title(
+            f"{ENGINE_LABELS.get(engine, engine)} - "
+            f"YCSB {workload.split('_')[1].upper()} vs. skew - GC {gc_choice}"
+        )
         ax.legend(title="Threads", fontsize="small")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
-        _save(fig, out_dir, f"skew_{workload}_{engine}")
+        _save(fig, out_dir, f"skew_{workload}_{engine}_gc_{gc_choice}")
         plt.close(fig)
 
 
-def plot_workload_all_engines(df: pd.DataFrame, workload: str, out_dir: Path, ref_threads: int) -> None:
+def plot_workload_all_engines(
+    df: pd.DataFrame, workload: str, gc_choice: str, out_dir: Path, ref_threads: int,
+) -> None:
     sub = df[(df["workload"] == workload) & (df["threads"] == ref_threads)]
     if sub.empty:
         return
@@ -90,12 +114,95 @@ def plot_workload_all_engines(df: pd.DataFrame, workload: str, out_dir: Path, re
         )
     ax.set_xlabel("Skew factor (Zipfian theta; 'uniform' = theta 0.0)")
     ax.set_ylabel("Throughput (ops/sec)")
-    ax.set_title(f"YCSB {workload.split('_')[1].upper()} vs. skew (threads={ref_threads})")
+    ax.set_title(
+        f"YCSB {workload.split('_')[1].upper()} vs. skew "
+        f"(threads={ref_threads}) - GC {gc_choice}"
+    )
     ax.legend(fontsize="small")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    _save(fig, out_dir, f"skew_{workload}_all_engines_threads{ref_threads}")
+    _save(
+        fig, out_dir,
+        f"skew_{workload}_all_engines_threads{ref_threads}_gc_{gc_choice}",
+    )
     plt.close(fig)
+
+
+def plot_workloads_overview(
+    df: pd.DataFrame, gc_choice: str, out_dir: Path, ref_threads: int,
+    value_column: str, ylabel: str, metric_name: str,
+) -> None:
+    """Plot all available YCSB workloads as a compact engine-comparison grid."""
+    sub = df[
+        df["workload"].isin(YCSB_WORKLOADS) & (df["threads"] == ref_threads)
+    ]
+    workloads = [workload for workload in YCSB_WORKLOADS if workload in set(sub["workload"])]
+    if not workloads:
+        return
+
+    skews = sorted(sub["skew"].unique(), key=skew_sort_key)
+    cols = min(3, len(workloads))
+    rows = (len(workloads) + cols - 1) // cols
+    fig, axes = plt.subplots(
+        rows, cols, figsize=(5 * cols, 4.1 * rows), squeeze=False, sharex=True,
+    )
+    legend_handles = {}
+    for idx, workload in enumerate(workloads):
+        ax = axes[idx // cols][idx % cols]
+        workload_df = sub[sub["workload"] == workload]
+        for engine in sorted(workload_df["engine"].unique(), key=engine_sort_key):
+            engine_df = (
+                workload_df[workload_df["engine"] == engine]
+                .set_index("skew")
+                .reindex(skews)
+            )
+            label = ENGINE_LABELS.get(engine, engine)
+            line, = ax.plot(
+                skews, engine_df[value_column], label=label,
+                **engine_line_style(engine),
+            )
+            legend_handles.setdefault(label, line)
+        ax.set_title(f"YCSB {workload.split('_')[1].upper()}")
+        ax.set_xlabel("Skew factor")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+
+    for idx in range(len(workloads), rows * cols):
+        axes[idx // cols][idx % cols].axis("off")
+
+    source_note = ""
+    if value_column == "peak_rss_mb" and "memory_source" in sub:
+        sources = set(sub["memory_source"])
+        if "cgroup_v2_memory.current" in sources and len(sources) > 1:
+            source_note = " — cgroup total where available; otherwise process RSS"
+    fig.suptitle(
+        f"YCSB workload {metric_name} overview "
+        f"(threads={ref_threads}, GC {gc_choice}){source_note}"
+    )
+    if legend_handles:
+        fig.legend(
+            legend_handles.values(), legend_handles.keys(),
+            loc="lower center", ncol=min(4, len(legend_handles)), fontsize="small",
+        )
+    fig.tight_layout(rect=(0, 0.08, 1, 0.95))
+    _save(
+        fig, out_dir,
+        f"skew_workloads_{metric_name}_overview_threads{ref_threads}_gc_{gc_choice}",
+    )
+    plt.close(fig)
+
+
+def plot_overviews(df: pd.DataFrame, out_dir: Path, ref_threads: int) -> None:
+    """Write throughput and peak-memory overview grids for each GC mode."""
+    for gc_choice, gc_df in gc_slices(df):
+        plot_workloads_overview(
+            gc_df, gc_choice, out_dir, ref_threads,
+            "primary_metric_value", "Throughput (ops/sec)", "throughput",
+        )
+        plot_workloads_overview(
+            gc_df, gc_choice, out_dir, ref_threads,
+            "peak_rss_mb", "Peak measured memory (MB)", "memory",
+        )
 
 
 def main() -> None:
@@ -110,11 +217,19 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for workload in YCSB_WORKLOADS:
-        if workload not in df["workload"].unique():
+        workload_df = df[df["workload"] == workload]
+        if workload_df.empty:
             continue
-        plot_workload_per_engine(df, workload, out_dir)
-        ref_threads = args.ref_threads or int(df[df["workload"] == workload]["threads"].max())
-        plot_workload_all_engines(df, workload, out_dir, ref_threads)
+        ref_threads = args.ref_threads or int(workload_df["threads"].max())
+        for gc_choice, gc_df in gc_slices(workload_df):
+            plot_workload_per_engine(gc_df, workload, gc_choice, out_dir)
+            plot_workload_all_engines(
+                gc_df, workload, gc_choice, out_dir, ref_threads,
+            )
+
+    if not df.empty:
+        ref_threads = args.ref_threads or int(df["threads"].max())
+        plot_overviews(df, out_dir, ref_threads)
 
     print(f"Wrote plots to {out_dir}")
 

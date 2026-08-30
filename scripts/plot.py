@@ -130,11 +130,17 @@ def plot_skew(run_dir: Path, requested_ref_threads: int | None) -> None:
         workload_df = manifest[manifest["workload"] == workload]
         if workload_df.empty:
             continue
-        plot_skew_sweep.plot_workload_per_engine(manifest, workload, out_dir)
         ref_threads = requested_ref_threads or int(workload_df["threads"].max())
-        plot_skew_sweep.plot_workload_all_engines(
-            manifest, workload, out_dir, ref_threads
-        )
+        for gc_choice, gc_df in plot_skew_sweep.gc_slices(workload_df):
+            plot_skew_sweep.plot_workload_per_engine(
+                gc_df, workload, gc_choice, out_dir,
+            )
+            plot_skew_sweep.plot_workload_all_engines(
+                gc_df, workload, gc_choice, out_dir, ref_threads,
+            )
+    if not manifest.empty:
+        ref_threads = requested_ref_threads or int(manifest["threads"].max())
+        plot_skew_sweep.plot_overviews(manifest, out_dir, ref_threads)
 
 
 def plot_benchmark_suite(run_dir: Path) -> None:

@@ -37,7 +37,8 @@ verified against the live container's /proc/<pid>/status after start - the same 
 but verify" the PostgreSQL wrapper applies to the postmaster), not via numactl in front of
 `docker run` itself: numactl would only pin the short-lived `docker` CLI invocation, not
 the actual server process the daemon spawns. The BenchBase JDBC client is independently
-numactl-pinned by common.run_and_track_rss, same as every engine's client/binary.
+pinned to the next NUMA node when available, so its JVM does not consume the database
+server's benchmark CPUs.
 """
 from __future__ import annotations
 
@@ -463,8 +464,9 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
             metric_name = "ops_per_sec"
 
         postgres_benchbase._assert_unlimited_config(config_path)
+        client_numa_node = common.external_client_numa_node()
         print(f"Umbra BenchBase config: {config_path} (rate=unlimited, terminals={threads}, "
-              f"port={common.UMBRA_PORT})")
+              f"port={common.UMBRA_PORT}, client_numa_node={client_numa_node})")
 
         tree_sampler = common.start_process_tree_sampler(pid)
 
@@ -480,6 +482,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         bench_env["YCSB_U64_PAYLOAD"] = "true" if ycsb_payload == "u64" else "false"
         returncode, _client_rss_unused = common.run_and_track_rss(
             args, cwd=BENCHBASE_HOME, env=bench_env, stdout_path=output_dir / "stdout.log", timeout=timeout,
+            numa_node=client_numa_node,
         )
 
         server_peak_rss_mb = 0.0
