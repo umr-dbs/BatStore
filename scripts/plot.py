@@ -79,6 +79,7 @@ def plot_comparison(run_dir: Path, engine: str | None) -> None:
         manifest = manifest[manifest["engine"] == engine].copy()
 
     out_dir = run_dir / "plots"
+    plot_compare.prepare_output_dir(out_dir)
     overview_name = f"single_engine_overview_{engine}" if engine else "single_engine_overview"
     if plot_compare.plot_single_engine_overview(manifest, out_dir, overview_name):
         return
@@ -139,8 +140,7 @@ def plot_skew(run_dir: Path, requested_ref_threads: int | None) -> None:
                 gc_df, workload, gc_choice, out_dir, ref_threads,
             )
     if not manifest.empty:
-        ref_threads = requested_ref_threads or int(manifest["threads"].max())
-        plot_skew_sweep.plot_overviews(manifest, out_dir, ref_threads)
+        plot_skew_sweep.plot_overviews(manifest, out_dir)
 
 
 def plot_benchmark_suite(run_dir: Path) -> None:

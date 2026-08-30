@@ -71,11 +71,35 @@ def _engine_sort_key(name: str):
     return engine_sort_key(name)
 
 
-def _save(fig, out_dir: Path, name: str):
+def _is_overview_name(name: str) -> bool:
+    return (
+        "overview" in name
+        or name.startswith("summary_all_workloads")
+        or name.startswith("memory_by_engine")
+    )
+
+
+def prepare_output_dir(out_dir: Path) -> None:
+    """Create the output layout and relocate PDFs from the legacy flat layout."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    pdf_dir = out_dir / "pdf"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "svg").mkdir(parents=True, exist_ok=True)
+    for path in out_dir.glob("*.pdf"):
+        if not _is_overview_name(path.stem):
+            path.replace(pdf_dir / path.name)
+
+
+def _save(fig, out_dir: Path, name: str, *, overview: bool | None = None):
+    prepare_output_dir(out_dir)
     fig.tight_layout()
+    if overview is None:
+        overview = _is_overview_name(name)
     for suffix in ("svg", "pdf"):
-        destination = out_dir / "svg" if suffix == "svg" else out_dir
+        if suffix == "svg":
+            destination = out_dir / "svg"
+        else:
+            destination = out_dir if overview else out_dir / "pdf"
         destination.mkdir(parents=True, exist_ok=True)
         path = destination / f"{name}.{suffix}"
         fig.savefig(path)
@@ -682,7 +706,7 @@ def plot_single_engine_overview(
         memory_ax.legend(fontsize=8)
 
     fig.suptitle(f"{ENGINE_LABELS.get(engine, engine)}: single-engine workload overview")
-    _save(fig, out_dir, output_name)
+    _save(fig, out_dir, output_name, overview=True)
     return True
 
 
@@ -791,7 +815,7 @@ def plot_all_engines_workload_overview(
     )
 
     fig.suptitle("All engines: workload overview")
-    _save(fig, out_dir, output_name)
+    _save(fig, out_dir, output_name, overview=True)
     return True
 
 
@@ -823,6 +847,7 @@ def main():
         manifest = manifest[manifest["engine"] == args.engine].copy()
         print(f"Selected single-engine view: {args.engine}")
     out_dir = run_dir / "plots"
+    prepare_output_dir(out_dir)
 
     overview_name = f"single_engine_overview_{args.engine}" if args.engine else "single_engine_overview"
     if plot_single_engine_overview(manifest, out_dir, overview_name):

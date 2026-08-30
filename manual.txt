@@ -627,7 +627,12 @@ current directory. It needs the venv's pandas/matplotlib - either activate it
 (`source scripts/.venv/bin/activate`) or invoke its interpreter directly
 (`scripts/.venv/bin/python3 scripts/plot.py ...`).
 
-Every figure is written as both PDF and SVG into <run-dir>/plots/. Figures produced:
+Overview PDFs are written directly into `<run-dir>/plots/`. Detailed PDFs live in
+`<run-dir>/plots/pdf/`, and SVG versions live in `<run-dir>/plots/svg/`. Replotting an
+older run automatically moves its legacy detailed PDFs out of the flat `plots/` layout.
+For skew sweeps, the all-workload throughput and memory overview grids are generated for
+every measured thread count and GC state; `--ref-threads` only selects the detailed
+single-workload all-engine overlay. Figures produced:
 
   tpcc_throughput_by_engine       TPC-C New-Order/sec, one bar per engine
   ycsb_throughput_by_engine       YCSB A-F ops/sec, grouped bars per workload x engine

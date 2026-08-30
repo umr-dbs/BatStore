@@ -60,11 +60,25 @@ def gc_slices(df: pd.DataFrame):
         yield "na", df[df["gc_enabled"] == "n/a"]
 
 
-def _save(fig, out_dir: Path, name: str) -> None:
-    """Save PDFs in plots/ and SVGs in plots/svg/."""
+def prepare_output_dir(out_dir: Path) -> None:
+    """Create the output layout and relocate PDFs from the legacy flat layout."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    pdf_dir = out_dir / "pdf"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "svg").mkdir(parents=True, exist_ok=True)
+    for path in out_dir.glob("*.pdf"):
+        if "overview" not in path.stem:
+            path.replace(pdf_dir / path.name)
+
+
+def _save(fig, out_dir: Path, name: str, *, overview: bool = False) -> None:
+    """Keep overview PDFs in plots/; put detailed PDFs/SVGs in format folders."""
+    prepare_output_dir(out_dir)
     for ext in ("pdf", "svg"):
-        destination = out_dir / "svg" if ext == "svg" else out_dir
+        if ext == "svg":
+            destination = out_dir / "svg"
+        else:
+            destination = out_dir if overview else out_dir / "pdf"
         destination.mkdir(parents=True, exist_ok=True)
         path = destination / f"{name}.{ext}"
         fig.savefig(path)
@@ -188,21 +202,23 @@ def plot_workloads_overview(
     _save(
         fig, out_dir,
         f"skew_workloads_{metric_name}_overview_threads{ref_threads}_gc_{gc_choice}",
+        overview=True,
     )
     plt.close(fig)
 
 
-def plot_overviews(df: pd.DataFrame, out_dir: Path, ref_threads: int) -> None:
-    """Write throughput and peak-memory overview grids for each GC mode."""
+def plot_overviews(df: pd.DataFrame, out_dir: Path) -> None:
+    """Write throughput and peak-memory grids for every GC mode and thread count."""
     for gc_choice, gc_df in gc_slices(df):
-        plot_workloads_overview(
-            gc_df, gc_choice, out_dir, ref_threads,
-            "primary_metric_value", "Throughput (ops/sec)", "throughput",
-        )
-        plot_workloads_overview(
-            gc_df, gc_choice, out_dir, ref_threads,
-            "peak_rss_mb", "Peak measured memory (MB)", "memory",
-        )
+        for threads in sorted(int(value) for value in gc_df["threads"].unique()):
+            plot_workloads_overview(
+                gc_df, gc_choice, out_dir, threads,
+                "primary_metric_value", "Throughput (ops/sec)", "throughput",
+            )
+            plot_workloads_overview(
+                gc_df, gc_choice, out_dir, threads,
+                "peak_rss_mb", "Peak measured memory (MB)", "memory",
+            )
 
 
 def main() -> None:
@@ -214,7 +230,7 @@ def main() -> None:
 
     df = load_manifest(args.run_dir)
     out_dir = args.run_dir / "plots"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    prepare_output_dir(out_dir)
 
     for workload in YCSB_WORKLOADS:
         workload_df = df[df["workload"] == workload]
@@ -228,8 +244,7 @@ def main() -> None:
             )
 
     if not df.empty:
-        ref_threads = args.ref_threads or int(df["threads"].max())
-        plot_overviews(df, out_dir, ref_threads)
+        plot_overviews(df, out_dir)
 
     print(f"Wrote plots to {out_dir}")
 
