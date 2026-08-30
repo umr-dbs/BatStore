@@ -103,6 +103,10 @@ def load_manifest(run_dir: Path) -> pd.DataFrame:
     df["notes"] = df["notes"].fillna("")
     df["failed"] = df["notes"].str.startswith(("FAILED", "TIMEOUT", "EXCEPTION"))
     df["gc_enabled"] = df["gc_enabled"].fillna("n/a")
+    if "memory_source" not in df:
+        df["memory_source"] = "process_rss"
+    else:
+        df["memory_source"] = df["memory_source"].fillna("process_rss")
     return df
 
 
@@ -186,7 +190,7 @@ def plot_ycsb_throughput(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: s
 
 
 def plot_memory_usage(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str, out_dir: Path):
-    """Peak RSS by engine, per workload."""
+    """Peak measured memory by engine, per workload."""
     df = ref_slice.copy()
     if df.empty:
         print(f"No rows in manifest.csv for gc={gc_choice} — skipping memory plot.")
@@ -200,12 +204,12 @@ def plot_memory_usage(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str,
         ax = axes[idx // cols][idx % cols]
         _bar_by_engine(ax, df[df["workload"] == workload], "peak_rss_mb")
         ax.set_title(workload, fontsize=10)
-        ax.set_ylabel("Peak RSS (MB)")
+        ax.set_ylabel("Peak measured memory (MB)")
         ax.grid(alpha=0.3, axis="y")
     for idx in range(len(workloads), rows * cols):
         axes[idx // cols][idx % cols].axis("off")
 
-    fig.suptitle(f"Peak memory usage by engine (threads={ref_threads}, gc={gc_choice})")
+    fig.suptitle(f"Peak measured memory by engine (threads={ref_threads}, gc={gc_choice})")
     _save(fig, out_dir, f"memory_by_engine_gc_{gc_choice}")
 
 
@@ -672,7 +676,7 @@ def plot_single_engine_overview(
                     gdf["peak_rss_mb"], linestyle=linestyle, label=label,
                     **engine_line_style(engine),
                 )
-        memory_ax.set_ylabel("Peak RSS (MB)")
+        memory_ax.set_ylabel("Peak measured memory (MB)")
         memory_ax.set_title(f"{workload}: memory")
         _set_measurement_thread_axis(memory_ax, thread_values)
         memory_ax.legend(fontsize=8)
@@ -765,7 +769,7 @@ def plot_all_engines_workload_overview(
 
         memory_ax = axes[row][3]
         plot_metric(memory_ax, wdf, "peak_rss_mb")
-        memory_ax.set_ylabel("Peak RSS (MB)")
+        memory_ax.set_ylabel("Peak measured memory (MB)")
         memory_ax.set_title(f"{workload}: memory")
         _set_measurement_thread_axis(memory_ax, thread_values)
 

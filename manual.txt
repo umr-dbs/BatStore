@@ -33,9 +33,10 @@ scripts work starting from nothing, on any machine:
 1. REQUIREMENTS
 ----------------
 
-- Linux, x86_64. `numactl` is REQUIRED (every benchmark subprocess runs under
-  `numactl --cpubind=0 --membind=0` - there is no unpinned fallback, by design, so
-  results are never accidentally cross-NUMA-node).
+- Linux, x86_64. `numactl` is REQUIRED. Engines use benchmark NUMA node 0 by
+  default; external BenchBase clients use the next available NUMA node so their CPU and
+  heap do not compete with the database server. Override the client with
+  `BENCHMARK_CLIENT_NUMA_NODE`.
 - Rust + Cargo (for BatStore) - stable toolchain, whatever `cargo build --release` needs.
 - CMake + a C++ toolchain with TBB, liburing, and the usual compression libs (snappy,
   zlib, bz2, lz4, zstd), for LeanStore + WiredTiger.
@@ -97,7 +98,11 @@ What it does, in order:
      -DCMAKE_BUILD_PARAM=Eval_skiplist - "just frugal lists", no vWeaver) into
      <workspace>/vWeaver_ermia/build_frugal - see engines/vweaver_ermia_frugal.py and
      section 5 for why this needed patches/vweaver_ermia_frugal.patch to even link.
-  7. Creates the `admin` (superuser) role and `benchbase` database in PostgreSQL.
+  7. Creates the `admin` (superuser) role and `benchbase` database in PostgreSQL, applies
+     a benchmark profile, and constrains the service to a fixed memory budget. The default
+     budget is 8 GiB (`POSTGRES_MEMORY_BUDGET_GIB` overrides it): shared_buffers=25%,
+     effective_cache_size=75%, work_mem=4MB, maintenance_work_mem=256MB, JIT off,
+     random_page_cost=1.1, checkpoint_timeout=30min, max_wal_size=16GB, and swap disabled.
   8. Clones (if missing) BenchBase and builds it with plain `mvn` (not the bundled
      ./mvnw). Before building, the script PATCHES BenchBase's pom.xml to strip out
      `com.spotify.fmt:fmt-maven-plugin` - see "MAVEN PLUGIN WORKAROUND" below. This step
@@ -124,6 +129,9 @@ Flags to skip individual steps:
     --skip-venv --skip-postgres-tmpfs
 
 Example: `python3 scripts/setup_environment.py --skip-postgres --skip-benchbase`
+
+To reapply only PostgreSQL's tuning, runtime cgroup limits, and tmpfs setup after a reboot
+or a profile change, run `python3 scripts/setup_environment.py --postgres-only`.
 
 PostgreSQL tmpfs relocation now runs by default. It stops/restarts the actual PostgreSQL
 service and preserves the original PGDATA as `<PGDATA>.diskbackup`; read
@@ -355,6 +363,18 @@ this rather than papering over it:
   libmdbx here. LeanStore/WiredTiger/libmdbx/Umbra always report gc="n/a" and run once per
   (workload, threads) regardless of --gc.
 
+  For PostgreSQL, each run verifies the live value before loading. GC-off also terminates
+  any autovacuum worker left from the preceding run and waits for it to disappear; GC-on
+  restores `autovacuum=on`. PostgreSQL can still launch an emergency anti-wraparound
+  vacuum while autovacuum is off, but freshly recreated benchmark tables are nowhere near
+  the transaction-age threshold where that exception applies. At process exit, the
+  harness restores `autovacuum=on` if the final PostgreSQL point used GC-off.
+
+- PostgreSQL durability: every PostgreSQL point runs in the benchmark performance mode
+  `fsync=off`, `synchronous_commit=off`, and `full_page_writes=off`. These are applied and
+  live-verified before every run and recorded in that point's `server_config.json`. This
+  is intentionally unsafe for real data; the harness recreates its benchmark tables.
+
 - HTAP/CH-benCHmark (htap_q1/htap_q6): these names now execute the SQL predicates from
   pinned BenchBase commit 33c00473807ebd49304d114a6d769d2d2b2bbb34 exactly: Q1 uses
   `ol_delivery_d > 2007-01-02`, and Q6 uses the half-open 1999-01-01..2020-01-01 date
@@ -486,19 +506,18 @@ this rather than papering over it:
   instead of silently paying real-disk fsync cost under a flag whose whole point is "no
   durability cost" - use compare_engines.py (tmpfs-backed) for Umbra numbers.
 
-- Peak memory (peak_rss_mb): tracks PostgreSQL's actual SERVER process tree now
-  (postmaster + checkpointer + bgwriter + walwriter + every per-connection backend -
-  summed current RSS, peak-tracked over the run), not the JDBC client's own memory (which
-  would be a different, misleading number - the client just drives requests, it doesn't
-  store anything). Every other engine's peak_rss_mb is single-process VmHWM, since a
-  single process IS the storage engine for all of them.
+- Peak memory (peak_rss_mb): the column name is retained for compatibility, but PostgreSQL
+  reports the peak cgroup-v2 `memory.current` charge for its dedicated systemd service.
+  That includes anonymous memory, shared mappings, and charged page cache without
+  double-counting shared pages across PostgreSQL processes. If cgroup v2 is unavailable,
+  it falls back to summed server process-tree RSS. The JDBC client is excluded. Each row's
+  exact method is recorded in `memory_source`, and PostgreSQL writes `memory_stats.json`
+  with the `memory.stat` breakdown at the peak. Other single-process engines report VmHWM.
 
-- NUMA pinning: every benchmark SUBPROCESS this harness spawns runs under
-  `numactl --cpubind=0 --membind=0`. The PostgreSQL SERVER itself is a pre-existing
-  system service, not spawned by this harness, so it is NOT NUMA-pinned by any of this -
-  only the BenchBase JDBC client that talks to it is. Pinning the Postgres server itself
-  would need a systemd unit override, outside this harness's scope. Umbra's server IS
-  spawned by this harness (a fresh container per run) but numactl in front of `docker run`
+- NUMA pinning: engine subprocesses use benchmark node 0 by default. Setup gives the
+  PostgreSQL systemd service matching `AllowedCPUs` and `AllowedMemoryNodes` constraints,
+  while its external BenchBase JDBC client uses the next NUMA node when available. Umbra's
+  server is spawned by this harness (a fresh container per run), but numactl in front of `docker run`
   itself would only pin the short-lived CLI invocation, not the actual server process the
   Docker daemon spawns - so it's pinned instead via the container's own cgroup
   (`--cpuset-cpus`/`--cpuset-mems`), verified against the live container's
@@ -513,7 +532,7 @@ this rather than papering over it:
   restarts it. With `--skip-postgres-tmpfs`, PostgreSQL's storage stays wherever it already was
   (almost certainly real disk) and is NOT part of the in-memory-only guarantee the other
   four engines now have. One caveat: tmpfs is volatile, so a reboot wipes it and
-  PostgreSQL will fail to start until you re-run the setup (it
+  PostgreSQL will fail to start until you run setup with `--postgres-only` (it
   restores from the `.diskbackup` automatically - there's no systemd-level auto-restore on
   boot, by design, see the docstring). The PostgreSQL wrapper verifies the live PGDATA
   filesystem and refuses to benchmark unless it is tmpfs-backed.
@@ -612,8 +631,8 @@ Every figure is written as both PDF and SVG into <run-dir>/plots/. Figures produ
 
   tpcc_throughput_by_engine       TPC-C New-Order/sec, one bar per engine
   ycsb_throughput_by_engine       YCSB A-F ops/sec, grouped bars per workload x engine
-  memory_by_engine                Peak RSS per workload x engine (PostgreSQL now
-                                  includes its actual server process-tree memory)
+  memory_by_engine                Peak measured memory per workload x engine (PostgreSQL
+                                  uses its service cgroup total when available)
   summary_all_workloads            Every workload's primary metric, log-scaled, one chart
   threads_sweep_<workload>         Throughput vs. thread count, one line per engine (and
                                   per GC variant where applicable) - one file per workload;
@@ -653,8 +672,9 @@ manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
     duration_secs            requested run duration
     primary_metric_name       new_order_per_sec (tpcc/htap_q1/htap_q6) or ops_per_sec (ycsb)
     primary_metric_value
-    peak_rss_mb               postgres/umbra report their server (process-tree/container)
-                            peak RSS (see section 5), not 0
+    peak_rss_mb               legacy column name: PostgreSQL reports service-cgroup charged
+                            memory when available; other engines report their documented
+                            process/container peak (see section 5)
     scan_p50_us / scan_p95_us / scan_p99_us / scan_avg_us / scan_count
                               scan/analytical-query latency (microseconds) - populated for
                               ycsb_e (scan ops), tpcc (BatStore's own HTAP scan-sweep only),
@@ -663,3 +683,5 @@ manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
     notes                     "FAILED ..." / "EXCEPTION: ..." on error (e.g.
                               vweaver_ermia_frugal on ANY sustained workload - see the
                               KNOWN ISSUE note in section 5), or blank
+    memory_source             exact measurement method, such as cgroup_v2_memory.current
+                            or process_rss

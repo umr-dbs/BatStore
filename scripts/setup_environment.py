@@ -129,6 +129,10 @@ PG_PASSWORD = common.PG_PASSWORD
 # fresh_scratch_dir), so PostgreSQL's storage gets the identical in-memory-only guarantee.
 PG_TMPFS_DATA_DIR = common.SCRATCH_ROOT / "postgresql_data"
 PG_DATABASE = common.PG_DATABASE
+# Fixed server-side memory envelope for the default 2M-row YCSB scale. Override and rerun
+# setup when intentionally benchmarking a larger scale; the PostgreSQL cgroup cap and
+# shared_buffers/effective_cache_size settings are derived from this one value.
+PG_MEMORY_BUDGET_GIB = common.POSTGRES_MEMORY_BUDGET_GIB
 
 
 def log(msg: str) -> None:
@@ -419,6 +423,15 @@ def step_postgres() -> None:
     if shutil.which("psql") is None:
         sys.exit("psql not found - install the 'postgresql' apt package first (see step above).")
 
+    # A previous benchmark setup may have symlinked PGDATA into volatile tmpfs. After a
+    # reboot that symlink still exists but its target is empty, so PostgreSQL cannot start
+    # and the connection probe below would fail before the normal tmpfs step at the end of
+    # setup got a chance to restore it. Recover that known state first.
+    real_datadir = _pg_data_directory()
+    if real_datadir.is_symlink() and not (PG_TMPFS_DATA_DIR / "PG_VERSION").exists():
+        log("PostgreSQL tmpfs data vanished after reboot; restoring it before server setup")
+        step_postgres_tmpfs()
+
     # Package installation does not necessarily start PostgreSQL (notably in containers
     # and on hosts where it was stopped previously).  Probe first so an already-running
     # installation remains untouched, then start the service and retry.  Previously the
@@ -462,18 +475,33 @@ def step_postgres() -> None:
         run(["sudo", "-u", "postgres", "psql", "-c",
              f"CREATE DATABASE {PG_DATABASE} OWNER {PG_ROLE};"])
 
-    # Default max_connections=100 is below compare_engines.py's own DEFAULT_THREADS ceiling
-    # (128, see compare_engines.py) - BenchBase opens roughly one JDBC connection per
-    # terminal/thread, so the highest thread-count sweep points fail to even connect
-    # without this. Sized well above 128 for headroom (superuser/monitoring connections
-    # also count against the limit).
-    max_conn = postgres_sql("SHOW max_connections")
-    if int(max_conn.stdout.strip()) < 300:
-        log("Raising PostgreSQL max_connections to 300 (default 100 is below the thread sweep's ceiling)")
-        run(["sudo", "-u", "postgres", "psql", "-c", "ALTER SYSTEM SET max_connections = 300;"])
-        run(["sudo", "systemctl", "restart", "postgresql"])
-    else:
-        print(f"max_connections already {max_conn.stdout.strip()}, skipping.")
+    # Give PostgreSQL an explicit, reproducible tuning profile instead of benchmarking
+    # the distro defaults (typically only 128MB shared_buffers) against embedded engines
+    # with a multi-GiB cache budget. PostgreSQL also relies on the kernel page cache, so
+    # reserve 25% of the cgroup budget for shared_buffers and expose the remaining 75% as
+    # the planner's effective-cache estimate. work_mem stays deliberately small because
+    # it may be consumed multiple times by each of 128 concurrent sessions.
+    shared_buffers_gib = max(1, round(PG_MEMORY_BUDGET_GIB * 0.25))
+    effective_cache_gib = max(1, round(PG_MEMORY_BUDGET_GIB * 0.75))
+    benchmark_settings = {
+        "max_connections": "200",
+        "shared_buffers": f"{shared_buffers_gib}GB",
+        "effective_cache_size": f"{effective_cache_gib}GB",
+        "work_mem": "4MB",
+        "maintenance_work_mem": "256MB",
+        "jit": "off",
+        "huge_pages": "try",
+        "random_page_cost": "1.1",
+        "checkpoint_timeout": "30min",
+        "max_wal_size": "16GB",
+        "checkpoint_completion_target": "0.9",
+    }
+    log(
+        "Applying PostgreSQL benchmark tuning "
+        f"(total memory budget {PG_MEMORY_BUDGET_GIB:g}GiB)"
+    )
+    for name, value in benchmark_settings.items():
+        postgres_sql(f"ALTER SYSTEM SET {name} = '{value}';")
 
     # Pin the actual PostgreSQL cluster service, not only BenchBase's JDBC process. The
     # cgroup constraints are inherited by the postmaster and every backend it forks.
@@ -488,8 +516,13 @@ def step_postgres() -> None:
     run([
         "sudo", "systemctl", "set-property", "--runtime", pg_unit,
         f"AllowedCPUs={cpu_list}", f"AllowedMemoryNodes={common.NUMA_NODE}",
+        f"MemoryMax={PG_MEMORY_BUDGET_GIB:g}G", "MemorySwapMax=0",
     ])
     run(["sudo", "systemctl", "restart", pg_unit])
+
+    for name, expected in benchmark_settings.items():
+        actual = postgres_sql(f"SHOW {name};").stdout.strip()
+        print(f"{name}={actual} (configured {expected})")
 
 
 def _pg_data_directory() -> Path:
@@ -529,9 +562,9 @@ def step_postgres_tmpfs() -> None:
     installed to auto-restore PG_TMPFS_DATA_DIR before postgresql.service starts (that
     would mean authoring/testing a systemd dependency override against a real production
     Postgres install, which this harness deliberately does not attempt sight-unseen). If
-    the machine reboots, PostgreSQL will fail to start (empty tmpfs dir) until you re-run
-    the setup script (the full default invocation is simplest), which restores tmpfs from
-    `.diskbackup` automatically, the same as a first run.
+    the machine reboots, PostgreSQL will fail to start (empty tmpfs dir) until you run
+    `python3 scripts/setup_environment.py --postgres-only`, which restores tmpfs from
+    `.diskbackup` automatically before applying the benchmark profile.
     """
     log("Relocating PostgreSQL's data directory onto tmpfs")
     if shutil.which("psql") is None:
@@ -785,6 +818,11 @@ def main() -> None:
         "--reuse-checkouts", action="store_true",
         help="do not delete and freshly clone setup-managed repositories (default is fresh)",
     )
+    parser.add_argument(
+        "--postgres-only", action="store_true",
+        help="only reapply the PostgreSQL benchmark profile, service limits, and tmpfs "
+             "setup; useful after a reboot or a tuning change",
+    )
     parser.add_argument("--skip-apt", action="store_true")
     parser.add_argument("--skip-wiredtiger", action="store_true")
     parser.add_argument("--skip-leanstore", action="store_true")
@@ -805,6 +843,21 @@ def main() -> None:
              "docstring before using this on a Postgres install you care about.",
     )
     args = parser.parse_args()
+
+    if args.postgres_only:
+        if args.skip_postgres:
+            parser.error("--postgres-only cannot be combined with --skip-postgres")
+        args.reuse_checkouts = True
+        args.skip_apt = True
+        args.skip_wiredtiger = True
+        args.skip_leanstore = True
+        args.skip_vweaver = True
+        args.skip_vweaver_frugal = True
+        args.skip_hugepages = True
+        args.skip_benchbase = True
+        args.skip_umbra = True
+        args.skip_batstore = True
+        args.skip_venv = True
 
     if not args.reuse_checkouts:
         step_fresh_checkouts()

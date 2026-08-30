@@ -6,13 +6,11 @@ Requires: local PostgreSQL server, an `admin`/`password` superuser role, and a
 `benchbase` database (see the plan's setup notes) - `--create=true` recreates
 the benchmark's own tables against that database on every run.
 
-Note: peak_rss_mb reports the PostgreSQL SERVER's memory, not the JDBC client's (those
-would be a different, misleading number - the client is just driving requests, not
-storing anything). Unlike the other three engines (a single process IS the storage
-engine), Postgres's engine is a whole process tree (postmaster + checkpointer + bgwriter +
-walwriter + one backend per connection) - see common.py's start_process_tree_sampler,
-which sums current RSS across that whole tree and tracks its peak, the cross-process
-analogue of the other engines' single-PID VmHWM sampling.
+Note: peak_rss_mb is the legacy manifest column name. For PostgreSQL it reports the
+SERVER cgroup's total charged memory during the measured execution phase (anonymous
+memory, shared memory, filesystem cache, and tmpfs), excluding the JDBC client. On hosts
+without cgroup-v2 accounting it falls back to summed RSS for the postmaster process tree.
+The source and peak memory.stat breakdown are preserved in memory_stats.json.
 
 NUMA-pinned: setup_environment.py constrains the actual PostgreSQL cluster service's
 cgroup to node 0's CPUs and memory nodes. This wrapper verifies the live postmaster's
@@ -21,9 +19,12 @@ common.run_and_track_rss.
 """
 from __future__ import annotations
 
+import atexit
+import json
 import os
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
@@ -45,6 +46,7 @@ def ensure_built() -> None:
 # Postgres has no literal "GC" flag; autovacuum (which cleans up dead/old row versions) is
 # the closest real, standard analog, toggled without a restart via ALTER SYSTEM + reload.
 SUPPORTS_GC_TOGGLE = True
+_AUTOVACUUM_DISABLED_BY_HARNESS = False
 
 # BenchBase's own transaction-type order for YCSB (config/postgres/sample_ycsb_config.xml):
 # ReadRecord, InsertRecord, ScanRecord, UpdateRecord, DeleteRecord, ReadModifyWriteRecord.
@@ -314,14 +316,45 @@ def _set_autovacuum(enabled: bool) -> None:
     """ALTER SYSTEM + reload takes effect immediately, no server restart needed. Runs
     directly (not through common.run_and_track_rss) - this is a tiny admin statement, not
     part of the measured workload, and shouldn't be numactl-wrapped or RSS-sampled."""
+    global _AUTOVACUUM_DISABLED_BY_HARNESS
     env = os.environ.copy()
     env["PGPASSWORD"] = common.PG_PASSWORD
     value = "on" if enabled else "off"
     subprocess.run(
         ["psql", "-U", common.PG_ROLE, "-h", "localhost", "-d", common.PG_DATABASE,
-         "-c", f"ALTER SYSTEM SET autovacuum = {value};", "-c", "SELECT pg_reload_conf();"],
+         "-v", "ON_ERROR_STOP=1",
+         "-c", f"ALTER SYSTEM SET autovacuum = {value};",
+         "-c", "SELECT pg_reload_conf();",
+         *([] if enabled else [
+             "-c", "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                   "WHERE backend_type = 'autovacuum worker';",
+         ])],
         env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
+    _wait_for_setting("autovacuum", value)
+    _AUTOVACUUM_DISABLED_BY_HARNESS = not enabled
+    if not enabled:
+        deadline = time.monotonic() + 5.0
+        while int(_psql_scalar(
+            "SELECT count(*) FROM pg_stat_activity "
+            "WHERE backend_type = 'autovacuum worker';"
+        )):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("autovacuum is off but an existing worker did not stop")
+            time.sleep(0.05)
+
+
+def _restore_autovacuum_at_exit() -> None:
+    """Do not leave the benchmark cluster with persistent autovacuum=off."""
+    if not _AUTOVACUUM_DISABLED_BY_HARNESS:
+        return
+    try:
+        _set_autovacuum(True)
+    except Exception as exc:  # pragma: no cover - best-effort interpreter shutdown path
+        print(f"WARNING: failed to restore PostgreSQL autovacuum=on: {exc}", file=sys.stderr)
+
+
+atexit.register(_restore_autovacuum_at_exit)
 
 
 def _psql_scalar(sql: str) -> str:
@@ -332,6 +365,117 @@ def _psql_scalar(sql: str) -> str:
         env=env, capture_output=True, text=True, check=True,
     )
     return result.stdout.strip()
+
+
+def _wait_for_setting(name: str, expected: str, timeout: float = 5.0) -> None:
+    """Wait for a SIGHUP-reloaded PostgreSQL setting to become visible."""
+    deadline = time.monotonic() + timeout
+    while True:
+        actual = _psql_scalar(f"SHOW {name};")
+        if actual == expected:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"failed to set {name}={expected}; live value is {actual!r}"
+            )
+        time.sleep(0.05)
+
+
+def _verify_benchmark_configuration(
+    postmaster_pid: int, autovacuum_enabled: bool,
+) -> dict:
+    """Fail before a long sweep if setup's PostgreSQL profile is not active."""
+    budget_bytes = int(common.POSTGRES_MEMORY_BUDGET_GIB * 1024 ** 3)
+    expected_shared_bytes = max(
+        1, round(common.POSTGRES_MEMORY_BUDGET_GIB * 0.25),
+    ) * 1024 ** 3
+    expected_cache_bytes = max(
+        1, round(common.POSTGRES_MEMORY_BUDGET_GIB * 0.75),
+    ) * 1024 ** 3
+    snapshot = {
+        "memory_budget_gib": common.POSTGRES_MEMORY_BUDGET_GIB,
+        "shared_buffers_bytes": int(_psql_scalar(
+            "SELECT pg_size_bytes(current_setting('shared_buffers'));",
+        )),
+        "effective_cache_size_bytes": int(_psql_scalar(
+            "SELECT pg_size_bytes(current_setting('effective_cache_size'));",
+        )),
+        "work_mem_bytes": int(_psql_scalar(
+            "SELECT pg_size_bytes(current_setting('work_mem'));",
+        )),
+        "max_connections": int(_psql_scalar("SHOW max_connections;")),
+        "jit": _psql_scalar("SHOW jit;"),
+        "autovacuum": _psql_scalar("SHOW autovacuum;"),
+        "fsync": _psql_scalar("SHOW fsync;"),
+        "synchronous_commit": _psql_scalar("SHOW synchronous_commit;"),
+        "full_page_writes": _psql_scalar("SHOW full_page_writes;"),
+        "random_page_cost": float(_psql_scalar("SHOW random_page_cost;")),
+        "checkpoint_timeout_seconds": int(_psql_scalar(
+            "SELECT setting FROM pg_settings WHERE name='checkpoint_timeout';",
+        )),
+        "max_wal_size_bytes": int(_psql_scalar(
+            "SELECT pg_size_bytes(current_setting('max_wal_size'));",
+        )),
+    }
+    errors = []
+    if snapshot["shared_buffers_bytes"] != expected_shared_bytes:
+        errors.append(
+            f"shared_buffers={snapshot['shared_buffers_bytes']} bytes "
+            f"(expected {expected_shared_bytes})"
+        )
+    if snapshot["effective_cache_size_bytes"] != expected_cache_bytes:
+        errors.append(
+            f"effective_cache_size={snapshot['effective_cache_size_bytes']} bytes "
+            f"(expected {expected_cache_bytes})"
+        )
+    if snapshot["work_mem_bytes"] != 4 * 1024 ** 2:
+        errors.append(f"work_mem={snapshot['work_mem_bytes']} bytes (expected 4MiB)")
+    if snapshot["max_connections"] < 160:
+        errors.append(f"max_connections={snapshot['max_connections']} (expected at least 160)")
+    if snapshot["jit"] != "off":
+        errors.append(f"jit={snapshot['jit']} (expected off)")
+    expected_autovacuum = "on" if autovacuum_enabled else "off"
+    if snapshot["autovacuum"] != expected_autovacuum:
+        errors.append(
+            f"autovacuum={snapshot['autovacuum']} (expected {expected_autovacuum})"
+        )
+    for setting in ("fsync", "synchronous_commit", "full_page_writes"):
+        if snapshot[setting] != "off":
+            errors.append(f"{setting}={snapshot[setting]} (expected off)")
+    if abs(snapshot["random_page_cost"] - 1.1) > 1e-9:
+        errors.append(
+            f"random_page_cost={snapshot['random_page_cost']} (expected 1.1)"
+        )
+    if snapshot["checkpoint_timeout_seconds"] != 30 * 60:
+        errors.append(
+            f"checkpoint_timeout={snapshot['checkpoint_timeout_seconds']}s (expected 1800s)"
+        )
+    if snapshot["max_wal_size_bytes"] != 16 * 1024 ** 3:
+        errors.append(
+            f"max_wal_size={snapshot['max_wal_size_bytes']} bytes (expected 16GiB)"
+        )
+
+    cgroup_dir = common._cgroup_v2_dir_for_pid(postmaster_pid)
+    if cgroup_dir is not None:
+        snapshot["cgroup"] = str(cgroup_dir)
+        for filename, expected in (("memory.max", budget_bytes), ("memory.swap.max", 0)):
+            try:
+                raw_value = (cgroup_dir / filename).read_text().strip()
+                actual = None if raw_value == "max" else int(raw_value)
+            except (OSError, ValueError):
+                actual = None
+            snapshot[filename] = actual
+            if actual != expected:
+                errors.append(f"{filename}={actual!r} (expected {expected})")
+
+    if errors:
+        sys.exit(
+            "PostgreSQL benchmark tuning is not active:\n  - "
+            + "\n  - ".join(errors)
+            + "\nRe-run `python3 scripts/setup_environment.py --postgres-only` "
+              "before benchmarking."
+        )
+    return snapshot
 
 
 def _verify_tmpfs_datadir() -> None:
@@ -352,7 +496,7 @@ def _verify_tmpfs_datadir() -> None:
             f"PostgreSQL's data_directory ({data_dir}) is not tmpfs-backed (fstype={fstype!r}) - "
             f"refusing to run, since every other engine in this harness is guaranteed "
             f"in-memory-only (see common.fresh_scratch_dir). Run "
-            f"`python scripts/setup_environment.py --reuse-checkouts` first (tmpfs doesn't "
+            f"`python3 scripts/setup_environment.py --postgres-only` first (tmpfs doesn't "
             f"survive a reboot, so this can go stale)."
         )
 
@@ -375,12 +519,50 @@ def _set_unsafe_durability() -> None:
     env["PGPASSWORD"] = common.PG_PASSWORD
     subprocess.run(
         ["psql", "-U", common.PG_ROLE, "-h", "localhost", "-d", common.PG_DATABASE,
+         "-v", "ON_ERROR_STOP=1",
          "-c", "ALTER SYSTEM SET synchronous_commit = off;",
          "-c", "ALTER SYSTEM SET fsync = off;",
          "-c", "ALTER SYSTEM SET full_page_writes = off;",
          "-c", "SELECT pg_reload_conf();"],
         env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
+    for setting in ("fsync", "synchronous_commit", "full_page_writes"):
+        _wait_for_setting(setting, "off")
+
+
+def _prepare_measured_execution() -> None:
+    """Finish load-time maintenance before throughput/memory measurement starts."""
+    env = os.environ.copy()
+    env["PGPASSWORD"] = common.PG_PASSWORD
+    subprocess.run(
+        ["psql", "-U", common.PG_ROLE, "-h", "localhost", "-d", common.PG_DATABASE,
+         "-v", "ON_ERROR_STOP=1", "-c", "ANALYZE;", "-c", "CHECKPOINT;"],
+        env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+
+
+def _start_server_memory_sampler(postmaster_pid: int):
+    sampler = common.start_cgroup_memory_sampler(postmaster_pid)
+    if sampler is not None:
+        return sampler
+    sampler = common.start_process_tree_sampler(postmaster_pid)
+    sampler[2]["source"] = "summed_process_tree_rss"
+    return sampler
+
+
+def _finish_server_memory_sampler(sampler, output_dir: Path) -> tuple[float, str]:
+    stop, thread, peak_box = sampler
+    stop.set()
+    thread.join()
+    metadata = {
+        "source": peak_box.get("source", "unknown"),
+        "peak_memory_mb": peak_box["mb"],
+        "current_memory_mb_at_last_sample": peak_box.get("current_mb"),
+        "cgroup": peak_box.get("cgroup"),
+        "memory_stat_bytes_at_peak": peak_box.get("stat", {}),
+    }
+    (output_dir / "memory_stats.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    return peak_box["mb"], metadata["source"]
 
 
 def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True,
@@ -411,8 +593,14 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     if not common.NO_DURABILITY:
         _verify_tmpfs_datadir()
     _set_unsafe_durability()
+    _set_autovacuum(gc != "off")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    server_config = _verify_benchmark_configuration(postmaster_pid, gc != "off")
+    server_config["gc_enabled"] = gc
+    (output_dir / "server_config.json").write_text(
+        json.dumps(server_config, indent=2) + "\n"
+    )
     results_dir = output_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "config.xml"
@@ -479,32 +667,59 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         metric_name = "ops_per_sec"
 
     _assert_unlimited_config(config_path)
-    print(f"PostgreSQL BenchBase config: {config_path} (rate=unlimited, terminals={threads})")
-    _set_autovacuum(gc != "off")
-
-    tree_sampler = common.start_process_tree_sampler(postmaster_pid)
-
-    create_load = ["--create=true", "--load=true"] if reload else ["--create=false", "--load=false"]
-    args = [
+    client_numa_node = common.external_client_numa_node()
+    print(
+        f"PostgreSQL BenchBase config: {config_path} "
+        f"(rate=unlimited, terminals={threads}, client_numa_node={client_numa_node})"
+    )
+    base_args = [
         "java", "-Duser.language=en", "-Duser.country=US", "-jar", str(BENCHBASE_JAR),
         "-b", bench_type, "-c", str(config_path),
-        *create_load, "--execute=true",
-        "-d", str(results_dir),
     ]
     timeout = common.default_subprocess_timeout(duration)
     bench_env = os.environ.copy()
     bench_env["YCSB_READ_PAYLOAD"] = "true" if read_payload else "false"
     bench_env["YCSB_U64_PAYLOAD"] = "true" if ycsb_payload == "u64" else "false"
-    returncode, _client_rss_unused = common.run_and_track_rss(
-        args, cwd=BENCHBASE_HOME, env=bench_env, stdout_path=output_dir / "stdout.log", timeout=timeout,
-    )
 
-    server_peak_rss_mb = 0.0
-    if tree_sampler:
-        stop, thread, peak_box = tree_sampler
-        stop.set()
-        thread.join()
-        server_peak_rss_mb = peak_box["mb"]
+    if reload:
+        load_results_dir = output_dir / "load_results"
+        load_results_dir.mkdir(parents=True, exist_ok=True)
+        load_args = [
+            *base_args, "--create=true", "--load=true", "--execute=false",
+            "-d", str(load_results_dir),
+        ]
+        load_returncode, _load_client_rss_unused = common.run_and_track_rss(
+            load_args, cwd=BENCHBASE_HOME, env=bench_env,
+            stdout_path=output_dir / "load_stdout.log", timeout=timeout,
+            numa_node=client_numa_node,
+        )
+        if load_returncode != 0:
+            notes = (
+                f"TIMEOUT during create/load after {timeout:.0f}s, see load_stdout.log"
+                if load_returncode is None
+                else f"FAILED create/load exit={load_returncode}, see load_stdout.log"
+            )
+            return common.NormalizedResult(
+                "postgres", workload, scale.label, duration, metric_name, 0.0, 0.0,
+                threads=threads, gc_enabled=gc, notes=notes, memory_source="not_measured",
+            )
+
+    _prepare_measured_execution()
+    memory_sampler = _start_server_memory_sampler(postmaster_pid)
+    execute_args = [
+        *base_args, "--create=false", "--load=false", "--execute=true",
+        "-d", str(results_dir),
+    ]
+    try:
+        returncode, _client_rss_unused = common.run_and_track_rss(
+            execute_args, cwd=BENCHBASE_HOME, env=bench_env,
+            stdout_path=output_dir / "stdout.log", timeout=timeout,
+            numa_node=client_numa_node,
+        )
+    finally:
+        server_peak_rss_mb, server_memory_source = _finish_server_memory_sampler(
+            memory_sampler, output_dir,
+        )
 
     if returncode != 0:
         notes = f"TIMEOUT after {timeout:.0f}s, see stdout.log" if returncode is None else \
@@ -512,7 +727,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         return common.NormalizedResult(
             "postgres", workload, scale.label, duration, metric_name, 0.0, server_peak_rss_mb,
             threads=threads, gc_enabled=gc,
-            notes=notes,
+            notes=notes, memory_source=server_memory_source,
         )
 
     if workload in (["tpcc"] + common.HTAP_WORKLOADS):
@@ -541,4 +756,5 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
         scan_p50_us=latency["p50"], scan_p95_us=latency["p95"], scan_p99_us=latency["p99"],
         scan_avg_us=latency["avg"], scan_count=latency["count"],
         notes="" if postmaster_pid else "peak_rss unavailable (couldn't locate the postmaster PID)",
+        memory_source=server_memory_source,
     )
