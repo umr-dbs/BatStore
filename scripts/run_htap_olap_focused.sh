@@ -23,7 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 exec python3 "$SCRIPT_DIR/run_htap_analytical_sweep.py" \
-    --engines batstore \
+    --engines batstore,postgres,libmdbx,wiredtiger \
     --workloads htap_q1,htap_q6 \
     --oltp-terminals 2 \
     --warehouses 16 \

@@ -1,0 +1,108 @@
+diff --git a/src/main/java/com/oltpbenchmark/util/SQLUtil.java b/src/main/java/com/oltpbenchmark/util/SQLUtil.java
+index 6b01f9e..db08f62 100644
+--- a/src/main/java/com/oltpbenchmark/util/SQLUtil.java
++++ b/src/main/java/com/oltpbenchmark/util/SQLUtil.java
+@@ -607,6 +607,25 @@ WHERE t.name='%s' AND c.name='%s'
+               continue;
+             }
+ 
++            if (catalog_tbl.getColumnByName(col_name) != null) {
++              // Umbra (umbra-db.com), reached through this same POSTGRES JDBC target (see
++              // engines/umbra_benchbase.py), returns a duplicate getColumns() row for
++              // every DECIMAL/NUMERIC column - confirmed live (e.g. a 5-column TPC-C
++              // "item" table with one NUMERIC column comes back as 6 rows, with that
++              // column's name repeated at consecutive ORDINAL_POSITIONs). Left unfixed,
++              // the extra Column here shifts every later column's index and inflates the
++              // generated INSERT statement's placeholder count past what any loader
++              // actually binds. Real PostgreSQL and every other engine here never repeats
++              // a column name for one table, so this is a no-op for them.
++              LOG.warn(
++                  "getColumns() returned duplicate column [{}] for table [{}] on database "
++                      + "type [{}] - keeping only the first occurrence",
++                  col_name,
++                  table_name,
++                  databaseType);
++              continue;
++            }
++
+             int col_type = col_rs.getInt("DATA_TYPE");
+             Integer col_size = col_rs.getInt("COLUMN_SIZE");
+             boolean col_nullable = col_rs.getString("IS_NULLABLE").equalsIgnoreCase("YES");
+@@ -618,33 +637,52 @@ WHERE t.name='%s' AND c.name='%s'
+           }
+         }
+ 
+-        try (ResultSet idx_rs = md.getIndexInfo(catalog, schema, table_name, false, false)) {
+-          while (idx_rs.next()) {
+-            int idx_type = idx_rs.getShort("TYPE");
+-            if (idx_type == DatabaseMetaData.tableIndexStatistic) {
+-              continue;
+-            }
+-            boolean idx_unique = (!idx_rs.getBoolean("NON_UNIQUE"));
+-            String idx_name = idx_rs.getString("INDEX_NAME");
+-            int idx_col_pos = idx_rs.getInt("ORDINAL_POSITION") - 1;
+-            String idx_col_name = idx_rs.getString("COLUMN_NAME");
+-            String sort = idx_rs.getString("ASC_OR_DESC");
+-            SortDirectionType idx_direction;
+-            if (sort != null) {
+-              idx_direction =
+-                  sort.equalsIgnoreCase("A") ? SortDirectionType.ASC : SortDirectionType.DESC;
+-            } else {
+-              idx_direction = null;
++        try {
++          try (ResultSet idx_rs = md.getIndexInfo(catalog, schema, table_name, false, false)) {
++            while (idx_rs.next()) {
++              int idx_type = idx_rs.getShort("TYPE");
++              if (idx_type == DatabaseMetaData.tableIndexStatistic) {
++                continue;
++              }
++              boolean idx_unique = (!idx_rs.getBoolean("NON_UNIQUE"));
++              String idx_name = idx_rs.getString("INDEX_NAME");
++              int idx_col_pos = idx_rs.getInt("ORDINAL_POSITION") - 1;
++              String idx_col_name = idx_rs.getString("COLUMN_NAME");
++              String sort = idx_rs.getString("ASC_OR_DESC");
++              SortDirectionType idx_direction;
++              if (sort != null) {
++                idx_direction =
++                    sort.equalsIgnoreCase("A") ? SortDirectionType.ASC : SortDirectionType.DESC;
++              } else {
++                idx_direction = null;
++              }
++
++              Index catalog_idx = catalog_tbl.getIndex(idx_name);
++              if (catalog_idx == null) {
++                catalog_idx = new Index(idx_name, separator, catalog_tbl, idx_type, idx_unique);
++                catalog_tbl.addIndex(catalog_idx);
++              }
++
++              catalog_idx.addColumn(idx_col_name, idx_direction, idx_col_pos);
+             }
+-
+-            Index catalog_idx = catalog_tbl.getIndex(idx_name);
+-            if (catalog_idx == null) {
+-              catalog_idx = new Index(idx_name, separator, catalog_tbl, idx_type, idx_unique);
+-              catalog_tbl.addIndex(catalog_idx);
+-            }
+-
+-            catalog_idx.addColumn(idx_col_name, idx_direction, idx_col_pos);
+           }
++        } catch (SQLException ex) {
++          // Umbra (umbra-db.com), reached through this same POSTGRES JDBC target (see
++          // engines/umbra_benchbase.py), does not implement
++          // information_schema._pg_expandarray(), which pgjdbc's driver-generated SQL for
++          // DatabaseMetaData.getIndexInfo() depends on ("unknown function or overload
++          // _pg_expandarray(smallint[])") - confirmed live. Every other caller here
++          // (getTables/getColumns/getImportedKeys above and below) works fine against
++          // Umbra; only this one JDBC metadata call has no working equivalent there, and
++          // BenchBase's own loaders/workers use Catalog's column/FK info, not per-table
++          // Index objects, for basic insert/query generation - so degrade to "no index
++          // metadata for this table" instead of failing the whole catalog build.
++          LOG.warn(
++              "getIndexInfo() failed for table [{}] on database type [{}] - continuing "
++                  + "without index metadata for it: {}",
++              table_name,
++              databaseType,
++              ex.getMessage());
+         }
+ 
+         tables.put(table_name, catalog_tbl);

@@ -1,0 +1,48 @@
+diff --git a/src/main/java/com/oltpbenchmark/api/BenchmarkModule.java b/src/main/java/com/oltpbenchmark/api/BenchmarkModule.java
+index ceb6327..410acc2 100644
+--- a/src/main/java/com/oltpbenchmark/api/BenchmarkModule.java
++++ b/src/main/java/com/oltpbenchmark/api/BenchmarkModule.java
+@@ -29,6 +29,7 @@ import java.io.InputStream;
+ import java.sql.Connection;
+ import java.sql.DriverManager;
+ import java.sql.SQLException;
++import java.sql.Statement;
+ import java.util.*;
+ import org.apache.commons.lang3.StringUtils;
+ import org.slf4j.Logger;
+@@ -80,13 +81,31 @@ public abstract class BenchmarkModule {
+   // --------------------------------------------------------------------------
+ 
+   public final Connection makeConnection() throws SQLException {
+-
++    Connection conn;
+     if (StringUtils.isEmpty(workConf.getUsername())) {
+-      return DriverManager.getConnection(workConf.getUrl());
++      conn = DriverManager.getConnection(workConf.getUrl());
+     } else {
+-      return DriverManager.getConnection(
+-          workConf.getUrl(), workConf.getUsername(), workConf.getPassword());
++      conn =
++          DriverManager.getConnection(
++              workConf.getUrl(), workConf.getUsername(), workConf.getPassword());
++    }
++    if (workConf.getDatabaseType() == DatabaseType.POSTGRES) {
++      // Umbra (umbra-db.com), reached through this same POSTGRES JDBC target (see
++      // engines/umbra_benchbase.py), returns the literal unresolved "$user" token from
++      // current_schema()/Connection.getSchema() instead of resolving it via search_path
++      // like real PostgreSQL does - confirmed live that neither a JDBC currentSchema/
++      // options connection property nor ALTER DATABASE/ROLE ... SET search_path (both
++      // "not implemented yet" there) changes that; only an actual runtime SET does. Left
++      // unfixed, every DatabaseMetaData.getTables() call this class's own
++      // getCatalogDirect() (SQLUtil.java) relies on silently finds nothing, so every table
++      // lookup fails. Harmless for a real PostgreSQL server too - this harness never
++      // creates a schema named after its own connecting role, so search_path there
++      // already effectively resolves to plain "public".
++      try (Statement st = conn.createStatement()) {
++        st.execute("SET search_path TO public");
++      }
+     }
++    return conn;
+   }
+ 
+   private String afterLoadScriptPath = null;

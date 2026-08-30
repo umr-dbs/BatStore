@@ -1,0 +1,113 @@
+diff --git a/src/main/java/com/oltpbenchmark/WorkloadConfiguration.java b/src/main/java/com/oltpbenchmark/WorkloadConfiguration.java
+index 5914eb6..e8033b1 100644
+--- a/src/main/java/com/oltpbenchmark/WorkloadConfiguration.java
++++ b/src/main/java/com/oltpbenchmark/WorkloadConfiguration.java
+@@ -63,6 +63,18 @@ public class WorkloadConfiguration {
+    */
+   private boolean reconnectOnConnectionFailure = false;
+ 
++  /**
++   * If false, YCSB's ReadModifyWriteRecord drops "FOR UPDATE" from its read - a plain read then
++   * a separate unlocked write instead of a locking read-modify-write. True (the real YCSB
++   * "workload F" semantics) everywhere by default; only Umbra (see engines/umbra_benchbase.py)
++   * sets this false, since it does not implement "FOR UPDATE" at all ("ERROR: locking specifier
++   * not implemented yet", confirmed live) and every RMW transaction would otherwise fail
++   * outright. This does trade away read-modify-write's lost-update protection under concurrent
++   * writers to the same key - accepted here as a throughput-benchmark compromise, not a
++   * transparent equivalent.
++   */
++  private boolean selectForUpdate = true;
++
+   public String getBenchmarkName() {
+     return benchmarkName;
+   }
+@@ -181,6 +193,22 @@ public class WorkloadConfiguration {
+     this.reconnectOnConnectionFailure = reconnectOnConnectionFailure;
+   }
+ 
++  /**
++   * @return @see selectForUpdate member docs for behavior.
++   */
++  public boolean getSelectForUpdate() {
++    return selectForUpdate;
++  }
++
++  /**
++   * Used by the configuration loader at startup. @see selectForUpdate member docs for behavior.
++   *
++   * @param selectForUpdate
++   */
++  public void setSelectForUpdate(boolean selectForUpdate) {
++    this.selectForUpdate = selectForUpdate;
++  }
++
+   /** Initiate a new benchmark and workload state */
+   public void initializeState(BenchmarkState benchmarkState) {
+     this.workloadState = new WorkloadState(benchmarkState, phases, terminals);
+@@ -407,6 +435,8 @@ public class WorkloadConfiguration {
+         + '\''
+         + ", reconnectOnFailure="
+         + reconnectOnConnectionFailure
++        + ", selectForUpdate="
++        + selectForUpdate
+         + ", newConnectionPerTxn="
+         + newConnectionPerTxn
+         + ", batchSize="
+diff --git a/src/main/java/com/oltpbenchmark/DBWorkload.java b/src/main/java/com/oltpbenchmark/DBWorkload.java
+index 11ab05c..e619cfe 100644
+--- a/src/main/java/com/oltpbenchmark/DBWorkload.java
++++ b/src/main/java/com/oltpbenchmark/DBWorkload.java
+@@ -143,6 +143,7 @@ public class DBWorkload {
+       wrkld.setNewConnectionPerTxn(xmlConfig.getBoolean("newConnectionPerTxn", false));
+       wrkld.setReconnectOnConnectionFailure(
+           xmlConfig.getBoolean("reconnectOnConnectionFailure", false));
++      wrkld.setSelectForUpdate(xmlConfig.getBoolean("selectForUpdate", true));
+ 
+       int terminals = xmlConfig.getInt("terminals[not(@bench)]", 0);
+       terminals = xmlConfig.getInt("terminals" + pluginTest, terminals);
+diff --git a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadModifyWriteRecord.java b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadModifyWriteRecord.java
+index fe52635..47c1eb7 100644
+--- a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadModifyWriteRecord.java
++++ b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/procedures/ReadModifyWriteRecord.java
+@@ -28,8 +28,12 @@ import java.sql.ResultSet;
+ import java.sql.SQLException;
+ 
+ public class ReadModifyWriteRecord extends Procedure {
+-  public final SQLStmt selectStmt =
++  // "FOR UPDATE" (real YCSB "workload F" semantics) unless the workload configuration turns
++  // it off - see WorkloadConfiguration.selectForUpdate's own doc for why (Umbra only).
++  public final SQLStmt selectStmtForUpdate =
+       new SQLStmt("SELECT * FROM " + TABLE_NAME + " where YCSB_KEY=? FOR UPDATE");
++  public final SQLStmt selectStmtPlain =
++      new SQLStmt("SELECT * FROM " + TABLE_NAME + " where YCSB_KEY=?");
+   public final SQLStmt updateAllStmt =
+       new SQLStmt(
+           "UPDATE "
+@@ -38,10 +42,12 @@ public class ReadModifyWriteRecord extends Procedure {
+               + "FIELD6=?,FIELD7=?,FIELD8=?,FIELD9=?,FIELD10=? WHERE YCSB_KEY=?");
+ 
+   // FIXME: The value in ysqb is a byteiterator
+-  public void run(Connection conn, int keyname, String[] fields, String[] results)
++  public void run(
++      Connection conn, int keyname, String[] fields, String[] results, boolean selectForUpdate)
+       throws SQLException {
+ 
+     // Fetch it!
++    SQLStmt selectStmt = selectForUpdate ? selectStmtForUpdate : selectStmtPlain;
+     try (PreparedStatement stmt = this.getPreparedStatement(conn, selectStmt)) {
+       stmt.setInt(1, keyname);
+       try (ResultSet r = stmt.executeQuery()) {
+diff --git a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java
+index 614ddb8..98e52b8 100644
+--- a/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java
++++ b/src/main/java/com/oltpbenchmark/benchmarks/ycsb/YCSBWorker.java
+@@ -120,7 +125,8 @@ class YCSBWorker extends Worker<YCSBBenchmark> {
+   private void readModifyWriteRecord(Connection conn) throws SQLException {
+     int keyname = readRecord.nextInt();
+     this.buildParameters();
+-    this.procReadModifyWriteRecord.run(conn, keyname, this.params, this.results);
++    this.procReadModifyWriteRecord.run(
++        conn, keyname, this.params, this.results, this.configuration.getSelectForUpdate());
+   }
+ 
+   private void insertRecord(Connection conn) throws SQLException {
