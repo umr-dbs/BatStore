@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Plot figures for a scripts/run_skew_sweep.py run: one figure per YCSB workload (a-f),
+"""Plot YCSB A-F or S-YCSB skew-sweep throughput, memory, and scan latency.
+
+For each workload, the primary figures use skew on the x-axis and throughput on the
+y-axis. YCSB-E and S-YCSB also produce p50/p95/p99 scan-latency figures whenever the
+manifest contains latency samples.
+
+For regular YCSB, one figure is produced per YCSB workload (a-f),
 x-axis = skew factor (uniform, then Zipfian theta 0.1/0.4/0.8/0.99/1.4), y-axis =
 throughput (ops/sec), with one line per thread count. One figure is produced per engine
 (so BatStore/libmdbx/PostgreSQL/WiredTiger each get their own file and can also be
@@ -26,6 +32,7 @@ from plot_styles import (
     ENGINE_LABELS, apply_compact_layout, engine_line_style, engine_sort_key,
 )
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
+SKEW_WORKLOADS = YCSB_WORKLOADS + ["s_htap"]
 
 _SKEW_RE = re.compile(r"skew=(\S+)")
 
@@ -37,6 +44,10 @@ def skew_label(config_label: str) -> str:
 
 def skew_sort_key(skew: str):
     return (-1.0, "uniform") if skew == "uniform" else (float(skew), skew)
+
+
+def workload_label(workload: str) -> str:
+    return "S-YCSB" if workload == "s_htap" else f"YCSB {workload.split('_')[1].upper()}"
 
 
 def load_manifest(run_dir: Path) -> pd.DataFrame:
@@ -105,7 +116,7 @@ def plot_workload_per_engine(
         ax.set_ylabel("Throughput (ops/sec)")
         ax.set_title(
             f"{ENGINE_LABELS.get(engine, engine)} - "
-            f"YCSB {workload.split('_')[1].upper()} vs. skew - GC {gc_choice}"
+            f"{workload_label(workload)} vs. skew - GC {gc_choice}"
         )
         ax.legend(title="Threads", fontsize="small")
         ax.grid(True, alpha=0.3)
@@ -132,7 +143,7 @@ def plot_workload_all_engines(
     ax.set_xlabel("Skew factor (Zipfian theta; 'uniform' = theta 0.0)")
     ax.set_ylabel("Throughput (ops/sec)")
     ax.set_title(
-        f"YCSB {workload.split('_')[1].upper()} vs. skew "
+        f"{workload_label(workload)} vs. skew "
         f"(threads={ref_threads}) - GC {gc_choice}"
     )
     ax.legend(fontsize="small")
@@ -145,15 +156,91 @@ def plot_workload_all_engines(
     plt.close(fig)
 
 
+def _latency_rows(df: pd.DataFrame, workload: str) -> pd.DataFrame:
+    """Successful rows with an actual scan-latency sample population."""
+    return df[
+        (df["workload"] == workload)
+        & (pd.to_numeric(df["scan_count"], errors="coerce").fillna(0) > 0)
+    ].copy()
+
+
+def plot_latency_per_engine(
+    df: pd.DataFrame, workload: str, gc_choice: str, out_dir: Path,
+) -> None:
+    """Skew-to-latency curves per engine, with one panel per percentile."""
+    sub = _latency_rows(df, workload)
+    if sub.empty:
+        return
+    metrics = (("scan_p50_us", "p50"), ("scan_p95_us", "p95"), ("scan_p99_us", "p99"))
+    for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
+        esub = sub[sub["engine"] == engine]
+        skews = sorted(esub["skew"].unique(), key=skew_sort_key)
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4.6), squeeze=False, sharex=True)
+        for idx, (column, percentile) in enumerate(metrics):
+            ax = axes[0][idx]
+            for threads in sorted(esub["threads"].unique()):
+                tsub = esub[esub["threads"] == threads].set_index("skew").reindex(skews)
+                ax.plot(skews, tsub[column], marker="o", label=f"{threads} threads")
+            ax.set_xlabel("Skew factor")
+            ax.set_ylabel(f"{percentile} scan latency (µs)")
+            ax.set_title(percentile)
+            ax.grid(True, alpha=0.3)
+            if idx == 0:
+                ax.legend(title="Total threads", fontsize="small")
+        fig.suptitle(
+            f"{ENGINE_LABELS.get(engine, engine)} - {workload_label(workload)} "
+            f"scan latency vs. skew - GC {gc_choice}"
+        )
+        _save(fig, out_dir, f"skew_{workload}_latency_{engine}_gc_{gc_choice}")
+        plt.close(fig)
+
+
+def plot_latency_all_engines(
+    df: pd.DataFrame, workload: str, gc_choice: str, out_dir: Path, ref_threads: int,
+) -> None:
+    """Cross-engine skew-to-latency curves at one reference thread count."""
+    sub = _latency_rows(df, workload)
+    sub = sub[sub["threads"] == ref_threads]
+    if sub.empty:
+        return
+    metrics = (("scan_p50_us", "p50"), ("scan_p95_us", "p95"), ("scan_p99_us", "p99"))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.6), squeeze=False, sharex=True)
+    for idx, (column, percentile) in enumerate(metrics):
+        ax = axes[0][idx]
+        for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
+            esub = sub[sub["engine"] == engine]
+            skews = sorted(esub["skew"].unique(), key=skew_sort_key)
+            esub = esub.set_index("skew").reindex(skews)
+            ax.plot(
+                skews, esub[column], label=ENGINE_LABELS.get(engine, engine),
+                **engine_line_style(engine),
+            )
+        ax.set_xlabel("Skew factor")
+        ax.set_ylabel(f"{percentile} scan latency (µs)")
+        ax.set_title(percentile)
+        ax.grid(True, alpha=0.3)
+        if idx == 0:
+            ax.legend(fontsize="small")
+    fig.suptitle(
+        f"{workload_label(workload)} scan latency vs. skew "
+        f"(threads={ref_threads}) - GC {gc_choice}"
+    )
+    _save(
+        fig, out_dir,
+        f"skew_{workload}_latency_all_engines_threads{ref_threads}_gc_{gc_choice}",
+    )
+    plt.close(fig)
+
+
 def plot_workloads_overview(
     df: pd.DataFrame, gc_choice: str, out_dir: Path, ref_threads: int,
     value_column: str, ylabel: str, metric_name: str,
 ) -> None:
-    """Plot all available YCSB workloads as a compact engine-comparison grid."""
+    """Plot all available YCSB/S-YCSB workloads as an engine-comparison grid."""
     sub = df[
-        df["workload"].isin(YCSB_WORKLOADS) & (df["threads"] == ref_threads)
+        df["workload"].isin(SKEW_WORKLOADS) & (df["threads"] == ref_threads)
     ]
-    workloads = [workload for workload in YCSB_WORKLOADS if workload in set(sub["workload"])]
+    workloads = [workload for workload in SKEW_WORKLOADS if workload in set(sub["workload"])]
     if not workloads:
         return
 
@@ -179,7 +266,7 @@ def plot_workloads_overview(
                 **engine_line_style(engine),
             )
             legend_handles.setdefault(label, line)
-        ax.set_title(f"YCSB {workload.split('_')[1].upper()}")
+        ax.set_title(workload_label(workload))
         ax.set_xlabel("Skew factor")
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
@@ -197,7 +284,7 @@ def plot_workloads_overview(
         if "cgroup_v2_memory.current" in sources and len(sources) > 1:
             source_note = " — cgroup total where available; otherwise process RSS"
     fig.suptitle(
-        f"YCSB workload {metric_name} overview "
+        f"YCSB/S-YCSB workload {metric_name} overview "
         f"(threads={ref_threads}, GC {gc_choice}){source_note}"
     )
     if legend_handles:
@@ -239,7 +326,7 @@ def main() -> None:
     out_dir = args.run_dir / "plots"
     prepare_output_dir(out_dir)
 
-    for workload in YCSB_WORKLOADS:
+    for workload in SKEW_WORKLOADS:
         workload_df = df[df["workload"] == workload]
         if workload_df.empty:
             continue
@@ -247,6 +334,10 @@ def main() -> None:
         for gc_choice, gc_df in gc_slices(workload_df):
             plot_workload_per_engine(gc_df, workload, gc_choice, out_dir)
             plot_workload_all_engines(
+                gc_df, workload, gc_choice, out_dir, ref_threads,
+            )
+            plot_latency_per_engine(gc_df, workload, gc_choice, out_dir)
+            plot_latency_all_engines(
                 gc_df, workload, gc_choice, out_dir, ref_threads,
             )
 

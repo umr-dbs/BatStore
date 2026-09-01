@@ -457,6 +457,8 @@ class Scale:
 TINY_SCALE = Scale(
     tpcc_warehouses=1, tpcc_terminals=2, tpcc_duration=10,
     ycsb_records=10_000, ycsb_threads=2, ycsb_duration=10,
+    s_htap_record_count=10_000, s_htap_duration=10,
+    s_htap_hot_window=1_000, s_htap_olap_span=3_000,
     dram_gib=2.0, label="tiny",
 )
 

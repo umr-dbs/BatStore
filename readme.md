@@ -45,7 +45,7 @@ The Python harness uses the following workload keys:
 | `htap_q6` | TPC-C OLTP plus concurrent canonical CH-benCHmark Q6 revenue-change queries. Measures the same HTAP trade-off with a selective query. |
 | `htap_q1_variant` | Q1 using each engine's former custom predicate. Kept for compatibility; not intended for cross-engine comparison. |
 | `htap_q6_variant` | Q6 using each engine's former custom predicate. Kept for compatibility; not intended for cross-engine comparison. |
-| `s_htap` | **S-YCSB**: a cold YCSB corpus with concurrent near-sorted arrivals, hot-tail updates, and long OLAP scans across the cold/hot boundary. The Python harness key and flags retain `s_htap`/`--s-htap-*`; the Rust subcommands are `s_ycsb` and `mdbx_s_ycsb`. |
+| `s_htap` | **S-YCSB**: a cold YCSB corpus with concurrent near-sorted arrivals, hot-tail updates, and long OLAP scans across the cold/hot boundary. The Python manifest key remains `s_htap`; the skew option is `--s-ycsb-theta`, and the Rust subcommands are `s_ycsb` and `mdbx_s_ycsb`. |
 
 YCSB uses Zipfian access by default, except workload D's latest-key pattern;
 engine adapters without a latest-key generator approximate D with Zipfian
@@ -87,7 +87,9 @@ python3 scripts/compare_engines.py \
 
 Useful workload-specific controls include `--warehouses`, `--tpcc-duration`,
 `--ycsb-records`, `--ycsb-duration`, `--theta`, `--htap-olap-threads`, and
-the `--s-htap-*` options. Results are written to a timestamped directory under
+the `--s-htap-*` options. The S-YCSB skew option uses the clearer
+`--s-ycsb-theta` spelling (`--s-htap-theta` remains a compatibility alias).
+Results are written to a timestamped directory under
 `comparison_results/`.
 
 ### HTAP analytical-thread sweep
@@ -120,13 +122,33 @@ python3 scripts/run_skew_sweep.py \
   --skews uniform,0.4,0.8,0.99,1.4
 ```
 
-Results are written under `skew_sweep_results/`. For a quick validation run,
-add `--tiny`; for all available options, use the runner's `--help`:
+Results are written under `skew_sweep_results/`.
+
+### S-YCSB skew sweep
+
+The dedicated S-YCSB runner crosses hot-update skew with total thread count and
+writes every point into one manifest. Its defaults select BatStore, LeanStore,
+WiredTiger, PostgreSQL, and libmdbx; GC is on unless `--gc on,off` is requested.
+
+```bash
+python3 scripts/run_s_ycsb_sweep.py \
+  --skews uniform,0.1,0.4,0.8,0.99,1.4 \
+  --threads 2,4,8,16,32,64,128
+```
+
+The general comparison runner calls the same parameter `--s-ycsb-theta` when
+running one theta value. The old `--s-htap-theta` spelling remains accepted.
+S-YCSB retains the internal workload key `s_htap` so older manifests and engine
+wrappers remain compatible.
+
+For a quick validation run, add `--tiny`; for all available options, use the
+runner's `--help`:
 
 ```bash
 python3 scripts/compare_engines.py --help
 python3 scripts/run_htap_analytical_sweep.py --help
 python3 scripts/run_skew_sweep.py --help
+python3 scripts/run_s_ycsb_sweep.py --help
 ```
 
 ## Plot results
@@ -137,6 +159,7 @@ Pass the completed run directory to the unified plotter:
 python3 scripts/plot.py comparison_results/run_YYYYMMDD_HHMMSS
 python3 scripts/plot.py htap_analytical_results/run_YYYYMMDD_HHMMSS
 python3 scripts/plot.py skew_sweep_results/run_YYYYMMDD_HHMMSS
+python3 scripts/plot.py s_ycsb_sweep_results/run_YYYYMMDD_HHMMSS
 ```
 
 The plotter detects the run type automatically. For compact, paper-oriented
@@ -149,7 +172,9 @@ python3 scripts/plot.py --compact comparison_results/run_YYYYMMDD_HHMMSS
 Use `--engine batstore` for a single-engine comparison overview and
 `--ref-threads N` to choose the cross-engine reference point in skew plots.
 Figures are written below `plots/` in the run directory, with format
-subdirectories where applicable.
+subdirectories where applicable. Skew runs include scan-latency-versus-skew
+figures when latency samples exist: YCSB-E for regular YCSB and every S-YCSB
+run for the streaming workload.
 
 See plotting options with:
 

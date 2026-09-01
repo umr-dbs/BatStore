@@ -112,7 +112,7 @@ def plot_skew(run_dir: Path, requested_ref_threads: int | None) -> None:
     manifest = plot_skew_sweep.load_manifest(run_dir)
     out_dir = run_dir / "plots"
     out_dir.mkdir(parents=True, exist_ok=True)
-    for workload in plot_skew_sweep.YCSB_WORKLOADS:
+    for workload in plot_skew_sweep.SKEW_WORKLOADS:
         workload_df = manifest[manifest["workload"] == workload]
         if workload_df.empty:
             continue
@@ -122,6 +122,12 @@ def plot_skew(run_dir: Path, requested_ref_threads: int | None) -> None:
                 gc_df, workload, gc_choice, out_dir,
             )
             plot_skew_sweep.plot_workload_all_engines(
+                gc_df, workload, gc_choice, out_dir, ref_threads,
+            )
+            plot_skew_sweep.plot_latency_per_engine(
+                gc_df, workload, gc_choice, out_dir,
+            )
+            plot_skew_sweep.plot_latency_all_engines(
                 gc_df, workload, gc_choice, out_dir, ref_threads,
             )
     if not manifest.empty:
