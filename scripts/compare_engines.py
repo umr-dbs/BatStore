@@ -135,7 +135,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--s-htap-duration", type=int)
     p.add_argument("--s-htap-hot-window", type=int,
                    help="width, in keys, of the recency-biased hot-update tail")
-    p.add_argument("--s-htap-theta", type=float, help="zipf skew of hot-tail updates")
+    p.add_argument(
+        "--s-ycsb-theta", "--s-yscb-theta", "--s-htap-theta",
+        dest="s_ycsb_theta", type=float,
+        help="S-YCSB Zipf skew of hot-tail updates (legacy alias: --s-htap-theta)",
+    )
     p.add_argument("--s-htap-arrival-ratio", type=float,
                    help="fraction of write-thread ops that are new arrivals vs. hot-tail updates")
     p.add_argument("--s-htap-max-lateness", type=int,
@@ -162,7 +166,7 @@ def build_scale(args: argparse.Namespace) -> common.Scale:
         "s_htap_record_count": args.s_htap_record_count,
         "s_htap_duration": args.s_htap_duration,
         "s_htap_hot_window": args.s_htap_hot_window,
-        "s_htap_theta": args.s_htap_theta,
+        "s_htap_theta": args.s_ycsb_theta,
         "s_htap_arrival_ratio": args.s_htap_arrival_ratio,
         "s_htap_max_lateness": args.s_htap_max_lateness,
         "s_htap_olap_threads": args.s_htap_olap_threads,
