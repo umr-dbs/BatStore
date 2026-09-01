@@ -52,7 +52,7 @@ pub const DEFAULT_VACUUM_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Spawns a background vacuum thread for a single, bare (not
 /// `bat_db::Database`-owned) tree — for a driver like `ycsb_driver`/
-/// `s_htap_driver` that runs one standalone `MVBTSt` rather than a
+/// `s_ycsb_driver` that runs one standalone `MVBTSt` rather than a
 /// multi-table `Database`, so `bat_db::database::Database::set_vacuum`'s
 /// own multi-table sweep doesn't apply. Same mechanism otherwise: repeatedly
 /// calls `compact_idle_pass(dead_ratio_threshold)`, sleeping
@@ -63,7 +63,7 @@ pub const DEFAULT_VACUUM_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 /// shutdown, joining the returned handle) — this doesn't wait for anything
 /// on its own. Takes `triomphe::Arc` specifically, the one `Arc` every
 /// workload driver's tree handle uses (see `tpcc_driver`/`ycsb_driver`/
-/// `s_htap_driver`, all `use triomphe::Arc`), same as `bat_db::Database`'s
+/// `s_ycsb_driver`, all `use triomphe::Arc`), same as `bat_db::Database`'s
 /// own table storage.
 pub fn spawn_vacuum_thread<
     const FAN_OUT: usize,

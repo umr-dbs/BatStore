@@ -1,11 +1,11 @@
-//! The "S-HTAP" (streaming HTAP) workload's two write-side operations. Reuses
+//! The "S-YCSB" (streaming HTAP) workload's two write-side operations. Reuses
 //! `ycsb_txn`'s existing `read`/`update`/`scan` verbatim (a hot-tail update
 //! or an OLAP scan against this workload's YCSB-shaped single table is
 //! identical to YCSB's own) - the one genuinely new operation is
 //! `arrival_upsert`: YCSB's `insert` assumes the key has never existed, but
 //! this workload's near-sorted arrival stream can mint an already-used key
 //! (a bounded-lateness "late" event colliding with an earlier one - see
-//! `s_htap_random::mint_arrival_key`'s doc), which must be handled as an
+//! `s_ycsb_random::mint_arrival_key`'s doc), which must be handled as an
 //! upsert rather than a panic.
 
 use crate::bat_bench::ycsb_random::random_row;
@@ -67,7 +67,7 @@ fn atomic_arrival_upsert(
             );
             false
         }
-        other => panic!("s_htap arrival: unexpected atomic insert result: {other}"),
+        other => panic!("s_ycsb arrival: unexpected atomic insert result: {other}"),
     }
 }
 
@@ -100,7 +100,7 @@ fn transactional_arrival_upsert(
                 return false;
             }
             CRUDOperationResult::Conflict => std::hint::spin_loop(),
-            other => panic!("s_htap arrival: unexpected transactional insert result: {other}"),
+            other => panic!("s_ycsb arrival: unexpected transactional insert result: {other}"),
         }
     }
 }

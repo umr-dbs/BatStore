@@ -1,5 +1,5 @@
-//! Correctness checks for the "S-HTAP" (streaming HTAP) benchmark harness
-//! (`bat_bench::s_htap_random`/`s_htap_txn`): a tiny table, exercising the
+//! Correctness checks for the "S-YCSB" (streaming HTAP) benchmark harness
+//! (`bat_bench::s_ycsb_random`/`s_ycsb_txn`): a tiny table, exercising the
 //! workload's two write-side behaviors (a genuinely new arrival vs. a
 //! late-arrival upsert colliding with an already-materialized key) and its
 //! OLAP scan path against real row content, not just `Ok`/`Err`.
@@ -10,8 +10,8 @@
 //! returns exactly one row per live key — a regression would show up here
 //! as a scan count exceeding the range's live-key count.
 
-use crate::bat_bench::s_htap_random::{HotTailSampler, olap_scan_bounds};
-use crate::bat_bench::s_htap_txn::arrival_upsert;
+use crate::bat_bench::s_ycsb_random::{HotTailSampler, olap_scan_bounds};
+use crate::bat_bench::s_ycsb_txn::arrival_upsert;
 use crate::bat_bench::ycsb_load::populate;
 use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbTree};
 use crate::bat_bench::ycsb_txn::{self, YcsbExecutionMode};
@@ -31,7 +31,7 @@ fn tiny_cfg() -> YcsbConfig {
 fn read_bytes(tree: &YcsbTree, key: u64) -> Option<Vec<u8>> {
     match tree.dispatch_crud(CRUDOperation::PointSi(key)) {
         CRUDOperationResult::MatchedRecords(v) => v.first().map(|r| r.payload.as_bytes().to_vec()),
-        other => panic!("s_htap test: unexpected point result: {other}"),
+        other => panic!("s_ycsb test: unexpected point result: {other}"),
     }
 }
 

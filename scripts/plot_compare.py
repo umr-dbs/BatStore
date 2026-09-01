@@ -57,6 +57,7 @@ from plot_styles import (
     latency_line_style,
     measurement_positions,
     measurement_values,
+    apply_compact_layout,
     set_measurement_axis,
 )
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
@@ -65,6 +66,11 @@ HTAP_WORKLOADS = ["htap_q1", "htap_q6", "htap_q1_variant", "htap_q6_variant"]
 # leanstore/wiredtiger only ever report gc_enabled="n/a" (no working toggle in this
 # checkout, see the plan's Context section), so they're excluded from GC-comparison plots.
 GC_TOGGLE_ENGINES = ["batstore", "postgres", "vweaver_ermia", "vweaver_ermia_frugal"]
+
+
+def _workload_label(workload: str) -> str:
+    """Return the publication-facing name without changing manifest keys."""
+    return "S-YCSB" if workload == "s_htap" else workload
 
 
 def _engine_sort_key(name: str):
@@ -93,6 +99,7 @@ def prepare_output_dir(out_dir: Path) -> None:
 def _save(fig, out_dir: Path, name: str, *, overview: bool | None = None):
     prepare_output_dir(out_dir)
     fig.tight_layout()
+    apply_compact_layout(fig)
     if overview is None:
         overview = _is_overview_name(name)
     for suffix in ("svg", "pdf"):
@@ -227,7 +234,7 @@ def plot_memory_usage(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str,
     for idx, workload in enumerate(workloads):
         ax = axes[idx // cols][idx % cols]
         _bar_by_engine(ax, df[df["workload"] == workload], "peak_rss_mb")
-        ax.set_title(workload, fontsize=10)
+        ax.set_title(_workload_label(workload), fontsize=10)
         ax.set_ylabel("Peak measured memory (MB)")
         ax.grid(alpha=0.3, axis="y")
     for idx in range(len(workloads), rows * cols):
@@ -262,7 +269,9 @@ def plot_summary_all(ref_slice: pd.DataFrame, ref_threads: int, gc_choice: str, 
         )
 
     ax.set_xticks(list(x))
-    ax.set_xticklabels(workloads, rotation=30, ha="right")
+    ax.set_xticklabels(
+        [_workload_label(workload) for workload in workloads], rotation=30, ha="right",
+    )
     ax.set_ylabel("Primary throughput metric (New-Order/sec or ops/sec)")
     ax.set_yscale("log")
     ax.set_title(f"All workloads: primary throughput by engine (log scale, threads={ref_threads}, gc={gc_choice})")
@@ -419,7 +428,7 @@ def plot_gc_comparison(manifest: pd.DataFrame, ref_threads: int, out_dir: Path):
         ax.bar([xi + width / 2 for xi in x], off_vals, width, label="gc=off", color="tab:red")
         ax.set_xticks(list(x))
         ax.set_xticklabels([ENGINE_LABELS.get(e, e) for e in engines_present])
-        ax.set_title(workload, fontsize=10)
+        ax.set_title(_workload_label(workload), fontsize=10)
         ax.grid(alpha=0.3, axis="y")
         if idx == 0:
             ax.legend(fontsize=8)
@@ -612,6 +621,7 @@ def plot_single_engine_overview(
 
     for row, workload in enumerate(workloads):
         wdf = valid[valid["workload"] == workload]
+        workload_name = _workload_label(workload)
         thread_values = measurement_values(wdf["threads"])
 
         throughput_ax = axes[row][0]
@@ -624,7 +634,7 @@ def plot_single_engine_overview(
                     **engine_line_style(engine),
                 )
         throughput_ax.set_ylabel(wdf["primary_metric_name"].iloc[0])
-        throughput_ax.set_title(f"{workload}: throughput")
+        throughput_ax.set_title(f"{workload_name}: throughput")
         _set_measurement_thread_axis(throughput_ax, thread_values)
         throughput_ax.legend(fontsize=8)
 
@@ -646,11 +656,11 @@ def plot_single_engine_overview(
                         **engine_line_style(engine),
                     )
             olap_throughput_ax.set_ylabel("Completed analytical queries / sec")
-            olap_throughput_ax.set_title(f"{workload}: OLAP throughput")
+            olap_throughput_ax.set_title(f"{workload_name}: OLAP throughput")
             _set_measurement_thread_axis(olap_throughput_ax, thread_values)
             olap_throughput_ax.legend(fontsize=8)
             throughput_ax.set_ylabel("New-Order transactions / sec")
-            throughput_ax.set_title(f"{workload}: OLTP throughput")
+            throughput_ax.set_title(f"{workload_name}: OLTP throughput")
         else:
             olap_throughput_ax.set_axis_off()
 
@@ -687,7 +697,7 @@ def plot_single_engine_overview(
                     **latency_line_style(label),
                 )
             latency_ax.set_ylabel("Latency (microseconds)")
-            latency_ax.set_title(f"{workload}: latency (gc={latency_gc})")
+            latency_ax.set_title(f"{workload_name}: latency (gc={latency_gc})")
             _set_measurement_thread_axis(latency_ax, latency_thread_values)
             latency_ax.legend(fontsize=7, frameon=True, framealpha=0.9, ncol=2)
 
@@ -701,7 +711,7 @@ def plot_single_engine_overview(
                     **engine_line_style(engine),
                 )
         memory_ax.set_ylabel("Peak measured memory (MB)")
-        memory_ax.set_title(f"{workload}: memory")
+        memory_ax.set_title(f"{workload_name}: memory")
         _set_measurement_thread_axis(memory_ax, thread_values)
         memory_ax.legend(fontsize=8)
 
@@ -752,12 +762,13 @@ def plot_all_engines_workload_overview(
 
     for row, workload in enumerate(workloads):
         wdf = valid[valid["workload"] == workload].copy()
+        workload_name = _workload_label(workload)
         thread_values = sorted(wdf["threads"].unique())
 
         throughput_ax = axes[row][0]
         plot_metric(throughput_ax, wdf, "primary_metric_value")
         throughput_ax.set_ylabel(wdf["primary_metric_name"].iloc[0])
-        throughput_ax.set_title(f"{workload}: throughput")
+        throughput_ax.set_title(f"{workload_name}: throughput")
         _set_measurement_thread_axis(throughput_ax, thread_values)
 
         olap_throughput_ax = axes[row][1]
@@ -770,10 +781,10 @@ def plot_all_engines_workload_overview(
             )
             plot_metric(olap_throughput_ax, wdf, "olap_queries_per_sec")
             olap_throughput_ax.set_ylabel("Completed analytical queries / sec")
-            olap_throughput_ax.set_title(f"{workload}: OLAP throughput")
+            olap_throughput_ax.set_title(f"{workload_name}: OLAP throughput")
             _set_measurement_thread_axis(olap_throughput_ax, thread_values)
             throughput_ax.set_ylabel("New-Order transactions / sec")
-            throughput_ax.set_title(f"{workload}: OLTP throughput")
+            throughput_ax.set_title(f"{workload_name}: OLTP throughput")
         else:
             olap_throughput_ax.set_axis_off()
 
@@ -788,13 +799,13 @@ def plot_all_engines_workload_overview(
         else:
             plot_metric(latency_ax, latency_df, "scan_p99_us")
             latency_ax.set_ylabel("p99 latency (microseconds)")
-            latency_ax.set_title(f"{workload}: p99 latency")
+            latency_ax.set_title(f"{workload_name}: p99 latency")
             _set_measurement_thread_axis(latency_ax, latency_df["threads"].unique())
 
         memory_ax = axes[row][3]
         plot_metric(memory_ax, wdf, "peak_rss_mb")
         memory_ax.set_ylabel("Peak measured memory (MB)")
-        memory_ax.set_title(f"{workload}: memory")
+        memory_ax.set_title(f"{workload_name}: memory")
         _set_measurement_thread_axis(memory_ax, thread_values)
 
     engine_handles = [

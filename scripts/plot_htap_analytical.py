@@ -8,6 +8,9 @@ OLAP-scaling stories are each readable on their own axis. It also plots analytic
 p50/p95/p99 latency over the thread sweep. Each workload gets per-engine figures and an
 all-engines overlay. GC-on and GC-off measurements are written to separate figures;
 engines without a GC toggle (``gc_enabled=n/a``) are shown in both comparison sets.
+Dedicated OLTP-throughput figures are also saved per engine and across engines.
+The throughput_overview figures collect all measured workloads into rows, with
+OLTP throughput on the left and OLAP throughput on the right.
 
 Reads <run_dir>/manifest.csv, written by run_htap_analytical_sweep.py - same schema as
 compare_engines.py's manifest, with the analytical thread count stamped into
@@ -27,6 +30,7 @@ import pandas as pd
 
 from plot_styles import (
     ENGINE_LABELS,
+    apply_compact_layout,
     engine_line_style,
     engine_sort_key,
     latency_line_style,
@@ -86,6 +90,7 @@ def gc_slices(df: pd.DataFrame):
 def _save(fig, out_dir: Path, name: str) -> None:
     """Save PDFs in plots/ and SVGs in plots/svg/."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    apply_compact_layout(fig)
     for ext in ("pdf", "svg"):
         destination = out_dir / "svg" if ext == "svg" else out_dir
         destination.mkdir(parents=True, exist_ok=True)
@@ -174,6 +179,70 @@ def plot_workload_all_engines(
     plt.close(fig)
 
 
+def plot_workload_oltp(
+    df: pd.DataFrame, workload: str, gc_choice: str, out_dir: Path,
+) -> None:
+    """Save standalone OLTP throughput plots per engine and across engines."""
+    sub = df[df["workload"] == workload]
+    if sub.empty:
+        return
+    engines = sorted(sub["engine"].unique(), key=engine_sort_key)
+    groups = [(engine, sub[sub["engine"] == engine]) for engine in engines]
+    groups.append(("all_engines", sub))
+    for name, rows in groups:
+        thread_values = _olap_thread_values(rows["olap_threads"])
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for engine in sorted(rows["engine"].unique(), key=engine_sort_key):
+            esub = rows[rows["engine"] == engine].sort_values("olap_threads")
+            ax.plot(
+                _olap_thread_positions(esub["olap_threads"], thread_values),
+                esub["primary_metric_value"],
+                label=ENGINE_LABELS.get(engine, engine), **engine_line_style(engine),
+            )
+        _set_olap_thread_axis(ax, thread_values)
+        ax.set_ylabel("new_order/sec")
+        ax.set_ylim(bottom=0)
+        ax.set_title("OLTP throughput (fixed OLTP terminals)")
+        ax.legend(fontsize="small")
+        title = "All engines" if name == "all_engines" else ENGINE_LABELS.get(name, name)
+        fig.suptitle(f"{title} - {HTAP_LABELS.get(workload, workload)} - GC {gc_choice}")
+        fig.tight_layout()
+        _save(fig, out_dir, f"htap_analytical_{workload}_{name}_oltp_gc_{gc_choice}")
+        plt.close(fig)
+
+
+def plot_throughput_overviews(df: pd.DataFrame, out_dir: Path) -> None:
+    """Compare all HTAP workloads in OLTP-left/OLAP-right rows, split by GC."""
+    sub = df[df["workload"].isin(HTAP_WORKLOADS)]
+    for gc_choice, gc_df in gc_slices(sub):
+        workloads = [w for w in HTAP_WORKLOADS if w in set(gc_df["workload"])]
+        fig, axes = plt.subplots(
+            len(workloads), 2, figsize=(14, 4 * len(workloads)), squeeze=False,
+        )
+        for (ax_oltp, ax_olap), workload in zip(axes, workloads):
+            wdf = gc_df[gc_df["workload"] == workload]
+            thread_values = _olap_thread_values(wdf["olap_threads"])
+            for engine in sorted(wdf["engine"].unique(), key=engine_sort_key):
+                esub = wdf[wdf["engine"] == engine].sort_values("olap_threads")
+                _plot_pair(
+                    ax_oltp, ax_olap, esub["olap_threads"], thread_values,
+                    esub["primary_metric_value"], esub["olap_qps"], engine,
+                )
+            title = HTAP_LABELS.get(workload, workload)
+            ax_oltp.set_title(f"{title}\nOLTP throughput")
+            ax_oltp.set_ylabel("new_order/sec")
+            ax_olap.set_title(f"{title}\nOLAP throughput")
+            ax_olap.set_ylabel("queries/sec")
+            for ax in (ax_oltp, ax_olap):
+                _set_olap_thread_axis(ax, thread_values)
+                ax.set_ylim(bottom=0)
+            ax_oltp.legend(fontsize="small")
+        fig.suptitle(f"HTAP throughput overview - fixed OLTP terminals - GC {gc_choice}")
+        fig.tight_layout()
+        _save(fig, out_dir, f"htap_analytical_throughput_overview_gc_{gc_choice}")
+        plt.close(fig)
+
+
 def _latency_rows(df: pd.DataFrame, workload: str) -> pd.DataFrame:
     """Return rows containing an actual analytical-query latency sample."""
     sub = df[(df["workload"] == workload) & (df["scan_count"] > 0)].copy()
@@ -255,6 +324,20 @@ def plot_workload_latency_all_engines(
     plt.close(fig)
 
 
+def plot_all(df: pd.DataFrame, out_dir: Path) -> None:
+    """Generate the same full set of figures from either plotting entry point."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for workload in HTAP_WORKLOADS:
+        workload_df = df[df["workload"] == workload]
+        for gc_choice, gc_df in gc_slices(workload_df):
+            plot_workload_per_engine(gc_df, workload, gc_choice, out_dir)
+            plot_workload_all_engines(gc_df, workload, gc_choice, out_dir)
+            plot_workload_oltp(gc_df, workload, gc_choice, out_dir)
+            plot_workload_latency_per_engine(gc_df, workload, gc_choice, out_dir)
+            plot_workload_latency_all_engines(gc_df, workload, gc_choice, out_dir)
+    plot_throughput_overviews(df, out_dir)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--run-dir", required=True, type=Path)
@@ -262,16 +345,7 @@ def main() -> None:
 
     df = load_manifest(args.run_dir)
     out_dir = args.run_dir / "plots"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for workload in HTAP_WORKLOADS:
-        workload_df = df[df["workload"] == workload]
-        for gc_choice, gc_df in gc_slices(workload_df):
-            plot_workload_per_engine(gc_df, workload, gc_choice, out_dir)
-            plot_workload_all_engines(gc_df, workload, gc_choice, out_dir)
-            plot_workload_latency_per_engine(gc_df, workload, gc_choice, out_dir)
-            plot_workload_latency_all_engines(gc_df, workload, gc_choice, out_dir)
-
+    plot_all(df, out_dir)
     print(f"Wrote plots to {out_dir}")
 
 

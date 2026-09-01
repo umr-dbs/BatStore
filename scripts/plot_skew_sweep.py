@@ -22,7 +22,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from plot_styles import ENGINE_LABELS, engine_line_style, engine_sort_key
+from plot_styles import (
+    ENGINE_LABELS, apply_compact_layout, engine_line_style, engine_sort_key,
+)
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
 
 _SKEW_RE = re.compile(r"skew=(\S+)")
@@ -74,6 +76,7 @@ def prepare_output_dir(out_dir: Path) -> None:
 def _save(fig, out_dir: Path, name: str, *, overview: bool = False) -> None:
     """Keep overview PDFs in plots/; put detailed PDFs/SVGs in format folders."""
     prepare_output_dir(out_dir)
+    apply_compact_layout(fig)
     for ext in ("pdf", "svg"):
         if ext == "svg":
             destination = out_dir / "svg"
@@ -180,6 +183,10 @@ def plot_workloads_overview(
         ax.set_xlabel("Skew factor")
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
+        # ``sharex=True`` otherwise lets Matplotlib hide tick values on every
+        # row except the last, which makes individual overview panels harder
+        # to read when cropped or embedded.
+        ax.tick_params(axis="x", which="both", labelbottom=True)
 
     for idx in range(len(workloads), rows * cols):
         axes[idx // cols][idx % cols].axis("off")

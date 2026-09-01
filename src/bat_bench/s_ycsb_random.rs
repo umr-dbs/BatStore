@@ -1,4 +1,4 @@
-//! Key-generation logic for the "S-HTAP" (streaming HTAP) workload: a
+//! Key-generation logic for the "S-YCSB" (streaming HTAP) workload: a
 //! near-sorted arrival stream plus a narrow, recency-biased hot-update
 //! window, modeled after real time-series/telemetry ingestion (Cooper et
 //! al.'s YCSB request distributions cover neither of these — see this
@@ -43,7 +43,7 @@ fn with_fast_rng<R>(f: impl FnOnce(&mut SmallRng) -> R) -> R {
 /// out of order relative to strictly increasing sequence numbers.
 ///
 /// A jittered key can collide with one already emitted by an earlier
-/// ticket; the caller (`s_htap_txn::arrival_upsert`) treats that as a
+/// ticket; the caller (`s_ycsb_txn::arrival_upsert`) treats that as a
 /// legitimate late-arriving upsert of an already-materialized row, not an
 /// error — exactly how real stream processors handle out-of-order/
 /// duplicate events under an idempotent upsert model.
@@ -90,12 +90,12 @@ impl HotTailSampler {
 /// already-arrived recent row) — the two write behaviors this workload is
 /// specifically about, as opposed to YCSB's five general-purpose ops.
 #[derive(Clone, Copy, Debug)]
-pub struct SHtapMix {
+pub struct SYcsbMix {
     pub arrival: f64,
     pub hot_update: f64,
 }
 
-impl Default for SHtapMix {
+impl Default for SYcsbMix {
     /// Mostly hot updates over a trickle of new arrivals — a dashboard-style
     /// "many small revisions to the last few minutes of data, occasionally
     /// appending a genuinely new row" pattern, rather than a pure insert
@@ -109,21 +109,21 @@ impl Default for SHtapMix {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SHtapWriteOp {
+pub enum SYcsbWriteOp {
     Arrival,
     HotUpdate,
 }
 
-pub fn pick_write_op(mix: &SHtapMix) -> SHtapWriteOp {
+pub fn pick_write_op(mix: &SYcsbMix) -> SYcsbWriteOp {
     let total = mix.arrival + mix.hot_update;
     if total <= 0.0 {
-        return SHtapWriteOp::HotUpdate;
+        return SYcsbWriteOp::HotUpdate;
     }
     let x = with_fast_rng(|rng| rng.random_range(0.0..total));
     if x < mix.arrival {
-        SHtapWriteOp::Arrival
+        SYcsbWriteOp::Arrival
     } else {
-        SHtapWriteOp::HotUpdate
+        SYcsbWriteOp::HotUpdate
     }
 }
 

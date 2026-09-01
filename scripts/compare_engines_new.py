@@ -24,7 +24,7 @@ real-disk scratch directory (engines/common.NO_DURABILITY_SCRATCH_ROOT, default
     with pwrite/fsync both off no WAL bytes ever reach disk or get flushed. Both flags
     already default to false upstream, so this makes the "off" state explicit rather
     than an implicit dependency on that default.
-  - libmdbx (engines/libmdbx.py): unchanged - src/bat_bench/mdbx_{ycsb,tpcc,s_htap}.rs
+  - libmdbx (engines/libmdbx.py): unchanged - src/bat_bench/mdbx_{ycsb,tpcc,s_ycsb}.rs
     already open every environment with SyncMode::UtterlyNoSync unconditionally, in
     compare_engines.py too.
   - vWeaver_ermia / vweaver_ermia_frugal (engines/vweaver_ermia*.py): unchanged -

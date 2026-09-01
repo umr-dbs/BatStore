@@ -30,6 +30,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from plot_styles import apply_compact_layout
+
 # The 4 CH-benCHmark queries implemented in bat_bench::tpch_queries, and the
 # order they're always run in (bat_bench::olap_scan::ch_benchmark_queries_once).
 CH_QUERY_ORDER = [
@@ -56,6 +58,7 @@ def _labels_for(paths, labels):
 
 def _save(fig, out):
     fig.tight_layout()
+    apply_compact_layout(fig)
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"Wrote {out}")

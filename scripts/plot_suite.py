@@ -32,6 +32,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from plot_styles import apply_compact_layout
+
 # The 4 CH-benCHmark queries implemented in bat_bench::tpch_queries, and the
 # order they're always run in (bat_bench::olap_scan::ch_benchmark_queries_once)
 # — mirrors scripts/plot_results.py's CH_QUERY_ORDER/LABELS.
@@ -65,6 +67,7 @@ def _save(fig, out_dir: Path, name: str):
     svg_dir = out_dir / "svg"
     svg_dir.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
+    apply_compact_layout(fig)
     path = svg_dir / f"{name}.svg"
     fig.savefig(path)
     print(f"Wrote {path}")
