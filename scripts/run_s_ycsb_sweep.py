@@ -25,6 +25,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# common.py derives every external checkout path while it is imported. Parse this one
+# bootstrap option first so a caller can select an existing dependency bundle without
+# having to export WORKSPACE_ROOT in the parent shell.
+_bootstrap_parser = argparse.ArgumentParser(add_help=False)
+_bootstrap_parser.add_argument("--workspace-root", type=Path)
+_bootstrap_args, _ = _bootstrap_parser.parse_known_args()
+if _bootstrap_args.workspace_root is not None:
+    os.environ["WORKSPACE_ROOT"] = str(_bootstrap_args.workspace_root.expanduser().resolve())
+
 from clean_leanstore_runs import clean_run as clean_engine_run
 from engines import (
     batstore, common, leanstore, libmdbx, postgres_benchbase, umbra_benchbase, wiredtiger,
@@ -51,6 +60,10 @@ def skew_to_theta(skew: str) -> float:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--workspace-root", type=Path,
+        help="directory containing the benchbase, leanstore, and wiredtiger checkouts",
     )
     p.add_argument("--output-root", default="s_ycsb_sweep_results")
     p.add_argument(
