@@ -38,6 +38,13 @@ BENCHBASE_JAR = BENCHBASE_HOME / "benchbase.jar"
 
 def ensure_built() -> None:
     repo = BENCHBASE_HOME.parent.parent
+    if not repo.is_dir():
+        raise SystemExit(
+            f"BenchBase repository not found at {repo.resolve(strict=False)}. "
+            f"Set WORKSPACE_ROOT to the directory containing the benchbase checkout "
+            f"(current WORKSPACE_ROOT={common.WORKSPACE_ROOT.resolve(strict=False)}), or pass "
+            f"--workspace-root to scripts/run_s_ycsb_sweep.py."
+        )
     subprocess.run(["mvn", "package", "-P", "postgres", "-DskipTests",
                     "-Dmaven.compiler.release=21"], cwd=repo, check=True)
     tgz = repo / "target" / "benchbase-postgres.tgz"

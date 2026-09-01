@@ -136,6 +136,13 @@ python3 scripts/run_s_ycsb_sweep.py \
   --threads 2,4,8,16,32,64,128
 ```
 
+If the dependency checkouts were set up outside the current directory, point the
+runner at the directory containing `benchbase/`, `leanstore/`, and `wiredtiger/`:
+
+```bash
+python3 scripts/run_s_ycsb_sweep.py --workspace-root /data/tx_tests
+```
+
 The general comparison runner calls the same parameter `--s-ycsb-theta` when
 running one theta value. The old `--s-htap-theta` spelling remains accepted.
 S-YCSB retains the internal workload key `s_htap` so older manifests and engine
