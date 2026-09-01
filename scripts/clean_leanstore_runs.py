@@ -29,6 +29,9 @@ LEANSTORE_KEEP_FILES = {
     "s_htap_timeseries.csv",
     "s_htap_scan_latency_summary.csv",
     "s_htap_staleness_summary.csv",
+    "s_ycsb_timeseries.csv",
+    "s_ycsb_scan_latency_summary.csv",
+    "s_ycsb_staleness_summary.csv",
     "ch_query_latency_summary.csv",
 }
 

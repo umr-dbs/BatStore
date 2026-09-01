@@ -1,7 +1,7 @@
-//! "S-HTAP" streaming-workload driver: loads a cold historical corpus,
+//! "S-YCSB" streaming-workload driver: loads a cold historical corpus,
 //! then runs two concurrent thread pools for a fixed wall-clock duration —
 //! write threads (near-sorted arrivals + recency-biased hot-tail updates,
-//! `s_htap_random`/`s_htap_txn`) and OLAP threads (long range scans
+//! `s_ycsb_random`/`s_ycsb_txn`) and OLAP threads (long range scans
 //! straddling the cold/hot boundary, `ycsb_txn::scan_with_mode`) — modeling
 //! a streaming-ingest-plus-dashboard workload where slow analytical queries
 //! run continuously over the same narrow key window that ingestion keeps
@@ -20,11 +20,11 @@ use std::time::{Duration, Instant};
 use triomphe::Arc;
 
 use crate::bat_bench::mem_stats::{DEFAULT_SAMPLE_INTERVAL, MemSampler};
-use crate::bat_bench::s_htap_random::{
-    HotTailSampler, SHtapMix, SHtapWriteOp, mint_arrival_key, olap_scan_bounds,
+use crate::bat_bench::s_ycsb_random::{
+    HotTailSampler, SYcsbMix, SYcsbWriteOp, mint_arrival_key, olap_scan_bounds,
     pick_write_op,
 };
-use crate::bat_bench::s_htap_txn;
+use crate::bat_bench::s_ycsb_txn;
 use crate::bat_bench::ycsb_load::populate;
 use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbScanPool, YcsbTree};
 use crate::bat_bench::ycsb_txn::{self, YcsbExecutionMode};
@@ -38,7 +38,7 @@ pub struct DriverConfig {
     pub num_write_threads: usize,
     pub num_olap_threads: usize,
     pub duration: Duration,
-    pub mix: SHtapMix,
+    pub mix: SYcsbMix,
     /// Width, in keys, of the recency-biased hot-update window (the tail
     /// that repeatedly gets revised).
     pub hot_window: u64,
@@ -79,7 +79,7 @@ pub struct DriverConfig {
     pub idle_compaction: Option<(f64, Duration)>,
 }
 
-pub struct SHtapRunSummary {
+pub struct SYcsbRunSummary {
     pub write_throughput_ops_sec: f64,
     pub totals: [u64; NUM_WRITE_COUNTERS],
     pub olap_scans_completed: u64,
@@ -101,7 +101,7 @@ struct WriteWorkerStats {
 fn write_worker_thread(
     tree: Arc<YcsbTree>,
     cfg: YcsbConfig,
-    mix: SHtapMix,
+    mix: SYcsbMix,
     hot_sampler: Arc<HotTailSampler>,
     write_all_fields: bool,
     execution_mode: YcsbExecutionMode,
@@ -119,13 +119,13 @@ fn write_worker_thread(
 
     while !stop.load(Relaxed) {
         match pick_write_op(&mix) {
-            SHtapWriteOp::Arrival => {
+            SYcsbWriteOp::Arrival => {
                 let key = mint_arrival_key(&current_max_key, max_lateness);
                 let was_new =
-                    s_htap_txn::arrival_upsert(&tree, &cfg, key, write_all_fields, execution_mode);
+                    s_ycsb_txn::arrival_upsert(&tree, &cfg, key, write_all_fields, execution_mode);
                 totals[if was_new { NEW_ARRIVAL } else { LATE_UPSERT }] += 1;
             }
-            SHtapWriteOp::HotUpdate => {
+            SYcsbWriteOp::HotUpdate => {
                 let max_key_now = current_max_key.load(Relaxed);
                 let key = hot_sampler.sample(max_key_now);
                 ycsb_txn::update_with_execution_mode(
@@ -189,13 +189,13 @@ fn olap_worker_thread(
     }
 }
 
-pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
+pub fn run_s_ycsb(cfg: DriverConfig) -> SYcsbRunSummary {
     assert!(
         cfg.ycsb.record_count >= 1,
-        "s_htap: record_count must be >= 1"
+        "s_ycsb: record_count must be >= 1"
     );
-    assert!(cfg.hot_window >= 1, "s_htap: hot_window must be >= 1");
-    assert!(cfg.olap_span >= 1, "s_htap: olap_span must be >= 1");
+    assert!(cfg.hot_window >= 1, "s_ycsb: hot_window must be >= 1");
+    assert!(cfg.olap_span >= 1, "s_ycsb: olap_span must be >= 1");
 
     let max_threads = crate::bat_tree::mvbt::default_max_workers().max(1);
     let mut num_write_threads = cfg.num_write_threads.max(1);
@@ -225,7 +225,7 @@ pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
 
     fs::create_dir_all(&cfg.output_dir).unwrap_or_else(|e| {
         panic!(
-            "s_htap: failed to create output_dir {}: {e}",
+            "s_ycsb: failed to create output_dir {}: {e}",
             cfg.output_dir.display()
         )
     });
@@ -277,7 +277,7 @@ pub fn run_s_htap(cfg: DriverConfig) -> SHtapRunSummary {
     });
 
     println!(
-        "S-HTAP benchmark\n\
+        "S-YCSB benchmark\n\
          - cold record_count   = {}\n\
          - field_count/length  = {}/{}\n\
          - write workers       = {num_write_threads}\n\
@@ -425,7 +425,7 @@ fn write_results(
     requested_duration: Duration,
     actual_wall: Duration,
     out_dir: &Path,
-) -> SHtapRunSummary {
+) -> SYcsbRunSummary {
     let series_len = requested_duration.as_secs() as usize + 2;
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_WRITE_COUNTERS];
@@ -449,7 +449,7 @@ fn write_results(
         staleness_versions.extend_from_slice(&s.staleness_versions);
     }
 
-    let ts_path = out_dir.join("s_htap_timeseries.csv");
+    let ts_path = out_dir.join("s_ycsb_timeseries.csv");
     let _ = fs::remove_file(&ts_path);
     let mut ts_file = OpenOptions::new()
         .create(true)
@@ -469,7 +469,7 @@ fn write_results(
     // throttled sampling), since this workload's scans are deliberately few
     // and slow rather than many and tiny.
     scan_latencies_ns.sort_unstable();
-    let scan_latency_path = out_dir.join("s_htap_scan_latency_summary.csv");
+    let scan_latency_path = out_dir.join("s_ycsb_scan_latency_summary.csv");
     let _ = fs::remove_file(&scan_latency_path);
     let mut scan_latency_file = OpenOptions::new()
         .create(true)
@@ -510,7 +510,7 @@ fn write_results(
     // (`ScanResult::staleness_versions` in olap_scan.rs is the same
     // concept) - a direct signal of how far behind GC/coldpages let the
     // OLAP-visible snapshot fall while writers kept revising the hot tail.
-    let staleness_path = out_dir.join("s_htap_staleness_summary.csv");
+    let staleness_path = out_dir.join("s_ycsb_staleness_summary.csv");
     let _ = fs::remove_file(&staleness_path);
     let mut staleness_file = OpenOptions::new()
         .create(true)
@@ -558,14 +558,14 @@ fn write_results(
         staleness_path.display()
     );
 
-    SHtapRunSummary {
+    SYcsbRunSummary {
         write_throughput_ops_sec: write_throughput,
         totals,
         olap_scans_completed: scans_completed,
     }
 }
 
-pub fn main_s_htap(parms: Vec<String>) {
+pub fn main_s_ycsb(parms: Vec<String>) {
     fn arg<T: std::str::FromStr>(parms: &[String], idx: usize, default: T) -> T {
         parms
             .get(idx)
@@ -599,13 +599,13 @@ pub fn main_s_htap(parms: Vec<String>) {
     let wal_path: String = parms
         .get(20)
         .cloned()
-        .unwrap_or_else(|| "s_htap_wal.log".to_string());
+        .unwrap_or_else(|| "s_ycsb_wal.log".to_string());
     let wal_flush_ms: u64 = arg(&parms, 21, 5);
     let execution_mode = match parms.get(22).map(String::as_str).unwrap_or("atomic") {
         "transaction" | "tx" => YcsbExecutionMode::Transaction,
         "atomic" | "auto" | "autocommit" => YcsbExecutionMode::Atomic,
         other => {
-            panic!("s_htap: invalid execution mode '{other}' (expected atomic or transaction)")
+            panic!("s_ycsb: invalid execution mode '{other}' (expected atomic or transaction)")
         }
     };
     // Same "0.0 explicitly opts out, otherwise defaults on whenever GC is
@@ -642,7 +642,7 @@ pub fn main_s_htap(parms: Vec<String>) {
         },
     };
 
-    run_s_htap(DriverConfig {
+    run_s_ycsb(DriverConfig {
         ycsb: YcsbConfig {
             record_count,
             field_count,
@@ -651,7 +651,7 @@ pub fn main_s_htap(parms: Vec<String>) {
         num_write_threads,
         num_olap_threads,
         duration: Duration::from_secs(duration_secs),
-        mix: SHtapMix {
+        mix: SYcsbMix {
             arrival: arrival_ratio,
             hot_update: (1.0 - arrival_ratio).max(0.0),
         },

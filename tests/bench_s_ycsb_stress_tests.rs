@@ -1,9 +1,9 @@
-//! Concurrent stress tests for the "S-HTAP" (streaming HTAP) benchmark
-//! harness (`bat_bench::s_htap_random`/`s_htap_txn`): several real OS threads
+//! Concurrent stress tests for the "S-YCSB" (streaming HTAP) benchmark
+//! harness (`bat_bench::s_ycsb_random`/`s_ycsb_txn`): several real OS threads
 //! run the workload's actual shape - near-sorted arrivals plus recency-biased
 //! hot-tail updates on one side, long OLAP scans straddling the cold/hot
 //! boundary on the other - concurrently, with GC enabled, for a second or
-//! two, mirroring `s_htap_driver::run_s_htap` at test scale (see
+//! two, mirroring `s_ycsb_driver::run_s_ycsb` at test scale (see
 //! `bench_ycsb_stress_tests.rs`, whose structure this follows for the
 //! write-side invariant).
 //!
@@ -34,10 +34,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::bat_bench::s_htap_random::{
-    HotTailSampler, SHtapMix, SHtapWriteOp, mint_arrival_key, olap_scan_bounds, pick_write_op,
+use crate::bat_bench::s_ycsb_random::{
+    HotTailSampler, SYcsbMix, SYcsbWriteOp, mint_arrival_key, olap_scan_bounds, pick_write_op,
 };
-use crate::bat_bench::s_htap_txn::arrival_upsert;
+use crate::bat_bench::s_ycsb_txn::arrival_upsert;
 use crate::bat_bench::ycsb_load::populate;
 use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbTree};
 use crate::bat_bench::ycsb_txn::{self, YcsbExecutionMode};
@@ -57,11 +57,11 @@ fn stress_cfg() -> YcsbConfig {
 fn read_bytes(tree: &YcsbTree, key: u64) -> Option<Vec<u8>> {
     match tree.dispatch_crud(CRUDOperation::PointSi(key)) {
         CRUDOperationResult::MatchedRecords(v) => v.first().map(|r| r.payload.as_bytes().to_vec()),
-        other => panic!("s_htap stress test: unexpected point result: {other}"),
+        other => panic!("s_ycsb stress test: unexpected point result: {other}"),
     }
 }
 
-/// Mirrors `s_htap_driver::write_worker_thread`'s op dispatch, minus the
+/// Mirrors `s_ycsb_driver::write_worker_thread`'s op dispatch, minus the
 /// per-second bookkeeping this test doesn't need. Returns every key this
 /// thread actually wrote (arrival or hot-update) so the caller can verify
 /// exactly those keys - see the module doc for why the ticket range itself
@@ -77,7 +77,7 @@ fn read_bytes(tree: &YcsbTree, key: u64) -> Option<Vec<u8>> {
 fn write_worker(
     tree: Arc<YcsbTree>,
     cfg: YcsbConfig,
-    mix: SHtapMix,
+    mix: SYcsbMix,
     hot_sampler: Arc<HotTailSampler>,
     current_max_key: Arc<AtomicU64>,
     max_lateness: u64,
@@ -87,12 +87,12 @@ fn write_worker(
     let mut touched = Vec::new();
     while !stop.load(Relaxed) {
         match pick_write_op(&mix) {
-            SHtapWriteOp::Arrival => {
+            SYcsbWriteOp::Arrival => {
                 let key = mint_arrival_key(&current_max_key, max_lateness);
                 arrival_upsert(&tree, &cfg, key, false, execution_mode);
                 touched.push(key);
             }
-            SHtapWriteOp::HotUpdate => {
+            SYcsbWriteOp::HotUpdate => {
                 let key = hot_sampler.sample(current_max_key.load(Relaxed));
                 if ycsb_txn::update_with_execution_mode(&tree, &cfg, key, false, execution_mode) {
                     touched.push(key);
@@ -103,7 +103,7 @@ fn write_worker(
     touched
 }
 
-/// Mirrors `s_htap_driver::olap_worker_thread`, additionally recording any
+/// Mirrors `s_ycsb_driver::olap_worker_thread`, additionally recording any
 /// scan whose returned count exceeds its own requested span into `violations`
 /// instead of asserting inline (asserting inside a spawned thread would only
 /// surface as an opaque `join` panic message with no scan details attached).
@@ -126,7 +126,7 @@ fn olap_worker(
 
 fn run_stress_and_check(
     gc_update_in_place: bool,
-    mix: SHtapMix,
+    mix: SYcsbMix,
     max_lateness: u64,
     hot_window: u64,
     execution_mode: YcsbExecutionMode,
@@ -182,10 +182,10 @@ fn run_stress_and_check(
     stop.store(true, Relaxed);
     let mut touched_keys: HashSet<u64> = HashSet::new();
     for h in write_handles {
-        touched_keys.extend(h.join().expect("s_htap write worker thread must not panic"));
+        touched_keys.extend(h.join().expect("s_ycsb write worker thread must not panic"));
     }
     for h in olap_handles {
-        h.join().expect("s_htap OLAP worker thread must not panic");
+        h.join().expect("s_ycsb OLAP worker thread must not panic");
     }
 
     let violations = violations.lock().unwrap();
@@ -224,7 +224,7 @@ fn run_stress_and_check(
 fn concurrent_default_mix_with_lateness_keeps_every_row_readable_and_scans_never_overcount() {
     run_stress_and_check(
         false,
-        SHtapMix::default(),
+        SYcsbMix::default(),
         50,
         30,
         YcsbExecutionMode::Atomic,
@@ -242,7 +242,7 @@ fn concurrent_default_mix_with_lateness_keeps_every_row_readable_and_scans_never
 fn concurrent_narrow_hot_window_under_update_in_place_gc_and_transaction_mode() {
     run_stress_and_check(
         true,
-        SHtapMix {
+        SYcsbMix {
             arrival: 0.4,
             hot_update: 0.6,
         },

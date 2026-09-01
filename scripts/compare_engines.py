@@ -131,7 +131,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dram-gib", type=float)
 
     p.add_argument("--s-htap-record-count", type=int,
-                   help="cold historical corpus loaded before the S-HTAP workload's timed phase")
+                   help="cold historical corpus loaded before the S-YCSB workload's timed phase")
     p.add_argument("--s-htap-duration", type=int)
     p.add_argument("--s-htap-hot-window", type=int,
                    help="width, in keys, of the recency-biased hot-update tail")

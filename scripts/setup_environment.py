@@ -268,7 +268,7 @@ def step_leanstore() -> None:
         run(["git", "apply", str(LEANSTORE_TPCC_SEMANTICS_PATCH_PATH)], cwd=LEANSTORE_REPO)
     if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_S_HTAP_PATCH_PATH)],
                       cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        log(f"Applying {LEANSTORE_S_HTAP_PATCH_PATH.name} (native + WiredTiger-adapter S-HTAP frontends)")
+        log(f"Applying {LEANSTORE_S_HTAP_PATCH_PATH.name} (native + WiredTiger-adapter S-YCSB frontends)")
         run(["git", "apply", str(LEANSTORE_S_HTAP_PATCH_PATH)], cwd=LEANSTORE_REPO)
 
     LEANSTORE_BUILD_DIR.mkdir(parents=True, exist_ok=True)

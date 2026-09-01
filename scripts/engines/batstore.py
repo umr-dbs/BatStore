@@ -139,7 +139,7 @@ def run(
         olap_threads = min(scale.s_htap_olap_threads, max(1, threads - 1))
         write_threads = max(1, threads - olap_threads)
         args = [
-            str(BINARY), "s_htap", str(scale.s_htap_record_count), str(write_threads),
+            str(BINARY), "s_ycsb", str(scale.s_htap_record_count), str(write_threads),
             str(olap_threads), str(duration), str(scale.s_htap_hot_window),
             str(scale.s_htap_theta), str(scale.s_htap_arrival_ratio),
             str(scale.s_htap_max_lateness), str(scale.s_htap_olap_lag),
@@ -148,7 +148,7 @@ def run(
             str(wal_path), "5", os.environ.get("BATSTORE_YCSB_MODE", "atomic"),
         ]
         metric_name = "write_ops_per_sec"
-        ts_file, ts_column = "s_htap_timeseries.csv", "ops_completed"
+        ts_file, ts_column = "s_ycsb_timeseries.csv", "ops_completed"
     else:
         letter = workload.split("_", 1)[1]
         duration = scale.ycsb_duration
@@ -202,7 +202,7 @@ def run(
     if workload == "ycsb_e":
         latency = common.read_latency_summary(output_dir / "ycsb_scan_latency_summary.csv")
     elif workload == "s_htap":
-        latency = common.read_latency_summary(output_dir / "s_htap_scan_latency_summary.csv")
+        latency = common.read_latency_summary(output_dir / "s_ycsb_scan_latency_summary.csv")
     elif workload in common.HTAP_WORKLOADS:
         mode = {
             "htap_q1": "ch_q1_pricing_summary",

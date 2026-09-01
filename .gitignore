@@ -4,6 +4,8 @@ Cargo.lock
 /comparison_results
 /skew_sweep_results
 /htap_analytical_results
+/scripts/skew_sweep_results
+/scripts/htap_analytical_results
 /benchmark_results
 /tx_tests
 __pycache__/

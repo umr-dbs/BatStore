@@ -21,6 +21,7 @@ import plot_htap_analytical
 import plot_results
 import plot_skew_sweep
 import plot_suite
+from plot_styles import set_compact
 
 
 KINDS = ("auto", "comparison", "htap", "skew", "suite", "raw")
@@ -104,23 +105,7 @@ def plot_comparison(run_dir: Path, engine: str | None) -> None:
 
 def plot_htap(run_dir: Path) -> None:
     manifest = plot_htap_analytical.load_manifest(run_dir)
-    out_dir = run_dir / "plots"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for workload in plot_htap_analytical.HTAP_WORKLOADS:
-        workload_df = manifest[manifest["workload"] == workload]
-        for gc_choice, gc_df in plot_htap_analytical.gc_slices(workload_df):
-            plot_htap_analytical.plot_workload_per_engine(
-                gc_df, workload, gc_choice, out_dir
-            )
-            plot_htap_analytical.plot_workload_all_engines(
-                gc_df, workload, gc_choice, out_dir
-            )
-            plot_htap_analytical.plot_workload_latency_per_engine(
-                gc_df, workload, gc_choice, out_dir
-            )
-            plot_htap_analytical.plot_workload_latency_all_engines(
-                gc_df, workload, gc_choice, out_dir
-            )
+    plot_htap_analytical.plot_all(manifest, run_dir / "plots")
 
 
 def plot_skew(run_dir: Path, requested_ref_threads: int | None) -> None:
@@ -169,6 +154,11 @@ def main() -> None:
         "--ref-threads", type=int,
         help="skew plots: thread count for the all-engine overlay (default: maximum)",
     )
+    parser.add_argument(
+        "--compact", action="store_true",
+        help=("omit overall titles and combine per-panel legends into a prominent "
+              "frameless legend above the plot; overview panel names are retained"),
+    )
     args = parser.parse_args()
 
     run_dir = args.directory.resolve()
@@ -176,6 +166,7 @@ def main() -> None:
         raise SystemExit(f"{run_dir} is not a directory")
 
     kind = detect_kind(run_dir) if args.kind == "auto" else args.kind
+    set_compact(args.compact)
     print(f"Detected {kind} results in {run_dir}")
     if kind == "comparison":
         plot_comparison(run_dir, args.engine)

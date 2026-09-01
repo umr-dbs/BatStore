@@ -68,13 +68,13 @@ fn main() {
             "tpch" => bat_bench::tpcc_driver::main_tpch(parms),
             "htap" => bat_bench::tpcc_driver::main_htap(parms),
             "ycsb" => bat_bench::ycsb_driver::main_ycsb(parms),
-            "s_htap" => bat_bench::s_htap_driver::main_s_htap(parms),
+            "s_ycsb" => bat_bench::s_ycsb_driver::main_s_ycsb(parms),
             #[cfg(feature = "mdbx-backend")]
             "mdbx_ycsb" => bat_bench::mdbx_ycsb::main_mdbx_ycsb(parms),
             #[cfg(feature = "mdbx-backend")]
             "mdbx_tpcc" => bat_bench::mdbx_tpcc::main_mdbx_tpcc(parms),
             #[cfg(feature = "mdbx-backend")]
-            "mdbx_s_htap" => bat_bench::mdbx_s_htap::main_mdbx_s_htap(parms),
+            "mdbx_s_ycsb" => bat_bench::mdbx_s_ycsb::main_mdbx_s_ycsb(parms),
             "benchmark" => bat_bench::suite::main_benchmark(parms),
             "_bench_one" => bat_bench::suite::main_bench_one(parms),
             #[cfg(feature = "tree-viz")]

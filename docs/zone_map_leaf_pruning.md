@@ -156,7 +156,7 @@ permanent test only asserts/prints timing and row counts, not leaf counts,
 so it doesn't depend on that flag.
 
 **A transient, unrelated test failure surfaced while `SCAN_TRACE` was still
-flipped on**: `bench_s_htap_stress_tests::
+flipped on**: `bench_s_ycsb_stress_tests::
 concurrent_default_mix_with_lateness_keeps_every_row_readable_and_scans_
 never_overcount` panicked once (`LeafPage::record`, index-out-of-bounds)
 during that same investigation session. 17 subsequent runs with

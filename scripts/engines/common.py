@@ -417,7 +417,7 @@ class Scale:
     # ignores this field entirely (only batstore.py's `run()` accepts a `scan_pool_workers`
     # kwarg at all - see run_htap_analytical_sweep.py's per-engine run_kwargs).
     htap_scan_pool_workers: Optional[int] = None
-    # "S-HTAP" streaming workload (src/bat_bench/s_htap_driver.rs): near-sorted
+    # "S-YCSB" streaming workload (src/bat_bench/s_ycsb_driver.rs): near-sorted
     # arrivals + recency-biased hot-tail updates running concurrently with OLAP scans
     # that straddle the cold/hot boundary - see that module's doc. `s_htap_record_count`
     # is the cold historical corpus loaded up front (mirrors ycsb_records); the swept
@@ -512,7 +512,7 @@ HTAP_CANONICAL_WORKLOADS = ["htap_q1", "htap_q6"]
 # now that htap_q1/htap_q6 mean the pinned BenchBase SQL exactly.
 HTAP_VARIANT_WORKLOADS = ["htap_q1_variant", "htap_q6_variant"]
 HTAP_WORKLOADS = HTAP_CANONICAL_WORKLOADS + HTAP_VARIANT_WORKLOADS
-# "S-HTAP" streaming workload (see Scale's s_htap_* fields' doc) - one name, no
+# "S-YCSB" streaming workload (see Scale's s_htap_* fields' doc) - one name, no
 # lettered variants (unlike YCSB A-F): the interesting axis here is the hot_window/
 # olap_lag/olap_span shape, not a fixed menu of op-mix presets, so it stays a single
 # workload tuned via those Scale fields / compare_engines.py flags instead.

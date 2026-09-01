@@ -1,12 +1,12 @@
-//! libmdbx-backed "S-HTAP" streaming benchmark - the same near-sorted-
+//! libmdbx-backed "S-YCSB" streaming benchmark - the same near-sorted-
 //! arrival + hot-tail-update + straddling-OLAP-scan workload as
-//! `s_htap_driver.rs`, run against libmdbx for a version-chain-vs-
+//! `s_ycsb_driver.rs`, run against libmdbx for a version-chain-vs-
 //! path-copying MVCC comparison. Mirrors `mdbx_ycsb.rs`'s structure and
 //! conventions (own `open_db`/read/write/scan reimplementations against
 //! `libmdbx::Transaction<RO|RW>`, since there's no shared trait boundary in
 //! this codebase between BatStore's tree and its transaction logic - see that
 //! file's module doc) while reusing every storage-engine-agnostic piece of
-//! `s_htap_random` (key minting, hot-tail sampling, OLAP scan bounds) and
+//! `s_ycsb_random` (key minting, hot-tail sampling, OLAP scan bounds) and
 //! `ycsb_random`/`ycsb_schema` (row generation, config) as-is.
 //!
 //! Unlike BatStore's tree, libmdbx's `put(..., WriteFlags::UPSERT)` doesn't
@@ -31,20 +31,20 @@ use libmdbx::{
 };
 
 use crate::bat_bench::mem_stats::{DEFAULT_SAMPLE_INTERVAL, MemSampler};
-use crate::bat_bench::s_htap_random::{
-    HotTailSampler, SHtapMix, SHtapWriteOp, mint_arrival_key, olap_scan_bounds,
+use crate::bat_bench::s_ycsb_random::{
+    HotTailSampler, SYcsbMix, SYcsbWriteOp, mint_arrival_key, olap_scan_bounds,
     pick_write_op,
 };
 use crate::bat_bench::ycsb_random::random_row;
 use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbKey};
 use crate::bat_wal::record::WalPayload;
 
-pub struct MdbxSHtapConfig {
+pub struct MdbxSYcsbConfig {
     pub ycsb: YcsbConfig,
     pub num_write_threads: usize,
     pub num_olap_threads: usize,
     pub duration: Duration,
-    pub mix: SHtapMix,
+    pub mix: SYcsbMix,
     pub hot_window: u64,
     pub hot_theta: f64,
     pub max_lateness: u64,
@@ -56,7 +56,7 @@ pub struct MdbxSHtapConfig {
     pub output_dir: PathBuf,
 }
 
-pub struct MdbxSHtapRunSummary {
+pub struct MdbxSYcsbRunSummary {
     pub write_throughput_ops_sec: f64,
     pub totals: [u64; NUM_WRITE_COUNTERS],
     pub olap_scans_completed: u64,
@@ -71,7 +71,7 @@ const WRITE_COUNTER_NAMES: [&str; NUM_WRITE_COUNTERS] =
 
 fn open_db(path: &std::path::Path, num_threads: usize) -> Database<WriteMap> {
     fs::create_dir_all(path)
-        .unwrap_or_else(|e| panic!("mdbx_s_htap: failed to create db dir {}: {e}", path.display()));
+        .unwrap_or_else(|e| panic!("mdbx_s_ycsb: failed to create db dir {}: {e}", path.display()));
     // See mdbx_ycsb.rs::open_db's doc for why max_readers is sized off the
     // actual thread count rather than left at libmdbx's default of 61.
     let options = DatabaseOptions {
@@ -83,10 +83,10 @@ fn open_db(path: &std::path::Path, num_threads: usize) -> Database<WriteMap> {
         ..Default::default()
     };
     let db = Database::<WriteMap>::open_with_options(path, options)
-        .unwrap_or_else(|e| panic!("mdbx_s_htap: failed to open database at {}: {e}", path.display()));
-    let txn = db.begin_rw_txn().expect("mdbx_s_htap: begin_rw_txn (table creation)");
-    txn.create_table(None, TableFlags::empty()).expect("mdbx_s_htap: create_table");
-    txn.commit().expect("mdbx_s_htap: commit (table creation)");
+        .unwrap_or_else(|e| panic!("mdbx_s_ycsb: failed to open database at {}: {e}", path.display()));
+    let txn = db.begin_rw_txn().expect("mdbx_s_ycsb: begin_rw_txn (table creation)");
+    txn.create_table(None, TableFlags::empty()).expect("mdbx_s_ycsb: create_table");
+    txn.commit().expect("mdbx_s_ycsb: commit (table creation)");
     db
 }
 
@@ -103,32 +103,32 @@ fn encode_row(cfg: &YcsbConfig) -> Vec<u8> {
 /// same txn so no concurrent writer can observe (or create) a window where
 /// the two disagree.
 fn mdbx_arrival_upsert(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> bool {
-    let txn = db.begin_rw_txn().expect("mdbx_s_htap: begin_rw_txn");
-    let table = txn.open_table(None).expect("mdbx_s_htap: open_table");
+    let txn = db.begin_rw_txn().expect("mdbx_s_ycsb: begin_rw_txn");
+    let table = txn.open_table(None).expect("mdbx_s_ycsb: open_table");
     let existed = txn
         .get::<Vec<u8>>(&table, &key.to_be_bytes())
-        .expect("mdbx_s_htap: get")
+        .expect("mdbx_s_ycsb: get")
         .is_some();
     let buf = encode_row(cfg);
     txn.put(&table, key.to_be_bytes(), &buf, WriteFlags::UPSERT)
-        .expect("mdbx_s_htap: put");
-    txn.commit().expect("mdbx_s_htap: commit");
+        .expect("mdbx_s_ycsb: put");
+    txn.commit().expect("mdbx_s_ycsb: commit");
     !existed
 }
 
 fn mdbx_hot_update(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> bool {
-    let txn = db.begin_rw_txn().expect("mdbx_s_htap: begin_rw_txn");
-    let table = txn.open_table(None).expect("mdbx_s_htap: open_table");
+    let txn = db.begin_rw_txn().expect("mdbx_s_ycsb: begin_rw_txn");
+    let table = txn.open_table(None).expect("mdbx_s_ycsb: open_table");
     let exists = txn
         .get::<Vec<u8>>(&table, &key.to_be_bytes())
-        .expect("mdbx_s_htap: get")
+        .expect("mdbx_s_ycsb: get")
         .is_some();
     if exists {
         let buf = encode_row(cfg);
         txn.put(&table, key.to_be_bytes(), &buf, WriteFlags::UPSERT)
-            .expect("mdbx_s_htap: put");
+            .expect("mdbx_s_ycsb: put");
     }
-    txn.commit().expect("mdbx_s_htap: commit");
+    txn.commit().expect("mdbx_s_ycsb: commit");
     exists
 }
 
@@ -139,14 +139,14 @@ fn mdbx_hot_update(db: &Database<WriteMap>, cfg: &YcsbConfig, key: YcsbKey) -> b
 /// the same kind of logical clock, so `staleness` can still be reported as
 /// "how many commits happened while this scan was in flight."
 fn mdbx_scan(db: &Database<WriteMap>, start_key: YcsbKey, len: u64, read_payload: bool) -> (usize, u64) {
-    let txn = db.begin_ro_txn().expect("mdbx_s_htap: begin_ro_txn");
+    let txn = db.begin_ro_txn().expect("mdbx_s_ycsb: begin_ro_txn");
     let txn_id = txn.id();
-    let table = txn.open_table(None).expect("mdbx_s_htap: open_table");
-    let mut cursor = txn.cursor(&table).expect("mdbx_s_htap: cursor");
+    let table = txn.open_table(None).expect("mdbx_s_ycsb: open_table");
+    let mut cursor = txn.cursor(&table).expect("mdbx_s_ycsb: cursor");
     let mut count = 0u64;
     let mut item = cursor
         .set_range::<Vec<u8>, Vec<u8>>(&start_key.to_be_bytes())
-        .expect("mdbx_s_htap: cursor.set_range");
+        .expect("mdbx_s_ycsb: cursor.set_range");
     while item.is_some() && count < len {
         if read_payload {
             if let Some((_, bytes)) = &item {
@@ -157,7 +157,7 @@ fn mdbx_scan(db: &Database<WriteMap>, start_key: YcsbKey, len: u64, read_payload
         if count >= len {
             break;
         }
-        item = cursor.next::<Vec<u8>, Vec<u8>>().expect("mdbx_s_htap: cursor.next");
+        item = cursor.next::<Vec<u8>, Vec<u8>>().expect("mdbx_s_ycsb: cursor.next");
     }
     (count as usize, txn_id)
 }
@@ -168,14 +168,14 @@ fn populate(db: &Database<WriteMap>, cfg: &YcsbConfig) {
     let mut key = 1u64;
     while key <= cfg.record_count {
         let batch_end = (key + LOAD_BATCH_SIZE - 1).min(cfg.record_count);
-        let txn = db.begin_rw_txn().expect("mdbx_s_htap: begin_rw_txn (load)");
-        let table = txn.open_table(None).expect("mdbx_s_htap: open_table (load)");
+        let txn = db.begin_rw_txn().expect("mdbx_s_ycsb: begin_rw_txn (load)");
+        let table = txn.open_table(None).expect("mdbx_s_ycsb: open_table (load)");
         for k in key..=batch_end {
             let buf = encode_row(cfg);
             txn.put(&table, k.to_be_bytes(), &buf, WriteFlags::UPSERT)
-                .expect("mdbx_s_htap: put (load)");
+                .expect("mdbx_s_ycsb: put (load)");
         }
-        txn.commit().expect("mdbx_s_htap: commit (load)");
+        txn.commit().expect("mdbx_s_ycsb: commit (load)");
         key = batch_end + 1;
     }
 }
@@ -189,7 +189,7 @@ struct WriteWorkerStats {
 fn write_worker_thread(
     db: Arc<Database<WriteMap>>,
     cfg: YcsbConfig,
-    mix: SHtapMix,
+    mix: SYcsbMix,
     hot_sampler: Arc<HotTailSampler>,
     current_max_key: Arc<AtomicU64>,
     max_lateness: u64,
@@ -205,12 +205,12 @@ fn write_worker_thread(
 
     while !stop.load(Relaxed) {
         match pick_write_op(&mix) {
-            SHtapWriteOp::Arrival => {
+            SYcsbWriteOp::Arrival => {
                 let key = mint_arrival_key(&current_max_key, max_lateness);
                 let was_new = mdbx_arrival_upsert(&db, &cfg, key);
                 totals[if was_new { NEW_ARRIVAL } else { LATE_UPSERT }] += 1;
             }
-            SHtapWriteOp::HotUpdate => {
+            SYcsbWriteOp::HotUpdate => {
                 let max_key_now = current_max_key.load(Relaxed);
                 let key = hot_sampler.sample(max_key_now);
                 mdbx_hot_update(&db, &cfg, key);
@@ -256,7 +256,7 @@ fn olap_worker_thread(
         scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
         let txn_id_now = db
             .begin_ro_txn()
-            .expect("mdbx_s_htap: begin_ro_txn (staleness probe)")
+            .expect("mdbx_s_ycsb: begin_ro_txn (staleness probe)")
             .id();
         staleness_txns.push(txn_id_now.saturating_sub(txn_id_at_start));
         scans_completed += 1;
@@ -270,13 +270,13 @@ fn olap_worker_thread(
     }
 }
 
-pub fn run_mdbx_s_htap(cfg: MdbxSHtapConfig) -> MdbxSHtapRunSummary {
-    assert!(cfg.ycsb.record_count >= 1, "mdbx_s_htap: record_count must be >= 1");
-    assert!(cfg.hot_window >= 1, "mdbx_s_htap: hot_window must be >= 1");
-    assert!(cfg.olap_span >= 1, "mdbx_s_htap: olap_span must be >= 1");
+pub fn run_mdbx_s_ycsb(cfg: MdbxSYcsbConfig) -> MdbxSYcsbRunSummary {
+    assert!(cfg.ycsb.record_count >= 1, "mdbx_s_ycsb: record_count must be >= 1");
+    assert!(cfg.hot_window >= 1, "mdbx_s_ycsb: hot_window must be >= 1");
+    assert!(cfg.olap_span >= 1, "mdbx_s_ycsb: olap_span must be >= 1");
 
     fs::create_dir_all(&cfg.output_dir)
-        .unwrap_or_else(|e| panic!("mdbx_s_htap: failed to create output_dir {}: {e}", cfg.output_dir.display()));
+        .unwrap_or_else(|e| panic!("mdbx_s_ycsb: failed to create output_dir {}: {e}", cfg.output_dir.display()));
     let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
     let num_write_threads = cfg.num_write_threads.max(1);
@@ -284,7 +284,7 @@ pub fn run_mdbx_s_htap(cfg: MdbxSHtapConfig) -> MdbxSHtapRunSummary {
     let db = Arc::new(open_db(&cfg.db_path, num_write_threads + num_olap_threads));
 
     println!(
-        "libmdbx S-HTAP benchmark\n\
+        "libmdbx S-YCSB benchmark\n\
          - cold record_count   = {}\n\
          - field_count/length  = {}/{}\n\
          - write workers       = {num_write_threads}\n\
@@ -362,7 +362,7 @@ fn write_results(
     requested_duration: Duration,
     actual_wall: Duration,
     out_dir: &std::path::Path,
-) -> MdbxSHtapRunSummary {
+) -> MdbxSYcsbRunSummary {
     let series_len = requested_duration.as_secs() as usize + 2;
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_WRITE_COUNTERS];
@@ -386,7 +386,7 @@ fn write_results(
         staleness_txns.extend_from_slice(&s.staleness_txns);
     }
 
-    let ts_path = out_dir.join("s_htap_timeseries.csv");
+    let ts_path = out_dir.join("s_ycsb_timeseries.csv");
     let _ = fs::remove_file(&ts_path);
     let mut ts_file = OpenOptions::new().create(true).append(true).open(&ts_path).unwrap();
     ts_file.write_all(b"elapsed_sec,ops_completed\n").unwrap();
@@ -394,7 +394,7 @@ fn write_results(
         ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
     }
 
-    // Same format as BatStore's own s_htap_driver.rs::write_results - see
+    // Same format as BatStore's own s_ycsb_driver.rs::write_results - see
     // that function's comment.
     let pct = |samples: &[u64], p: f64| -> f64 {
         if samples.is_empty() {
@@ -406,7 +406,7 @@ fn write_results(
     };
 
     scan_latencies_ns.sort_unstable();
-    let scan_latency_path = out_dir.join("s_htap_scan_latency_summary.csv");
+    let scan_latency_path = out_dir.join("s_ycsb_scan_latency_summary.csv");
     let _ = fs::remove_file(&scan_latency_path);
     let mut scan_latency_file = OpenOptions::new().create(true).append(true).open(&scan_latency_path).unwrap();
     scan_latency_file.write_all(b"p50_us,p95_us,p99_us,count,avg_us\n").unwrap();
@@ -422,7 +422,7 @@ fn write_results(
     ).as_bytes()).unwrap();
 
     staleness_txns.sort_unstable();
-    let staleness_path = out_dir.join("s_htap_staleness_summary.csv");
+    let staleness_path = out_dir.join("s_ycsb_staleness_summary.csv");
     let _ = fs::remove_file(&staleness_path);
     let mut staleness_file = OpenOptions::new().create(true).append(true).open(&staleness_path).unwrap();
     staleness_file.write_all(b"p50,p95,p99,count,avg\n").unwrap();
@@ -450,20 +450,20 @@ fn write_results(
     println!("{:<20} {}", "olap_scanned_tuples", scanned_tuples);
     println!("Wrote {}, {} and {}", ts_path.display(), scan_latency_path.display(), staleness_path.display());
 
-    MdbxSHtapRunSummary {
+    MdbxSYcsbRunSummary {
         write_throughput_ops_sec: write_throughput,
         totals,
         olap_scans_completed: scans_completed,
     }
 }
 
-pub fn main_mdbx_s_htap(parms: Vec<String>) {
+pub fn main_mdbx_s_ycsb(parms: Vec<String>) {
     fn arg<T: std::str::FromStr>(parms: &[String], idx: usize, default: T) -> T {
         parms.get(idx).and_then(|s| s.parse().ok()).unwrap_or(default)
     }
 
-    // Positional order mirrors the native `s_htap` subcommand
-    // (main_s_htap), dropping MVBTree-internal knobs (root_star_index,
+    // Positional order mirrors the native `s_ycsb` subcommand
+    // (main_s_ycsb), dropping MVBTree-internal knobs (root_star_index,
     // gc, update_in_place, WAL, execution_mode) that have no libmdbx
     // equivalent - see mdbx_ycsb.rs/mdbx_tpcc.rs for the same convention.
     let record_count: u64 = arg(&parms, 2, 1_000_000);
@@ -479,14 +479,14 @@ pub fn main_mdbx_s_htap(parms: Vec<String>) {
     let field_count: usize = arg(&parms, 12, 10);
     let field_length: usize = arg(&parms, 13, 100);
     let read_payload: bool = arg(&parms, 14, true);
-    let db_path: String = parms.get(15).cloned().unwrap_or_else(|| "mdbx_s_htap_db".to_string());
+    let db_path: String = parms.get(15).cloned().unwrap_or_else(|| "mdbx_s_ycsb_db".to_string());
 
-    run_mdbx_s_htap(MdbxSHtapConfig {
+    run_mdbx_s_ycsb(MdbxSYcsbConfig {
         ycsb: YcsbConfig { record_count, field_count, field_length },
         num_write_threads,
         num_olap_threads,
         duration: Duration::from_secs(duration_secs),
-        mix: SHtapMix { arrival: arrival_ratio, hot_update: (1.0 - arrival_ratio).max(0.0) },
+        mix: SYcsbMix { arrival: arrival_ratio, hot_update: (1.0 - arrival_ratio).max(0.0) },
         hot_window,
         hot_theta,
         max_lateness,
