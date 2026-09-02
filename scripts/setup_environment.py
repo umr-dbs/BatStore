@@ -114,8 +114,9 @@ VWEAVER_BURT_HASH_GEN = Path(__file__).resolve().parent.parent / "patches" / "vw
 # scripts/engines/leanstore.py never builds), plus postgresql itself, plus numactl
 # (every engine subprocess here runs under `numactl --cpubind=0 --membind=0` - see
 # engines/common.py::run_and_track_rss - matching the real 2-NUMA-node server), plus
-# maven (BenchBase is now built with plain `mvn`, not its bundled ./mvnw wrapper, so
-# build errors are visible instead of the wrapper's own download/bootstrap noise), plus
+# OpenJDK 21 + maven (BenchBase is built with plain `mvn`, not its bundled ./mvnw wrapper,
+# so both the compiler and build errors are available without relying on Maven's
+# runtime-only Java dependency), plus
 # clang/libnuma-dev (vWeaver_ermia/ERMIA only builds with clang, and needs libnuma - see
 # its README). No ninja-build: both cmake builds below go through `cmake --build`, which
 # drives whatever generator got configured (default: Unix Makefiles via the
@@ -123,7 +124,7 @@ VWEAVER_BURT_HASH_GEN = Path(__file__).resolve().parent.parent / "patches" / "vw
 APT_PACKAGES = [
     "cmake", "libtbb-dev", "libaio-dev", "libsnappy-dev", "zlib1g-dev",
     "libbz2-dev", "liblz4-dev", "libzstd-dev", "liburing-dev", "numactl",
-    "postgresql", "postgresql-contrib", "maven",
+    "postgresql", "postgresql-contrib", "openjdk-21-jdk-headless", "maven",
 ]
 VWEAVER_APT_PACKAGES = ["clang", "libnuma-dev", "libgoogle-glog-dev", "libibverbs-dev"]
 
@@ -162,14 +163,23 @@ def shallow_clone(url: str, dest: Path, commit: str | None = None) -> None:
     Requires the remote to allow fetching by SHA (`uploadpack.allowReachableSHA1InWant` or
     equivalent) - true for GitHub, which is where every commit-pinned repo here lives.
     """
-    if commit is None:
-        run(["git", "clone", "--depth", "1", url, str(dest)])
-        return
-    dest.mkdir(parents=True, exist_ok=True)
-    run(["git", "init"], cwd=dest)
-    run(["git", "remote", "add", "origin", url], cwd=dest)
-    run(["git", "fetch", "--depth", "1", "origin", commit], cwd=dest)
-    run(["git", "checkout", "FETCH_HEAD"], cwd=dest)
+    try:
+        if commit is None:
+            run(["git", "clone", "--depth", "1", url, str(dest)])
+            return
+        dest.mkdir(parents=True, exist_ok=True)
+        run(["git", "init"], cwd=dest)
+        run(["git", "remote", "add", "origin", url], cwd=dest)
+        run(["git", "fetch", "--depth", "1", "origin", commit], cwd=dest)
+        run(["git", "checkout", "FETCH_HEAD"], cwd=dest)
+    except subprocess.CalledProcessError:
+        # A failed clone/fetch otherwise leaves `dest` present. Every setup step uses
+        # existence as its "already cloned" check, so that partial directory would poison
+        # all --reuse-checkouts retries and make (notably) BenchBase appear to be skipped.
+        if dest.exists():
+            print(f"Removing incomplete checkout after clone failure: {dest}")
+            shutil.rmtree(dest)
+        raise
 
 
 def is_apt_package_installed(pkg: str) -> bool:
@@ -800,6 +810,10 @@ def step_benchbase() -> None:
     if not tgz.exists():
         sys.exit(f"Build finished but {tgz} is missing - check the Maven output above.")
     run(["tar", "xzf", str(tgz)], cwd=BENCHBASE_REPO / "target")
+    jar = BENCHBASE_DIST / "benchbase.jar"
+    if not jar.exists():
+        sys.exit(f"BenchBase archive was extracted but {jar} is missing.")
+    print(f"BenchBase installed: {jar}")
 
 
 def _docker_available() -> bool:

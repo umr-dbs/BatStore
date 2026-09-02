@@ -16,7 +16,9 @@ source scripts/.venv/bin/activate
 ```
 
 The setup may request `sudo` access to install system packages and configure
-PostgreSQL. To reuse existing engine checkouts instead of cloning them again:
+PostgreSQL. By default it installs the BenchBase distribution at
+`tx_tests/benchbase/target/benchbase-postgres/benchbase.jar`. To reuse existing engine
+checkouts instead of cloning them again:
 
 ```bash
 python3 scripts/setup_environment.py --reuse-checkouts

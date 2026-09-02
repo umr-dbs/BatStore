@@ -44,7 +44,7 @@ scripts work starting from nothing, on any machine:
   (ERMIA only builds with clang; the other three are linked unconditionally by its
   CMakeLists.txt even though this harness never exercises RDMA replication).
 - A JDK (21 is verified working; BenchBase's pom.xml nominally wants 23 but the build is
-  pinned down to 21 via -Dmaven.compiler.source/target) + Maven (plain `mvn`, not
+  pinned down to 21 via `-Dmaven.compiler.release=21`) + Maven (plain `mvn`, not
   BenchBase's bundled ./mvnw wrapper - see section on why).
 - PostgreSQL server + client (`postgresql`, `postgresql-contrib`).
 - Docker, for Umbra (umbradb/umbra - it ships only as a Docker image, no native package;
