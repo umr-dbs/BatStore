@@ -29,6 +29,11 @@ scripts work starting from nothing, on any machine:
                                           (Umbra has no checkout here - it ships only as a
                                           Docker image, pulled directly; see section 2)
 
+The setup's GitHub clone/fetch calls force Git's HTTP/1.1 transport. This avoids false
+credential prompts caused by HTTP/2-interfering proxies or network middleboxes while
+remaining anonymous for the public dependency repositories; it does not alter global Git
+configuration.
+
 
 1. REQUIREMENTS
 ----------------
