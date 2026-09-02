@@ -43,9 +43,9 @@ use libmdbx::{
     Database, DatabaseOptions, Mode, ReadWriteOptions, SyncMode, TableFlags, WriteFlags, WriteMap,
 };
 
-use crate::bat_bench::mem_stats::{MemSampler, DEFAULT_SAMPLE_INTERVAL};
+use crate::bat_bench::mem_stats::{DEFAULT_SAMPLE_INTERVAL, MemSampler};
 use crate::bat_bench::ycsb_random::{
-    pick_op, random_row, random_scan_length, KeySampler, RequestDistribution, YcsbMix, YcsbOpType,
+    KeySampler, RequestDistribution, YcsbMix, YcsbOpType, pick_op, random_row, random_scan_length,
 };
 use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbKey};
 use crate::bat_wal::record::WalPayload;
@@ -80,9 +80,9 @@ const NUM_COUNTERS: usize = 5;
 // Keep per-second accounting from becoming part of the point-read benchmark. This
 // matches ycsb_driver.rs: one clock read per 256 operations, rather than one per op.
 const TIMESERIES_CLOCK_EVERY: u64 = 256;
-// Storing/timing every scan is especially intrusive for short in-memory scans. Keep the
-// same systematic sampling rate as BatStore's YCSB driver.
-const SCAN_LATENCY_SAMPLE_EVERY: u64 = 1024;
+// Storing/timing every operation is intrusive for an in-memory workload. Keep the same
+// systematic sampling rate as BatStore's YCSB driver.
+const OPERATION_LATENCY_SAMPLE_EVERY: u64 = 1024;
 const COUNTER_NAMES: [&str; NUM_COUNTERS] =
     ["read", "update", "insert", "scan", "read_modify_write"];
 
@@ -239,7 +239,7 @@ struct WorkerStats {
     ops_per_sec: Vec<u64>,
     totals: [u64; NUM_COUNTERS],
     scanned_tuples: u64,
-    scan_latencies_ns: Vec<u64>,
+    operation_latencies_ns: [Vec<u64>; NUM_COUNTERS],
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -260,7 +260,7 @@ fn worker_thread(
     let mut ops_per_sec = vec![0u64; duration.as_secs() as usize + 2];
     let mut totals = [0u64; NUM_COUNTERS];
     let mut scanned_tuples = 0u64;
-    let mut scan_latencies_ns = Vec::new();
+    let mut operation_latencies_ns: [Vec<u64>; NUM_COUNTERS] = std::array::from_fn(|_| Vec::new());
     let start = Instant::now();
     let mut completed = 0u64;
     let mut current_second = 0usize;
@@ -272,26 +272,41 @@ fn worker_thread(
         match pick_op(&mix) {
             YcsbOpType::Read => {
                 let key = sampler.sample(record_count, max_key_now);
+                let op_start =
+                    (totals[READ] % OPERATION_LATENCY_SAMPLE_EVERY == 0).then(Instant::now);
                 mdbx_read(&db, key, read_payload);
+                if let Some(op_start) = op_start {
+                    operation_latencies_ns[READ].push(op_start.elapsed().as_nanos() as u64);
+                }
                 totals[READ] += 1;
             }
             YcsbOpType::Update => {
                 let key = sampler.sample(record_count, max_key_now);
+                let op_start =
+                    (totals[UPDATE] % OPERATION_LATENCY_SAMPLE_EVERY == 0).then(Instant::now);
                 mdbx_update(&db, &cfg, key);
+                if let Some(op_start) = op_start {
+                    operation_latencies_ns[UPDATE].push(op_start.elapsed().as_nanos() as u64);
+                }
                 totals[UPDATE] += 1;
             }
             YcsbOpType::Insert => {
                 let key = current_max_key.fetch_add(1, Relaxed) + 1;
+                let op_start =
+                    (totals[INSERT] % OPERATION_LATENCY_SAMPLE_EVERY == 0).then(Instant::now);
                 mdbx_insert(&db, &cfg, key);
+                if let Some(op_start) = op_start {
+                    operation_latencies_ns[INSERT].push(op_start.elapsed().as_nanos() as u64);
+                }
                 totals[INSERT] += 1;
             }
             YcsbOpType::Scan => {
                 let key = sampler.sample(record_count, max_key_now);
                 let len = random_scan_length(max_scan_length);
-                if totals[SCAN] % SCAN_LATENCY_SAMPLE_EVERY == 0 {
+                if totals[SCAN] % OPERATION_LATENCY_SAMPLE_EVERY == 0 {
                     let scan_start = Instant::now();
                     scanned_tuples += mdbx_scan(&db, key, len, read_payload) as u64;
-                    scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
+                    operation_latencies_ns[SCAN].push(scan_start.elapsed().as_nanos() as u64);
                 } else {
                     scanned_tuples += mdbx_scan(&db, key, len, read_payload) as u64;
                 }
@@ -299,7 +314,12 @@ fn worker_thread(
             }
             YcsbOpType::ReadModifyWrite => {
                 let key = sampler.sample(record_count, max_key_now);
+                let op_start =
+                    (totals[RMW] % OPERATION_LATENCY_SAMPLE_EVERY == 0).then(Instant::now);
                 mdbx_read_modify_write(&db, &cfg, key, read_payload);
+                if let Some(op_start) = op_start {
+                    operation_latencies_ns[RMW].push(op_start.elapsed().as_nanos() as u64);
+                }
                 totals[RMW] += 1;
             }
         }
@@ -315,7 +335,7 @@ fn worker_thread(
         ops_per_sec,
         totals,
         scanned_tuples,
-        scan_latencies_ns,
+        operation_latencies_ns,
     }
 }
 
@@ -428,7 +448,7 @@ fn write_results(
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_COUNTERS];
     let mut scanned_tuples = 0u64;
-    let mut scan_latencies_ns: Vec<u64> = Vec::new();
+    let mut operation_latencies_ns: [Vec<u64>; NUM_COUNTERS] = std::array::from_fn(|_| Vec::new());
     for s in stats {
         for (i, v) in s.ops_per_sec.iter().enumerate() {
             per_sec[i] += v;
@@ -437,7 +457,12 @@ fn write_results(
             totals[i] += s.totals[i];
         }
         scanned_tuples += s.scanned_tuples;
-        scan_latencies_ns.extend_from_slice(&s.scan_latencies_ns);
+        for (combined, worker) in operation_latencies_ns
+            .iter_mut()
+            .zip(&s.operation_latencies_ns)
+        {
+            combined.extend_from_slice(worker);
+        }
     }
 
     let ts_path = out_dir.join("ycsb_timeseries.csv");
@@ -454,9 +479,51 @@ fn write_results(
             .unwrap();
     }
 
-    // Summary (not raw per-op samples), same format/reasoning as BatStore's own
-    // ycsb_driver.rs::write_results - see that file's comment on why.
-    scan_latencies_ns.sort_unstable();
+    let operation_latency_path = out_dir.join("ycsb_operation_latency_summary.csv");
+    let _ = fs::remove_file(&operation_latency_path);
+    let mut operation_latency_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&operation_latency_path)
+        .unwrap();
+    operation_latency_file
+        .write_all(b"operation,p50_us,p95_us,p99_us,count,avg_us,sample_every\n")
+        .unwrap();
+    for samples in &mut operation_latencies_ns {
+        samples.sort_unstable();
+    }
+    let stats = |samples: &[u64]| -> (f64, f64, f64, f64) {
+        let pct = |p: f64| -> f64 {
+            if samples.is_empty() {
+                0.0
+            } else {
+                let idx =
+                    ((p * (samples.len() - 1) as f64).round() as usize).min(samples.len() - 1);
+                samples[idx] as f64 / 1000.0
+            }
+        };
+        let avg = if samples.is_empty() {
+            0.0
+        } else {
+            samples.iter().map(|&v| v as u128).sum::<u128>() as f64 / samples.len() as f64 / 1000.0
+        };
+        (pct(0.50), pct(0.95), pct(0.99), avg)
+    };
+    for (operation, samples) in COUNTER_NAMES.iter().zip(&operation_latencies_ns) {
+        let (p50, p95, p99, avg) = stats(samples);
+        operation_latency_file
+            .write_all(
+                format!(
+                    "{operation},{p50:.3},{p95:.3},{p99:.3},{},{avg:.3},{}\n",
+                    samples.len(),
+                    OPERATION_LATENCY_SAMPLE_EVERY,
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+
+    // Backward-compatible scan-only summary for the existing manifest and plots.
     let scan_latency_path = out_dir.join("ycsb_scan_latency_summary.csv");
     let _ = fs::remove_file(&scan_latency_path);
     let mut scan_latency_file = OpenOptions::new()
@@ -467,29 +534,17 @@ fn write_results(
     scan_latency_file
         .write_all(b"p50_us,p95_us,p99_us,count,avg_us\n")
         .unwrap();
-    let pct = |p: f64| -> f64 {
-        if scan_latencies_ns.is_empty() {
-            0.0
-        } else {
-            let idx = ((p * (scan_latencies_ns.len() - 1) as f64).round() as usize)
-                .min(scan_latencies_ns.len() - 1);
-            scan_latencies_ns[idx] as f64 / 1000.0
-        }
-    };
-    let avg_us = if scan_latencies_ns.is_empty() {
-        0.0
-    } else {
-        scan_latencies_ns.iter().sum::<u64>() as f64 / scan_latencies_ns.len() as f64 / 1000.0
-    };
+    let scan_samples = &operation_latencies_ns[SCAN];
+    let (scan_p50, scan_p95, scan_p99, scan_avg) = stats(scan_samples);
     scan_latency_file
         .write_all(
             format!(
                 "{:.3},{:.3},{:.3},{},{:.3}\n",
-                pct(0.50),
-                pct(0.95),
-                pct(0.99),
-                scan_latencies_ns.len(),
-                avg_us,
+                scan_p50,
+                scan_p95,
+                scan_p99,
+                scan_samples.len(),
+                scan_avg,
             )
             .as_bytes(),
         )
@@ -506,8 +561,9 @@ fn write_results(
     println!("{:<20} {}", "total_ops", total_ops);
     println!("{:<20} {:.2}", "throughput (ops/sec)", throughput);
     println!(
-        "Wrote {} and {}",
+        "Wrote {}, {} and {}",
         ts_path.display(),
+        operation_latency_path.display(),
         scan_latency_path.display()
     );
 

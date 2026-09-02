@@ -25,6 +25,7 @@ LEANSTORE_KEEP_FILES = {
     "tpcc_oltp_timeseries.csv",
     "tpcc_scan.csv",
     "ycsb_timeseries.csv",
+    "ycsb_operation_latency_summary.csv",
     "ycsb_scan_latency_summary.csv",
     "s_htap_timeseries.csv",
     "s_htap_scan_latency_summary.csv",

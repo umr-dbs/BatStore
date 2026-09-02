@@ -29,7 +29,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from plot_styles import (
-    ENGINE_LABELS, apply_compact_layout, engine_line_style, engine_sort_key,
+    ENGINE_LABELS, apply_compact_layout, compact_enabled, engine_line_style,
+    engine_sort_key,
 )
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
 SKEW_WORKLOADS = YCSB_WORKLOADS + ["s_htap"]
@@ -250,9 +251,14 @@ def plot_workloads_overview(
     fig, axes = plt.subplots(
         rows, cols, figsize=(5 * cols, 4.1 * rows), squeeze=False, sharex=True,
     )
+    last_active_row = {
+        col: max(idx // cols for idx in range(len(workloads)) if idx % cols == col)
+        for col in range(min(cols, len(workloads)))
+    }
     legend_handles = {}
     for idx, workload in enumerate(workloads):
-        ax = axes[idx // cols][idx % cols]
+        row, col = divmod(idx, cols)
+        ax = axes[row][col]
         workload_df = sub[sub["workload"] == workload]
         for engine in sorted(workload_df["engine"].unique(), key=engine_sort_key):
             engine_df = (
@@ -267,8 +273,11 @@ def plot_workloads_overview(
             )
             legend_handles.setdefault(label, line)
         ax.set_title(workload_label(workload))
-        ax.set_xlabel("Skew factor")
-        ax.set_ylabel(ylabel)
+        if compact_enabled():
+            ax.set_xlabel("Skew factor" if row == last_active_row[col] else "")
+        else:
+            ax.set_xlabel("Skew factor")
+            ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
         # ``sharex=True`` otherwise lets Matplotlib hide tick values on every
         # row except the last, which makes individual overview panels harder
@@ -283,6 +292,8 @@ def plot_workloads_overview(
         sources = set(sub["memory_source"])
         if "cgroup_v2_memory.current" in sources and len(sources) > 1:
             source_note = " — cgroup total where available; otherwise process RSS"
+    if compact_enabled():
+        fig.supylabel(ylabel)
     fig.suptitle(
         f"YCSB/S-YCSB workload {metric_name} overview "
         f"(threads={ref_threads}, GC {gc_choice}){source_note}"

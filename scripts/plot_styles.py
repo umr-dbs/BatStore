@@ -17,6 +17,11 @@ def set_compact(enabled: bool = True) -> None:
     _COMPACT = enabled
 
 
+def compact_enabled() -> bool:
+    """Return whether the shared paper-oriented layout is enabled."""
+    return _COMPACT
+
+
 def apply_compact_layout(fig) -> None:
     """Remove the overall title and use one prominent shared figure legend.
 
@@ -29,7 +34,12 @@ def apply_compact_layout(fig) -> None:
         return
 
     overall_title = fig._suptitle.get_text() if fig._suptitle is not None else ""
+    active_axes = [ax for ax in fig.axes if ax.get_visible() and ax.axison]
+    figure_labels = [overall_title]
+    figure_labels.extend(ax.get_title() for ax in active_axes)
+    figure_labels.extend(ax.get_ylabel() for ax in active_axes)
     is_overview = "overview" in overall_title.lower()
+    is_latency = any("latency" in label.lower() for label in figure_labels)
     if fig._suptitle is not None:
         fig._suptitle.remove()
         fig._suptitle = None
@@ -41,7 +51,38 @@ def apply_compact_layout(fig) -> None:
         # text along with the figure.
         width, height = fig.get_size_inches()
         fig.set_size_inches(width * 0.70, height * 0.54, forward=True)
-    active_axes = [ax for ax in fig.axes if ax.get_visible() and ax.axison]
+    elif is_latency:
+        # Latency figures are usually initialized at the same height as the
+        # presentation-oriented throughput plots.  They need less vertical
+        # room once the overall title has been removed for paper output.
+        width, height = fig.get_size_inches()
+        fig.set_size_inches(width * 0.56, height * 0.45, forward=True)
+
+        # Percentile grids repeat the same unit on every panel.  Keep it only
+        # on the first occurrence so the smaller canvas is not dominated by
+        # identical vertical labels.  Distinct latency/staleness units remain.
+        seen_ylabels = set()
+        for ax in active_axes:
+            ylabel = ax.get_ylabel()
+            if ylabel and ylabel in seen_ylabels:
+                ax.set_ylabel("")
+            elif ylabel:
+                seen_ylabels.add(ylabel)
+
+            if "analytical (olap) threads" in ax.get_xlabel().lower():
+                ax.set_xlabel("OLAP threads")
+
+            # Keep every plotted sample, but label the same concise selection
+            # used by compact HTAP throughput overviews.
+            compact_ticks = {"1", "2", "4", "8", "16", "32", "64", "120"}
+            visible_ticks = [
+                (tick, label.get_text())
+                for tick, label in zip(ax.get_xticks(), ax.get_xticklabels())
+                if label.get_text() in compact_ticks
+            ]
+            if visible_ticks:
+                ax.set_xticks([tick for tick, _ in visible_ticks])
+                ax.set_xticklabels([label for _, label in visible_ticks])
     entries = []
     for ax in active_axes:
         # A one-panel axes title is the plot's overall title.  In an overview,
@@ -79,14 +120,22 @@ def apply_compact_layout(fig) -> None:
 
     ncol = min(5, len(unique))
     rows = math.ceil(len(unique) / ncol)
-    top = max(0.76, 0.998 - 0.055 * rows)
+    if is_latency and not is_overview:
+        top = max(0.73, 0.965 - 0.055 * rows)
+    else:
+        top = max(0.76, 0.998 - 0.055 * rows)
     fig.legend(
         unique.values(), unique.keys(), loc="upper center",
         bbox_to_anchor=(0.5, 0.985), ncol=ncol, frameon=False,
         fontsize=11, columnspacing=1.4, handletextpad=0.6,
         handlelength=2.2,
     )
-    fig.tight_layout(rect=(0, 0, 1, top))
+    layout_left = getattr(fig, "_compact_layout_left", 0)
+    layout_w_pad = getattr(fig, "_compact_layout_w_pad", None)
+    fig.tight_layout(
+        rect=(layout_left, 0, 1, top),
+        w_pad=layout_w_pad,
+    )
 
 ENGINE_ORDER = [
     "batstore", "leanstore", "wiredtiger", "postgres", "umbra", "vweaver_ermia",
@@ -104,7 +153,7 @@ ENGINE_LABELS = {
     "libmdbx": "libmdbx",
 }
 
-# Okabe-Ito-derived colors, with black reserved for libmdbx.
+# Okabe-Ito-derived colors, with black emphasizing BatStore.
 ENGINE_COLORS = {
     "batstore": "#222222",             # near black; emphasized primary system
     "leanstore": "#0072B2",            # blue

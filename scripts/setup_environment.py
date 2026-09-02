@@ -60,6 +60,7 @@ LEANSTORE_PATCH_COMMIT = "90fcf185c1c8506344a7aa779928787d494348f4"
 LEANSTORE_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "leanstore.patch"
 LEANSTORE_YCSB_PAYLOAD_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_payload_leanstore.patch"
 LEANSTORE_YCSB_FIELDS_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_fields_leanstore.patch"
+LEANSTORE_YCSB_OPERATION_LATENCY_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_operation_latency_leanstore.patch"
 LEANSTORE_TPCC_SEMANTICS_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "tpcc_semantics_leanstore.patch"
 LEANSTORE_S_HTAP_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "s_htap_leanstore.patch"
 WIREDTIGER_URL = "https://github.com/wiredtiger/wiredtiger.git"
@@ -262,6 +263,11 @@ def step_leanstore() -> None:
                       cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
         log(f"Applying {LEANSTORE_YCSB_FIELDS_PATCH_PATH.name} (fielded YCSB records and writeallfields semantics)")
         run(["git", "apply", str(LEANSTORE_YCSB_FIELDS_PATCH_PATH)], cwd=LEANSTORE_REPO)
+    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_YCSB_OPERATION_LATENCY_PATCH_PATH)],
+                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        log(f"Applying {LEANSTORE_YCSB_OPERATION_LATENCY_PATCH_PATH.name} "
+            f"(sampled read/update/insert/scan/RMW latency for LeanStore and WiredTiger YCSB)")
+        run(["git", "apply", str(LEANSTORE_YCSB_OPERATION_LATENCY_PATCH_PATH)], cwd=LEANSTORE_REPO)
     if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_TPCC_SEMANTICS_PATCH_PATH)],
                       cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
         log(f"Applying {LEANSTORE_TPCC_SEMANTICS_PATCH_PATH.name} (TPC-C 1% New-Order rollback)")

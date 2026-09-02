@@ -8,8 +8,8 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Barrier;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -116,7 +116,11 @@ fn expected_scan_concurrency(num_threads: usize, mix: &YcsbMix) -> usize {
 /// not just CLI parsing — so a workload with no scans (A/B/C/D/F) never pays
 /// for idle pool threads while YCSB-E gets the pool by default without any
 /// extra configuration.
-pub fn default_scan_pool_workers(record_count: u64, mix: &YcsbMix, num_threads: usize) -> Option<usize> {
+pub fn default_scan_pool_workers(
+    record_count: u64,
+    mix: &YcsbMix,
+    num_threads: usize,
+) -> Option<usize> {
     (mix.scan > 0.0 && record_count >= MIN_ROWS_FOR_SCAN_POOL).then(|| {
         let expected_scanners = expected_scan_concurrency(num_threads, mix);
         crate::bat_tree::mvbt::default_max_workers()
@@ -136,9 +140,9 @@ const INSERT: usize = 2;
 const SCAN: usize = 3;
 const RMW: usize = 4;
 const NUM_COUNTERS: usize = 5;
-/// Systematic latency sampling keeps percentile storage and clock reads
-/// bounded even when YCSB-E completes millions of tiny scans per second.
-const SCAN_LATENCY_SAMPLE_EVERY: u64 = 1024;
+/// Systematic latency sampling keeps percentile storage and clock reads bounded even
+/// when an in-memory YCSB workload completes millions of operations per second.
+const OPERATION_LATENCY_SAMPLE_EVERY: u64 = 1024;
 const TIMESERIES_CLOCK_EVERY: u64 = 256;
 
 const COUNTER_NAMES: [&str; NUM_COUNTERS] =
@@ -148,10 +152,10 @@ struct WorkerStats {
     ops_per_sec: Vec<u64>,
     totals: [u64; NUM_COUNTERS],
     scanned_tuples: u64,
-    /// Per-scan-op wall-clock latency (nanoseconds), one entry per YCSB-E scan op
-    /// completed by this thread - empty for every other workload (A/B/C/D/F never
-    /// take the `Scan` arm below).
-    scan_latencies_ns: Vec<u64>,
+    /// Sampled wall-clock latency (nanoseconds), indexed like `totals`. Keeping one
+    /// vector per operation makes mixed workloads such as A report reads and updates
+    /// independently without retaining a sample for every completed operation.
+    operation_latencies_ns: [Vec<u64>; NUM_COUNTERS],
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -175,7 +179,7 @@ fn worker_thread(
     let mut ops_per_sec = vec![0u64; duration.as_secs() as usize + 2];
     let mut totals = [0u64; NUM_COUNTERS];
     let mut scanned_tuples = 0u64;
-    let mut scan_latencies_ns = Vec::new();
+    let mut operation_latencies_ns: [Vec<u64>; NUM_COUNTERS] = std::array::from_fn(|_| Vec::new());
     let start = Instant::now();
     let mut completed = 0u64;
     let mut current_second = 0usize;
@@ -187,11 +191,18 @@ fn worker_thread(
         match pick_op(&mix) {
             YcsbOpType::Read => {
                 let key = sampler.sample(record_count, max_key_now);
+                let op_start =
+                    (totals[READ] % OPERATION_LATENCY_SAMPLE_EVERY == 0).then(Instant::now);
                 ycsb_txn::read_with_mode(&tree, key, read_payload);
+                if let Some(op_start) = op_start {
+                    operation_latencies_ns[READ].push(op_start.elapsed().as_nanos() as u64);
+                }
                 totals[READ] += 1;
             }
             YcsbOpType::Update => {
                 let key = sampler.sample(record_count, max_key_now);
+                let op_start =
+                    (totals[UPDATE] % OPERATION_LATENCY_SAMPLE_EVERY == 0).then(Instant::now);
                 ycsb_txn::update_with_execution_mode(
                     &tree,
                     &cfg,
@@ -199,19 +210,27 @@ fn worker_thread(
                     write_all_fields,
                     execution_mode,
                 );
+                if let Some(op_start) = op_start {
+                    operation_latencies_ns[UPDATE].push(op_start.elapsed().as_nanos() as u64);
+                }
                 totals[UPDATE] += 1;
             }
             YcsbOpType::Insert => {
                 // Mints the next never-before-used key, past the initially
                 // loaded range and every key inserted by this run so far.
                 let key = current_max_key.fetch_add(1, Relaxed) + 1;
+                let op_start =
+                    (totals[INSERT] % OPERATION_LATENCY_SAMPLE_EVERY == 0).then(Instant::now);
                 ycsb_txn::insert_with_execution_mode(&tree, &cfg, key, execution_mode);
+                if let Some(op_start) = op_start {
+                    operation_latencies_ns[INSERT].push(op_start.elapsed().as_nanos() as u64);
+                }
                 totals[INSERT] += 1;
             }
             YcsbOpType::Scan => {
                 let key = sampler.sample(record_count, max_key_now);
                 let len = random_scan_length(max_scan_length);
-                if totals[SCAN] % SCAN_LATENCY_SAMPLE_EVERY == 0 {
+                if totals[SCAN] % OPERATION_LATENCY_SAMPLE_EVERY == 0 {
                     let scan_start = Instant::now();
                     scanned_tuples += ycsb_txn::scan_parallel(
                         scan_pool.as_deref(),
@@ -220,7 +239,7 @@ fn worker_thread(
                         len,
                         read_payload,
                     ) as u64;
-                    scan_latencies_ns.push(scan_start.elapsed().as_nanos() as u64);
+                    operation_latencies_ns[SCAN].push(scan_start.elapsed().as_nanos() as u64);
                 } else {
                     scanned_tuples += ycsb_txn::scan_parallel(
                         scan_pool.as_deref(),
@@ -234,6 +253,8 @@ fn worker_thread(
             }
             YcsbOpType::ReadModifyWrite => {
                 let key = sampler.sample(record_count, max_key_now);
+                let op_start =
+                    (totals[RMW] % OPERATION_LATENCY_SAMPLE_EVERY == 0).then(Instant::now);
                 ycsb_txn::read_modify_write_with_execution_mode(
                     &tree,
                     &cfg,
@@ -242,6 +263,9 @@ fn worker_thread(
                     read_payload,
                     execution_mode,
                 );
+                if let Some(op_start) = op_start {
+                    operation_latencies_ns[RMW].push(op_start.elapsed().as_nanos() as u64);
+                }
                 totals[RMW] += 1;
             }
         }
@@ -257,7 +281,7 @@ fn worker_thread(
         ops_per_sec,
         totals,
         scanned_tuples,
-        scan_latencies_ns,
+        operation_latencies_ns,
     }
 }
 
@@ -276,7 +300,11 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     // `self.worker_id()` just like any terminal thread, so it has to be
     // budgeted here too or its first sweep panics the registry once the
     // loader + workers have already filled every other slot.
-    let idle_compaction_cost = if cfg.gc && cfg.idle_compaction.is_some() { 1 } else { 0 };
+    let idle_compaction_cost = if cfg.gc && cfg.idle_compaction.is_some() {
+        1
+    } else {
+        0
+    };
     // +1: the main thread also acquires a WorkerId, for the sequential
     // population phase before any worker thread is spawned (see tpcc_driver).
     let fixed_cost = 1 + idle_compaction_cost;
@@ -301,8 +329,10 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     let tree = match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);
-            let base =
-                YcsbTree::make_standard_with_max_workers(cfg.root_star_index, fixed_cost + num_threads);
+            let base = YcsbTree::make_standard_with_max_workers(
+                cfg.root_star_index,
+                fixed_cost + num_threads,
+            );
             Arc::new(
                 match cfg.wal_lockfree_batch_size {
                     Some(batch_size) => {
@@ -466,7 +496,7 @@ fn write_results(
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_COUNTERS];
     let mut scanned_tuples = 0u64;
-    let mut scan_latencies_ns: Vec<u64> = Vec::new();
+    let mut operation_latencies_ns: [Vec<u64>; NUM_COUNTERS] = std::array::from_fn(|_| Vec::new());
     for s in stats {
         for (i, v) in s.ops_per_sec.iter().enumerate() {
             per_sec[i] += v;
@@ -475,7 +505,12 @@ fn write_results(
             totals[i] += s.totals[i];
         }
         scanned_tuples += s.scanned_tuples;
-        scan_latencies_ns.extend_from_slice(&s.scan_latencies_ns);
+        for (combined, worker) in operation_latencies_ns
+            .iter_mut()
+            .zip(&s.operation_latencies_ns)
+        {
+            combined.extend_from_slice(worker);
+        }
     }
 
     let ts_path = out_dir.join("ycsb_timeseries.csv");
@@ -492,14 +527,53 @@ fn write_results(
             .unwrap();
     }
 
-    // Systematically sampled summary (one of every SCAN_LATENCY_SAMPLE_EVERY scans),
-    // avoiding a clock read and retained u64 for every one of millions of tiny scans.
-    // Nearest-rank percentiles over the sorted sample,
-    // in microseconds - empty (all-zero) file for every other workload. Every engine's
-    // wrapper computes this the same way (see scripts/engines/common.py's
-    // read_latency_summary, mirroring this exact nearest-rank formula) so percentiles are
-    // comparable across engines even though each is computed in its own process/language.
-    scan_latencies_ns.sort_unstable();
+    let operation_latency_path = out_dir.join("ycsb_operation_latency_summary.csv");
+    let _ = fs::remove_file(&operation_latency_path);
+    let mut operation_latency_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&operation_latency_path)
+        .unwrap();
+    operation_latency_file
+        .write_all(b"operation,p50_us,p95_us,p99_us,count,avg_us,sample_every\n")
+        .unwrap();
+
+    for samples in &mut operation_latencies_ns {
+        samples.sort_unstable();
+    }
+    let stats = |samples: &[u64]| -> (f64, f64, f64, f64) {
+        let pct = |p: f64| -> f64 {
+            if samples.is_empty() {
+                0.0
+            } else {
+                let idx =
+                    ((p * (samples.len() - 1) as f64).round() as usize).min(samples.len() - 1);
+                samples[idx] as f64 / 1000.0
+            }
+        };
+        let avg_us = if samples.is_empty() {
+            0.0
+        } else {
+            samples.iter().map(|&v| v as u128).sum::<u128>() as f64 / samples.len() as f64 / 1000.0
+        };
+        (pct(0.50), pct(0.95), pct(0.99), avg_us)
+    };
+    for (operation, samples) in COUNTER_NAMES.iter().zip(&operation_latencies_ns) {
+        let (p50, p95, p99, avg) = stats(samples);
+        operation_latency_file
+            .write_all(
+                format!(
+                    "{operation},{p50:.3},{p95:.3},{p99:.3},{},{avg:.3},{}\n",
+                    samples.len(),
+                    OPERATION_LATENCY_SAMPLE_EVERY,
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+
+    // Retain the original scan-only file so existing manifests and plotting scripts keep
+    // working. Its row is now derived from the scan row in the all-operation summary.
     let scan_latency_path = out_dir.join("ycsb_scan_latency_summary.csv");
     let _ = fs::remove_file(&scan_latency_path);
     let mut scan_latency_file = OpenOptions::new()
@@ -510,29 +584,17 @@ fn write_results(
     scan_latency_file
         .write_all(b"p50_us,p95_us,p99_us,count,avg_us\n")
         .unwrap();
-    let pct = |p: f64| -> f64 {
-        if scan_latencies_ns.is_empty() {
-            0.0
-        } else {
-            let idx = ((p * (scan_latencies_ns.len() - 1) as f64).round() as usize)
-                .min(scan_latencies_ns.len() - 1);
-            scan_latencies_ns[idx] as f64 / 1000.0
-        }
-    };
-    let avg_us = if scan_latencies_ns.is_empty() {
-        0.0
-    } else {
-        scan_latencies_ns.iter().sum::<u64>() as f64 / scan_latencies_ns.len() as f64 / 1000.0
-    };
+    let scan_samples = &operation_latencies_ns[SCAN];
+    let (scan_p50, scan_p95, scan_p99, scan_avg) = stats(scan_samples);
     scan_latency_file
         .write_all(
             format!(
                 "{:.3},{:.3},{:.3},{},{:.3}\n",
-                pct(0.50),
-                pct(0.95),
-                pct(0.99),
-                scan_latencies_ns.len(),
-                avg_us,
+                scan_p50,
+                scan_p95,
+                scan_p99,
+                scan_samples.len(),
+                scan_avg,
             )
             .as_bytes(),
         )
@@ -548,12 +610,15 @@ fn write_results(
     println!("{:<20} {}", "scanned_tuples", scanned_tuples);
     println!("{:<20} {}", "total_ops", total_ops);
     println!("{:<20} {:.2}", "throughput (ops/sec)", throughput);
-    if !scan_latencies_ns.is_empty() {
-        println!("{:<20} {}", "scan ops timed", scan_latencies_ns.len());
+    for (operation, samples) in COUNTER_NAMES.iter().zip(&operation_latencies_ns) {
+        if !samples.is_empty() {
+            println!("{operation:<20} {} latency samples", samples.len());
+        }
     }
     println!(
-        "Wrote {} and {}",
+        "Wrote {}, {} and {}",
         ts_path.display(),
+        operation_latency_path.display(),
         scan_latency_path.display()
     );
 
@@ -633,15 +698,23 @@ pub fn main_ycsb(parms: Vec<String>) {
     let idle_compaction_dead_ratio: f64 = arg(
         &parms,
         21,
-        if gc { crate::bat_tree::idle_compaction::DEFAULT_VACUUM_DEAD_RATIO } else { 0.0 },
+        if gc {
+            crate::bat_tree::idle_compaction::DEFAULT_VACUUM_DEAD_RATIO
+        } else {
+            0.0
+        },
     );
     let idle_compaction_sweep_secs: f64 = arg(
         &parms,
         22,
         crate::bat_tree::idle_compaction::DEFAULT_VACUUM_SWEEP_INTERVAL.as_secs_f64(),
     );
-    let idle_compaction = (idle_compaction_dead_ratio > 0.0)
-        .then(|| (idle_compaction_dead_ratio, Duration::from_secs_f64(idle_compaction_sweep_secs)));
+    let idle_compaction = (idle_compaction_dead_ratio > 0.0).then(|| {
+        (
+            idle_compaction_dead_ratio,
+            Duration::from_secs_f64(idle_compaction_sweep_secs),
+        )
+    });
 
     run_ycsb(DriverConfig {
         ycsb: YcsbConfig {
