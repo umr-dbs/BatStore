@@ -63,6 +63,7 @@ LEANSTORE_YCSB_FIELDS_PATCH_PATH = Path(__file__).resolve().parent.parent / "pat
 LEANSTORE_YCSB_OPERATION_LATENCY_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_operation_latency_leanstore.patch"
 LEANSTORE_TPCC_SEMANTICS_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "tpcc_semantics_leanstore.patch"
 LEANSTORE_S_HTAP_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "s_htap_leanstore.patch"
+LEANSTORE_GIT_HTTP1_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "git_http1_leanstore.patch"
 WIREDTIGER_URL = "https://github.com/wiredtiger/wiredtiger.git"
 BENCHBASE_URL = "https://github.com/cmu-db/benchbase.git"
 BENCHBASE_PATCH_COMMIT = "33c00473807ebd49304d114a6d769d2d2b2bbb34"
@@ -291,6 +292,11 @@ def step_leanstore() -> None:
                       cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
         log(f"Applying {LEANSTORE_S_HTAP_PATCH_PATH.name} (native + WiredTiger-adapter S-YCSB frontends)")
         run(["git", "apply", str(LEANSTORE_S_HTAP_PATCH_PATH)], cwd=LEANSTORE_REPO)
+    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_GIT_HTTP1_PATCH_PATH)],
+                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        log(f"Applying {LEANSTORE_GIT_HTTP1_PATCH_PATH.name} "
+            f"(HTTP/1.1 for CMake's nested gflags/tabulate fetches)")
+        run(["git", "apply", str(LEANSTORE_GIT_HTTP1_PATCH_PATH)], cwd=LEANSTORE_REPO)
 
     LEANSTORE_BUILD_DIR.mkdir(parents=True, exist_ok=True)
     common.check_release_build(LEANSTORE_BUILD_DIR, "LeanStore")
