@@ -163,14 +163,19 @@ def shallow_clone(url: str, dest: Path, commit: str | None = None) -> None:
     Requires the remote to allow fetching by SHA (`uploadpack.allowReachableSHA1InWant` or
     equivalent) - true for GitHub, which is where every commit-pinned repo here lives.
     """
+    # Some HTTP/2 middleboxes answer Git's smart-HTTP request with an authentication
+    # challenge even for public GitHub repositories. The same anonymous request over
+    # HTTP/1.1 works normally. Keep this workaround local to setup-managed network calls
+    # instead of changing the user's global Git configuration.
+    git_http = ["git", "-c", "http.version=HTTP/1.1"]
     try:
         if commit is None:
-            run(["git", "clone", "--depth", "1", url, str(dest)])
+            run(git_http + ["clone", "--depth", "1", url, str(dest)])
             return
         dest.mkdir(parents=True, exist_ok=True)
         run(["git", "init"], cwd=dest)
         run(["git", "remote", "add", "origin", url], cwd=dest)
-        run(["git", "fetch", "--depth", "1", "origin", commit], cwd=dest)
+        run(git_http + ["fetch", "--depth", "1", "origin", commit], cwd=dest)
         run(["git", "checkout", "FETCH_HEAD"], cwd=dest)
     except subprocess.CalledProcessError:
         # A failed clone/fetch otherwise leaves `dest` present. Every setup step uses
