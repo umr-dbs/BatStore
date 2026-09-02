@@ -32,7 +32,8 @@ scripts work starting from nothing, on any machine:
 The setup's GitHub clone/fetch calls force Git's HTTP/1.1 transport. This avoids false
 credential prompts caused by HTTP/2-interfering proxies or network middleboxes while
 remaining anonymous for the public dependency repositories; it does not alter global Git
-configuration.
+configuration. The same scoped setting is applied to LeanStore's nested CMake downloads
+of gflags and the header-only tabulate library (misspelled `tabluate` by upstream).
 
 
 1. REQUIREMENTS

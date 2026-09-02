@@ -1,0 +1,22 @@
+diff --git a/libs/gflags.cmake b/libs/gflags.cmake
+--- a/libs/gflags.cmake
++++ b/libs/gflags.cmake
+@@ -10,6 +10,7 @@ ExternalProject_Add(
+         PREFIX "vendor/gflags"
+         GIT_REPOSITORY "https://github.com/gflags/gflags.git"
+         GIT_TAG f8a0efe03aa69b3336d8e228b37d4ccb17324b88
++        GIT_CONFIG http.version=HTTP/1.1
+         TIMEOUT 10
+         CMAKE_ARGS
+         -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/vendor/gflags
+diff --git a/libs/tabluate.cmake b/libs/tabluate.cmake
+--- a/libs/tabluate.cmake
++++ b/libs/tabluate.cmake
+@@ -6,6 +6,7 @@ ExternalProject_Add(
+         PREFIX "vendor/tabluate"
+         GIT_REPOSITORY "https://github.com/p-ranav/tabulate.git"
+         GIT_TAG 718d827cf05c2e9bba17e926cac2d7ab2356621c
++        GIT_CONFIG http.version=HTTP/1.1
+         TIMEOUT 10
+         BUILD_COMMAND ""
+         UPDATE_COMMAND "" # to prevent rebuilding everytime
