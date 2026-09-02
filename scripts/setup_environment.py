@@ -195,6 +195,36 @@ def is_apt_package_installed(pkg: str) -> bool:
     return result.returncode == 0 and "install ok installed" in result.stdout
 
 
+def apply_patch_once(repo: Path, patch_path: Path, marker_file: str, marker: str,
+                     description: str) -> None:
+    """Apply one setup patch, using a stable added-code marker for idempotency.
+
+    A reverse ``git apply --check`` is not reliable after a later patch changes lines in
+    an earlier patch's hunks. That made --reuse-checkouts mistake an already-patched
+    LeanStore tree for an unpatched one and try to apply the patch twice.
+    """
+    marker_path = repo / marker_file
+    if marker_path.exists() and marker in marker_path.read_text():
+        print(f"{patch_path.name} already applied, skipping.")
+        return
+
+    check = subprocess.run(
+        ["git", "apply", "--check", str(patch_path)], cwd=repo,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    if check.returncode != 0:
+        sys.exit(
+            f"Cannot apply {patch_path.name}, and its expected marker is absent from "
+            f"{marker_file}. The setup-managed checkout may contain partial or conflicting "
+            f"changes:\n{check.stderr.strip()}"
+        )
+
+    log(f"Applying {patch_path.name} ({description})")
+    run(["git", "apply", str(patch_path)], cwd=repo)
+    if not marker_path.exists() or marker not in marker_path.read_text():
+        sys.exit(f"Applied {patch_path.name}, but its expected marker is missing from {marker_file}.")
+
+
 def step_apt_packages(full: bool = False) -> None:
     log("Checking apt dependencies")
     packages = APT_PACKAGES + (VWEAVER_APT_PACKAGES if full else [])
@@ -271,32 +301,22 @@ def step_leanstore() -> None:
             f"YCSB-E/HTAP scan-latency instrumentation, New-Order-only counters, WiredTiger "
             f"adapter log=(enabled=true) so its WAL isn't silently off in this comparison)")
         run(["git", "apply", str(LEANSTORE_PATCH_PATH)], cwd=LEANSTORE_REPO)
-    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_YCSB_PAYLOAD_PATCH_PATH)],
-                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        log(f"Applying {LEANSTORE_YCSB_PAYLOAD_PATCH_PATH.name} (canonical/u64 YCSB payloads and explicit payload reads)")
-        run(["git", "apply", str(LEANSTORE_YCSB_PAYLOAD_PATCH_PATH)], cwd=LEANSTORE_REPO)
-    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_YCSB_FIELDS_PATCH_PATH)],
-                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        log(f"Applying {LEANSTORE_YCSB_FIELDS_PATCH_PATH.name} (fielded YCSB records and writeallfields semantics)")
-        run(["git", "apply", str(LEANSTORE_YCSB_FIELDS_PATCH_PATH)], cwd=LEANSTORE_REPO)
-    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_YCSB_OPERATION_LATENCY_PATCH_PATH)],
-                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        log(f"Applying {LEANSTORE_YCSB_OPERATION_LATENCY_PATCH_PATH.name} "
-            f"(sampled read/update/insert/scan/RMW latency for LeanStore and WiredTiger YCSB)")
-        run(["git", "apply", str(LEANSTORE_YCSB_OPERATION_LATENCY_PATCH_PATH)], cwd=LEANSTORE_REPO)
-    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_TPCC_SEMANTICS_PATCH_PATH)],
-                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        log(f"Applying {LEANSTORE_TPCC_SEMANTICS_PATCH_PATH.name} (TPC-C 1% New-Order rollback)")
-        run(["git", "apply", str(LEANSTORE_TPCC_SEMANTICS_PATCH_PATH)], cwd=LEANSTORE_REPO)
-    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_S_HTAP_PATCH_PATH)],
-                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        log(f"Applying {LEANSTORE_S_HTAP_PATCH_PATH.name} (native + WiredTiger-adapter S-YCSB frontends)")
-        run(["git", "apply", str(LEANSTORE_S_HTAP_PATCH_PATH)], cwd=LEANSTORE_REPO)
-    if subprocess.run(["git", "apply", "--reverse", "--check", str(LEANSTORE_GIT_HTTP1_PATCH_PATH)],
-                      cwd=LEANSTORE_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        log(f"Applying {LEANSTORE_GIT_HTTP1_PATCH_PATH.name} "
-            f"(HTTP/1.1 for CMake's nested gflags/tabulate fetches)")
-        run(["git", "apply", str(LEANSTORE_GIT_HTTP1_PATCH_PATH)], cwd=LEANSTORE_REPO)
+    leanstore_patches = [
+        (LEANSTORE_YCSB_PAYLOAD_PATCH_PATH, "frontend/ycsb/ycsb.cpp",
+         "DEFINE_bool(ycsb_read_payload", "canonical/u64 YCSB payloads and explicit payload reads"),
+        (LEANSTORE_YCSB_FIELDS_PATCH_PATH, "frontend/ycsb/ycsb.cpp",
+         "DEFINE_bool(ycsb_write_all_fields", "fielded YCSB records and writeallfields semantics"),
+        (LEANSTORE_YCSB_OPERATION_LATENCY_PATCH_PATH, "frontend/ycsb/ycsb.cpp",
+         "YCSB_LATENCY_SAMPLE_EVERY", "sampled operation latency for LeanStore and WiredTiger YCSB"),
+        (LEANSTORE_TPCC_SEMANTICS_PATCH_PATH, "frontend/tpc-c/TPCCWorkload.hpp",
+         "TPC-C: 1% expected rollback", "TPC-C 1% New-Order rollback"),
+        (LEANSTORE_S_HTAP_PATCH_PATH, "frontend/ycsb/s_htap.cpp",
+         "DEFINE_uint64(s_htap_record_count", "native + WiredTiger-adapter S-YCSB frontends"),
+        (LEANSTORE_GIT_HTTP1_PATCH_PATH, "libs/gflags.cmake",
+         "GIT_CONFIG http.version=HTTP/1.1", "HTTP/1.1 for CMake's nested dependency fetches"),
+    ]
+    for patch_path, marker_file, marker, description in leanstore_patches:
+        apply_patch_once(LEANSTORE_REPO, patch_path, marker_file, marker, description)
 
     LEANSTORE_BUILD_DIR.mkdir(parents=True, exist_ok=True)
     common.check_release_build(LEANSTORE_BUILD_DIR, "LeanStore")
