@@ -661,6 +661,17 @@ manifest, and gc="on" for engines that support toggling GC / "n/a" for the ones 
 don't (never "off", so a bar chart never silently shows the GC-disabled number as if it
 were the default). Every such figure's title says which thread count it's pinned to.
 
+Every BatStore, libmdbx, LeanStore, and WiredTiger YCSB A-F run also writes
+`ycsb_operation_latency_summary.csv` in its per-run directory. It has one row for each
+operation (`read`, `update`, `insert`, `scan`, and `read_modify_write`) and columns for
+`p50_us`, `p95_us`, `p99_us`, `count`, and `avg_us`. Latencies are sampled
+systematically once per 1,024 operations of each type per worker to keep clock and storage
+overhead small; `count` is therefore the number of latency samples, not the total number
+of operations. Operations absent from a workload have an all-zero row. For example,
+YCSB-A has populated `read` and `update` rows. The older
+`ycsb_scan_latency_summary.csv` remains available for the existing YCSB-E comparison
+plot and manifest columns.
+
 
 9. MANIFEST SCHEMA REFERENCE
 -------------------------------

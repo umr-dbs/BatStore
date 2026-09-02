@@ -1,0 +1,345 @@
+diff --git a/frontend/ycsb/wiredtiger_ycsb.cpp b/frontend/ycsb/wiredtiger_ycsb.cpp
+index e504d11..873825e 100644
+--- a/frontend/ycsb/wiredtiger_ycsb.cpp
++++ b/frontend/ycsb/wiredtiger_ycsb.cpp
+@@ -13,6 +13,7 @@
+ #include "leanstore/utils/ScrambledZipfGenerator.hpp"
+ // -------------------------------------------------------------------------------------
+ #include <algorithm>
++#include <array>
+ #include <chrono>
+ #include <cmath>
+ #include <fstream>
+@@ -52,6 +53,11 @@ struct YCSBPayload {
+ };
+ static_assert(sizeof(YCSBPayload) == YCSB_PAYLOAD_BYTES);
+ using YCSBTable = Relation<YCSBKey, YCSBPayload>;
++static constexpr u64 YCSB_LATENCY_SAMPLE_EVERY = 1024;
++static constexpr u64 YCSB_OPERATION_COUNT = 5;
++static constexpr const char* YCSB_OPERATION_NAMES[YCSB_OPERATION_COUNT] = {
++    "read", "update", "insert", "scan", "read_modify_write"};
++using YCSBLatencySamples = std::array<std::vector<uint64_t>, YCSB_OPERATION_COUNT>;
+ static inline void consume_payload(const YCSBPayload& payload) {
+    if (!FLAGS_ycsb_read_payload) return;
+    const u8* p = reinterpret_cast<const u8*>(&payload);
+@@ -110,9 +116,9 @@ int main(int argc, char** argv)
+    atomic<u64> running_threads_counter = 0;
+    std::atomic<u64> thread_committed[FLAGS_worker_threads];
+    std::atomic<u64> thread_aborted[FLAGS_worker_threads];
+-   // Per-scan-op latency (ns), one slot per thread - each thread only ever touches its own
+-   // index, so no synchronization is needed despite the shared outer vector.
+-   std::vector<std::vector<uint64_t>> scan_latencies_ns(FLAGS_worker_threads);
++   std::vector<YCSBLatencySamples> operation_latencies_ns(FLAGS_worker_threads);
++   std::vector<std::array<u64, YCSB_OPERATION_COUNT>> operation_counts(FLAGS_worker_threads);
++   for (auto& counts : operation_counts) counts.fill(0);
+    for (u64 t_i = 0; t_i < FLAGS_worker_threads; t_i++) {
+       thread_committed[t_i] = 0;
+       thread_aborted[t_i] = 0;
+@@ -135,14 +141,21 @@ int main(int argc, char** argv)
+                const u64 op_rnd = leanstore::utils::RandomGenerator::getRandU64(0, 100);
+                if (op_rnd < FLAGS_ycsb_insert_ratio) {
+                   // YCSB D: insert a brand-new key.
++                  const bool sample = operation_counts[t_i][2]++ % YCSB_LATENCY_SAMPLE_EVERY == 0;
++                  const auto op_start = sample ? chrono::high_resolution_clock::now()
++                                               : chrono::high_resolution_clock::time_point{};
+                   YCSBPayload payload;
+                   leanstore::utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+                   table.insert({next_insert_key++}, {payload});
++                  if (sample) operation_latencies_ns[t_i][2].push_back(
++                      chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - op_start).count());
+                } else if (op_rnd < FLAGS_ycsb_insert_ratio + FLAGS_ycsb_scan_ratio) {
+                   // YCSB E: scan forward from `key` for a random length in [1, ycsb_max_scan_length].
+                   const u64 scan_length = leanstore::utils::RandomGenerator::getRandU64(1, FLAGS_ycsb_max_scan_length + 1);
+                   u64 scanned = 0;
+-                  const auto scan_start = chrono::high_resolution_clock::now();
++                  const bool sample = operation_counts[t_i][3]++ % YCSB_LATENCY_SAMPLE_EVERY == 0;
++                  const auto op_start = sample ? chrono::high_resolution_clock::now()
++                                               : chrono::high_resolution_clock::time_point{};
+                   table.scan(
+                       {key},
+                       [&](const YCSBTable::Key&, const YCSBTable& record) {
+@@ -151,10 +164,13 @@ int main(int argc, char** argv)
+                          return scanned < scan_length;
+                       },
+                       [&]() {});
+-                  scan_latencies_ns[t_i].push_back(
+-                      chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - scan_start).count());
++                  if (sample) operation_latencies_ns[t_i][3].push_back(
++                      chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - op_start).count());
+                } else if (op_rnd < FLAGS_ycsb_insert_ratio + FLAGS_ycsb_scan_ratio + FLAGS_ycsb_rmw_ratio) {
+                   // YCSB F: read-modify-write - read then update the same key in one op.
++                  const bool sample = operation_counts[t_i][4]++ % YCSB_LATENCY_SAMPLE_EVERY == 0;
++                  const auto op_start = sample ? chrono::high_resolution_clock::now()
++                                               : chrono::high_resolution_clock::time_point{};
+                   table.lookup1({key}, [&](const YCSBTable& record) { consume_payload(record.my_payload); });
+                   const u32 field = leanstore::utils::RandomGenerator::getRandU64(0, YCSB_FIELD_COUNT);
+                   UpdateDescriptorGenerator1(rmw_update_descriptor, YCSBTable, my_payload);
+@@ -167,9 +183,19 @@ int main(int argc, char** argv)
+                          if (FLAGS_ycsb_write_all_fields) rec.my_payload = result;
+                          else rec.my_payload.fields[field] = result.fields[field];
+                       }, rmw_update_descriptor);
++                  if (sample) operation_latencies_ns[t_i][4].push_back(
++                      chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - op_start).count());
+                } else if (FLAGS_ycsb_read_ratio == 100 || leanstore::utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
++                  const bool sample = operation_counts[t_i][0]++ % YCSB_LATENCY_SAMPLE_EVERY == 0;
++                  const auto op_start = sample ? chrono::high_resolution_clock::now()
++                                               : chrono::high_resolution_clock::time_point{};
+                   table.lookup1({key}, [&](const YCSBTable& record) { consume_payload(record.my_payload); });
++                  if (sample) operation_latencies_ns[t_i][0].push_back(
++                      chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - op_start).count());
+                } else {
++                  const bool sample = operation_counts[t_i][1]++ % YCSB_LATENCY_SAMPLE_EVERY == 0;
++                  const auto op_start = sample ? chrono::high_resolution_clock::now()
++                                               : chrono::high_resolution_clock::time_point{};
+                   const u32 field = leanstore::utils::RandomGenerator::getRandU64(0, YCSB_FIELD_COUNT);
+                   UpdateDescriptorGenerator1(tabular_update_descriptor, YCSBTable, my_payload);
+                   if (FLAGS_ycsb_write_all_fields)
+@@ -181,6 +207,8 @@ int main(int argc, char** argv)
+                          if (FLAGS_ycsb_write_all_fields) rec.my_payload = result;
+                          else rec.my_payload.fields[field] = result.fields[field];
+                       }, tabular_update_descriptor);
++                  if (sample) operation_latencies_ns[t_i][1].push_back(
++                      chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - op_start).count());
+                }
+                wiredtiger_db.commitTX();
+                thread_committed[t_i]++;
+@@ -216,31 +244,42 @@ int main(int argc, char** argv)
+    for (auto& thread : threads) {
+       thread.join();
+    }
+-   // Summary (not raw per-op samples - see the matching comment in ycsb.cpp / BatStore's
+-   // ycsb_driver.rs::write_results for why). Nearest-rank percentiles, in microseconds -
+-   // empty (all-zero) row for every non-scan workload. Written to the current working
+-   // directory, matching every other engine's convention here (the Python wrapper always
+-   // invokes this binary with cwd=output_dir).
+-   std::vector<uint64_t> all_scan_latencies_ns;
+-   for (auto& v : scan_latencies_ns) {
+-      all_scan_latencies_ns.insert(all_scan_latencies_ns.end(), v.begin(), v.end());
++   YCSBLatencySamples all_operation_latencies_ns;
++   for (auto& thread_samples : operation_latencies_ns)
++      for (u64 op = 0; op < YCSB_OPERATION_COUNT; op++)
++         all_operation_latencies_ns[op].insert(all_operation_latencies_ns[op].end(),
++                                               thread_samples[op].begin(), thread_samples[op].end());
++   std::ofstream operation_latency_file("ycsb_operation_latency_summary.csv");
++   operation_latency_file << "operation,p50_us,p95_us,p99_us,count,avg_us,sample_every\n";
++   for (u64 op = 0; op < YCSB_OPERATION_COUNT; op++) {
++      auto& samples = all_operation_latencies_ns[op];
++      std::sort(samples.begin(), samples.end());
++      auto pct = [&](double p) -> double {
++         if (samples.empty()) return 0.0;
++         size_t idx = std::min(samples.size() - 1,
++             static_cast<size_t>(std::llround(p * (samples.size() - 1))));
++         return samples[idx] / 1000.0;
++      };
++      long double sum = 0;
++      for (auto value : samples) sum += value;
++      const double avg_us = samples.empty() ? 0.0 : static_cast<double>(sum / samples.size() / 1000.0);
++      operation_latency_file << YCSB_OPERATION_NAMES[op] << "," << pct(0.50) << "," << pct(0.95)
++                             << "," << pct(0.99) << "," << samples.size() << "," << avg_us
++                             << "," << YCSB_LATENCY_SAMPLE_EVERY << "\n";
+    }
+-   std::sort(all_scan_latencies_ns.begin(), all_scan_latencies_ns.end());
+-   auto pct = [&](double p) -> double {
+-      if (all_scan_latencies_ns.empty()) return 0.0;
+-      size_t idx = std::min(all_scan_latencies_ns.size() - 1,
+-                             static_cast<size_t>(std::llround(p * (all_scan_latencies_ns.size() - 1))));
+-      return all_scan_latencies_ns[idx] / 1000.0;
++   auto& scan_samples = all_operation_latencies_ns[3];
++   auto scan_pct = [&](double p) -> double {
++      if (scan_samples.empty()) return 0.0;
++      size_t idx = std::min(scan_samples.size() - 1,
++          static_cast<size_t>(std::llround(p * (scan_samples.size() - 1))));
++      return scan_samples[idx] / 1000.0;
+    };
+-   double avg_us = 0.0;
+-   if (!all_scan_latencies_ns.empty()) {
+-      uint64_t sum = 0;
+-      for (auto v : all_scan_latencies_ns) sum += v;
+-      avg_us = static_cast<double>(sum) / all_scan_latencies_ns.size() / 1000.0;
+-   }
++   long double scan_sum = 0;
++   for (auto value : scan_samples) scan_sum += value;
++   const double scan_avg_us = scan_samples.empty() ? 0.0 : static_cast<double>(scan_sum / scan_samples.size() / 1000.0);
+    std::ofstream scan_latency_file("ycsb_scan_latency_summary.csv");
+    scan_latency_file << "p50_us,p95_us,p99_us,count,avg_us\n";
+-   scan_latency_file << pct(0.50) << "," << pct(0.95) << "," << pct(0.99) << ","
+-                      << all_scan_latencies_ns.size() << "," << avg_us << "\n";
++   scan_latency_file << scan_pct(0.50) << "," << scan_pct(0.95) << "," << scan_pct(0.99) << ","
++                     << scan_samples.size() << "," << scan_avg_us << "\n";
+    return 0;
+ }
+diff --git a/frontend/ycsb/ycsb.cpp b/frontend/ycsb/ycsb.cpp
+index 24b14f9..29968e3 100644
+--- a/frontend/ycsb/ycsb.cpp
++++ b/frontend/ycsb/ycsb.cpp
+@@ -14,6 +14,7 @@
+ #include <tbb/parallel_for.h>
+ // -------------------------------------------------------------------------------------
+ #include <algorithm>
++#include <array>
+ #include <cmath>
+ #include <fstream>
+ #include <iostream>
+@@ -52,6 +53,11 @@ struct YCSBPayload {
+ };
+ static_assert(sizeof(YCSBPayload) == YCSB_PAYLOAD_BYTES);
+ using KVTable = Relation<YCSBKey, YCSBPayload>;
++static constexpr u64 YCSB_LATENCY_SAMPLE_EVERY = 1024;
++static constexpr u64 YCSB_OPERATION_COUNT = 5;
++static constexpr const char* YCSB_OPERATION_NAMES[YCSB_OPERATION_COUNT] = {
++    "read", "update", "insert", "scan", "read_modify_write"};
++using YCSBLatencySamples = std::array<std::vector<uint64_t>, YCSB_OPERATION_COUNT>;
+ static inline void consume_payload(const YCSBPayload& payload) {
+    if (!FLAGS_ycsb_read_payload) return;
+    const u8* p = reinterpret_cast<const u8*>(&payload);
+@@ -177,10 +183,9 @@ int main(int argc, char** argv)
+    atomic<bool> keep_running = true;
+    atomic<u64> running_threads_counter = 0;
+    const u32 exec_threads = FLAGS_ycsb_threads ? FLAGS_ycsb_threads : FLAGS_worker_threads;
+-   // Per-scan-op latency (ns), one slot per thread - each thread only ever touches its own
+-   // index (captured by value below, since scheduleJobAsync's [&] would otherwise see
+-   // whatever value the shared loop variable `t_i` has by the time the job actually runs).
+-   std::vector<std::vector<uint64_t>> scan_latencies_ns(exec_threads);
++   std::vector<YCSBLatencySamples> operation_latencies_ns(exec_threads);
++   std::vector<std::array<u64, YCSB_OPERATION_COUNT>> operation_counts(exec_threads);
++   for (auto& counts : operation_counts) counts.fill(0);
+    for (u64 t_i = 0; t_i < exec_threads - ((FLAGS_ycsb_sleepy_thread) ? 1 : 0); t_i++) {
+       crm.scheduleJobAsync(t_i, [&, t_i]() {
+          running_threads_counter++;
+@@ -200,14 +205,21 @@ int main(int argc, char** argv)
+                   const u64 op_rnd = utils::RandomGenerator::getRandU64(0, 100);
+                   if (op_rnd < FLAGS_ycsb_insert_ratio) {
+                      // YCSB D: insert a brand-new key.
++                     const bool sample = operation_counts[t_i][2]++ % YCSB_LATENCY_SAMPLE_EVERY == 0;
++                     const auto op_start = sample ? chrono::high_resolution_clock::now()
++                                                  : chrono::high_resolution_clock::time_point{};
+                      YCSBPayload payload;
+                      utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
+                      table.insert({next_insert_key++}, {payload});
++                     if (sample) operation_latencies_ns[t_i][2].push_back(
++                         chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - op_start).count());
+                   } else if (op_rnd < FLAGS_ycsb_insert_ratio + FLAGS_ycsb_scan_ratio) {
+                      // YCSB E: scan forward from `key` for a random length in [1, ycsb_max_scan_length].
+                      const u64 scan_length = utils::RandomGenerator::getRandU64(1, FLAGS_ycsb_max_scan_length + 1);
+                      u64 scanned = 0;
+-                     const auto scan_start = chrono::high_resolution_clock::now();
++                     const bool sample = operation_counts[t_i][3]++ % YCSB_LATENCY_SAMPLE_EVERY == 0;
++                     const auto op_start = sample ? chrono::high_resolution_clock::now()
++                                                  : chrono::high_resolution_clock::time_point{};
+                      table.scan(
+                          {key},
+                          [&](const KVTable::Key&, const KVTable& record) {
+@@ -216,10 +228,13 @@ int main(int argc, char** argv)
+                             return scanned < scan_length;
+                          },
+                          [&]() {});
+-                     scan_latencies_ns[t_i].push_back(
+-                         chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - scan_start).count());
++                     if (sample) operation_latencies_ns[t_i][3].push_back(
++                         chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - op_start).count());
+                   } else if (op_rnd < FLAGS_ycsb_insert_ratio + FLAGS_ycsb_scan_ratio + FLAGS_ycsb_rmw_ratio) {
+                      // YCSB F: read-modify-write - read then update the same key in one op.
++                     const bool sample = operation_counts[t_i][4]++ % YCSB_LATENCY_SAMPLE_EVERY == 0;
++                     const auto op_start = sample ? chrono::high_resolution_clock::now()
++                                                  : chrono::high_resolution_clock::time_point{};
+                      table.lookup1({key}, [&](const KVTable& record) { consume_payload(record.my_payload); });
+                      const u32 field = utils::RandomGenerator::getRandU64(0, YCSB_FIELD_COUNT);
+                      UpdateDescriptorInit(rmw_update_descriptor, 1);
+@@ -235,11 +250,21 @@ int main(int argc, char** argv)
+                             if (FLAGS_ycsb_write_all_fields) rec.my_payload = result;
+                             else rec.my_payload.fields[field] = result.fields[field];
+                          }, rmw_update_descriptor);
++                     if (sample) operation_latencies_ns[t_i][4].push_back(
++                         chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - op_start).count());
+                      leanstore::storage::BMC::global_bf->evictLastPage();
+                   } else if (FLAGS_ycsb_read_ratio == 100 || utils::RandomGenerator::getRandU64(0, 100) < FLAGS_ycsb_read_ratio) {
++                     const bool sample = operation_counts[t_i][0]++ % YCSB_LATENCY_SAMPLE_EVERY == 0;
++                     const auto op_start = sample ? chrono::high_resolution_clock::now()
++                                                  : chrono::high_resolution_clock::time_point{};
+                      table.lookup1({key}, [&](const KVTable& record) { consume_payload(record.my_payload); });
++                     if (sample) operation_latencies_ns[t_i][0].push_back(
++                         chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - op_start).count());
+                      leanstore::storage::BMC::global_bf->evictLastPage();  // to ignore the replacement strategy effect on MVCC experiment
+                   } else {
++                     const bool sample = operation_counts[t_i][1]++ % YCSB_LATENCY_SAMPLE_EVERY == 0;
++                     const auto op_start = sample ? chrono::high_resolution_clock::now()
++                                                  : chrono::high_resolution_clock::time_point{};
+                      const u32 field = utils::RandomGenerator::getRandU64(0, YCSB_FIELD_COUNT);
+                      UpdateDescriptorInit(tabular_update_descriptor, 1);
+                      tabular_update_descriptor.slots[0].offset = offsetof(KVTable, my_payload) +
+@@ -255,6 +280,8 @@ int main(int argc, char** argv)
+                             if (FLAGS_ycsb_write_all_fields) rec.my_payload = result;
+                             else rec.my_payload.fields[field] = result.fields[field];
+                          }, tabular_update_descriptor);
++                     if (sample) operation_latencies_ns[t_i][1].push_back(
++                         chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now() - op_start).count());
+                      leanstore::storage::BMC::global_bf->evictLastPage();  // to ignore the replacement strategy effect on MVCC experiment
+                   }
+                }
+@@ -292,33 +319,44 @@ int main(int argc, char** argv)
+       }
+       crm.joinAll();
+    }
+-   // Summary (not raw per-op samples - see the matching comment in wiredtiger_ycsb.cpp /
+-   // BatStore's ycsb_driver.rs::write_results for why). Nearest-rank percentiles, in
+-   // microseconds - empty (all-zero) row for every non-scan workload. Written to the
+-   // current working directory, matching every other engine's convention here (the Python
+-   // wrapper always invokes this binary with cwd=output_dir).
+    {
+-      std::vector<uint64_t> all_scan_latencies_ns;
+-      for (auto& v : scan_latencies_ns) {
+-         all_scan_latencies_ns.insert(all_scan_latencies_ns.end(), v.begin(), v.end());
++      YCSBLatencySamples all_operation_latencies_ns;
++      for (auto& thread_samples : operation_latencies_ns)
++         for (u64 op = 0; op < YCSB_OPERATION_COUNT; op++)
++            all_operation_latencies_ns[op].insert(all_operation_latencies_ns[op].end(),
++                                                  thread_samples[op].begin(), thread_samples[op].end());
++      std::ofstream operation_latency_file("ycsb_operation_latency_summary.csv");
++      operation_latency_file << "operation,p50_us,p95_us,p99_us,count,avg_us,sample_every\n";
++      for (u64 op = 0; op < YCSB_OPERATION_COUNT; op++) {
++         auto& samples = all_operation_latencies_ns[op];
++         std::sort(samples.begin(), samples.end());
++         auto pct = [&](double p) -> double {
++            if (samples.empty()) return 0.0;
++            size_t idx = std::min(samples.size() - 1,
++                static_cast<size_t>(std::llround(p * (samples.size() - 1))));
++            return samples[idx] / 1000.0;
++         };
++         long double sum = 0;
++         for (auto value : samples) sum += value;
++         const double avg_us = samples.empty() ? 0.0 : static_cast<double>(sum / samples.size() / 1000.0);
++         operation_latency_file << YCSB_OPERATION_NAMES[op] << "," << pct(0.50) << "," << pct(0.95)
++                                << "," << pct(0.99) << "," << samples.size() << "," << avg_us
++                                << "," << YCSB_LATENCY_SAMPLE_EVERY << "\n";
+       }
+-      std::sort(all_scan_latencies_ns.begin(), all_scan_latencies_ns.end());
+-      auto pct = [&](double p) -> double {
+-         if (all_scan_latencies_ns.empty()) return 0.0;
+-         size_t idx = std::min(all_scan_latencies_ns.size() - 1,
+-                                static_cast<size_t>(std::llround(p * (all_scan_latencies_ns.size() - 1))));
+-         return all_scan_latencies_ns[idx] / 1000.0;
++      auto& scan_samples = all_operation_latencies_ns[3];
++      auto scan_pct = [&](double p) -> double {
++         if (scan_samples.empty()) return 0.0;
++         size_t idx = std::min(scan_samples.size() - 1,
++             static_cast<size_t>(std::llround(p * (scan_samples.size() - 1))));
++         return scan_samples[idx] / 1000.0;
+       };
+-      double avg_us = 0.0;
+-      if (!all_scan_latencies_ns.empty()) {
+-         uint64_t sum = 0;
+-         for (auto v : all_scan_latencies_ns) sum += v;
+-         avg_us = static_cast<double>(sum) / all_scan_latencies_ns.size() / 1000.0;
+-      }
++      long double scan_sum = 0;
++      for (auto value : scan_samples) scan_sum += value;
++      const double scan_avg_us = scan_samples.empty() ? 0.0 : static_cast<double>(scan_sum / scan_samples.size() / 1000.0);
+       std::ofstream scan_latency_file("ycsb_scan_latency_summary.csv");
+       scan_latency_file << "p50_us,p95_us,p99_us,count,avg_us\n";
+-      scan_latency_file << pct(0.50) << "," << pct(0.95) << "," << pct(0.99) << ","
+-                         << all_scan_latencies_ns.size() << "," << avg_us << "\n";
++      scan_latency_file << scan_pct(0.50) << "," << scan_pct(0.95) << "," << scan_pct(0.99) << ","
++                        << scan_samples.size() << "," << scan_avg_us << "\n";
+    }
+    cout << "-------------------------------------------------------------------------------------" << endl;
+    return 0;

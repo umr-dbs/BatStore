@@ -31,11 +31,13 @@ import pandas as pd
 from plot_styles import (
     ENGINE_LABELS,
     apply_compact_layout,
+    compact_enabled,
     engine_line_style,
     engine_sort_key,
     latency_line_style,
     measurement_positions,
     measurement_values,
+    set_compact,
     set_measurement_axis,
 )
 HTAP_WORKLOADS = ["htap_q1", "htap_q6", "htap_q1_variant", "htap_q6_variant"]
@@ -45,6 +47,19 @@ HTAP_LABELS = {
     "htap_q1_variant": "Q1 predicate variant",
     "htap_q6_variant": "Q6 predicate variant",
 }
+HTAP_PANEL_LABELS = {
+    "htap_q1": "Q1 Pricing Summary",
+    "htap_q6": "Q6 Revenue Change",
+    "htap_q1_variant": "Q1 predicate variant",
+    "htap_q6_variant": "Q6 predicate variant",
+}
+HTAP_COMPACT_PANEL_LABELS = {
+    "htap_q1": "Q1",
+    "htap_q6": "Q6",
+    "htap_q1_variant": "Q1 variant",
+    "htap_q6_variant": "Q6 variant",
+}
+COMPACT_OLAP_THREADS = {1, 2, 4, 8, 16, 32, 64, 120}
 
 _OLAP_RE = re.compile(r"olap_threads=(\d+)")
 
@@ -216,11 +231,16 @@ def plot_throughput_overviews(df: pd.DataFrame, out_dir: Path) -> None:
     sub = df[df["workload"].isin(HTAP_WORKLOADS)]
     for gc_choice, gc_df in gc_slices(sub):
         workloads = [w for w in HTAP_WORKLOADS if w in set(gc_df["workload"])]
+        row_height = 3.8 if compact_enabled() else 2.3
         fig, axes = plt.subplots(
-            len(workloads), 2, figsize=(14, 4 * len(workloads)), squeeze=False,
+            len(workloads), 2, figsize=(10, row_height * len(workloads)), squeeze=False,
         )
-        for (ax_oltp, ax_olap), workload in zip(axes, workloads):
+        for row, ((ax_oltp, ax_olap), workload) in enumerate(zip(axes, workloads)):
             wdf = gc_df[gc_df["workload"] == workload]
+            if compact_enabled():
+                # Keep the paper overview legible by showing a representative
+                # power-of-two progression plus the measured endpoint.
+                wdf = wdf[wdf["olap_threads"].isin(COMPACT_OLAP_THREADS)]
             thread_values = _olap_thread_values(wdf["olap_threads"])
             for engine in sorted(wdf["engine"].unique(), key=engine_sort_key):
                 esub = wdf[wdf["engine"] == engine].sort_values("olap_threads")
@@ -228,15 +248,36 @@ def plot_throughput_overviews(df: pd.DataFrame, out_dir: Path) -> None:
                     ax_oltp, ax_olap, esub["olap_threads"], thread_values,
                     esub["primary_metric_value"], esub["olap_qps"], engine,
                 )
-            title = HTAP_LABELS.get(workload, workload)
-            ax_oltp.set_title(f"{title}\nOLTP throughput")
-            ax_oltp.set_ylabel("new_order/sec")
-            ax_olap.set_title(f"{title}\nOLAP throughput")
-            ax_olap.set_ylabel("queries/sec")
+            title = HTAP_PANEL_LABELS.get(workload, workload)
+            if compact_enabled():
+                compact_title = HTAP_COMPACT_PANEL_LABELS.get(workload, title)
+                ax_oltp.set_title(f"{compact_title} — OLTP")
+                ax_olap.set_title(f"{compact_title} — OLAP")
+            else:
+                ax_oltp.set_title(f"{title}\nOLTP throughput")
+                ax_olap.set_title(f"{title}\nOLAP throughput")
+            if not compact_enabled():
+                ax_oltp.set_ylabel("new_order/sec")
+                ax_olap.set_ylabel("queries/sec")
             for ax in (ax_oltp, ax_olap):
                 _set_olap_thread_axis(ax, thread_values)
+                if compact_enabled():
+                    ax.set_xlabel("OLAP threads" if row == len(workloads) - 1 else "")
                 ax.set_ylim(bottom=0)
             ax_oltp.legend(fontsize="small")
+        if compact_enabled():
+            # Reserve room for the shared OLTP unit and a wider center gutter
+            # for the shared OLAP unit.
+            fig._compact_layout_left = 0.02
+            fig._compact_layout_w_pad = 3.0
+            fig.text(
+                0.012, 0.5, "Throughput (new_order/sec)", rotation="vertical",
+                va="center", ha="center", fontsize=12,
+            )
+            fig.text(
+                0.525, 0.5, "Throughput (queries/sec)", rotation="vertical",
+                va="center", ha="center", fontsize=12,
+            )
         fig.suptitle(f"HTAP throughput overview - fixed OLTP terminals - GC {gc_choice}")
         fig.tight_layout()
         _save(fig, out_dir, f"htap_analytical_throughput_overview_gc_{gc_choice}")
@@ -324,6 +365,69 @@ def plot_workload_latency_all_engines(
     plt.close(fig)
 
 
+def plot_latency_overviews(df: pd.DataFrame, out_dir: Path) -> None:
+    """Combine Q1/Q6 latency percentiles into workload rows, split by GC."""
+    latency_workloads = ["htap_q1", "htap_q6"]
+    sub = df[df["workload"].isin(latency_workloads)]
+    percentiles = (
+        ("scan_p50_us", "P50"),
+        ("scan_p95_us", "P95"),
+        ("scan_p99_us", "P99"),
+    )
+
+    for gc_choice, gc_df in gc_slices(sub):
+        workloads = [
+            workload for workload in latency_workloads
+            if not _latency_rows(gc_df, workload).empty
+        ]
+        if not workloads:
+            continue
+
+        row_height = 3.8 if compact_enabled() else 2.3
+        width = 13 if compact_enabled() else 16
+        fig, axes = plt.subplots(
+            len(workloads), 3,
+            figsize=(width, row_height * len(workloads)),
+            squeeze=False,
+        )
+
+        for row, workload in enumerate(workloads):
+            wdf = _latency_rows(gc_df, workload)
+            if compact_enabled():
+                wdf = wdf[wdf["olap_threads"].isin(COMPACT_OLAP_THREADS)]
+            thread_values = _olap_thread_values(wdf["olap_threads"])
+            workload_title = (
+                HTAP_COMPACT_PANEL_LABELS.get(workload, workload)
+                if compact_enabled()
+                else HTAP_PANEL_LABELS.get(workload, workload)
+            )
+
+            for column_index, (column, percentile) in enumerate(percentiles):
+                ax = axes[row][column_index]
+                for engine in sorted(wdf["engine"].unique(), key=engine_sort_key):
+                    esub = wdf[wdf["engine"] == engine].sort_values("olap_threads")
+                    ax.plot(
+                        _olap_thread_positions(esub["olap_threads"], thread_values),
+                        esub[column], label=ENGINE_LABELS.get(engine, engine),
+                        **engine_line_style(engine),
+                    )
+                _set_olap_thread_axis(ax, thread_values)
+                if compact_enabled():
+                    ax.set_title(f"{workload_title} — {percentile}")
+                    ax.set_xlabel("OLAP threads" if row == len(workloads) - 1 else "")
+                else:
+                    ax.set_title(f"{workload_title}\n{percentile} latency")
+                ax.set_ylim(bottom=0)
+                if row == 0 and column_index == 0:
+                    ax.legend(fontsize="small", frameon=True, framealpha=0.9)
+
+        fig.supylabel("Query latency (microseconds)")
+        fig.suptitle(f"HTAP Q1/Q6 latency overview - GC {gc_choice}")
+        fig.tight_layout()
+        _save(fig, out_dir, f"htap_analytical_latency_overview_gc_{gc_choice}")
+        plt.close(fig)
+
+
 def plot_all(df: pd.DataFrame, out_dir: Path) -> None:
     """Generate the same full set of figures from either plotting entry point."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -336,13 +440,20 @@ def plot_all(df: pd.DataFrame, out_dir: Path) -> None:
             plot_workload_latency_per_engine(gc_df, workload, gc_choice, out_dir)
             plot_workload_latency_all_engines(gc_df, workload, gc_choice, out_dir)
     plot_throughput_overviews(df, out_dir)
+    plot_latency_overviews(df, out_dir)
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--run-dir", required=True, type=Path)
+    p.add_argument(
+        "--compact", action="store_true",
+        help=("use the shared paper-oriented layout: no overall title, a top legend, "
+              "and smaller overview panels"),
+    )
     args = p.parse_args()
 
+    set_compact(args.compact)
     df = load_manifest(args.run_dir)
     out_dir = args.run_dir / "plots"
     plot_all(df, out_dir)
