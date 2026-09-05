@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Plot YCSB A-F or S-YCSB skew-sweep throughput, memory, and scan latency.
+"""Plot YCSB A-F or S-YCSB skew-sweep throughput, memory, and latency.
 
-For each workload, the primary figures use skew on the x-axis and throughput on the
-y-axis. YCSB-E and S-YCSB also produce p50/p95/p99 scan-latency figures whenever the
-manifest contains latency samples.
+Regular YCSB figures split the aggregate throughput into read-class and write-class
+operations and plot the matching p50/p95/p99 operation latency. Reads and scans are
+read-class operations; updates, inserts, and read-modify-write operations are
+write-class operations. S-YCSB retains its write-throughput and scan-latency plots.
 
 For regular YCSB, one figure is produced per YCSB workload (a-f),
 x-axis = skew factor (uniform, then Zipfian theta 0.1/0.4/0.8/0.99/1.4), y-axis =
@@ -35,6 +36,26 @@ from plot_styles import (
 YCSB_WORKLOADS = [f"ycsb_{w}" for w in "abcdef"]
 SKEW_WORKLOADS = YCSB_WORKLOADS + ["s_htap"]
 
+# The standard YCSB mixes used by every engine.  Multiplying the normalized aggregate
+# throughput by these ratios gives a comparable read/write split without relying on
+# sampled latency counts (which are deliberately sparse and can differ by one sample).
+YCSB_OPERATION_MIX = {
+    "ycsb_a": (0.50, 0.50),
+    "ycsb_b": (0.95, 0.05),
+    "ycsb_c": (1.00, 0.00),
+    "ycsb_d": (0.95, 0.05),
+    "ycsb_e": (0.95, 0.05),
+    "ycsb_f": (0.50, 0.50),
+}
+YCSB_OPERATION_BY_CLASS = {
+    "ycsb_a": ("read", "update"),
+    "ycsb_b": ("read", "update"),
+    "ycsb_c": ("read", None),
+    "ycsb_d": ("read", "insert"),
+    "ycsb_e": ("scan", "insert"),
+    "ycsb_f": ("read", "read_modify_write"),
+}
+
 _SKEW_RE = re.compile(r"skew=(\S+)")
 
 
@@ -51,6 +72,84 @@ def workload_label(workload: str) -> str:
     return "S-YCSB" if workload == "s_htap" else f"YCSB {workload.split('_')[1].upper()}"
 
 
+def _operation_summary_path(run_dir: Path, row: pd.Series) -> Path:
+    gc_dir = f"gc_{row['gc_enabled']}".replace("/", "_")
+    base = (
+        run_dir / row["workload"] / row["engine"] / f"skew_{row['skew']}"
+        / f"threads_{int(row['threads'])}"
+    )
+    preferred = base / gc_dir / "ycsb_operation_latency_summary.csv"
+    # Skew sweeps duplicate a non-toggle engine's single gc_n_a measurement into
+    # manifest rows labelled on/off so the comparison slices remain symmetrical.
+    fallback = base / "gc_n_a" / "ycsb_operation_latency_summary.csv"
+    return preferred if preferred.exists() else fallback
+
+
+def _add_ycsb_operation_metrics(run_dir: Path, df: pd.DataFrame) -> pd.DataFrame:
+    """Add read/write throughput and operation-latency columns to manifest rows."""
+    result = df.copy()
+    for operation_class in ("read", "write"):
+        result[f"{operation_class}_throughput"] = float("nan")
+        result[f"{operation_class}_operation"] = None
+        for percentile in ("p50", "p95", "p99"):
+            result[f"{operation_class}_{percentile}_us"] = float("nan")
+
+    for index, row in result.iterrows():
+        workload = row["workload"]
+        if workload == "s_htap":
+            result.at[index, "write_throughput"] = pd.to_numeric(
+                row["primary_metric_value"], errors="coerce",
+            )
+            if pd.to_numeric(row.get("scan_count"), errors="coerce") > 0:
+                result.at[index, "read_operation"] = "scan"
+                for percentile in ("p50", "p95", "p99"):
+                    result.at[index, f"read_{percentile}_us"] = pd.to_numeric(
+                        row.get(f"scan_{percentile}_us"), errors="coerce",
+                    )
+            continue
+        if workload not in YCSB_OPERATION_MIX:
+            continue
+        read_ratio, write_ratio = YCSB_OPERATION_MIX[workload]
+        aggregate = pd.to_numeric(row["primary_metric_value"], errors="coerce")
+        result.at[index, "read_throughput"] = aggregate * read_ratio
+        result.at[index, "write_throughput"] = aggregate * write_ratio
+
+        summary_path = _operation_summary_path(run_dir, row)
+        summary = None
+        if summary_path.exists():
+            try:
+                summary = pd.read_csv(summary_path).set_index("operation")
+            except (OSError, ValueError, KeyError):
+                pass
+        if summary is None:
+            # Older YCSB-E runs only have the backward-compatible scan summary in
+            # manifest.csv. Keep those runs plottable as read-class latency.
+            if (
+                workload == "ycsb_e"
+                and pd.to_numeric(row.get("scan_count"), errors="coerce") > 0
+            ):
+                result.at[index, "read_operation"] = "scan"
+                for percentile in ("p50", "p95", "p99"):
+                    result.at[index, f"read_{percentile}_us"] = pd.to_numeric(
+                        row.get(f"scan_{percentile}_us"), errors="coerce",
+                    )
+            continue
+        for operation_class, operation in zip(
+            ("read", "write"), YCSB_OPERATION_BY_CLASS[workload],
+        ):
+            if operation is None or operation not in summary.index:
+                continue
+            operation_row = summary.loc[operation]
+            if pd.to_numeric(operation_row.get("count"), errors="coerce") <= 0:
+                continue
+            result.at[index, f"{operation_class}_operation"] = operation
+            for percentile in ("p50", "p95", "p99"):
+                result.at[index, f"{operation_class}_{percentile}_us"] = pd.to_numeric(
+                    operation_row.get(f"{percentile}_us"), errors="coerce",
+                )
+    return result
+
+
 def load_manifest(run_dir: Path) -> pd.DataFrame:
     df = pd.read_csv(run_dir / "manifest.csv")
     df = df[df["notes"].fillna("") == ""]
@@ -60,7 +159,7 @@ def load_manifest(run_dir: Path) -> pd.DataFrame:
     else:
         df["memory_source"] = df["memory_source"].fillna("process_rss")
     df["skew"] = df["config_label"].map(skew_label)
-    return df
+    return _add_ycsb_operation_metrics(run_dir, df)
 
 
 def gc_slices(df: pd.DataFrame):
@@ -109,20 +208,29 @@ def plot_workload_per_engine(
     for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
         esub = sub[sub["engine"] == engine]
         skews = sorted(esub["skew"].unique(), key=skew_sort_key)
-        fig, ax = plt.subplots(figsize=(7, 5))
-        for threads in sorted(esub["threads"].unique()):
-            tsub = esub[esub["threads"] == threads].set_index("skew").reindex(skews)
-            ax.plot(skews, tsub["primary_metric_value"], marker="o", label=f"{threads} threads")
-        ax.set_xlabel("Skew factor (Zipfian theta; 'uniform' = theta 0.0)")
-        ax.set_ylabel("Throughput (ops/sec)")
-        ax.set_title(
+        metrics = (
+            (("read_throughput", "Read throughput"), ("write_throughput", "Write throughput"))
+            if workload in YCSB_WORKLOADS
+            else (("primary_metric_value", "Write throughput"),)
+        )
+        fig, axes = plt.subplots(1, len(metrics), figsize=(7 * len(metrics), 5), squeeze=False)
+        for metric_index, (column, title) in enumerate(metrics):
+            ax = axes[0][metric_index]
+            for threads in sorted(esub["threads"].unique()):
+                tsub = esub[esub["threads"] == threads].set_index("skew").reindex(skews)
+                ax.plot(skews, tsub[column], marker="o", label=f"{threads} threads")
+            ax.set_xlabel("Skew factor (Zipfian theta; 'uniform' = theta 0.0)")
+            ax.set_ylabel(f"{title} (ops/sec)")
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+            if metric_index == 0:
+                ax.legend(title="Threads", fontsize="small")
+        fig.suptitle(
             f"{ENGINE_LABELS.get(engine, engine)} - "
             f"{workload_label(workload)} vs. skew - GC {gc_choice}"
         )
-        ax.legend(title="Threads", fontsize="small")
-        ax.grid(True, alpha=0.3)
         fig.tight_layout()
-        _save(fig, out_dir, f"skew_{workload}_{engine}_gc_{gc_choice}")
+        _save(fig, out_dir, f"skew_{workload}_read_write_throughput_{engine}_gc_{gc_choice}")
         plt.close(fig)
 
 
@@ -132,82 +240,139 @@ def plot_workload_all_engines(
     sub = df[(df["workload"] == workload) & (df["threads"] == ref_threads)]
     if sub.empty:
         return
-    fig, ax = plt.subplots(figsize=(7, 5))
-    for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
-        esub = sub[sub["engine"] == engine]
-        skews = sorted(esub["skew"].unique(), key=skew_sort_key)
-        esub = esub.set_index("skew").reindex(skews)
-        ax.plot(
-            skews, esub["primary_metric_value"],
-            label=ENGINE_LABELS.get(engine, engine), **engine_line_style(engine),
-        )
-    ax.set_xlabel("Skew factor (Zipfian theta; 'uniform' = theta 0.0)")
-    ax.set_ylabel("Throughput (ops/sec)")
-    ax.set_title(
+    metrics = (
+        (("read_throughput", "Read throughput"), ("write_throughput", "Write throughput"))
+        if workload in YCSB_WORKLOADS
+        else (("primary_metric_value", "Write throughput"),)
+    )
+    fig, axes = plt.subplots(1, len(metrics), figsize=(7 * len(metrics), 5), squeeze=False)
+    for metric_index, (column, title) in enumerate(metrics):
+        ax = axes[0][metric_index]
+        for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
+            esub = sub[sub["engine"] == engine]
+            skews = sorted(esub["skew"].unique(), key=skew_sort_key)
+            esub = esub.set_index("skew").reindex(skews)
+            ax.plot(
+                skews, esub[column],
+                label=ENGINE_LABELS.get(engine, engine), **engine_line_style(engine),
+            )
+        ax.set_xlabel("Skew factor (Zipfian theta; 'uniform' = theta 0.0)")
+        ax.set_ylabel(f"{title} (ops/sec)")
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        if metric_index == 0:
+            ax.legend(fontsize="small")
+    fig.suptitle(
         f"{workload_label(workload)} vs. skew "
         f"(threads={ref_threads}) - GC {gc_choice}"
     )
-    ax.legend(fontsize="small")
-    ax.grid(True, alpha=0.3)
     fig.tight_layout()
     _save(
         fig, out_dir,
-        f"skew_{workload}_all_engines_threads{ref_threads}_gc_{gc_choice}",
+        f"skew_{workload}_read_write_throughput_all_engines_threads{ref_threads}_gc_{gc_choice}",
     )
     plt.close(fig)
 
 
 def _latency_rows(df: pd.DataFrame, workload: str) -> pd.DataFrame:
-    """Successful rows with an actual scan-latency sample population."""
+    """Successful rows with an actual latency sample population."""
+    if workload in YCSB_WORKLOADS:
+        latency_columns = [
+            f"{operation_class}_{percentile}_us"
+            for operation_class in ("read", "write")
+            for percentile in ("p50", "p95", "p99")
+        ]
+        return df[
+            (df["workload"] == workload) & df[latency_columns].notna().any(axis=1)
+        ].copy()
     return df[
         (df["workload"] == workload)
         & (pd.to_numeric(df["scan_count"], errors="coerce").fillna(0) > 0)
     ].copy()
 
 
+def _latency_metrics(workload: str):
+    if workload in YCSB_WORKLOADS:
+        return [
+            (operation_class, percentile, f"{operation_class}_{percentile}_us")
+            for operation_class in ("read", "write")
+            for percentile in ("p50", "p95", "p99")
+        ]
+    return [
+        ("read", percentile, column)
+        for column, percentile in (
+            ("scan_p50_us", "p50"),
+            ("scan_p95_us", "p95"),
+            ("scan_p99_us", "p99"),
+        )
+    ]
+
+
 def plot_latency_per_engine(
     df: pd.DataFrame, workload: str, gc_choice: str, out_dir: Path,
 ) -> None:
-    """Skew-to-latency curves per engine, with one panel per percentile."""
+    """Skew-to-latency curves per engine, split by read/write and percentile."""
     sub = _latency_rows(df, workload)
     if sub.empty:
         return
-    metrics = (("scan_p50_us", "p50"), ("scan_p95_us", "p95"), ("scan_p99_us", "p99"))
+    metrics = _latency_metrics(workload)
+    row_classes = ["read", "write"] if workload in YCSB_WORKLOADS else ["read"]
     for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
         esub = sub[sub["engine"] == engine]
         skews = sorted(esub["skew"].unique(), key=skew_sort_key)
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4.6), squeeze=False, sharex=True)
-        for idx, (column, percentile) in enumerate(metrics):
-            ax = axes[0][idx]
+        fig, axes = plt.subplots(
+            len(row_classes), 3, figsize=(15, 4.4 * len(row_classes)),
+            squeeze=False, sharex=True,
+        )
+        for operation_class, percentile, column in metrics:
+            row = row_classes.index(operation_class)
+            col = ("p50", "p95", "p99").index(percentile)
+            ax = axes[row][col]
+            if esub[column].notna().sum() == 0:
+                ax.text(0.5, 0.5, "No measurements", ha="center", va="center",
+                        transform=ax.transAxes)
+                ax.set_axis_off()
+                continue
             for threads in sorted(esub["threads"].unique()):
                 tsub = esub[esub["threads"] == threads].set_index("skew").reindex(skews)
                 ax.plot(skews, tsub[column], marker="o", label=f"{threads} threads")
             ax.set_xlabel("Skew factor")
-            ax.set_ylabel(f"{percentile} scan latency (µs)")
+            ax.set_ylabel(f"{operation_class.title()} {percentile} latency (µs)")
             ax.set_title(percentile)
             ax.grid(True, alpha=0.3)
-            if idx == 0:
+            if col == 0:
                 ax.legend(title="Total threads", fontsize="small")
         fig.suptitle(
             f"{ENGINE_LABELS.get(engine, engine)} - {workload_label(workload)} "
-            f"scan latency vs. skew - GC {gc_choice}"
+            f"read/write latency vs. skew - GC {gc_choice}"
         )
-        _save(fig, out_dir, f"skew_{workload}_latency_{engine}_gc_{gc_choice}")
+        _save(fig, out_dir, f"skew_{workload}_read_write_latency_{engine}_gc_{gc_choice}")
         plt.close(fig)
 
 
 def plot_latency_all_engines(
     df: pd.DataFrame, workload: str, gc_choice: str, out_dir: Path, ref_threads: int,
 ) -> None:
-    """Cross-engine skew-to-latency curves at one reference thread count."""
+    """Cross-engine latency curves at one thread count, split by read/write."""
     sub = _latency_rows(df, workload)
     sub = sub[sub["threads"] == ref_threads]
     if sub.empty:
         return
-    metrics = (("scan_p50_us", "p50"), ("scan_p95_us", "p95"), ("scan_p99_us", "p99"))
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.6), squeeze=False, sharex=True)
-    for idx, (column, percentile) in enumerate(metrics):
-        ax = axes[0][idx]
+    metrics = _latency_metrics(workload)
+    row_classes = ["read", "write"] if workload in YCSB_WORKLOADS else ["read"]
+    fig, axes = plt.subplots(
+        len(row_classes), 3, figsize=(15, 4.4 * len(row_classes)),
+        squeeze=False, sharex=True,
+    )
+    for operation_class, percentile, column in metrics:
+        row = row_classes.index(operation_class)
+        col = ("p50", "p95", "p99").index(percentile)
+        ax = axes[row][col]
+        if sub[column].notna().sum() == 0:
+            ax.text(0.5, 0.5, "No measurements", ha="center", va="center",
+                    transform=ax.transAxes)
+            ax.set_axis_off()
+            continue
         for engine in sorted(sub["engine"].unique(), key=engine_sort_key):
             esub = sub[sub["engine"] == engine]
             skews = sorted(esub["skew"].unique(), key=skew_sort_key)
@@ -217,18 +382,18 @@ def plot_latency_all_engines(
                 **engine_line_style(engine),
             )
         ax.set_xlabel("Skew factor")
-        ax.set_ylabel(f"{percentile} scan latency (µs)")
+        ax.set_ylabel(f"{operation_class.title()} {percentile} latency (µs)")
         ax.set_title(percentile)
         ax.grid(True, alpha=0.3)
-        if idx == 0:
+        if col == 0:
             ax.legend(fontsize="small")
     fig.suptitle(
-        f"{workload_label(workload)} scan latency vs. skew "
+        f"{workload_label(workload)} read/write latency vs. skew "
         f"(threads={ref_threads}) - GC {gc_choice}"
     )
     _save(
         fig, out_dir,
-        f"skew_{workload}_latency_all_engines_threads{ref_threads}_gc_{gc_choice}",
+        f"skew_{workload}_read_write_latency_all_engines_threads{ref_threads}_gc_{gc_choice}",
     )
     plt.close(fig)
 
@@ -241,7 +406,11 @@ def plot_workloads_overview(
     sub = df[
         df["workload"].isin(SKEW_WORKLOADS) & (df["threads"] == ref_threads)
     ]
-    workloads = [workload for workload in SKEW_WORKLOADS if workload in set(sub["workload"])]
+    numeric_values = pd.to_numeric(sub[value_column], errors="coerce")
+    workloads = [
+        workload for workload in SKEW_WORKLOADS
+        if numeric_values[sub["workload"] == workload].notna().any()
+    ]
     if not workloads:
         return
 
@@ -313,12 +482,24 @@ def plot_workloads_overview(
 
 
 def plot_overviews(df: pd.DataFrame, out_dir: Path) -> None:
-    """Write throughput and peak-memory grids for every GC mode and thread count."""
+    """Write read/write throughput, latency, and memory overview grids."""
     for gc_choice, gc_df in gc_slices(df):
         for threads in sorted(int(value) for value in gc_df["threads"].unique()):
             plot_workloads_overview(
                 gc_df, gc_choice, out_dir, threads,
-                "primary_metric_value", "Throughput (ops/sec)", "throughput",
+                "read_throughput", "Read throughput (ops/sec)", "read_throughput",
+            )
+            plot_workloads_overview(
+                gc_df, gc_choice, out_dir, threads,
+                "write_throughput", "Write throughput (ops/sec)", "write_throughput",
+            )
+            plot_workloads_overview(
+                gc_df, gc_choice, out_dir, threads,
+                "read_p99_us", "Read p99 latency (µs)", "read_p99_latency",
+            )
+            plot_workloads_overview(
+                gc_df, gc_choice, out_dir, threads,
+                "write_p99_us", "Write p99 latency (µs)", "write_p99_latency",
             )
             plot_workloads_overview(
                 gc_df, gc_choice, out_dir, threads,
