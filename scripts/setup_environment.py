@@ -50,6 +50,8 @@ BENCHBASE_REPO = BENCHBASE_DIST.parent.parent
 VWEAVER_REPO = common.VWEAVER_REPO
 VWEAVER_BUILD_DIR = VWEAVER_REPO / "build"
 VWEAVER_FRUGAL_BUILD_DIR = VWEAVER_REPO / "build_frugal"
+HYRISE_REPO = common.HYRISE_REPO
+HYRISE_BUILD_DIR = common.HYRISE_BUILD_DIR
 
 BATSTORE_REPO_URL = "https://github.com/umr-dbs/BatStore.git"
 BATSTORE_WORKSPACE_CLONE = WORKSPACE_ROOT / "batstore"
@@ -110,6 +112,12 @@ VWEAVER_YCSB_PAYLOAD_PATCH_PATH = Path(__file__).resolve().parent.parent / "patc
 # python2 on this system, so this repo ships a Python 3 port instead (see that file's header).
 VWEAVER_BURT_HASH_GEN = Path(__file__).resolve().parent.parent / "patches" / "vweaver_burt_hash_gen.py"
 
+# Not pinned to a commit (like WIREDTIGER_URL below, and unlike LEANSTORE_URL/
+# BENCHBASE_URL/VWEAVER_URL, which pin against a patch this repo carries): no patch is
+# applied to this checkout, so there is no specific commit a patch was generated against
+# to stay reproducible for. Clones whatever the default branch's HEAD is at setup time.
+HYRISE_URL = "https://github.com/hyrise/hyrise.git"
+
 # Everything LeanStore's own README asks for, minus librocksdb-dev/liblmdb-dev
 # (only needed for the rocksdb_*/lmdb_* frontend targets, which
 # scripts/engines/leanstore.py never builds), plus postgresql itself, plus numactl
@@ -128,6 +136,18 @@ APT_PACKAGES = [
     "postgresql", "postgresql-contrib", "openjdk-21-jdk-headless", "maven",
 ]
 VWEAVER_APT_PACKAGES = ["clang", "libnuma-dev", "libgoogle-glog-dev", "libibverbs-dev"]
+# Hyrise's own install_dependencies.sh pulls a pinned, bleeding-edge toolchain (clang-19,
+# gcc-15, llvm-20, lld-20, bolt-20 - via a custom apt.llvm.org repo this harness does not
+# add) on top of these libraries. Rather than take on a custom apt repo + exotic compiler
+# versions just to match upstream's CI environment, this installs only the real library
+# dependencies and builds with whatever g++/clang++ this machine already has (both
+# already required above/by VWEAVER_APT_PACKAGES) plus -DHYRISE_RELAXED_BUILD=On
+# (Hyrise's own documented escape hatch for "non-standard environments" - see
+# step_hyrise). libtbb-dev/libnuma-dev are already in APT_PACKAGES/VWEAVER_APT_PACKAGES.
+HYRISE_APT_PACKAGES = [
+    "libboost-all-dev", "libhwloc-dev", "libncurses-dev", "libnuma-dev",
+    "libpq-dev", "libreadline-dev", "libsqlite3-dev",
+]
 
 PG_ROLE = common.PG_ROLE
 PG_PASSWORD = common.PG_PASSWORD
@@ -227,7 +247,7 @@ def apply_patch_once(repo: Path, patch_path: Path, marker_file: str, marker: str
 
 def step_apt_packages(full: bool = False) -> None:
     log("Checking apt dependencies")
-    packages = APT_PACKAGES + (VWEAVER_APT_PACKAGES if full else [])
+    packages = APT_PACKAGES + HYRISE_APT_PACKAGES + (VWEAVER_APT_PACKAGES if full else [])
     missing = [p for p in packages if not is_apt_package_installed(p)]
     if not missing:
         print("All required apt packages already installed.")
@@ -248,7 +268,7 @@ def step_fresh_checkouts() -> None:
     log("Removing setup-managed checkouts for a reproducible fresh build")
     workspace = WORKSPACE_ROOT.resolve()
     targets = [
-        WIREDTIGER_REPO, LEANSTORE_REPO, BENCHBASE_REPO, VWEAVER_REPO,
+        WIREDTIGER_REPO, LEANSTORE_REPO, BENCHBASE_REPO, VWEAVER_REPO, HYRISE_REPO,
         BATSTORE_WORKSPACE_CLONE,
     ]
     for target in targets:
@@ -331,6 +351,65 @@ def step_leanstore() -> None:
 
     # `--build`/`--target`/`--parallel`: generator-agnostic, no `cwd=` needed.
     run(["cmake", "--build", str(LEANSTORE_BUILD_DIR), "--target", *targets,
+         "--parallel", str(shutil_cpu_count())])
+
+
+def step_hyrise() -> None:
+    """Clones (with its ~20 git submodules) and builds Hyrise's `hyriseServer` target -
+    see engines/hyrise.py's own module doc for how it's driven (BenchBase's POSTGRES JDBC
+    target, same as PostgreSQL/Umbra) and what's unverified about that integration.
+
+    Submodules (sql-parser, googletest, tpch-dbgen/tpcds-kit/jcch-dbgen, jemalloc, ...)
+    aren't fetched by a plain `git clone` - a separate `git submodule update --init
+    --recursive` is required and, like shallow_clone's own `--depth 1`, fetched shallow
+    (`--depth 1`) too: none of them need history here either, only a working tree to
+    build from.
+
+    The submodule fetch runs unconditionally (NOT only right after a fresh clone) and is
+    itself idempotent - `git submodule update` skips whatever's already checked out and
+    only fetches what's missing. This matters in practice: ~20 near-simultaneous
+    unauthenticated clones from one IP can trip GitHub's own anonymous-download rate
+    limit ("temporarily limiting some unauthenticated downloads") partway through,
+    leaving some submodules fetched and others not - confirmed live. Gating this call on
+    "did HYRISE_REPO not exist yet" would make re-running this step after exactly that
+    failure skip straight to a cmake configure that's missing half its third_party/ tree.
+
+    `--force` (re-checks out every submodule's pinned commit even if its gitlink already
+    matches) is deliberate, not a style choice: also confirmed live, a handful of
+    submodules can come out of exactly that rate-limit-triggered retry sequence with
+    their commit recorded in git's index (so `git submodule status` reports them as
+    "clean") but an actually EMPTY working tree - no files ever wrote through - which
+    then fails cmake's configure step with a confusing "cannot find source file" error
+    that looks unrelated to the real cause. `--force` re-materializes those files even
+    though the recorded commit didn't change.
+    """
+    log("Cloning + building Hyrise (hyriseServer target only)")
+    if not HYRISE_REPO.exists():
+        shallow_clone(HYRISE_URL, HYRISE_REPO)
+    log("Fetching Hyrise's git submodules (sql-parser, googletest, tpch-dbgen, ...)")
+    run(["git", "submodule", "update", "--init", "--recursive", "--force", "--depth", "1"], cwd=HYRISE_REPO)
+
+    HYRISE_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    common.check_release_build(HYRISE_BUILD_DIR, "Hyrise")
+    if not (HYRISE_BUILD_DIR / "CMakeCache.txt").exists():
+        run([
+            "cmake", "-S", str(HYRISE_REPO), "-B", str(HYRISE_BUILD_DIR),
+            "-DCMAKE_BUILD_TYPE=Release",
+            # See HYRISE_APT_PACKAGES's own comment: this harness doesn't install
+            # upstream's exact pinned compiler toolchain, so Hyrise's own documented
+            # escape hatch for "non-standard environments" is required here.
+            "-DHYRISE_RELAXED_BUILD=On",
+            # Hyrise's own CMakeLists.txt enables Link Time Optimization by default for
+            # every non-Debug build and explicitly warns "LTO build times can be very
+            # long using GCC" - confirmed live: linking just the hyrise_impl library
+            # alone ran GCC's lto1 WPA pass at ~16GB RSS for 45+ minutes on a 32GB
+            # machine before being aborted, matching that warning exactly. -DNO_LTO=On
+            # is Hyrise's own documented flag to skip it - this harness needs a build
+            # that completes in reasonable time/memory on whatever machine it's run on,
+            # not upstream's own release-quality optimization level.
+            "-DNO_LTO=On",
+        ])
+    run(["cmake", "--build", str(HYRISE_BUILD_DIR), "--target", "hyriseServer",
          "--parallel", str(shutil_cpu_count())])
 
 
@@ -938,6 +1017,7 @@ def main() -> None:
     parser.add_argument("--skip-apt", action="store_true")
     parser.add_argument("--skip-wiredtiger", action="store_true")
     parser.add_argument("--skip-leanstore", action="store_true")
+    parser.add_argument("--skip-hyrise", action="store_true")
     parser.add_argument("--skip-vweaver", action="store_true")
     parser.add_argument("--skip-vweaver-frugal", action="store_true")
     parser.add_argument("--skip-hugepages", action="store_true")
@@ -963,6 +1043,7 @@ def main() -> None:
         args.skip_apt = True
         args.skip_wiredtiger = True
         args.skip_leanstore = True
+        args.skip_hyrise = True
         args.skip_vweaver = True
         args.skip_vweaver_frugal = True
         args.skip_hugepages = True
@@ -978,6 +1059,7 @@ def main() -> None:
         ("apt", args.skip_apt, lambda: step_apt_packages(args.full)),
         ("wiredtiger", args.skip_wiredtiger, step_wiredtiger),
         ("leanstore", args.skip_leanstore, step_leanstore),
+        ("hyrise", args.skip_hyrise, step_hyrise),
         ("hugepages", not args.full or args.skip_hugepages, step_vweaver_hugepages),
         ("vweaver", not args.full or args.skip_vweaver, step_vweaver_ermia),
         ("vweaver-frugal", not args.full or args.skip_vweaver_frugal, step_vweaver_ermia_frugal),

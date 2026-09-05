@@ -32,6 +32,14 @@ BINARY = REPO_ROOT / "target" / "release" / "batstore"
 # ycsb_driver.rs) - a genuine gc=on/off comparison is possible here.
 SUPPORTS_GC_TOGGLE = True
 
+# BatStore's TPC-C driver (tpcc_driver.rs) has a real `affinity` flag (DriverConfig::
+# affinity - each terminal restricted to its own home warehouse, 0% remote, vs. the
+# spec's normal cross-warehouse mix) - see common.AFFINITY_WORKLOADS for which workloads
+# actually reach it (plain "tpcc" and the htap_* modes; YCSB/S-YCSB have no such concept).
+# No other engine wrapper in this harness has an equivalent (see manual.txt section 6:
+# even BatStore's own mdbx_tpcc driver dropped this knob for lack of a libmdbx analog).
+SUPPORTS_AFFINITY_TOGGLE = True
+
 
 def ensure_built() -> None:
     # Always built with --features mdbx-backend (not just when "libmdbx" is also in
@@ -47,11 +55,19 @@ def ensure_built() -> None:
 def run(
     workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", reload: bool = True,
     big_tree_size: str = "medium", ycsb_payload: str = "standard", read_payload: bool = True,
-    scan_pool_workers: Optional[int] = None,
+    scan_pool_workers: Optional[int] = None, affinity: str = "off",
 ) -> common.NormalizedResult:
     """`reload` is accepted for interface parity with postgres_benchbase.run() but unused -
     every BatStore invocation is a fresh in-process population, there's no persisted state to
     reuse across sweep points.
+
+    `affinity` ("on"/"off", default "off" - matches the hardcoded value every call site used
+    before this parameter existed) only reaches the driver for "tpcc" and the htap_* modes
+    (positional arg 6 to `BatStore tpcc` - see tpcc_driver.rs::main_tpcc's `affinity` field);
+    "on" restricts every terminal to its own home warehouse (0% remote transactions), "off"
+    is the spec's normal cross-warehouse mix. Ignored (and reported back as affinity="n/a",
+    not whatever was passed) for every other workload, which has no such concept - see
+    common.AFFINITY_WORKLOADS.
 
     `big_tree_size` (tiny/small/medium/large/huge) selects Table::Warehouse/Table::District's
     leaf capacity - see tpcc_schema::BigTreeSize's doc - only wired through for the "tpcc"
@@ -76,6 +92,11 @@ def run(
     del reload
     output_dir.mkdir(parents=True, exist_ok=True)
     gc_bool = "false" if gc == "off" else "true"
+    affinity_bool = "true" if affinity == "on" else "false"
+    # Only "tpcc" and the htap_* modes reach the driver's `affinity` positional arg at all
+    # (see this function's doc) - stamp back "n/a" for every other workload regardless of
+    # what was passed in, rather than echoing a setting that was silently ignored.
+    affinity_reported = affinity if workload in common.AFFINITY_WORKLOADS else "n/a"
     field_count, field_length = ((1, 8) if ycsb_payload == "u64" else (10, 100))
     # Under common.NO_DURABILITY (see compare_engines_new.py), WAL is switched off
     # entirely rather than left on with fsync somehow suppressed - no such partial toggle
@@ -100,7 +121,7 @@ def run(
         # Rust's arg() is strictly positional (parms.get(idx)).
         args = [
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
-            "false", gc_bool, "false", "fg", "none", "0", "10.0",
+            affinity_bool, gc_bool, "false", "fg", "none", "0", "10.0",
             "100000", "3000", "3000", wal_enabled_str, str(wal_path), "5",
             # Positions 18-20 (ch_region/num_suppliers/htap_baseline_secs) filled with the
             # driver's own defaults so position 21 (big_tree_size) is reachable.
@@ -116,7 +137,7 @@ def run(
         olap_mode = workload.replace("htap_", "ch_", 1)
         args = [
             str(BINARY), "tpcc", str(scale.tpcc_warehouses), str(threads), str(duration),
-            "false", gc_bool, "false", "fg", olap_mode, str(scale.htap_olap_threads), "10.0",
+            affinity_bool, gc_bool, "false", "fg", olap_mode, str(scale.htap_olap_threads), "10.0",
             "100000", "3000", "3000", wal_enabled_str, str(wal_path), "5", "EUROPE", "10000",
             # Positions 20-21 (htap_baseline_secs/big_tree_size) filled with the driver's
             # own defaults so position 22 (scan_pool_workers) is reachable.
@@ -181,14 +202,14 @@ def run(
             f"FAILED exit={returncode}, see stdout.log"
         return common.NormalizedResult(
             "batstore", workload, scale.label, duration, metric_name, 0.0, 0.0,
-            threads=threads, gc_enabled=gc,
+            threads=threads, gc_enabled=gc, affinity=affinity_reported,
             notes=notes,
         )
 
     if not common.NO_DURABILITY and (not wal_path.is_file() or wal_path.stat().st_size == 0):
         return common.NormalizedResult(
             "batstore", workload, scale.label, duration, metric_name, 0.0, 0.0,
-            threads=threads, gc_enabled=gc,
+            threads=threads, gc_enabled=gc, affinity=affinity_reported,
             notes=f"FAILED: BatStore WAL was enabled but {wal_path} is missing or empty",
         )
 
@@ -220,7 +241,7 @@ def run(
 
     return common.NormalizedResult(
         "batstore", workload, scale.label, duration, metric_name, value, peak_rss_mb,
-        threads=threads, gc_enabled=gc,
+        threads=threads, gc_enabled=gc, affinity=affinity_reported,
         scan_p50_us=latency["p50"], scan_p95_us=latency["p95"], scan_p99_us=latency["p99"],
         scan_avg_us=latency["avg"], scan_count=latency["count"],
     )
