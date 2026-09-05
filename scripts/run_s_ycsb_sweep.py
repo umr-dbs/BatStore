@@ -36,7 +36,7 @@ if _bootstrap_args.workspace_root is not None:
 
 from clean_leanstore_runs import clean_run as clean_engine_run
 from engines import (
-    batstore, common, leanstore, libmdbx, postgres_benchbase, umbra_benchbase, wiredtiger,
+    batstore, common, hyrise, leanstore, libmdbx, postgres_benchbase, umbra_benchbase, wiredtiger,
 )
 
 
@@ -46,6 +46,7 @@ ENGINE_MODULES = {
     "wiredtiger": wiredtiger,
     "postgres": postgres_benchbase,
     "umbra": umbra_benchbase,
+    "hyrise": hyrise,
     "libmdbx": libmdbx,
 }
 DEFAULT_ENGINES = ["batstore", "leanstore", "wiredtiger", "postgres", "libmdbx"]

@@ -46,6 +46,8 @@ LEANSTORE_REPO = Path(os.environ.get("LEANSTORE_REPO", str(WORKSPACE_ROOT / "lea
 WIREDTIGER_BUILD_DIR = Path(os.environ.get("WIREDTIGER_BUILD_DIR", str(WORKSPACE_ROOT / "wiredtiger" / "cmake-build-debug")))
 BENCHBASE_HOME = Path(os.environ.get("BENCHBASE_HOME", str(WORKSPACE_ROOT / "benchbase" / "target" / "benchbase-postgres")))
 VWEAVER_REPO = Path(os.environ.get("VWEAVER_REPO", str(WORKSPACE_ROOT / "vWeaver_ermia")))
+HYRISE_REPO = Path(os.environ.get("HYRISE_REPO", str(WORKSPACE_ROOT / "hyrise")))
+HYRISE_BUILD_DIR = Path(os.environ.get("HYRISE_BUILD_DIR", str(HYRISE_REPO / "cmake-build-release")))
 
 # Matches the role/database setup_environment.py::step_postgres creates (admin is a
 # SUPERUSER role, needed for postgres_benchbase.py's ALTER SYSTEM autovacuum toggle).
@@ -70,6 +72,20 @@ UMBRA_ROLE = os.environ.get("UMBRA_ROLE", "postgres")  # fixed by the image's ow
 UMBRA_PASSWORD = os.environ.get("UMBRA_PASSWORD", "postgres")  # ditto
 UMBRA_DATABASE = os.environ.get("UMBRA_DATABASE", "benchbase")
 UMBRA_CONTAINER_NAME = os.environ.get("UMBRA_CONTAINER_NAME", "batstore_bench_umbra")
+
+# Hyrise (github.com/hyrise/hyrise, see engines/hyrise.py) - HPI's in-memory,
+# column-oriented research OLTP+OLAP engine. Its `hyriseServer` binary implements the
+# PostgreSQL wire protocol (src/bin/server.cpp; default port 5432 upstream, always
+# overridden here), so - like Umbra - it's driven through the same BenchBase
+# <type>POSTGRES</type> JDBC target as engines/postgres_benchbase.py, just pointed at a
+# different port. Unlike Umbra it ships no usable Docker image for this harness (built
+# from source instead, setup_environment.py::step_hyrise) and has no multi-database
+# concept, so HYRISE_DATABASE is a placeholder value only - the server has one implicit
+# catalog and does not need an equivalent of Umbra's per-run `CREATE DATABASE`.
+HYRISE_PORT = int(os.environ.get("HYRISE_PORT", "5434"))  # not 5432 (real postgres) or 5433 (umbra)
+HYRISE_DATABASE = os.environ.get("HYRISE_DATABASE", "hyrise")
+HYRISE_ROLE = os.environ.get("HYRISE_ROLE", "hyrise")
+HYRISE_PASSWORD = os.environ.get("HYRISE_PASSWORD", "hyrise")
 
 # This harness always pins to one NUMA node - matches the real server (2x AMD EPYC 7742,
 # 2 NUMA nodes) where cross-node traffic would otherwise confound every measurement here.
@@ -476,6 +492,9 @@ class NormalizedResult:
     # "on" | "off" | "n/a" (engine has no working version-GC toggle - see leanstore.py/
     # wiredtiger.py's SUPPORTS_GC_TOGGLE = False and the plan's Context section for why).
     gc_enabled: str = "n/a"
+    # "on" | "off" | "n/a" (workload/engine has no warehouse-affinity concept - see
+    # AFFINITY_WORKLOADS and engines/batstore.py's SUPPORTS_AFFINITY_TOGGLE).
+    affinity: str = "n/a"
     # Scan/OLAP-scan latency (microseconds), populated only for workload == "ycsb_e" (all
     # engines) or workload == "tpcc" and engine == "batstore" (its existing HTAP scan-sweep
     # mode) - 0 elsewhere.
@@ -489,7 +508,7 @@ class NormalizedResult:
 
 
 MANIFEST_HEADER = [
-    "engine", "workload", "config_label", "threads", "gc_enabled", "duration_secs",
+    "engine", "workload", "config_label", "threads", "gc_enabled", "affinity", "duration_secs",
     "primary_metric_name", "primary_metric_value", "peak_rss_mb",
     "scan_p50_us", "scan_p95_us", "scan_p99_us", "scan_avg_us", "scan_count", "notes",
     "memory_source",
@@ -514,13 +533,18 @@ HTAP_CANONICAL_WORKLOADS = ["htap_q1", "htap_q6"]
 # now that htap_q1/htap_q6 mean the pinned BenchBase SQL exactly.
 HTAP_VARIANT_WORKLOADS = ["htap_q1_variant", "htap_q6_variant"]
 HTAP_WORKLOADS = HTAP_CANONICAL_WORKLOADS + HTAP_VARIANT_WORKLOADS
+# Workloads that run through BatStore's TPC-C driver (tpcc_driver.rs), the only place a
+# warehouse-affinity toggle exists at all (DriverConfig::affinity - each terminal
+# restricted to its own home warehouse, 0% remote, vs. the spec's normal cross-warehouse
+# mix). YCSB/S-YCSB have no such concept. See engines/batstore.py's SUPPORTS_AFFINITY_TOGGLE.
+AFFINITY_WORKLOADS = ["tpcc"] + HTAP_WORKLOADS
 # "S-YCSB" streaming workload (see Scale's s_htap_* fields' doc) - one name, no
 # lettered variants (unlike YCSB A-F): the interesting axis here is the hot_window/
 # olap_lag/olap_span shape, not a fixed menu of op-mix presets, so it stays a single
 # workload tuned via those Scale fields / compare_engines.py flags instead.
 ALL_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_WORKLOADS + ["s_htap"]
 DEFAULT_WORKLOADS = ["tpcc"] + YCSB_WORKLOADS + HTAP_CANONICAL_WORKLOADS + ["s_htap"]
-ENGINES = ["batstore", "leanstore", "wiredtiger", "postgres", "umbra", "vweaver_ermia", "vweaver_ermia_frugal", "libmdbx"]
+ENGINES = ["batstore", "leanstore", "wiredtiger", "postgres", "umbra", "hyrise", "vweaver_ermia", "vweaver_ermia_frugal", "libmdbx"]
 
 
 def _read_vmhwm_kb(pid: int) -> float:
@@ -805,6 +829,7 @@ def append_manifest_row(manifest_path: Path, result: NormalizedResult) -> None:
     with open(manifest_path, "a", newline="") as f:
         csv.writer(f).writerow([
             result.engine, result.workload, result.config_label, result.threads, result.gc_enabled,
+            result.affinity,
             f"{result.duration_secs:.1f}",
             result.primary_metric_name, f"{result.primary_metric_value:.3f}",
             f"{result.peak_rss_mb:.2f}",

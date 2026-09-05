@@ -15,6 +15,13 @@ equivalent at all) - those two engines run once per (workload, threads) with
 gc_enabled="n/a" regardless of --gc. BatStore (real --gc flag) and PostgreSQL
 (via autovacuum, see engines/postgres_benchbase.py) get a real on/off compare.
 
+--affinity toggles TPC-C warehouse affinity (each terminal restricted to its own home
+warehouse, 0% remote, vs. the spec's normal cross-warehouse mix) - a real toggle exists
+ONLY on BatStore's own TPC-C driver, and only for the "tpcc"/htap_* workloads (see
+common.AFFINITY_WORKLOADS, engines/batstore.py's SUPPORTS_AFFINITY_TOGGLE); every other
+engine/workload combination runs once per (workload, threads, gc) with affinity="n/a"
+regardless of --affinity, same pattern as the GC toggle above.
+
 htap_q1/htap_q6 (see common.py's HTAP_WORKLOADS) run TPC-C OLTP concurrently
 with one dedicated thread repeatedly executing CH-benCHmark Q1 ("Pricing
 Summary Report") or Q6 ("Forecasting Revenue Change") - the only 2 of
@@ -39,6 +46,8 @@ Usage:
     python3 scripts/compare_engines.py --engines batstore,leanstore --workloads tpcc,ycsb_e
     python3 scripts/compare_engines.py --threads 1,4,16,64 --gc on
     python3 scripts/compare_engines.py --warehouses 16 --tpcc-duration 120
+    python3 scripts/compare_engines.py --workloads tpcc --threads 2,4,8,16,32,64,128 \
+        --gc on,off --affinity on,off --warehouses 8
 """
 from __future__ import annotations
 
@@ -55,7 +64,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from engines import (
-    batstore, common, leanstore, libmdbx, postgres_benchbase, umbra_benchbase, vweaver_ermia,
+    batstore, common, hyrise, leanstore, libmdbx, postgres_benchbase, umbra_benchbase, vweaver_ermia,
     vweaver_ermia_frugal, wiredtiger,
 )
 from clean_leanstore_runs import clean_run as clean_engine_run
@@ -66,6 +75,7 @@ ENGINE_MODULES = {
     "wiredtiger": wiredtiger,
     "postgres": postgres_benchbase,
     "umbra": umbra_benchbase,
+    "hyrise": hyrise,
     "vweaver_ermia": vweaver_ermia,
     "vweaver_ermia_frugal": vweaver_ermia_frugal,
     "libmdbx": libmdbx,
@@ -76,6 +86,7 @@ ENGINE_MODULES = {
 # per the user's own thread-sweep spec.
 DEFAULT_THREADS = [2, 4, 8, 16, 32, 64, 128]
 DEFAULT_GC = ["on", "off"]
+DEFAULT_AFFINITY = ["on", "off"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,6 +111,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gc", default=",".join(DEFAULT_GC),
                    help="comma-separated subset of on,off - ignored for engines with no working "
                         "GC toggle (see SUPPORTS_GC_TOGGLE in each engines/*.py)")
+    p.add_argument("--affinity", default=",".join(DEFAULT_AFFINITY),
+                   help="comma-separated subset of on,off - TPC-C warehouse affinity (each "
+                        "terminal restricted to its own home warehouse, 0%% remote) vs. the "
+                        "spec's normal cross-warehouse mix. Only BatStore has this toggle, and "
+                        "only for the 'tpcc'/htap_* workloads (see common.AFFINITY_WORKLOADS, "
+                        "engines/batstore.py's SUPPORTS_AFFINITY_TOGGLE) - every other "
+                        "engine/workload combination runs once, affinity=n/a")
 
     p.add_argument("--warehouses", type=int)
     p.add_argument("--tpcc-duration", type=int)
@@ -218,6 +236,7 @@ def main() -> None:
     ]
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
     gc_list = [g.strip() for g in args.gc.split(",") if g.strip()]
+    affinity_list = [a.strip() for a in args.affinity.split(",") if a.strip()]
     if args.threads:
         thread_list = [int(t.strip()) for t in args.threads.split(",") if t.strip()]
     else:
@@ -232,8 +251,11 @@ def main() -> None:
     for g in gc_list:
         if g not in ("on", "off"):
             sys.exit(f"unknown --gc value '{g}' (expected 'on' and/or 'off')")
-    if not engines or not workloads or not gc_list:
-        sys.exit("--engines, --workloads, and --gc must each contain at least one value")
+    for a in affinity_list:
+        if a not in ("on", "off"):
+            sys.exit(f"unknown --affinity value '{a}' (expected 'on' and/or 'off')")
+    if not engines or not workloads or not gc_list or not affinity_list:
+        sys.exit("--engines, --workloads, --gc, and --affinity must each contain at least one value")
     if not thread_list or any(t <= 0 for t in thread_list):
         sys.exit("--threads must contain positive integers")
     if args.htap_cpu_budget is not None and args.htap_cpu_budget <= 0:
@@ -277,10 +299,15 @@ def main() -> None:
     for workload in workloads:
         duration = _workload_duration(workload, scale)
         for engine_name in engines:
-            supports_gc = getattr(ENGINE_MODULES[engine_name], "SUPPORTS_GC_TOGGLE", False)
+            module = ENGINE_MODULES[engine_name]
+            supports_gc = getattr(module, "SUPPORTS_GC_TOGGLE", False)
+            supports_affinity = (
+                getattr(module, "SUPPORTS_AFFINITY_TOGGLE", False) and workload in common.AFFINITY_WORKLOADS
+            )
             n_gc = len(gc_list) if supports_gc else 1
-            total_runs += len(thread_list) * n_gc
-            total_secs += len(thread_list) * n_gc * duration
+            n_affinity = len(affinity_list) if supports_affinity else 1
+            total_runs += len(thread_list) * n_gc * n_affinity
+            total_secs += len(thread_list) * n_gc * n_affinity * duration
 
     print("\n########## cross-engine benchmark comparison ##########")
     print(f"run directory : {run_dir}")
@@ -300,6 +327,9 @@ def main() -> None:
     )
     print(f"BatStore HTAP scan pool: {scan_pool_desc}")
     print(f"gc sweep      : {gc_list} (engines with no working GC toggle always run once, gc=n/a)")
+    print(f"affinity sweep: {affinity_list} (warehouse affinity - only BatStore's 'tpcc'/htap_* "
+          f"workloads have this toggle; every other engine/workload combination always runs "
+          f"once, affinity=n/a)")
     pg_client_node = common.external_client_numa_node()
     print(f"NUMA pinning  : engines use node {common.NUMA_NODE}; PostgreSQL's cluster service and "
           f"Umbra's container use matching cgroup CPU/memory-node constraints (verified per run). "
@@ -364,6 +394,10 @@ def main() -> None:
             module = ENGINE_MODULES[engine_name]
             supports_gc = getattr(module, "SUPPORTS_GC_TOGGLE", False)
             gc_variants = gc_list if supports_gc else ["n/a"]
+            supports_affinity = (
+                getattr(module, "SUPPORTS_AFFINITY_TOGGLE", False) and workload in common.AFFINITY_WORKLOADS
+            )
+            affinity_variants = affinity_list if supports_affinity else ["n/a"]
             for threads in thread_list:
                 # TPC-C spec sizes populations at ~10 terminals per warehouse; a fixed
                 # warehouse count while terminals sweep up to 128 would push the
@@ -386,55 +420,73 @@ def main() -> None:
                     scale_variant = dataclasses.replace(
                         scale_variant, dram_gib=common.dram_gib_for(workload, scale_variant),
                     )
-                for gc_variant in gc_variants:
-                    # gc_variant is the literal string "n/a" for engines without a GC
-                    # toggle - the "/" is a path separator, so f"gc_{gc_variant}" used
-                    # unsanitized would silently split into two nested directories
-                    # (gc_n/a/) instead of one, leaving gc_n/ looking empty at a glance.
-                    gc_dir_name = f"gc_{gc_variant}".replace("/", "_")
-                    out_dir = run_dir / workload / engine_name / f"threads_{threads}" / gc_dir_name
-                    batstore_scan_pool_workers = None
-                    if engine_name == "batstore":
-                        if args.scan_pool_workers is not None:
-                            batstore_scan_pool_workers = args.scan_pool_workers
-                        elif workload in common.HTAP_WORKLOADS:
-                            batstore_scan_pool_workers = _dynamic_htap_scan_pool_workers(
-                                htap_cpu_budget, threads,
+                for affinity_variant in affinity_variants:
+                    for gc_variant in gc_variants:
+                        # gc_variant is the literal string "n/a" for engines without a GC
+                        # toggle - the "/" is a path separator, so f"gc_{gc_variant}" used
+                        # unsanitized would silently split into two nested directories
+                        # (gc_n/a/) instead of one, leaving gc_n/ looking empty at a glance.
+                        gc_dir_name = f"gc_{gc_variant}".replace("/", "_")
+                        out_dir = run_dir / workload / engine_name / f"threads_{threads}"
+                        if supports_affinity:
+                            # Only added for the one workload/engine combination that actually
+                            # sweeps this (BatStore's tpcc/htap_*) - every other combination
+                            # keeps its pre-existing threads_N/gc_X layout unchanged.
+                            out_dir = out_dir / f"affinity_{affinity_variant}".replace("/", "_")
+                        out_dir = out_dir / gc_dir_name
+                        batstore_scan_pool_workers = None
+                        if engine_name == "batstore":
+                            if args.scan_pool_workers is not None:
+                                batstore_scan_pool_workers = args.scan_pool_workers
+                            elif workload in common.HTAP_WORKLOADS:
+                                batstore_scan_pool_workers = _dynamic_htap_scan_pool_workers(
+                                    htap_cpu_budget, threads,
+                                )
+                        scan_pool_note = (
+                            f" / scan_pool_workers={batstore_scan_pool_workers}"
+                            if batstore_scan_pool_workers is not None else ""
+                        )
+                        print(f"=== {workload} / {engine_name} / threads={threads} / gc={gc_variant} / "
+                              f"affinity={affinity_variant} / "
+                              f"dram_gib={scale_variant.dram_gib}{scan_pool_note} ===")
+                        try:
+                            # PostgreSQL is also recreated and loaded for every point. This is
+                            # slower than reusing BenchBase tables across the thread/GC sweep,
+                            # but guarantees that mutations and vacuum state from a prior point
+                            # cannot contaminate the next measurement.
+                            reload_data = engine_name == "postgres"
+                            run_kwargs = dict(
+                                gc=gc_variant, reload=reload_data,
+                                ycsb_payload=args.ycsb_payload, read_payload=not args.ycsb_key_only,
                             )
-                    scan_pool_note = (
-                        f" / scan_pool_workers={batstore_scan_pool_workers}"
-                        if batstore_scan_pool_workers is not None else ""
-                    )
-                    print(f"=== {workload} / {engine_name} / threads={threads} / gc={gc_variant} / "
-                          f"dram_gib={scale_variant.dram_gib}{scan_pool_note} ===")
-                    try:
-                        # PostgreSQL is also recreated and loaded for every point. This is
-                        # slower than reusing BenchBase tables across the thread/GC sweep,
-                        # but guarantees that mutations and vacuum state from a prior point
-                        # cannot contaminate the next measurement.
-                        reload_data = engine_name == "postgres"
-                        run_kwargs = dict(
-                            gc=gc_variant, reload=reload_data,
-                            ycsb_payload=args.ycsb_payload, read_payload=not args.ycsb_key_only,
-                        )
-                        # scan_pool_workers is a batstore.py-only kwarg (see its `run()` doc) -
-                        # every other engine's run() has no such parameter. For BatStore HTAP,
-                        # the dynamic CPU-budget calculation supplies it even without an explicit
-                        # CLI override; for BatStore YCSB it remains absent so binary auto-sizing
-                        # still applies.
-                        if batstore_scan_pool_workers is not None:
-                            run_kwargs["scan_pool_workers"] = batstore_scan_pool_workers
-                        result = module.run(workload, scale_variant, out_dir, **run_kwargs)
-                    except Exception as e:  # noqa: BLE001 - one engine's failure shouldn't abort the whole matrix
-                        result = common.NormalizedResult(
-                            engine_name, workload, scale_variant.label, _workload_duration(workload, scale_variant),
-                            "error", 0.0, 0.0, threads=threads, gc_enabled=gc_variant, notes=f"EXCEPTION: {e}",
-                        )
-                    common.append_manifest_row(manifest_path, result)
-                    status = "OK" if not result.notes else result.notes
-                    print(f"    {result.primary_metric_name}={result.primary_metric_value:.2f}  "
-                          f"peak_rss={result.peak_rss_mb:.1f}MB  "
-                          f"scan_p99={result.scan_p99_us:.1f}us (n={result.scan_count})  [{status}]")
+                            # affinity is a batstore.py-only kwarg (see its `run()` doc, mirrors
+                            # scan_pool_workers below) - every other engine's run() has no such
+                            # parameter. Safe to pass even when this workload has no affinity
+                            # concept (affinity_variant == "n/a"): batstore.py's own
+                            # AFFINITY_WORKLOADS check stamps the reported value back to "n/a"
+                            # regardless of what's passed in that case.
+                            if engine_name == "batstore":
+                                run_kwargs["affinity"] = affinity_variant
+                            # scan_pool_workers is a batstore.py-only kwarg (see its `run()`
+                            # doc) - every other engine's run() has no such parameter. For
+                            # BatStore HTAP, the dynamic CPU-budget calculation supplies it
+                            # even without an explicit CLI override; for BatStore YCSB it
+                            # remains absent so binary auto-sizing still applies.
+                            if batstore_scan_pool_workers is not None:
+                                run_kwargs["scan_pool_workers"] = batstore_scan_pool_workers
+                            result = module.run(workload, scale_variant, out_dir, **run_kwargs)
+                        except Exception as e:  # noqa: BLE001 - one engine's failure shouldn't abort the whole matrix
+                            result = common.NormalizedResult(
+                                engine_name, workload, scale_variant.label,
+                                _workload_duration(workload, scale_variant),
+                                "error", 0.0, 0.0, threads=threads, gc_enabled=gc_variant,
+                                affinity=affinity_variant, notes=f"EXCEPTION: {e}",
+                            )
+                        common.append_manifest_row(manifest_path, result)
+                        status = "OK" if not result.notes else result.notes
+                        print(f"    {result.primary_metric_name}={result.primary_metric_value:.2f}  "
+                              f"peak_rss={result.peak_rss_mb:.1f}MB  "
+                              f"scan_p99={result.scan_p99_us:.1f}us (n={result.scan_count})  [{status}]")
 
     print("\nCleaning unneeded engine run artifacts...")
     clean_engine_run(run_dir, delete=True, verbose=False)

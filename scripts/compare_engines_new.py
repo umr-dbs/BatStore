@@ -43,6 +43,10 @@ real-disk scratch directory (engines/common.NO_DURABILITY_SCRATCH_ROOT, default
     (log=(enabled=true)); fully disabling that needs a source patch and rebuild, not a
     script-level config knob, so it's left exactly as compare_engines.py runs it - just
     without the tmpfs requirement on its own ssd_path, like every other engine here.
+  - Hyrise (engines/hyrise.py): unchanged, no branch needed - unlike every engine above,
+    this build has no on-disk persistence at all (no WAL, no checkpoint file - see that
+    module's own doc), so it never pays a durability cost to turn off in the first place,
+    under compare_engines.py OR this script.
   - Umbra (engines/umbra_benchbase.py): NOT POSSIBLE AT ALL, unlike every engine above -
     confirmed directly against a live umbra-server that neither `ALTER SYSTEM SET
     fsync/synchronous_commit/...` nor plain `SET ...` can change any of those GUCs in

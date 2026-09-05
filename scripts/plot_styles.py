@@ -138,7 +138,7 @@ def apply_compact_layout(fig) -> None:
     )
 
 ENGINE_ORDER = [
-    "batstore", "leanstore", "wiredtiger", "postgres", "umbra", "vweaver_ermia",
+    "batstore", "leanstore", "wiredtiger", "postgres", "umbra", "hyrise", "vweaver_ermia",
     "vweaver_ermia_frugal", "libmdbx",
 ]
 
@@ -148,18 +148,25 @@ ENGINE_LABELS = {
     "wiredtiger": "WiredTiger",
     "postgres": "PostgreSQL",
     "umbra": "Umbra",
+    "hyrise": "Hyrise",
     "vweaver_ermia": "vWeaver/ERMIA",
     "vweaver_ermia_frugal": "Frugal/ERMIA",
     "libmdbx": "libmdbx",
 }
 
-# Okabe-Ito-derived colors, with black emphasizing BatStore.
+# Okabe-Ito-derived colors, with black emphasizing BatStore. The 8 Okabe-Ito hues are all
+# already spoken for, so Hyrise's "#8B4513" is a 9th, non-Okabe-Ito addition - checked with
+# this repo's dataviz skill (scripts/validate_palette.py) against the other 8 for CVD
+# separation/normal-vision-floor before adopting it; the pre-existing lightness-band/
+# chroma-floor/contrast flags on "#222222"/"#F0E442" are unrelated to this addition (they
+# reproduce identically without it) and are unaddressed here as out of scope.
 ENGINE_COLORS = {
     "batstore": "#222222",             # near black; emphasized primary system
     "leanstore": "#0072B2",            # blue
     "wiredtiger": "#E69F00",           # orange
     "postgres": "#D55E00",             # vermillion
     "umbra": "#F0E442",                # yellow
+    "hyrise": "#8B4513",               # brown
     "vweaver_ermia": "#CC79A7",        # reddish purple
     "vweaver_ermia_frugal": "#56B4E9", # sky blue
     "libmdbx": "#009E73",              # bluish green
@@ -171,6 +178,7 @@ ENGINE_MARKERS = {
     "wiredtiger": "^",
     "postgres": "D",
     "umbra": "*",
+    "hyrise": "h",
     "vweaver_ermia": "P",
     "vweaver_ermia_frugal": "X",
     "libmdbx": "o",
@@ -182,6 +190,7 @@ ENGINE_HATCHES = {
     "wiredtiger": "xx",
     "postgres": "..",
     "umbra": "**",
+    "hyrise": "||",
     "vweaver_ermia": "++",
     "vweaver_ermia_frugal": "oo",
     "libmdbx": "--",

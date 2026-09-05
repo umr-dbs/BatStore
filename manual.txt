@@ -1,10 +1,11 @@
 CROSS-ENGINE BENCHMARK HARNESS - MANUAL
 ========================================
 
-This harness runs matched TPC-C, YCSB (A-F), and HTAP/CH-benCHmark workloads against eight
+This harness runs matched TPC-C, YCSB (A-F), and HTAP/CH-benCHmark workloads against nine
 storage engines - BatStore (its own MVBTree, and a second libmdbx-backed comparison point),
 LeanStore, LeanStore's WiredTiger adapter, PostgreSQL (via BenchBase), Umbra (umbra-db.com,
-also via BenchBase - see engines/umbra_benchbase.py), and vWeaver_ermia
+also via BenchBase - see engines/umbra_benchbase.py), Hyrise (github.com/hyrise/hyrise,
+HPI's in-memory column store, also via BenchBase - see engines/hyrise.py), and vWeaver_ermia
 (ERMIA) built two ways: `-DCMAKE_BUILD_PARAM=Vweaver` (vWeaver's own "weaving" version-chain
 compaction, engines/vweaver_ermia.py) and `-DCMAKE_BUILD_PARAM=Eval_skiplist` (the plain
 frugal-list version chain with neither vWeaver nor its own compaction enabled, engines/
@@ -24,10 +25,13 @@ scripts work starting from nothing, on any machine:
         benchbase/                   BenchBase checkout + target/benchbase-postgres/
         vWeaver_ermia/                 ERMIA checkout + build/ (Vweaver) + build_frugal/
                                           (Eval_skiplist) - one shared checkout, two builds
+        hyrise/                          Hyrise checkout (+ submodules) + cmake-build-release/
         batstore/                          only if umr-dbs/BatStore was reachable to clone
         scratch/<engine>/                 reused, wiped-before-every-run data directories
                                           (Umbra has no checkout here - it ships only as a
-                                          Docker image, pulled directly; see section 2)
+                                          Docker image, pulled directly; see section 2. Hyrise
+                                          has no scratch dir either - it has no on-disk data
+                                          at all, see section 5)
 
 The setup's GitHub clone/fetch calls force Git's HTTP/1.1 transport. This avoids false
 credential prompts caused by HTTP/2-interfering proxies or network middleboxes while
@@ -49,6 +53,14 @@ of gflags and the header-only tabulate library (misspelled `tabluate` by upstrea
 - clang/clang++ + libnuma-dev + libgoogle-glog-dev + libibverbs-dev, for vWeaver_ermia
   (ERMIA only builds with clang; the other three are linked unconditionally by its
   CMakeLists.txt even though this harness never exercises RDMA replication).
+- CMake + libboost-all-dev, libhwloc-dev, libncurses-dev, libpq-dev, libreadline-dev,
+  libsqlite3-dev (libtbb-dev/libnuma-dev already required above), for Hyrise. Built with
+  whatever g++/clang++ is already on this machine plus -DHYRISE_RELAXED_BUILD=On, NOT
+  upstream's own pinned clang-19/gcc-15/LLVM toolchain (see engines/hyrise.py's and
+  setup_environment.py's step_hyrise doc for why). Also built with -DNO_LTO=On: Hyrise
+  defaults to Link Time Optimization for non-Debug builds and upstream's own CMakeLists.txt
+  warns GCC+LTO link times can be very long - confirmed live (~16GB RSS, 45+ minutes for
+  one link step on a 32GB machine).
 - A JDK (21 is verified working; BenchBase's pom.xml nominally wants 23 but the build is
   pinned down to 21 via `-Dmaven.compiler.release=21`) + Maven (plain `mvn`, not
   BenchBase's bundled ./mvnw wrapper - see section on why).
@@ -81,7 +93,9 @@ package) just picks up where it left off, without redoing finished steps.
 What it does, in order:
   1. apt packages (see APT_PACKAGES in the script - cmake, libtbb-dev, libaio-dev,
      compression libs, liburing-dev, numactl, postgresql, postgresql-contrib, maven,
-     clang, libnuma-dev, libgoogle-glog-dev, libibverbs-dev).
+     clang, libnuma-dev, libgoogle-glog-dev, libibverbs-dev, plus HYRISE_APT_PACKAGES -
+     libboost-all-dev, libhwloc-dev, libncurses-dev, libpq-dev, libreadline-dev,
+     libsqlite3-dev).
   2. Clones (if missing) and builds WiredTiger from source (Release, -DENABLE_PYTHON=OFF)
      into <workspace>/wiredtiger/cmake-build-debug (the directory name is a stale holdover
      from an old CLion default - it IS a Release build, not Debug; a build-type sanity
@@ -91,37 +105,45 @@ What it does, in order:
      YCSB-E/HTAP scan-latency instrumentation, New-Order-only counters - see section 5),
      then builds its native + WiredTiger-adapter frontends (Release) into
      <workspace>/leanstore/build.
-  4. Reserves hugepages for vWeaver_ermia's node-memory pool (sudo sysctl -w
+  4. Clones (if missing) Hyrise and its ~20 git submodules (`git submodule update --init
+     --recursive --depth 1` - a plain clone alone doesn't fetch them), then builds its
+     `hyriseServer` target (Release, -DHYRISE_RELAXED_BUILD=On - NOT upstream's own
+     pinned clang-19/gcc-15/LLVM toolchain; -DNO_LTO=On - upstream's LTO default is
+     impractically slow/memory-hungry with GCC, confirmed live, see section 5) into
+     <workspace>/hyrise/cmake-build-release.
+  5. Reserves hugepages for vWeaver_ermia's node-memory pool (sudo sysctl -w
      vm.nr_hugepages=N, sized off common.Scale().dram_gib - see section 5).
-  5. Clones (if missing) vWeaver_ermia, checks out the pinned commit patches/
+  6. Clones (if missing) vWeaver_ermia, checks out the pinned commit patches/
      vweaver_ermia.patch was generated against, applies it (a dead include - see section
      5), applies patches/vweaver_ermia_frugal.patch (fixes two upstream bugs that only
      affect the frugal-list build below - a no-op for this one, see section 5), generates
      dbcore/burt-hash.cpp via patches/vweaver_burt_hash_gen.py (a Python 3 port of
      upstream's Python-2-only generator), then builds `ermia_SI` (CC=clang CXX=clang++,
      -DCMAKE_BUILD_PARAM=Vweaver) into <workspace>/vWeaver_ermia/build.
-  6. Builds a SECOND `ermia_SI` from that same checkout (CC=clang CXX=clang++,
+  7. Builds a SECOND `ermia_SI` from that same checkout (CC=clang CXX=clang++,
      -DCMAKE_BUILD_PARAM=Eval_skiplist - "just frugal lists", no vWeaver) into
      <workspace>/vWeaver_ermia/build_frugal - see engines/vweaver_ermia_frugal.py and
      section 5 for why this needed patches/vweaver_ermia_frugal.patch to even link.
-  7. Creates the `admin` (superuser) role and `benchbase` database in PostgreSQL, applies
+  8. Creates the `admin` (superuser) role and `benchbase` database in PostgreSQL, applies
      a benchmark profile, and constrains the service to a fixed memory budget. The default
      budget is 8 GiB (`POSTGRES_MEMORY_BUDGET_GIB` overrides it): shared_buffers=25%,
      effective_cache_size=75%, work_mem=4MB, maintenance_work_mem=256MB, JIT off,
      random_page_cost=1.1, checkpoint_timeout=30min, max_wal_size=16GB, and swap disabled.
-  8. Clones (if missing) BenchBase and builds it with plain `mvn` (not the bundled
+  9. Clones (if missing) BenchBase and builds it with plain `mvn` (not the bundled
      ./mvnw). Before building, the script PATCHES BenchBase's pom.xml to strip out
      `com.spotify.fmt:fmt-maven-plugin` - see "MAVEN PLUGIN WORKAROUND" below. This step
-     is idempotent too (safe to re-run, detects if the plugin block is already gone).
-  9. Installs Docker (if missing), adds you to the `docker` group, and pulls the pinned
+     is idempotent too (safe to re-run, detects if the plugin block is already gone). This
+     same jar drives PostgreSQL, Umbra, AND Hyrise (all three via the POSTGRES JDBC
+     target) - no separate build for Hyrise.
+  10. Installs Docker (if missing), adds you to the `docker` group, and pulls the pinned
      umbradb/umbra image (common.UMBRA_IMAGE) - see engines/umbra_benchbase.py, which
      starts/stops one throwaway container per benchmark run rather than a checkout+build
      this script performs itself (Umbra has no native package).
-  10. Attempts to clone BatStore itself (umr-dbs/BatStore) into the workspace; if that
+  11. Attempts to clone BatStore itself (umr-dbs/BatStore) into the workspace; if that
      fails (e.g. the repo is private and you don't have access here), falls back to
      building the checkout this script is already part of instead - see "BATSTORE_REPO
      RESOLUTION" below for exactly how this is decided and a gotcha to know about.
-  11. Sets up the Python venv at scripts/.venv with pandas + matplotlib (needed only for
+  12. Sets up the Python venv at scripts/.venv with pandas + matplotlib (needed only for
      plot_compare.py, not for running experiments).
 
 By default the setup removes and freshly clones every setup-managed checkout under
@@ -130,9 +152,9 @@ builds. vWeaver and its hugepage setup remain excluded unless `--full` is passed
 
 Flags to skip individual steps:
 
-    --skip-apt --skip-wiredtiger --skip-leanstore --skip-hugepages --skip-vweaver
-    --skip-vweaver-frugal --skip-postgres --skip-benchbase --skip-umbra --skip-batstore
-    --skip-venv --skip-postgres-tmpfs
+    --skip-apt --skip-wiredtiger --skip-leanstore --skip-hyrise --skip-hugepages
+    --skip-vweaver --skip-vweaver-frugal --skip-postgres --skip-benchbase --skip-umbra
+    --skip-batstore --skip-venv --skip-postgres-tmpfs
 
 Example: `python3 scripts/setup_environment.py --skip-postgres --skip-benchbase`
 
@@ -235,8 +257,8 @@ Options:
   --output-root DIR        where run_<timestamp>/ directories go (default:
                             comparison_results)
   --engines LIST            comma-separated subset of: batstore, leanstore, wiredtiger,
-                            postgres, umbra, vweaver_ermia, vweaver_ermia_frugal, libmdbx
-                            (default: all eight)
+                            postgres, umbra, hyrise, vweaver_ermia, vweaver_ermia_frugal,
+                            libmdbx (default: all nine)
   --workloads LIST           comma-separated subset of: tpcc, ycsb_a..ycsb_f, htap_q1,
                             htap_q6, htap_q1_variant, htap_q6_variant, s_htap. The query
                             variants are selectable but excluded from the default run.
@@ -512,6 +534,46 @@ this rather than papering over it:
   instead of silently paying real-disk fsync cost under a flag whose whole point is "no
   durability cost" - use compare_engines.py (tmpfs-backed) for Umbra numbers.
 
+- Hyrise (github.com/hyrise/hyrise, engines/hyrise.py): HPI's in-memory, column-oriented
+  research OLTP+OLAP engine, driven through the same BenchBase `<type>POSTGRES</type>`
+  JDBC target as PostgreSQL/Umbra. UNLIKE Umbra's bullet above, this integration is
+  UNVERIFIED - no live hyriseServer has actually been exercised against BenchBase from
+  this wrapper (its own build pulls a heavy, actively-evolving toolchain, deliberately
+  not installed exactly as upstream specifies - see below), so whether BenchBase's DDL
+  (foreign keys, prepared statements, and TPC-C NewOrder's hardcoded `SELECT ... FOR
+  UPDATE`) actually works against Hyrise's wire-protocol surface is unknown going in.
+  Nothing here pre-emptively SKIPs a workload the way Umbra's TPC-C bullet does - that
+  followed a confirmed live failure; absent the same confirmation for Hyrise, every
+  workload is attempted and left to fail loudly (a FAILED/EXCEPTION manifest row for that
+  one point, not a whole-sweep crash) if something turns out unsupported.
+  Ships no usable Docker image for this harness, so unlike Umbra it's built from source
+  (setup_environment.py::step_hyrise: clone + ~20 git submodules + CMake, `hyriseServer`
+  target only) rather than a pulled image. Deliberately does NOT install upstream's own
+  pinned clang-19/gcc-15/LLVM/lld/bolt toolchain (install_dependencies.sh) - that would
+  need a custom apt.llvm.org repo just to match Hyrise's own CI environment; instead this
+  builds with whatever g++/clang++ is already on the machine plus
+  `-DHYRISE_RELAXED_BUILD=On`, Hyrise's own documented escape hatch for "non-standard
+  environments" (also unverified beyond upstream's own claim that this flag exists for
+  exactly this purpose). Also passes `-DNO_LTO=On`: Hyrise's own CMakeLists.txt enables
+  Link Time Optimization by default for every non-Debug build and explicitly warns "LTO
+  build times can be very long using GCC" - confirmed live (linking just the hyrise_impl
+  library ran GCC's lto1 whole-program-analysis pass at ~16GB RSS for 45+ minutes on a
+  32GB machine before being aborted); this harness needs a build that reliably finishes
+  in reasonable time/memory on whatever machine runs it, not upstream's own
+  release-quality optimization level. Listens on port 5434 (neither 5432 nor Umbra's 5433), spawned as
+  this harness's own OS process directly (numactl-pinned, not containerized) fresh for
+  every run() and killed afterward - the same "fresh every run" lifecycle Umbra's
+  container gets, minus Docker. No `CREATE DATABASE` step: Hyrise has one implicit
+  catalog, not Umbra's multiple logical databases.
+  DURABILITY: this build has no on-disk persistence at all - no WAL, no checkpoint/log
+  file (confirmed by reading src/bin/server.cpp/CMakeLists.txt: its only disk-adjacent
+  server flag, --benchmark_data, is never set here, since BenchBase creates and loads its
+  own schema instead) - so unlike Umbra it never pays a durability cost to turn off, in
+  EITHER compare_engines.py or compare_engines_new.py, and needs no scratch directory at
+  all (nothing here for section 4's tmpfs guarantee to cover). No documented
+  autovacuum-equivalent GC toggle either - SUPPORTS_GC_TOGGLE=False, so it always reports
+  gc="n/a" like LeanStore/WiredTiger/libmdbx/Umbra.
+
 - Peak memory (peak_rss_mb): the column name is retained for compatibility, but PostgreSQL
   reports the peak cgroup-v2 `memory.current` charge for its dedicated systemd service.
   That includes anonymous memory, shared mappings, and charged page cache without
@@ -527,7 +589,10 @@ this rather than papering over it:
   itself would only pin the short-lived CLI invocation, not the actual server process the
   Docker daemon spawns - so it's pinned instead via the container's own cgroup
   (`--cpuset-cpus`/`--cpuset-mems`), verified against the live container's
-  /proc/<pid>/status after start.
+  /proc/<pid>/status after start. Hyrise's server is ALSO spawned fresh by this harness,
+  but as a plain OS process (not a container) - numactl execs directly into hyriseServer,
+  so its own Popen pid IS the pinned server's pid, verified against /proc/<pid>/status the
+  same way.
 
 - In-memory only (section 4), PostgreSQL, and Umbra: SCRATCH_ROOT's tmpfs guarantee covers
   LeanStore/WiredTiger/libmdbx/vWeaver_ermia because this harness owns their data
@@ -684,7 +749,7 @@ plot and manifest columns.
 
 manifest.csv columns (scripts/engines/common.py::MANIFEST_HEADER):
 
-    engine                batstore | leanstore | wiredtiger | postgres | umbra |
+    engine                batstore | leanstore | wiredtiger | postgres | umbra | hyrise |
                             vweaver_ermia | vweaver_ermia_frugal | libmdbx
     workload               tpcc | ycsb_a..ycsb_f | htap_q1 | htap_q6 |
                             htap_q1_variant | htap_q6_variant | s_htap
