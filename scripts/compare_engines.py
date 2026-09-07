@@ -45,9 +45,9 @@ Usage:
     python3 scripts/compare_engines.py --tiny --threads 2,4
     python3 scripts/compare_engines.py --engines batstore,leanstore --workloads tpcc,ycsb_e
     python3 scripts/compare_engines.py --threads 1,4,16,64 --gc on
-    python3 scripts/compare_engines.py --warehouses 16 --tpcc-duration 120
+    python3 scripts/compare_engines.py --threads 2,4,8,16 --warehouses 16 --tpcc-duration 120
     python3 scripts/compare_engines.py --workloads tpcc --threads 2,4,8,16,32,64,128 \
-        --gc on,off --affinity on,off --warehouses 8
+        --gc on,off --affinity on,off --warehouses 128
 """
 from __future__ import annotations
 
@@ -119,7 +119,9 @@ def parse_args() -> argparse.Namespace:
                         "engines/batstore.py's SUPPORTS_AFFINITY_TOGGLE) - every other "
                         "engine/workload combination runs once, affinity=n/a")
 
-    p.add_argument("--warehouses", type=int)
+    p.add_argument("--warehouses", type=int,
+                   help="fixed warehouse count for the entire sweep; with affinity on, "
+                        "must be at least the largest terminal count (auto-sized if omitted)")
     p.add_argument("--tpcc-duration", type=int)
     p.add_argument("--ycsb-records", type=int)
     p.add_argument("--ycsb-duration", type=int)
@@ -217,6 +219,30 @@ def _dynamic_htap_scan_pool_workers(cpu_budget: int, oltp_threads: int) -> int:
     return remaining if remaining >= 2 else 0
 
 
+def configure_tpcc_scale(
+    scale: common.Scale, thread_list: list[int], engines: list[str], workloads: list[str],
+    affinity_list: list[str], warehouses: int | None,
+) -> common.Scale:
+    """Choose one population for every engine, affinity setting and thread count."""
+    if not any(w in common.AFFINITY_WORKLOADS for w in workloads):
+        return scale
+    needs_owned_warehouses = "on" in affinity_list and any(
+        getattr(ENGINE_MODULES[e], "SUPPORTS_AFFINITY_TOGGLE", False) for e in engines
+    )
+    max_terminals = max(thread_list)
+    if warehouses is not None:
+        if needs_owned_warehouses and warehouses < max_terminals:
+            raise ValueError(
+                f"--warehouses must be >= {max_terminals} for affinity on with this "
+                "--threads sweep; omit --warehouses to size it automatically"
+            )
+        count = warehouses
+    else:
+        count = max(scale.tpcc_warehouses,
+                    max_terminals if needs_owned_warehouses else -(-max_terminals // 10))
+    return dataclasses.replace(scale, tpcc_warehouses=count)
+
+
 def main() -> None:
     args = parse_args()
     # Read fresh by common.batstore_cargo_build_args() inside batstore.py/libmdbx.py's own
@@ -276,6 +302,12 @@ def main() -> None:
         sys.exit("--dram-gib must be positive")
 
     htap_cpu_budget = args.htap_cpu_budget or max(thread_list)
+    try:
+        scale = configure_tpcc_scale(
+            scale, thread_list, engines, workloads, affinity_list, args.warehouses,
+        )
+    except ValueError as exc:
+        sys.exit(str(exc))
 
     # Must be absolute: each engine wrapper spawns its subprocess with a different cwd
     # (output_dir for leanstore/wiredtiger, BENCHBASE_HOME for postgres), so a relative
@@ -285,6 +317,9 @@ def main() -> None:
     manifest_path = run_dir / "manifest.csv"
     common.write_manifest_header(manifest_path)
     (run_dir / "run_config.json").write_text(json.dumps({
+        "tpcc_warehouses": scale.tpcc_warehouses,
+        "threads": thread_list,
+        "affinity": affinity_list,
         "ycsb_payload": args.ycsb_payload,
         "ycsb_payload_bytes": 8 if args.ycsb_payload == "u64" else 1000,
         "ycsb_read_payload": not args.ycsb_key_only,
@@ -399,24 +434,14 @@ def main() -> None:
             )
             affinity_variants = affinity_list if supports_affinity else ["n/a"]
             for threads in thread_list:
-                # TPC-C spec sizes populations at ~10 terminals per warehouse; a fixed
-                # warehouse count while terminals sweep up to 128 would push the
-                # terminals/warehouse ratio to 16:1 at the top end - far more contention
-                # than the spec's intended range, and a likely contributor to BatStore's
-                # observed panic at threads=128 (see task_89ebda8a). Scaling warehouses
-                # with threads keeps contention roughly constant across the sweep, so it
-                # measures throughput vs. concurrency without confounding it with
-                # ever-increasing contention.
-                tpcc_warehouses = max(scale.tpcc_warehouses, -(-threads // 10))
                 scale_variant = dataclasses.replace(
-                    scale, tpcc_terminals=threads, tpcc_warehouses=tpcc_warehouses, ycsb_threads=threads,
+                    scale, tpcc_terminals=threads, ycsb_threads=threads,
                 )
                 if args.dram_gib is None:
                     # No explicit --dram-gib: re-size the buffer pool to THIS workload's own
                     # (tiny) dataset instead of leaving it at default_dram_gib()'s flat,
                     # machine-wide ceiling - see common.dram_gib_for's docstring for why an
                     # oversized buffer pool makes peak_rss_mb stop reflecting genuine usage.
-                    # Recomputed every threads point since tpcc_warehouses grows with it above.
                     scale_variant = dataclasses.replace(
                         scale_variant, dram_gib=common.dram_gib_for(workload, scale_variant),
                     )

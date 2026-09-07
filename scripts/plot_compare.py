@@ -9,7 +9,9 @@ cross-engine comparison charts.
 
 Reads <run_dir>/manifest.csv (one row per engine/workload/threads/gc combo,
 written incrementally by compare_engines.py) and writes every figure as both
-PDF and SVG into <run_dir>/plots/.
+PDF and SVG into <run_dir>/plots/. Runs with warehouse-affinity settings get
+separate affinity_on/ and affinity_off/ subdirectories, each including engines
+whose affinity is n/a.
 
     python3 scripts/plot_compare.py
     python3 scripts/plot_compare.py --run-dir comparison_results/run_20260101_120000
@@ -98,6 +100,14 @@ def prepare_output_dir(out_dir: Path) -> None:
 
 def _save(fig, out_dir: Path, name: str, *, overview: bool | None = None):
     prepare_output_dir(out_dir)
+    if out_dir.name in ("affinity_on", "affinity_off"):
+        affinity_label = f"Warehouse affinity {out_dir.name.removeprefix('affinity_')}"
+        if fig._suptitle is not None:
+            fig._suptitle.set_text(f"{fig._suptitle.get_text()} ({affinity_label})")
+        elif fig.axes:
+            ax = fig.axes[0]
+            if "Affinity " not in ax.get_title():
+                ax.set_title(f"{ax.get_title()} ({affinity_label})")
     fig.tight_layout()
     apply_compact_layout(fig)
     if overview is None:
@@ -544,12 +554,17 @@ def plot_ch_query_latency(manifest: pd.DataFrame, ref_threads: int, out_dir: Pat
     _save(fig, out_dir, "ch_query_latency")
 
 
-def plot_batstore_olap_scan_latency(run_dir: Path, ref_threads: int, out_dir: Path):
+def plot_batstore_olap_scan_latency(
+    run_dir: Path, ref_threads: int, out_dir: Path, affinity: str | None = None,
+):
     """BatStore-specific: its TPC-C run always includes a concurrent HTAP scan-sweep OLAP
     thread (see tpcc_driver.rs's olap_mode_str default), writing raw per-scan latency vs.
     the scan's staleness/delay to tpcc_scan.csv. Not comparable to the other 3 engines'
     plain-OLTP TPC-C in this harness, so it's its own plot rather than a 4-way bar."""
-    candidates = sorted(run_dir.glob(f"tpcc/batstore/threads_{ref_threads}/gc_*/tpcc_scan.csv"))
+    scan_dir = run_dir / "tpcc" / "batstore" / f"threads_{ref_threads}"
+    if affinity is not None:
+        scan_dir = scan_dir / f"affinity_{affinity}"
+    candidates = sorted(scan_dir.glob("gc_*/tpcc_scan.csv"))
     if not candidates:
         print(f"No tpcc_scan.csv found for batstore at threads={ref_threads} — skipping BatStore OLAP-scan-latency plot.")
         return
@@ -729,6 +744,8 @@ def plot_all_engines_workload_overview(
     contain separate OLTP and aggregate OLAP throughput panels; the remaining panels show
     p99 scan/query latency and peak RSS. Showing p99 alone keeps the multi-engine latency
     panel readable instead of multiplying every engine/GC line by three percentiles.
+    Warehouse-affinity settings appear side by side, with non-toggle engines in both.
+    Columns without measurements are omitted.
     """
     engines = sorted(manifest["engine"].dropna().unique(), key=_engine_sort_key)
     if len(engines) < 2:
@@ -740,11 +757,38 @@ def plot_all_engines_workload_overview(
         print("No successful measurements — skipping all-engines workload overview.")
         return True
 
+    groups = [
+        (workload, list(affinity_slices(valid[valid["workload"] == workload])))
+        for workload in workloads
+    ]
+    metrics = ["throughput"]
+    if any(workload in HTAP_WORKLOADS for workload in workloads):
+        metrics.append("olap")
+    if (valid["scan_count"] > 0).any():
+        metrics.append("latency")
+    metrics.append("memory")
+    side_by_side = any(len(slices) > 1 for _, slices in groups)
+    nrows = len(groups) * len(metrics) if side_by_side else len(groups)
+    ncols = max(len(slices) for _, slices in groups) if side_by_side else len(metrics)
     gc_linestyles = {"on": "-", "off": "--", "n/a": ":"}
     gc_labels = {"on": "GC on", "off": "GC off", "n/a": "GC n/a"}
     fig, axes = plt.subplots(
-        len(workloads), 4, figsize=(20, max(4.2, 3.8 * len(workloads))), squeeze=False,
+        nrows, ncols, figsize=(5.5 * ncols, max(4.2, 3.6 * nrows)), squeeze=False,
+        sharey="row" if side_by_side else False,
     )
+    panels = []
+    for group_row, (workload, slices) in enumerate(groups):
+        for column, (affinity, subset) in enumerate(slices):
+            panel_axes = {
+                metric: axes[group_row * len(metrics) + i][column]
+                if side_by_side else axes[group_row][i]
+                for i, metric in enumerate(metrics)
+            }
+            panels.append((workload, affinity, subset, panel_axes))
+        if side_by_side:
+            for column in range(len(slices), ncols):
+                for i in range(len(metrics)):
+                    axes[group_row * len(metrics) + i][column].set_axis_off()
 
     def plot_metric(ax, wdf: pd.DataFrame, value_col: str) -> None:
         thread_values = measurement_values(wdf["threads"])
@@ -760,18 +804,23 @@ def plot_all_engines_workload_overview(
                     **engine_line_style(engine),
                 )
 
-    for row, workload in enumerate(workloads):
-        wdf = valid[valid["workload"] == workload].copy()
-        workload_name = _workload_label(workload)
+    for workload, affinity, wdf, panel_axes in panels:
+        wdf = wdf.copy()
+        workload_name = "TPC-C" if workload == "tpcc" else _workload_label(workload)
+        if affinity is not None:
+            workload_name += f" - Affinity {affinity.title()}"
         thread_values = sorted(wdf["threads"].unique())
 
-        throughput_ax = axes[row][0]
+        throughput_ax = panel_axes["throughput"]
         plot_metric(throughput_ax, wdf, "primary_metric_value")
-        throughput_ax.set_ylabel(wdf["primary_metric_name"].iloc[0])
-        throughput_ax.set_title(f"{workload_name}: throughput")
+        throughput_ax.set_ylabel(
+            "New-Order transactions / sec" if workload == "tpcc"
+            else wdf["primary_metric_name"].iloc[0]
+        )
+        throughput_ax.set_title(workload_name)
         _set_measurement_thread_axis(throughput_ax, thread_values)
 
-        olap_throughput_ax = axes[row][1]
+        olap_throughput_ax = panel_axes.get("olap")
         if workload in HTAP_WORKLOADS:
             duration = pd.to_numeric(wdf["duration_secs"], errors="coerce").replace(
                 0, float("nan"),
@@ -781,16 +830,18 @@ def plot_all_engines_workload_overview(
             )
             plot_metric(olap_throughput_ax, wdf, "olap_queries_per_sec")
             olap_throughput_ax.set_ylabel("Completed analytical queries / sec")
-            olap_throughput_ax.set_title(f"{workload_name}: OLAP throughput")
+            olap_throughput_ax.set_title(workload_name)
             _set_measurement_thread_axis(olap_throughput_ax, thread_values)
             throughput_ax.set_ylabel("New-Order transactions / sec")
-            throughput_ax.set_title(f"{workload_name}: OLTP throughput")
-        else:
+            throughput_ax.set_title(workload_name)
+        elif olap_throughput_ax is not None:
             olap_throughput_ax.set_axis_off()
 
-        latency_ax = axes[row][2]
+        latency_ax = panel_axes.get("latency")
         latency_df = wdf[wdf["scan_count"] > 0]
-        if latency_df.empty:
+        if latency_ax is None:
+            pass
+        elif latency_df.empty:
             latency_ax.text(
                 0.5, 0.5, "No latency measurements", ha="center", va="center",
                 transform=latency_ax.transAxes,
@@ -799,13 +850,13 @@ def plot_all_engines_workload_overview(
         else:
             plot_metric(latency_ax, latency_df, "scan_p99_us")
             latency_ax.set_ylabel("p99 latency (microseconds)")
-            latency_ax.set_title(f"{workload_name}: p99 latency")
+            latency_ax.set_title(workload_name)
             _set_measurement_thread_axis(latency_ax, latency_df["threads"].unique())
 
-        memory_ax = axes[row][3]
+        memory_ax = panel_axes["memory"]
         plot_metric(memory_ax, wdf, "peak_rss_mb")
         memory_ax.set_ylabel("Peak measured memory (MB)")
-        memory_ax.set_title(f"{workload_name}: memory")
+        memory_ax.set_title(workload_name)
         _set_measurement_thread_axis(memory_ax, thread_values)
 
     engine_handles = [
@@ -825,9 +876,70 @@ def plot_all_engines_workload_overview(
         title="Color/marker = engine; line = GC", title_fontsize=8,
     )
 
-    fig.suptitle("All engines: workload overview")
+    for ax in fig.axes:
+        if ax.axison:
+            ax.set_xlabel("Requested threads / terminals")
+    if side_by_side:
+        for row_axes in axes:
+            for ax in row_axes[1:]:
+                ax.set_ylabel("")
     _save(fig, out_dir, output_name, overview=True)
     return True
+
+
+def affinity_slices(manifest: pd.DataFrame):
+    """Separate affinity settings, retaining engines without an affinity toggle."""
+    if "affinity" not in manifest:
+        yield None, manifest
+        return
+    affinity = manifest["affinity"].fillna("n/a")
+    choices = [choice for choice in ("on", "off") if choice in set(affinity)]
+    if not choices:
+        yield None, manifest
+        return
+    for choice in choices:
+        yield choice, manifest[affinity.isin([choice, "n/a"])].copy()
+
+
+def plot_comparison_manifest(manifest: pd.DataFrame, run_dir: Path, engine: str | None = None):
+    """Render each affinity setting separately so points and bars stay unambiguous."""
+    slices = list(affinity_slices(manifest))
+    if any(affinity is not None for affinity, _ in slices):
+        plot_all_engines_workload_overview(manifest, run_dir / "plots")
+    for affinity, subset in slices:
+        out_dir = run_dir / "plots"
+        if affinity is not None:
+            out_dir = out_dir / f"affinity_{affinity}"
+        _plot_comparison_slice(subset, run_dir, out_dir, engine, affinity)
+
+
+def _plot_comparison_slice(
+    manifest: pd.DataFrame, run_dir: Path, out_dir: Path,
+    engine: str | None, affinity: str | None,
+):
+    prepare_output_dir(out_dir)
+
+    overview_name = f"single_engine_overview_{engine}" if engine else "single_engine_overview"
+    if plot_single_engine_overview(manifest, out_dir, overview_name):
+        return
+
+    plot_all_engines_workload_overview(manifest, out_dir)
+
+    ref_threads = 0
+    for gc_choice in ("on", "off"):
+        ref_slice, ref_threads = pick_reference_slice(manifest, gc_choice)
+        plot_tpcc_throughput(ref_slice, ref_threads, gc_choice, out_dir)
+        plot_ycsb_throughput(ref_slice, ref_threads, gc_choice, out_dir)
+        plot_memory_usage(ref_slice, ref_threads, gc_choice, out_dir)
+        plot_summary_all(ref_slice, ref_threads, gc_choice, out_dir)
+    plot_throughput_vs_threads_ycsb(manifest, out_dir)
+    plot_throughput_vs_threads_tpcc(manifest, out_dir)
+    plot_throughput_vs_threads_htap(manifest, out_dir)
+    plot_gc_comparison(manifest, ref_threads, out_dir)
+    plot_scan_latency(manifest, ref_threads, out_dir)
+    plot_batstore_olap_scan_latency(run_dir, ref_threads, out_dir, affinity)
+    plot_htap_interference(manifest, ref_threads, out_dir)
+    plot_ch_query_latency(manifest, ref_threads, out_dir)
 
 
 def main():
@@ -857,31 +969,8 @@ def main():
             )
         manifest = manifest[manifest["engine"] == args.engine].copy()
         print(f"Selected single-engine view: {args.engine}")
+    plot_comparison_manifest(manifest, run_dir, args.engine)
     out_dir = run_dir / "plots"
-    prepare_output_dir(out_dir)
-
-    overview_name = f"single_engine_overview_{args.engine}" if args.engine else "single_engine_overview"
-    if plot_single_engine_overview(manifest, out_dir, overview_name):
-        print(f"\nSingle-engine overview written to {out_dir}")
-        return
-
-    plot_all_engines_workload_overview(manifest, out_dir)
-
-    ref_threads = 0
-    for gc_choice in ("on", "off"):
-        ref_slice, ref_threads = pick_reference_slice(manifest, gc_choice)
-        plot_tpcc_throughput(ref_slice, ref_threads, gc_choice, out_dir)
-        plot_ycsb_throughput(ref_slice, ref_threads, gc_choice, out_dir)
-        plot_memory_usage(ref_slice, ref_threads, gc_choice, out_dir)
-        plot_summary_all(ref_slice, ref_threads, gc_choice, out_dir)
-    plot_throughput_vs_threads_ycsb(manifest, out_dir)
-    plot_throughput_vs_threads_tpcc(manifest, out_dir)
-    plot_throughput_vs_threads_htap(manifest, out_dir)
-    plot_gc_comparison(manifest, ref_threads, out_dir)
-    plot_scan_latency(manifest, ref_threads, out_dir)
-    plot_batstore_olap_scan_latency(run_dir, ref_threads, out_dir)
-    plot_htap_interference(manifest, ref_threads, out_dir)
-    plot_ch_query_latency(manifest, ref_threads, out_dir)
 
     print(f"\nAll figures written to {out_dir}")
 

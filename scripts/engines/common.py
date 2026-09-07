@@ -54,7 +54,9 @@ HYRISE_BUILD_DIR = Path(os.environ.get("HYRISE_BUILD_DIR", str(HYRISE_REPO / "cm
 PG_ROLE = os.environ.get("PG_ROLE", "admin")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "password")
 PG_DATABASE = os.environ.get("PG_DATABASE", "benchbase")
-POSTGRES_MEMORY_BUDGET_GIB = float(os.environ.get("POSTGRES_MEMORY_BUDGET_GIB", "8"))
+# Shared by setup and runtime verification. Allow headroom for TPC-C's tmpfs
+# database/WAL storage, which is charged to the service along with server memory.
+POSTGRES_MEMORY_BUDGET_GIB = float(os.environ.get("POSTGRES_MEMORY_BUDGET_GIB", "16"))
 
 # umbradb/umbra (see engines/umbra_benchbase.py) - a research OLTP+OLAP engine from TUM's
 # database group (db.in.tum.de) that speaks the PostgreSQL wire protocol, so it can be

@@ -19,6 +19,7 @@ returns a plain real-disk directory instead of requiring tmpfs.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -90,6 +91,9 @@ def run(
     above.
     """
     del reload
+    if workload in common.AFFINITY_WORKLOADS and affinity == "on":
+        if scale.tpcc_warehouses < scale.tpcc_terminals:
+            raise ValueError("warehouse affinity requires at least one warehouse per terminal")
     output_dir.mkdir(parents=True, exist_ok=True)
     gc_bool = "false" if gc == "off" else "true"
     affinity_bool = "true" if affinity == "on" else "false"
@@ -205,6 +209,18 @@ def run(
             threads=threads, gc_enabled=gc, affinity=affinity_reported,
             notes=notes,
         )
+
+    if workload in common.AFFINITY_WORKLOADS:
+        log = (output_dir / "stdout.log").read_text(errors="replace")
+        match = re.search(r"terminals \(OLTP\)\s*=\s*(\d+)", log)
+        if match is None or int(match.group(1)) != threads:
+            actual = match.group(1) if match else "unknown"
+            return common.NormalizedResult(
+                "batstore", workload, scale.label, duration, metric_name, 0.0, 0.0,
+                threads=threads, gc_enabled=gc, affinity=affinity_reported,
+                notes=f"FAILED: requested {threads} terminals but driver reported {actual}; "
+                      "rebuild BatStore and check warehouse/worker capacity",
+            )
 
     if not common.NO_DURABILITY and (not wal_path.is_file() or wal_path.stat().st_size == 0):
         return common.NormalizedResult(

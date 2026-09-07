@@ -79,28 +79,7 @@ def plot_comparison(run_dir: Path, engine: str | None) -> None:
             )
         manifest = manifest[manifest["engine"] == engine].copy()
 
-    out_dir = run_dir / "plots"
-    plot_compare.prepare_output_dir(out_dir)
-    overview_name = f"single_engine_overview_{engine}" if engine else "single_engine_overview"
-    if plot_compare.plot_single_engine_overview(manifest, out_dir, overview_name):
-        return
-
-    plot_compare.plot_all_engines_workload_overview(manifest, out_dir)
-    ref_threads = 0
-    for gc_choice in ("on", "off"):
-        ref_slice, ref_threads = plot_compare.pick_reference_slice(manifest, gc_choice)
-        plot_compare.plot_tpcc_throughput(ref_slice, ref_threads, gc_choice, out_dir)
-        plot_compare.plot_ycsb_throughput(ref_slice, ref_threads, gc_choice, out_dir)
-        plot_compare.plot_memory_usage(ref_slice, ref_threads, gc_choice, out_dir)
-        plot_compare.plot_summary_all(ref_slice, ref_threads, gc_choice, out_dir)
-    plot_compare.plot_throughput_vs_threads_ycsb(manifest, out_dir)
-    plot_compare.plot_throughput_vs_threads_tpcc(manifest, out_dir)
-    plot_compare.plot_throughput_vs_threads_htap(manifest, out_dir)
-    plot_compare.plot_gc_comparison(manifest, ref_threads, out_dir)
-    plot_compare.plot_scan_latency(manifest, ref_threads, out_dir)
-    plot_compare.plot_batstore_olap_scan_latency(run_dir, ref_threads, out_dir)
-    plot_compare.plot_htap_interference(manifest, ref_threads, out_dir)
-    plot_compare.plot_ch_query_latency(manifest, ref_threads, out_dir)
+    plot_compare.plot_comparison_manifest(manifest, run_dir, engine)
 
 
 def plot_htap(run_dir: Path) -> None:

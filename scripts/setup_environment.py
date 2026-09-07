@@ -156,8 +156,8 @@ PG_PASSWORD = common.PG_PASSWORD
 # fresh_scratch_dir), so PostgreSQL's storage gets the identical in-memory-only guarantee.
 PG_TMPFS_DATA_DIR = common.SCRATCH_ROOT / "postgresql_data"
 PG_DATABASE = common.PG_DATABASE
-# Fixed server-side memory envelope for the default 2M-row YCSB scale. Override and rerun
-# setup when intentionally benchmarking a larger scale; the PostgreSQL cgroup cap and
+# Default 16 GiB server-side memory envelope, including tmpfs database/WAL storage.
+# Override and rerun setup when benchmarking a larger scale; the PostgreSQL cgroup cap and
 # shared_buffers/effective_cache_size settings are derived from this one value.
 PG_MEMORY_BUDGET_GIB = common.POSTGRES_MEMORY_BUDGET_GIB
 
