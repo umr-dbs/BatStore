@@ -8,10 +8,10 @@
 //!
 //! Threading constraint: every distinct OS thread that ever calls into the
 //! tree (every terminal + every OLAP thread) permanently consumes one slot
-//! of the tree's fixed `WorkerId` pool, sized to `num_cpus::get()` at tree
-//! construction (see `bat_sync::worker::WorkerRegistry`) with no way to grow
-//! it afterwards. `num_terminals + num_olap_threads` is therefore clamped to
-//! that pool size.
+//! of the tree's fixed `WorkerId` pool. Size that pool at construction for
+//! every requested terminal, OLAP thread, loader and idle-compaction worker,
+//! including a separate set of terminals when an HTAP baseline is enabled.
+//! CPU count does not limit the requested concurrency.
 
 use std::fs;
 use std::fs::OpenOptions;
@@ -94,9 +94,9 @@ pub struct DriverConfig {
     /// `OrderLine` (via `TpccTxn::range`/`range_count`, or `OlapMode::ChQ1`/
     /// `ChQ6`'s own partitioners) to fan its queries out across. This is
     /// the pool's whole capacity, not what any one query asks for: `run_tpcc`
-    /// also tells the pool how many OLAP threads (`num_olap_threads`, after
-    /// clamping) are expected to share it, so `ScanWorkerPool::
-    /// fair_query_fanout` can divide this number evenly across them — see
+    /// also tells the pool how many OLAP threads (`num_olap_threads`) are
+    /// expected to share it, so `ScanWorkerPool::fair_query_fanout` can
+    /// divide this number evenly across them — see
     /// that method's doc.
     ///
     /// `None`/`Some(0)` disables it entirely: no pool, every query runs
@@ -257,14 +257,15 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     crate::bat_test::reset_restart_trace();
     crate::bat_test::reset_scan_trace();
 
-    let max_threads = crate::bat_tree::mvbt::default_max_workers().max(1);
-
-    let mut num_terminals = cfg.num_terminals.max(1);
+    assert!(cfg.num_terminals > 0, "tpcc: num_terminals must be >= 1");
+    let num_terminals = cfg.num_terminals;
     if cfg.affinity {
-        // Under strict affinity every terminal needs >= 1 owned warehouse.
-        num_terminals = num_terminals.min(cfg.tpcc.num_warehouses as usize).max(1);
+        assert!(
+            num_terminals <= cfg.tpcc.num_warehouses as usize,
+            "tpcc: warehouse affinity requires at least one warehouse per terminal; increase num_warehouses",
+        );
     }
-    let mut num_olap = cfg.num_olap_threads;
+    let num_olap = cfg.num_olap_threads;
 
     // The HTAP baseline sub-phase (if enabled) spawns its own `num_terminals`
     // OS threads before the real phase's — a *different* set of threads from
@@ -285,7 +286,7 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     // (see `bat_sync::worker::READ_ONLY_SCAN_WORKER_ID`'s doc) never call
     // `tree.worker_id()` and so never draw from the `WorkerRegistry` this
     // budget sizes — they're pure job-runners, not workload participants,
-    // and can freely oversubscribe past `max_threads` however large
+    // and can freely oversubscribe past the CPU count however large
     // `cfg.scan_pool_workers` is. `ScanWorkerPool::spawn` still floors it
     // at 2 (a "pool" of 1 buys no parallelism), but that floor has nothing
     // to do with this `WorkerId` budget.
@@ -294,20 +295,12 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
     // (sequential) data-set population directly via `dispatch_crud` before
     // any terminal/OLAP thread is spawned.
     let fixed_cost = 1 + idle_compaction_cost;
-    if fixed_cost + num_terminals * terminal_cost + num_olap * olap_thread_cost > max_threads {
-        println!(
-            "!! {fixed_cost} loader/idle-compaction + {num_terminals} terminals{} + {num_olap} OLAP threads (x{olap_thread_cost} each) > max_workers ({max_threads} = num_cpus); clamping.",
-            if terminal_cost == 2 { " (x2: HTAP baseline sub-phase)" } else { "" }
-        );
-        num_terminals = (max_threads.saturating_sub(fixed_cost + 1) / terminal_cost).max(1);
-        num_olap = max_threads.saturating_sub(fixed_cost + num_terminals * terminal_cost) / olap_thread_cost;
-    }
-
     fs::create_dir_all(&cfg.output_dir)
         .unwrap_or_else(|e| panic!("tpcc: failed to create output_dir {}: {e}", cfg.output_dir.display()));
     let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
 
     let worker_capacity = fixed_cost + num_terminals * terminal_cost + num_olap * olap_thread_cost;
+    assert!(worker_capacity <= u16::MAX as usize, "tpcc: requested concurrency exceeds WorkerId capacity");
     let db = Arc::new(match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);

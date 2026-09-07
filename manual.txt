@@ -126,7 +126,7 @@ What it does, in order:
      section 5 for why this needed patches/vweaver_ermia_frugal.patch to even link.
   8. Creates the `admin` (superuser) role and `benchbase` database in PostgreSQL, applies
      a benchmark profile, and constrains the service to a fixed memory budget. The default
-     budget is 8 GiB (`POSTGRES_MEMORY_BUDGET_GIB` overrides it): shared_buffers=25%,
+     budget is 16 GiB (`POSTGRES_MEMORY_BUDGET_GIB` overrides it): shared_buffers=25%,
      effective_cache_size=75%, work_mem=4MB, maintenance_work_mem=256MB, JIT off,
      random_page_cost=1.1, checkpoint_timeout=30min, max_wal_size=16GB, and swap disabled.
   9. Clones (if missing) BenchBase and builds it with plain `mvn` (not the bundled
