@@ -59,6 +59,15 @@ mimalloc = ["dep:mimalloc"]
 # allocation and O(M) snapshot collection. Good for testing or memory-constrained
 # deployments; default (off) uses precise tracking for better GC efficiency.
 lightweight-gc = []
+# Per-shard atomic counters in bat_gc/tracker_handle.rs tracking where a
+# reclaimed/allocated block came from (own-shard reuse vs. cross-thread
+# "steal" vs. a fresh OS allocation), dumped to gc_stats.csv by the YCSB
+# driver (bat_bench/ycsb_driver.rs) - see scripts/h6.py, which validates that
+# GC cost stays a small, roughly fixed cost per OLTP thread. Off by default:
+# these are extra atomic RMWs on the block-alloc/reclaim hot path that a
+# normal benchmark/paper run has no use for, so they never make it into a
+# plain release build unless explicitly asked for.
+gc-stats = []
 
 [[bin]]
 name = "batstore"
