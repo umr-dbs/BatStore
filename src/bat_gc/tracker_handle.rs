@@ -4,12 +4,37 @@ use crate::bat_page_model::time_matcher::TimeMatcher;
 use crate::bat_record_model::tx_stamp::WorkerId;
 use crate::bat_record_model::version_info::Version;
 use crate::bat_sync::tx_context::TxContext;
+#[cfg(feature = "gc-stats")]
+use crossbeam_utils::CachePadded;
 use parking_lot::Mutex;
 use std::fmt::Display;
 use std::hash::Hash;
+#[cfg(feature = "gc-stats")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use triomphe::Arc;
+
+/// Per-shard (see `BlockTrace`'s doc — same `num_cpus`-sized, `worker_id %
+/// shard_count`-indexed sharding) breakdown of where a reclaimed/allocated
+/// block came from, read back by `TrackerHandleSt::gc_stats_per_shard` for
+/// H6-style GC-cost benchmarking. `CachePadded` for the same false-sharing
+/// reason as `TxContext::live_tx` — see that field's doc.
+///
+/// Only ever populated behind the `gc-stats` Cargo feature (see its doc in
+/// `Cargo.toml`) — with the feature off, `gc_stats_per_shard` returns an
+/// empty `Vec` and none of the counter fields/increments exist in the
+/// compiled binary at all, so a normal release build pays nothing for this.
+pub struct GcStats {
+    /// Handed out from this shard's own `reusable` cache or its own
+    /// `dead_blocks` shard — no cross-thread contention involved.
+    pub local_reuse: u64,
+    /// Handed out after scanning another shard's `dead_blocks` queue.
+    pub steal: u64,
+    /// No reusable/dead block found anywhere; a brand-new block was
+    /// obtained from the global allocator (see `Block::into_cell`).
+    pub fresh_alloc: u64,
+}
 
 pub type TrackerHandle<const P_F: usize, const P_N: usize, Key, Payload> =
     Arc<TrackerHandleSt<P_F, P_N, Key, Payload>>;
@@ -43,6 +68,17 @@ pub struct TrackerHandleSt<
     /// turned on, matching the pre-existing behavior from when the whole
     /// tracker was optional.
     block_reclaim_enabled: AtomicBool,
+    /// See `GcStats`'s doc. One triple per shard, `worker_id % len()`-indexed
+    /// like `reusable`/`dead_blocks`, so recording these never introduces
+    /// the cross-thread contention this benchmarking is meant to measure the
+    /// absence of. Feature-gated (see `GcStats`'s doc) — doesn't exist in a
+    /// plain build.
+    #[cfg(feature = "gc-stats")]
+    local_reuse: Vec<CachePadded<AtomicU64>>,
+    #[cfg(feature = "gc-stats")]
+    steal: Vec<CachePadded<AtomicU64>>,
+    #[cfg(feature = "gc-stats")]
+    fresh_alloc: Vec<CachePadded<AtomicU64>>,
 }
 
 impl<
@@ -53,13 +89,57 @@ impl<
 > TrackerHandleSt<P_F, P_N, Key, Payload>
 {
     pub fn new() -> Self {
+        let shard_count = num_cpus::get().max(1);
         Self {
             dead_blocks: BlockTrace::new(),
-            reusable: (0..num_cpus::get().max(1))
-                .map(|_| Mutex::new(Vec::new()))
-                .collect(),
+            reusable: (0..shard_count).map(|_| Mutex::new(Vec::new())).collect(),
             block_reclaim_enabled: AtomicBool::new(false),
+            #[cfg(feature = "gc-stats")]
+            local_reuse: (0..shard_count)
+                .map(|_| CachePadded::new(AtomicU64::new(0)))
+                .collect(),
+            #[cfg(feature = "gc-stats")]
+            steal: (0..shard_count)
+                .map(|_| CachePadded::new(AtomicU64::new(0)))
+                .collect(),
+            #[cfg(feature = "gc-stats")]
+            fresh_alloc: (0..shard_count)
+                .map(|_| CachePadded::new(AtomicU64::new(0)))
+                .collect(),
         }
+    }
+
+    /// See `GcStats`'s doc. Called from `BlockAllocManager::alloc_block`'s
+    /// fallback branch, once `free_block` has already returned `None` (i.e.
+    /// nothing reusable was found locally, nor by stealing from any other
+    /// shard). A no-op without the `gc-stats` feature.
+    #[cfg(feature = "gc-stats")]
+    #[inline]
+    pub(crate) fn record_fresh_alloc(&self, worker_id: WorkerId) {
+        let idx = worker_id as usize % self.fresh_alloc.len();
+        self.fresh_alloc[idx].fetch_add(1, Relaxed);
+    }
+
+    #[cfg(not(feature = "gc-stats"))]
+    #[inline(always)]
+    pub(crate) fn record_fresh_alloc(&self, _worker_id: WorkerId) {}
+
+    /// Per-shard GC breakdown accumulated since this tracker was created —
+    /// see `GcStats`'s doc. Always empty without the `gc-stats` feature.
+    #[cfg(feature = "gc-stats")]
+    pub fn gc_stats_per_shard(&self) -> Vec<GcStats> {
+        (0..self.local_reuse.len())
+            .map(|i| GcStats {
+                local_reuse: self.local_reuse[i].load(Relaxed),
+                steal: self.steal[i].load(Relaxed),
+                fresh_alloc: self.fresh_alloc[i].load(Relaxed),
+            })
+            .collect()
+    }
+
+    #[cfg(not(feature = "gc-stats"))]
+    pub fn gc_stats_per_shard(&self) -> Vec<GcStats> {
+        Vec::new()
     }
 
     /// See `block_reclaim_enabled`'s field doc.
@@ -125,6 +205,8 @@ impl<
         let worker_id = ctx.worker_id();
         let cache_index = worker_id as usize % self.reusable.len();
         if let Some(page) = self.reusable[cache_index].lock().pop() {
+            #[cfg(feature = "gc-stats")]
+            self.local_reuse[cache_index].fetch_add(1, Relaxed);
             return Some(page);
         }
 
@@ -136,7 +218,7 @@ impl<
         let live_min_snapshot = ctx.live_min_snapshot();
 
         const RECLAIM_BATCH: usize = 16;
-        let reclaimed_roots =
+        let (reclaimed_roots, _local_count, _steal_count) =
             self.dead_blocks
                 .reclaim_batch(
                     worker_id,
@@ -146,6 +228,15 @@ impl<
             Some(live_min_snapshot) => dead_v.lt_self_any(live_min_snapshot),
                     },
                 );
+        #[cfg(feature = "gc-stats")]
+        {
+            if _local_count > 0 {
+                self.local_reuse[cache_index].fetch_add(_local_count as u64, Relaxed);
+            }
+            if _steal_count > 0 {
+                self.steal[cache_index].fetch_add(_steal_count as u64, Relaxed);
+            }
+        }
         let mut reclaimed = reclaimed_roots;
         let result = reclaimed.pop();
         if !reclaimed.is_empty() {

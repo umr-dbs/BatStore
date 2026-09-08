@@ -482,8 +482,36 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     let actual_wall = run_start.elapsed();
 
     mem_sampler.stop();
+    #[cfg(feature = "gc-stats")]
+    write_gc_stats(&tree, &cfg.output_dir);
 
     write_results(&stats, duration, actual_wall, &cfg.output_dir)
+}
+
+/// Dumps the per-shard local-reuse/steal/fresh-alloc breakdown accumulated
+/// over the whole run (population + timed phase) — see `bat_gc::GcStats`'s
+/// doc. Written the same way `mem_stats.csv` is (a plain CSV in `out_dir`),
+/// not stdout, so it stays parseable by a Python harness at scale. Only
+/// compiled in with the `gc-stats` feature (see its doc in `Cargo.toml`) —
+/// without it, no `gc_stats.csv` is written at all (rather than an
+/// all-zero/misleading one), so a Python reader can tell "feature off" apart
+/// from "no reclaim activity happened."
+#[cfg(feature = "gc-stats")]
+fn write_gc_stats(tree: &YcsbTree, out_dir: &Path) {
+    let path = out_dir.join("gc_stats.csv");
+    let _ = fs::remove_file(&path);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("gc_stats: failed to open {}: {e}", path.display()));
+    file.write_all(b"shard,local_reuse,steal,fresh_alloc\n").unwrap();
+    for (shard, s) in tree.tracker().gc_stats_per_shard().into_iter().enumerate() {
+        file.write_all(
+            format!("{shard},{},{},{}\n", s.local_reuse, s.steal, s.fresh_alloc).as_bytes(),
+        )
+        .unwrap();
+    }
 }
 
 fn write_results(

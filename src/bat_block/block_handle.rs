@@ -238,8 +238,7 @@ impl<const FAN_OUT: usize,
                 block
             }
             None => {
-                // self.alloc_count.fetch_add(1, Relaxed);
-                // println!("Alloc");
+                self.tracker.record_fresh_alloc(ctx.worker_id());
                 Block {
                     // block_id: self.next_block_id(),
                     node_data: SafeCell::new(if leaf { Node::new_leaf() } else { Node::new_internal() })

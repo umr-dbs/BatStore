@@ -127,17 +127,24 @@ impl<
     /// Reclaims up to `limit` pages using one eligibility bound computed by
     /// the caller. The owning shard is drained first; only then are remote
     /// shards visited from a rotating start position.
+    ///
+    /// Returns `(pages, local_count, stolen_count)` — `local_count` is how
+    /// many of `pages` came from `worker_id`'s own shard, `stolen_count` how
+    /// many came from another worker's shard (a "steal"). Callers that don't
+    /// care about the H6-style local-vs-steal breakdown can just use
+    /// `pages.len() == local_count + stolen_count`.
     #[inline]
     pub(crate) fn reclaim_batch(
         &self,
         worker_id: WorkerId,
         limit: usize,
         mut eligible: impl FnMut(DeadPageKey) -> bool,
-    ) -> Vec<DeadPageValue<P_F, P_N, Key, Payload>> {
+    ) -> (Vec<DeadPageValue<P_F, P_N, Key, Payload>>, usize, usize) {
         let mut out = Vec::with_capacity(limit);
         let mut remaining = limit;
         let own = self.shard_for(worker_id);
         self.drain_eligible_from(own, &mut remaining, &mut eligible, &mut out);
+        let local_count = out.len();
 
         if remaining != 0 && self.shards.len() > 1 {
             let start = self.next_scan.fetch_add(1, Relaxed) % self.shards.len();
@@ -151,6 +158,7 @@ impl<
                 }
             }
         }
-        out
+        let stolen_count = out.len() - local_count;
+        (out, local_count, stolen_count)
     }
 }
