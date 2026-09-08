@@ -45,10 +45,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib.pyplot as plt
 
+from hypothesis_common import configure_checkout, thread_counts, check_run
+
+configure_checkout()
 from engines import batstore, common
 from plot_styles import measurement_positions, measurement_values, set_measurement_axis
 
-DEFAULT_THREADS = [1, 2, 4, 8, 16, 32]
+DEFAULT_THREADS = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
 WORKLOADS = ["ycsb_a", "ycsb_c"]
 MODES = ["atomic", "transaction"]
 MODE_LABELS = {"atomic": "Autocommit (atomic)", "transaction": "Transaction (SI)"}
@@ -95,7 +98,7 @@ def main() -> None:
     args = parse_args()
     os.environ["BATSTORE_ALLOCATOR"] = args.batstore_allocator
 
-    threads_list = [int(t) for t in args.threads.split(",") if t.strip()]
+    threads_list = thread_counts(args.threads)
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
 
     if not args.skip_build:
@@ -136,6 +139,7 @@ def main() -> None:
                 result = batstore.run(workload, scale, out_dir, gc=args.gc)
                 result.config_label = f"{result.config_label} mode={mode}"
                 common.append_manifest_row(manifest_path, result)
+                check_run(result, out_dir)
 
                 op_rows = {}
                 op_csv = out_dir / "ycsb_operation_latency_summary.csv"
