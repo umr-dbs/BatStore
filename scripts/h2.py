@@ -1,26 +1,12 @@
 #!/usr/bin/env python3
-"""H2: key skew shouldn't hurt BatStore's throughput.
+"""H2: Throughput sensitivity to key-access skew.
 
-    H2) Die Performance von BatStore wird nicht durch den Skew der Schluessel
-        beeintraechtigt, wenn der Skew gleichverteilt ueber die Seiten ist.
-
-This is the same axis `scripts/run_skew_sweep.py` already covers across every
-engine; this script is a focused, BatStore-only re-run with its own inline
-plot, at several thread counts, so H2 can be checked without
-wading through a multi-engine sweep's manifest.
-
-Workload: ycsb_a (50% read / 50% update - skew affects hot-page contention on
-both paths) with BatStore's scrambled Zipfian key generator (hot ranks are hashed across the key space), theta swept from
-uniform (0.0) up to strongly skewed (1.4) - same skew points as
-run_skew_sweep.py's default, so results are directly comparable to that
-sweep. We report both throughput and tail (p99) read/update latency: if a
-skewed key range concentrated updates onto one page, we'd expect not just
-lower throughput but a blown-up p99 (latch contention), so tail latency is
-the more sensitive signal.
-
-Usage:
-    python3 scripts/h2.py
-    python3 scripts/h2.py --threads 16 --skews uniform,0.4,0.99,1.4
+Run YCSB A at each skew/thread-count combination. Uniform is a mandatory
+baseline. Nonzero theta uses scrambled Zipfian ranks, spreading hot keys
+across the key space; this does not guarantee equal load on physical pages.
+Compare each skew to uniform at the same thread count. Report throughput and
+sampled read/update p99 latency; h2_skew_summary.csv includes relative throughput.
+Fixed within each curve: threads, records, duration, GC and execution mode.
 """
 from __future__ import annotations
 
@@ -28,6 +14,8 @@ import argparse
 import csv
 import dataclasses
 import datetime
+import os
+import math
 import sys
 from pathlib import Path
 
@@ -35,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib.pyplot as plt
 
-from hypothesis_common import configure_checkout, thread_counts, check_run
+from hypothesis_common import configure_checkout, thread_counts, check_run, read_op_latency, positive_int, record_setup
 
 configure_checkout()
 from engines import batstore, common
@@ -45,25 +33,13 @@ OP_COLORS = {"read": "#0072B2", "update": "#D55E00"}  # Okabe-Ito blue/vermillio
 
 
 def skew_to_theta(skew: str) -> float:
-    return 0.0 if skew == "uniform" else float(skew)
-
-
-def read_op_latency(csv_path: Path, operation: str) -> dict:
-    empty = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
-    if not csv_path.exists():
-        return empty
-    with open(csv_path, newline="") as f:
-        for row in csv.DictReader(f):
-            if row.get("operation") == operation:
-                try:
-                    return {
-                        "p50": float(row["p50_us"]), "p95": float(row["p95_us"]),
-                        "p99": float(row["p99_us"]), "avg": float(row["avg_us"]),
-                        "count": int(row["count"]),
-                    }
-                except (KeyError, ValueError):
-                    return empty
-    return empty
+    try:
+        theta = 0.0 if skew == "uniform" else float(skew)
+        if math.isfinite(theta) and theta >= 0:
+            return theta
+    except ValueError:
+        pass
+    raise SystemExit("--skews must contain uniform or finite nonnegative theta values")
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,21 +47,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-root", default="h2_results")
     p.add_argument("--skews", default=",".join(DEFAULT_SKEWS))
     p.add_argument("--threads", default="1,8,16,32,48,64,80,96,112,128", help="comma-separated OLTP thread counts")
-    p.add_argument("--records", type=int, default=2_000_000)
-    p.add_argument("--duration", type=int, default=20)
+    p.add_argument("--records", type=positive_int, default=2_000_000)
+    p.add_argument("--duration", type=positive_int, default=20)
     p.add_argument("--gc", choices=["on", "off"], default="on")
+    p.add_argument("--mode", choices=["atomic", "transaction"], default="atomic", help="fixed YCSB execution mode")
     p.add_argument("--skip-build", action="store_true")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    os.environ["BATSTORE_YCSB_MODE"] = args.mode
+    threads_list = thread_counts(args.threads)
+    skews = list(dict.fromkeys(s.strip() for s in args.skews.split(",")))
+    for skew in skews:
+        skew_to_theta(skew)
+    skews = ["uniform"] + [s for s in skews if skew_to_theta(s) != 0]
     if not args.skip_build:
         print("[build] batstore...")
         batstore.ensure_built()
 
-    skews = [s.strip() for s in args.skews.split(",") if s.strip()]
     run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
+    record_setup(run_dir, "H2", args, varies=f"theta={skews} at threads={threads_list}",
+                 fixed=f"YCSB A, mode={args.mode}, records={args.records}, duration={args.duration}s, GC={args.gc}",
+                 measures="throughput relative to uniform at matching threads; read/update p99 latency")
     manifest_path = run_dir / "manifest.csv"
     common.write_manifest_header(manifest_path)
 
@@ -97,7 +82,10 @@ def main() -> None:
 
     scale_base = common.Scale(ycsb_records=args.records, ycsb_duration=args.duration)
 
-    for threads in thread_counts(args.threads):
+    summary_path = run_dir / "h2_skew_summary.csv"
+    with summary_path.open("w", newline="") as f:
+        csv.writer(f).writerow(["threads", "skew", "throughput_ops_sec", "relative_to_uniform_pct", "read_p99_us", "update_p99_us"])
+    for threads in threads_list:
         throughput_by_skew = {}
         latency_by_skew = {}
         for skew in skews:
@@ -118,11 +106,16 @@ def main() -> None:
                   f"read_p99={latency_by_skew[skew]['read']['p99']:8.1f}us  "
                   f"update_p99={latency_by_skew[skew]['update']['p99']:8.1f}us  [{status}]")
 
-        plot(skews, throughput_by_skew, latency_by_skew, run_dir / "plots" / f"threads_{threads}")
+        with summary_path.open("a", newline="") as f:
+            for skew in skews:
+                csv.writer(f).writerow([threads, skew, throughput_by_skew[skew],
+                    100 * throughput_by_skew[skew] / throughput_by_skew["uniform"],
+                    latency_by_skew[skew]["read"]["p99"], latency_by_skew[skew]["update"]["p99"]])
+        plot(skews, throughput_by_skew, latency_by_skew, run_dir / "plots" / f"threads_{threads}", threads)
     print(f"\nmanifest : {manifest_path}")
 
 
-def plot(skews: list, throughput_by_skew: dict, latency_by_skew: dict, out_dir: Path) -> None:
+def plot(skews: list, throughput_by_skew: dict, latency_by_skew: dict, out_dir: Path, threads: int) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     positions = list(range(len(skews)))
 
@@ -149,7 +142,7 @@ def plot(skews: list, throughput_by_skew: dict, latency_by_skew: dict, out_dir: 
     ax_lat.legend(frameon=False)
     ax_lat.grid(alpha=0.3)
 
-    fig.suptitle("H2: key-skew sensitivity (ycsb_a)")
+    fig.suptitle(f"H2: key-skew sensitivity (YCSB A, {threads} OLTP threads)")
     fig.tight_layout()
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h2_skew.{ext}", dpi=150)

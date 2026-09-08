@@ -60,13 +60,17 @@ class HypothesesTests(unittest.TestCase):
     def test_h6_excludes_load(self):
         self.exercise(6, ["--threads", "1,4"])
 
-    def test_h3_buckets_by_scan_start(self):
-        from h3 import read_fresh_scan_rows, bucket_rows
+    def test_h3_buckets_by_recorded_snapshot_age(self):
+        from h3 import read_historic_scan_rows, bucket_rows, build_args
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "tpcc_scan.csv"
-            path.write_text("mode,elapsed_secs,scanned_tuples,latency_ns,tuples_per_sec\n"
-                            "fresh_full_scan,11,100,2000000000,50\n")
-            rows = read_fresh_scan_rows(path)
+            path.write_text("mode,elapsed_secs,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec\n"
+                            "historic_full_scan,100,9,42,100,2000000000,50\n")
+            rows = read_historic_scan_rows(path)
+        args = build_args(1, 2, 600, 1, Path("wal.log"))
+        self.assertEqual(args[9], "historic")
+        self.assertEqual(args[6], "false")
+        self.assertEqual(rows[0]["snapshot"], 42)
         self.assertEqual(rows[0]["elapsed_secs"], 9)
         self.assertEqual(bucket_rows(rows, 20, 2)[0]["window_start"], 0)
 

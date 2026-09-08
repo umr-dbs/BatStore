@@ -8,6 +8,11 @@ gc_stats_after_load.csv is subtracted to exclude initial population.
 These are event counts, not allocation timings. A fresh global-allocator
 request is not necessarily an OS allocation (jemalloc can reuse memory).
 Frequency shares alone cannot establish the fraction of allocation time.
+Each handed-out page is counted once. Prefetched pages keep their original
+local/cross-shard source while cached and are counted only when consumed.
+The plot uses all allocation events as the denominator for all three sources.
+CSV steal_share retains the legacy reuse-only denominator; use
+steal_all_events_share to compare against local_reuse_share/fresh_alloc_share.
 
 Usage: python3 scripts/h6.py --threads 1,2,4,8,16,32,48,64,80,96,112,128 --duration 60
 """
@@ -17,6 +22,7 @@ import argparse
 import csv
 import dataclasses
 import datetime
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,14 +31,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib.pyplot as plt
 
-from hypothesis_common import configure_checkout, thread_counts, check_run
+from hypothesis_common import configure_checkout, thread_counts, check_run, positive_int, record_setup
 
 configure_checkout()
 from engines import batstore, common
 from plot_styles import measurement_positions, measurement_values, set_measurement_axis
 
 DEFAULT_THREADS = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
-EVENT_COLORS = {"steal": "#D55E00", "fresh_alloc": "#009E73"}  # Okabe-Ito vermillion/bluish-green
+EVENT_COLORS = {"local_reuse": "#0072B2", "steal": "#D55E00", "fresh_alloc": "#009E73"}  # Okabe-Ito vermillion/bluish-green
 
 
 def ensure_built_with_gc_stats() -> None:
@@ -63,13 +69,25 @@ def read_gc_stats(csv_path: Path) -> tuple:
     totals = {"local_reuse": 0, "steal": 0, "fresh_alloc": 0}
     if not csv_path.exists():
         return totals, False
-    with open(csv_path, newline="") as f:
-        for row in csv.DictReader(f):
-            for key in totals:
-                try:
-                    totals[key] += int(row[key])
-                except (KeyError, ValueError):
-                    continue
+    seen = set()
+    try:
+        with open(csv_path, newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("schema_version") != "2":
+                    raise ValueError("requires allocation-source counter schema 2; rebuild Rust")
+                shard = int(row["shard"])
+                if shard in seen:
+                    raise ValueError("duplicate shard")
+                seen.add(shard)
+                for key in totals:
+                    value = int(row[key])
+                    if value < 0:
+                        raise ValueError("negative counter")
+                    totals[key] += value
+        if not seen:
+            raise ValueError("empty counter file")
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise SystemExit(f"{csv_path}: invalid GC counters: {exc}")
     return totals, True
 
 
@@ -77,27 +95,32 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--output-root", default="h6_results")
     p.add_argument("--threads", default=",".join(str(t) for t in DEFAULT_THREADS))
-    p.add_argument("--records", type=int, default=200_000)
-    p.add_argument("--duration", type=int, default=60)
+    p.add_argument("--records", type=positive_int, default=200_000)
+    p.add_argument("--duration", type=positive_int, default=60)
+    p.add_argument("--mode", choices=["atomic", "transaction"], default="atomic", help="fixed YCSB execution mode")
     p.add_argument("--skip-build", action="store_true")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    os.environ["BATSTORE_YCSB_MODE"] = args.mode
+    threads_list = thread_counts(args.threads)
     if not args.skip_build:
         print("[build] batstore (with --features gc-stats)...")
         ensure_built_with_gc_stats()
 
-    threads_list = thread_counts(args.threads)
     run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
+    record_setup(run_dir, "H6", args, varies=f"OLTP threads={threads_list}",
+                 fixed=f"YCSB A, mode={args.mode}, records={args.records}, duration={args.duration}s, GC=on, theta=0.99",
+                 measures="allocation-source counts excluding load; shares are frequencies, not allocation-time fractions")
     manifest_path = run_dir / "manifest.csv"
     common.write_manifest_header(manifest_path)
     gc_summary_path = run_dir / "h6_gc_stats.csv"
     with open(gc_summary_path, "w", newline="") as f:
         csv.writer(f).writerow([
             "threads", "throughput_ops_sec", "local_reuse", "steal", "fresh_alloc",
-            "steal_share", "fresh_alloc_share", "steal_per_thread", "fresh_alloc_per_thread", "local_reuse_share",
+            "steal_share", "fresh_alloc_share", "steal_per_thread", "fresh_alloc_per_thread", "local_reuse_share", "steal_all_events_share", "all_events",
         ])
 
     print("\n########## H6: Memory reuse ##########")
@@ -128,11 +151,15 @@ def main() -> None:
             sys.exit("Invalid GC counters: final totals are below the post-load baseline.")
         reclaimed = gc["local_reuse"] + gc["steal"]
         all_events = reclaimed + gc["fresh_alloc"]
+        if all_events == 0:
+            sys.exit("No allocation events after loading; increase duration or workload size")
         steal_share = gc["steal"] / reclaimed if reclaimed else 0.0
         fresh_alloc_share = gc["fresh_alloc"] / all_events if all_events else 0.0
         row = {
             "threads": threads, "throughput": result.primary_metric_value,
             "local_reuse": gc["local_reuse"], "steal": gc["steal"], "fresh_alloc": gc["fresh_alloc"],
+            "local_reuse_share": gc["local_reuse"] / all_events,
+            "steal_all_events_share": gc["steal"] / all_events,
             "steal_share": steal_share, "fresh_alloc_share": fresh_alloc_share,
             "steal_per_thread": gc["steal"] / threads, "fresh_alloc_per_thread": gc["fresh_alloc"] / threads,
         }
@@ -142,11 +169,12 @@ def main() -> None:
                 threads, f"{row['throughput']:.2f}", gc["local_reuse"], gc["steal"], gc["fresh_alloc"],
                 f"{steal_share:.5f}", f"{fresh_alloc_share:.5f}",
                 f"{row['steal_per_thread']:.2f}", f"{row['fresh_alloc_per_thread']:.2f}",
-                f"{gc['local_reuse'] / all_events if all_events else 0.0:.5f}",
+                f"{gc['local_reuse'] / all_events:.5f}",
+                f"{gc['steal'] / all_events:.5f}", all_events,
             ])
         status = result.notes or "OK"
         print(f"threads={threads:3d}  throughput={result.primary_metric_value:10.1f} ops/s  "
-              f"local_reuse={gc['local_reuse']:9d}  steal={gc['steal']:6d} ({steal_share:.3%})  "
+              f"local_reuse={gc['local_reuse']:9d}  steal={gc['steal']:6d} ({row['steal_all_events_share']:.3%} of allocations)  "
               f"fresh_alloc={gc['fresh_alloc']:6d} ({fresh_alloc_share:.3%})  [{status}]")
 
     print(f"\nmanifest  : {manifest_path}")
@@ -162,15 +190,15 @@ def plot(rows: list, out_dir: Path) -> None:
 
     fig, (ax_share, ax_per_thread) = plt.subplots(1, 2, figsize=(13, 5))
 
-    ax_share.plot(positions, [r["steal_share"] * 100.0 for r in rows], color=EVENT_COLORS["steal"],
-                  marker="o", markersize=6, markeredgecolor="white", markeredgewidth=0.7, linewidth=2.0,
-                  label="steal share (of reclaims)")
-    ax_share.plot(positions, [r["fresh_alloc_share"] * 100.0 for r in rows], color=EVENT_COLORS["fresh_alloc"],
-                  marker="s", markersize=6, markeredgecolor="white", markeredgewidth=0.7, linewidth=2.0,
-                  label="fresh-alloc share (of all events)")
+    for source, label, marker in (("local_reuse", "local-shard reuse", "o"),
+                                  ("steal", "cross-shard reuse", "s"),
+                                  ("fresh_alloc", "global allocator", "^")):
+        share_key = "steal_all_events_share" if source == "steal" else f"{source}_share"
+        ax_share.plot(positions, [r[share_key] * 100.0 for r in rows],
+                      color=EVENT_COLORS[source], marker=marker, linewidth=2, label=label)
     set_measurement_axis(ax_share, threads_list, "OLTP threads")
-    ax_share.set_ylabel("share of GC events (%)")
-    ax_share.set_title("Steal / fresh-alloc share vs. thread count")
+    ax_share.set_ylabel("share of allocation requests (%)")
+    ax_share.set_title("Allocation sources (common denominator)")
     ax_share.legend(frameon=False)
 
     ax_per_thread.plot(positions, [r["steal_per_thread"] for r in rows], color=EVENT_COLORS["steal"],

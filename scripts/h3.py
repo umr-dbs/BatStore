@@ -1,26 +1,16 @@
 #!/usr/bin/env python3
-"""H3: range-scan performance is independent of *when* the scan runs.
+"""H3: Historical range-scan performance versus snapshot age.
 
-    H3) BatStore garantiert die gleiche Performance von Range-Scans
-        unabhaengig von dem Zeitpunkt, wann der Scanablaeuft.
+Capture one snapshot at the beginning of the timed workload and repeatedly
+scan every TPC-C table at that same version while OLTP updates continue.
+The historic driver mode enables allow_historic_query(true): GC, in-place
+updates and idle compaction are disabled, and commit logs are retained.
+A transaction keeps the snapshot registered throughout the run; this tests
+an aging snapshot, not arbitrary AS OF timestamps supplied after the fact.
 
-`batstore.py`'s `run()` wrapper hardcodes TPC-C's `olap_mode` to "none", so it
-can't drive this - we invoke the release binary directly (mirroring what
-`batstore.py` itself does) with `olap_mode="fresh"`
-(`OlapMode::RepeatedFreshFullScan`, src/bat_bench/olap_scan.rs): one dedicated
-OLAP thread opens a fresh MVCC snapshot, scans every TPC-C table back-to-back,
-commits, and repeats for the whole run - producing one `tpcc_scan.csv` row per
-scan attempt, each stamped with `elapsed_secs` (completion time since the
-timed phase started; this script subtracts latency to recover scan start time) and `scanned_tuples`/`latency_ns`.
-
-Caveat: BatStore's TPC-C driver always keeps at least one OLTP terminal
-running (no "writers off" mode exists), so the scanned tables are not
-perfectly static across the run - NewOrder/Payment keep inserting. We use a
-minimal terminal count and report the scanned_tuples growth ratio alongside
-the latency numbers, and treat `tuples_per_sec` (scan throughput normalized
-for how much data there was to scan) as the primary "is it time-dependent"
-signal, since it isn't confounded by slow, roughly-linear data growth the way
-raw scanned_tuples/latency_ns are.
+Group scans by actual snapshot age at scan start into 12 equal windows over
+600 seconds by default. Report median latency and tuples/sec per window.
+The snapshot ID and scanned cardinality must stay constant across the run.
 
 Usage:
     python3 scripts/h3.py
@@ -38,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib.pyplot as plt
 
-from hypothesis_common import configure_checkout, thread_counts, check_worker_log
+from hypothesis_common import configure_checkout, check_worker_log
 
 configure_checkout()
 from engines import batstore, common
@@ -53,12 +43,12 @@ def build_args(
     return [
         str(batstore.BINARY), "tpcc", str(warehouses), str(terminals), str(duration),
         "false",  # affinity
-        "true",   # gc
+        "false",  # gc: historical retention overrides GC anyway
         "false",  # update_in_place
         "fg",     # root_star_index
-        "fresh",  # olap_mode -> OlapMode::RepeatedFreshFullScan
+        "historic",  # one fixed snapshot; all history retained
         str(olap_threads),
-        "0",      # olap_param (unused by "fresh")
+        "0",      # olap_param (unused by "historic")
         "100000", # num_items
         "3000",   # customers_per_district
         "3000",   # initial_orders_per_district
@@ -72,7 +62,7 @@ def build_args(
     ]
 
 
-def run_fresh_scan(warehouses: int, terminals: int, duration: int, olap_threads: int, output_dir: Path) -> None:
+def run_historic_scan(warehouses: int, terminals: int, duration: int, olap_threads: int, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     wal_path = output_dir / "tpcc_wal.log"
     args = build_args(warehouses, terminals, duration, olap_threads, wal_path)
@@ -81,21 +71,22 @@ def run_fresh_scan(warehouses: int, terminals: int, duration: int, olap_threads:
         args, cwd=output_dir, stdout_path=output_dir / "stdout.log", timeout=timeout,
     )
     if returncode != 0:
-        raise RuntimeError(f"batstore tpcc (olap_mode=fresh) failed (returncode={returncode}); "
+        raise RuntimeError(f"batstore tpcc (olap_mode=historic) failed (returncode={returncode}); "
                             f"see {output_dir / 'stdout.log'}")
 
 
-def read_fresh_scan_rows(scan_csv: Path) -> list:
+def read_historic_scan_rows(scan_csv: Path) -> list:
     if not scan_csv.exists():
         return []
     rows = []
     with open(scan_csv, newline="") as f:
         for row in csv.DictReader(f):
-            if row.get("mode") != "fresh_full_scan":
+            if row.get("mode") != "historic_full_scan":
                 continue
             try:
                 rows.append({
-                    "elapsed_secs": max(0.0, float(row["elapsed_secs"]) - int(row["latency_ns"]) / 1e9),
+                    "elapsed_secs": float(row["delay_secs"]),
+                    "snapshot": int(row["snapshot"]),
                     "scanned_tuples": int(row["scanned_tuples"]),
                     "latency_ns": int(row["latency_ns"]),
                     "tuples_per_sec": float(row["tuples_per_sec"]),
@@ -141,13 +132,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-root", default="h3_results")
     p.add_argument("--warehouses", type=int, default=8)
     p.add_argument("--terminals", type=int, default=2,
-                   help="minimal OLTP terminal count (BatStore has no writers-off mode; "
-                        "this minimizes how much the scanned tables mutate during the run)")
+                   help="fixed OLTP terminal count generating updates while the snapshot ages")
     p.add_argument("--duration", type=int, default=600)
-    p.add_argument("--olap-threads", type=int, default=1)
-    p.add_argument("--buckets", type=int, default=12, help="number of equal wall-clock windows to bucket scans into")
+    p.add_argument("--olap-threads", type=int, choices=[1], default=1,
+                   help="one fixed snapshot to isolate the effect of snapshot age")
+    p.add_argument("--buckets", type=int, default=12, help="number of equal snapshot-age windows to bucket scans into")
     p.add_argument("--skip-build", action="store_true")
-    return p.parse_args()
+    args = p.parse_args()
+    if min(args.duration, args.buckets, args.warehouses, args.terminals) < 1:
+        p.error("duration, buckets, warehouses and terminals must be positive")
+    return args
 
 
 def main() -> None:
@@ -157,21 +151,26 @@ def main() -> None:
         batstore.ensure_built()
 
     run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
-    out_dir = run_dir / "tpcc_fresh_scan"
+    out_dir = run_dir / "tpcc_historic_scan"
 
-    print("\n########## H3: range-scan latency vs. time-in-run ##########")
+    print("\n########## H3: historical scan latency vs. snapshot age ##########")
     print(f"run directory : {run_dir}")
     print(f"warehouses={args.warehouses} terminals={args.terminals} olap_threads={args.olap_threads} "
           f"duration={args.duration}s buckets={args.buckets}")
     print("###############################################################\n")
 
-    run_fresh_scan(args.warehouses, args.terminals, args.duration, args.olap_threads, out_dir)
+    run_historic_scan(args.warehouses, args.terminals, args.duration, args.olap_threads, out_dir)
 
     check_worker_log(out_dir)
-    rows = read_fresh_scan_rows(out_dir / "tpcc_scan.csv")
+    rows = read_historic_scan_rows(out_dir / "tpcc_scan.csv")
     if not rows:
-        sys.exit(f"no 'fresh_full_scan' rows found in {out_dir / 'tpcc_scan.csv'} - run failed?")
+        sys.exit(f"no 'historic_full_scan' rows found in {out_dir / 'tpcc_scan.csv'} - run failed?")
+    if len({r["snapshot"] for r in rows}) != 1:
+        sys.exit("Historical scans did not use one fixed snapshot")
+    if len({r["scanned_tuples"] for r in rows}) != 1:
+        sys.exit("Historical snapshot cardinality changed during the run")
     rows.sort(key=lambda r: r["elapsed_secs"])
+    print(f"historical snapshot : {rows[0]['snapshot']} (GC and log truncation disabled)")
 
     summaries = bucket_rows(rows, args.duration, args.buckets)
     summary_path = run_dir / "h3_time_buckets.csv"
@@ -184,10 +183,8 @@ def main() -> None:
                         f"{s['median_latency_us']:.2f}", f"{s['median_tuples_per_sec']:.2f}",
                         f"{s['median_scanned_tuples']:.1f}"])
 
-    growth = (summaries[-1]["median_scanned_tuples"] / summaries[0]["median_scanned_tuples"] - 1.0) * 100.0 \
-        if summaries and summaries[0]["median_scanned_tuples"] else 0.0
     print(f"total scan samples : {len(rows)}")
-    print(f"scanned_tuples growth (first bucket -> last bucket): {growth:+.2f}%")
+    print(f"fixed snapshot cardinality : {rows[0]['scanned_tuples']}")
     print(f"per-bucket summary : {summary_path}")
     for s in summaries:
         print(f"  [{s['window_start']:6.1f}s, {s['window_end']:6.1f}s)  n={s['count']:4d}  "
@@ -208,23 +205,23 @@ def plot(rows: list, summaries: list, out_dir: Path) -> None:
     ax_lat.plot(bucket_mid, [s["median_latency_us"] for s in summaries], color="#D55E00",
                 marker="o", markersize=7, markeredgecolor="white", markeredgewidth=0.8,
                 linewidth=2.2, label="per-window median")
-    ax_lat.set_xlabel("elapsed time in run (s)")
+    ax_lat.set_xlabel("snapshot age at scan start (s)")
     ax_lat.set_ylabel("full-table-scan latency (µs)")
-    ax_lat.set_title("Scan latency over time")
+    ax_lat.set_title("Historical scan latency")
     ax_lat.legend(frameon=False)
     ax_lat.grid(alpha=0.3)
 
     ax_tup.plot(bucket_mid, [s["median_tuples_per_sec"] for s in summaries], color=SERIES_COLOR,
                 marker="o", markersize=7, markeredgecolor="white", markeredgewidth=0.8, linewidth=2.2)
-    ax_tup.set_xlabel("elapsed time in run (s)")
+    ax_tup.set_xlabel("snapshot age at scan start (s)")
     ax_tup.set_ylabel("scan throughput (tuples/sec)")
-    ax_tup.set_title("Scan throughput over time (data-size-normalized)")
+    ax_tup.set_title("Historical scan throughput")
     ax_tup.grid(alpha=0.3)
 
-    fig.suptitle("H3: range-scan performance vs. time-in-run")
+    fig.suptitle("H3: historical scan performance vs. snapshot age")
     fig.tight_layout()
     for ext in ("pdf", "png"):
-        fig.savefig(out_dir / f"h3_scan_vs_time.{ext}", dpi=150)
+        fig.savefig(out_dir / f"h3_scan_vs_snapshot_age.{ext}", dpi=150)
     plt.close(fig)
     print(f"plots            : {out_dir}")
 
