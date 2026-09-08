@@ -509,10 +509,10 @@ fn write_gc_stats(tree: &YcsbTree, out_dir: &Path, filename: &str) {
         .append(true)
         .open(&path)
         .unwrap_or_else(|e| panic!("gc_stats: failed to open {}: {e}", path.display()));
-    file.write_all(b"shard,local_reuse,steal,fresh_alloc\n").unwrap();
+    file.write_all(b"shard,local_reuse,steal,fresh_alloc,schema_version\n").unwrap();
     for (shard, s) in tree.tracker().gc_stats_per_shard().into_iter().enumerate() {
         file.write_all(
-            format!("{shard},{},{},{}\n", s.local_reuse, s.steal, s.fresh_alloc).as_bytes(),
+            format!("{shard},{},{},{},2\n", s.local_reuse, s.steal, s.fresh_alloc).as_bytes(),
         )
         .unwrap();
     }

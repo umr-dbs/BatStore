@@ -246,7 +246,13 @@ fn terminal_thread(
     TerminalStats { new_order_committed_per_sec, totals }
 }
 
-pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
+pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
+    let historic = matches!(&cfg.olap_mode, OlapMode::RepeatedHistoricFullScan);
+    if historic {
+        cfg.gc = false;
+        cfg.update_in_place = false;
+        cfg.idle_compaction = None;
+    }
     assert!(cfg.tpcc.num_warehouses >= 1, "tpcc: num_warehouses must be >= 1");
 
     // See `bat_test::reset_restart_trace`'s doc: without this, a caller that
@@ -313,7 +319,9 @@ pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
             cfg.root_star_index, cfg.big_tree_size, worker_capacity,
         ),
     });
-    if cfg.gc {
+    if historic {
+        db.allow_historic_query(true);
+    } else if cfg.gc {
         db.enable_gc(cfg.update_in_place, None);
     }
 
@@ -552,6 +560,7 @@ fn num_olap_mode_summary(mode: &OlapMode) -> &'static str {
         OlapMode::OpenAndSleep { .. } => "open_and_sleep",
         OlapMode::ScanDelaySweep { .. } => "scan_delay_sweep",
         OlapMode::RepeatedFreshFullScan => "repeated_fresh_full_scan",
+        OlapMode::RepeatedHistoricFullScan => "repeated_historic_full_scan",
         OlapMode::ChBenchmark { .. } => "ch_benchmark",
         OlapMode::ChQ1 { .. } => "ch_q1",
         OlapMode::ChQ6 { .. } => "ch_q6",
@@ -777,6 +786,7 @@ pub fn main_tpcc(parms: Vec<String>) {
         "none" => (OlapMode::RepeatedFreshFullScan, 0),
         "sleep" => (OlapMode::OpenAndSleep { hold: Duration::from_secs_f64(olap_param) }, num_olap_threads),
         "fresh" => (OlapMode::RepeatedFreshFullScan, num_olap_threads),
+        "historic" => (OlapMode::RepeatedHistoricFullScan, num_olap_threads),
         "ch" => (
             OlapMode::ChBenchmark { region_name: ch_region, date_lo: q6_date_lo, date_hi: q6_date_hi },
             num_olap_threads,

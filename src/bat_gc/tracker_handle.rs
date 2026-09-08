@@ -15,6 +15,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use triomphe::Arc;
 
+// Preserve the source of prefetched pages until they actually satisfy a request.
+// Normal builds retain the original cache layout and incur no tagging overhead.
+#[cfg(feature = "gc-stats")]
+type ReusableBlock<const F: usize, const N: usize, K, V> = (BlockRef<F, N, K, V>, bool);
+#[cfg(not(feature = "gc-stats"))]
+type ReusableBlock<const F: usize, const N: usize, K, V> = BlockRef<F, N, K, V>;
+
 /// Per-shard (see `BlockTrace`'s doc — same `num_cpus`-sized, `worker_id %
 /// shard_count`-indexed sharding) breakdown of where a reclaimed/allocated
 /// block came from, read back by `TrackerHandleSt::gc_stats_per_shard` for
@@ -26,10 +33,11 @@ use triomphe::Arc;
 /// empty `Vec` and none of the counter fields/increments exist in the
 /// compiled binary at all, so a normal release build pays nothing for this.
 pub struct GcStats {
-    /// Handed out from this shard's own `reusable` cache or its own
-    /// `dead_blocks` shard — no cross-thread contention involved.
+    /// Allocation requests satisfied by a page reclaimed from the owning shard,
+    /// including prefetched pages later handed out from its reuse cache.
     pub local_reuse: u64,
-    /// Handed out after scanning another shard's `dead_blocks` queue.
+    /// Requests satisfied by a page reclaimed from another shard, including
+    /// prefetched pages. Each page is counted only when handed to an allocation.
     pub steal: u64,
     /// No reusable/dead block found anywhere; a brand-new block was
     /// obtained from the global allocator (see `Block::into_cell`).
@@ -62,7 +70,7 @@ pub struct TrackerHandleSt<
     dead_blocks: BlockTrace<P_F, P_N, Key, Payload>,
     /// Pages already proven reclaimable, filled in batches so the expensive
     /// all-worker liveness scan is amortized across several allocations.
-    reusable: Vec<Mutex<Vec<BlockRef<P_F, P_N, Key, Payload>>>>,
+    reusable: Vec<Mutex<Vec<ReusableBlock<P_F, P_N, Key, Payload>>>>,
     /// Explicit opt-in for block reclaim (`MVBTSt::enable_gc`/`disable_gc`).
     /// `false` by default: a fresh tree never reuses blocks until this is
     /// turned on, matching the pre-existing behavior from when the whole
@@ -206,7 +214,12 @@ impl<
         let cache_index = worker_id as usize % self.reusable.len();
         if let Some(page) = self.reusable[cache_index].lock().pop() {
             #[cfg(feature = "gc-stats")]
-            self.local_reuse[cache_index].fetch_add(1, Relaxed);
+            let page = {
+                let (page, stolen) = page;
+                let counter = if stolen { &self.steal } else { &self.local_reuse };
+                counter[cache_index].fetch_add(1, Relaxed);
+                page
+            };
             return Some(page);
         }
 
@@ -228,17 +241,19 @@ impl<
             Some(live_min_snapshot) => dead_v.lt_self_any(live_min_snapshot),
                     },
                 );
+        // reclaim_batch orders own-shard pages first, then stolen pages.
         #[cfg(feature = "gc-stats")]
-        {
-            if _local_count > 0 {
-                self.local_reuse[cache_index].fetch_add(_local_count as u64, Relaxed);
-            }
-            if _steal_count > 0 {
-                self.steal[cache_index].fetch_add(_steal_count as u64, Relaxed);
-            }
-        }
+        let mut reclaimed: Vec<_> = reclaimed_roots.into_iter().enumerate()
+            .map(|(index, page)| (page, index >= _local_count)).collect();
+        #[cfg(not(feature = "gc-stats"))]
         let mut reclaimed = reclaimed_roots;
         let result = reclaimed.pop();
+        #[cfg(feature = "gc-stats")]
+        let result = result.map(|(page, stolen)| {
+            let counter = if stolen { &self.steal } else { &self.local_reuse };
+            counter[cache_index].fetch_add(1, Relaxed);
+            page
+        });
         if !reclaimed.is_empty() {
             self.reusable[cache_index].lock().extend(reclaimed);
         }

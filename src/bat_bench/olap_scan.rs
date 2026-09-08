@@ -75,6 +75,8 @@ pub enum OlapMode {
     /// possible — a throughput-oriented full-database scan, closer to this
     /// project's own base OLAP methodology (see `bat_test::olap_tests`).
     RepeatedFreshFullScan,
+    /// H3: repeatedly scan one fixed snapshot while OLTP advances.
+    RepeatedHistoricFullScan,
     /// Runs the CH-benCHmark analytical queries (`bat_bench::tpch_queries`)
     /// in rotation — Q1, Q6, Q4, Q5 in that order (cheapest/no-join queries
     /// first) — repeating until told to stop. `region_name` is Q5's region
@@ -432,6 +434,36 @@ pub fn run_olap_worker(
                 let r = scan_after_delay_once(db, delay, run_start);
                 let _ = results.send(r);
             }
+        }
+        OlapMode::RepeatedHistoricFullScan => {
+            let mut tx = TpccTxn::begin(db);
+            let snapshot = tx.ts_start();
+            let snapshot_started = Instant::now();
+            let full_range = crate::bat_query::interval::Interval::new(TpccKey::MIN, TpccKey::MAX);
+            let mut expected_count = None;
+            while !stop.load(Relaxed) {
+                let age = snapshot_started.elapsed();
+                let start = Instant::now();
+                let scanned = Table::ALL.iter()
+                    .map(|&table| tx.range_count(table, full_range))
+                    .sum();
+                let latency = start.elapsed();
+                if let Some(expected) = expected_count {
+                    assert_eq!(scanned, expected, "historic snapshot cardinality changed");
+                }
+                expected_count = Some(scanned);
+                let _ = results.send(ScanResult {
+                    mode: "historic_full_scan",
+                    elapsed_secs: run_start.elapsed().as_secs_f64(),
+                    delay_secs: age.as_secs_f64(),
+                    snapshot,
+                    scanned_tuples: scanned,
+                    latency_ns: latency.as_nanos(),
+                    summary: None,
+                    staleness_versions: Some(db.current_version().saturating_sub(snapshot)),
+                });
+            }
+            tx.commit();
         }
         OlapMode::RepeatedFreshFullScan => {
             while !stop.load(Relaxed) {

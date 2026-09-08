@@ -1,35 +1,16 @@
 #!/usr/bin/env python3
-"""H1: autocommit ("atomic") vs. explicit snapshot-isolation transactions ("transaction").
+"""H1: Snapshot-isolation overhead relative to AutoCommit.
 
-    H1) Der Overhead von SI bei BatStore ist niedrig im Vergleich zu AutoCommit.
-        Jedoch lohnt sich AutoCommit immer im Vergleich zu SI.
+Compare single-operation write commit paths at each OLTP thread count.
+YCSB A (50% reads / 50% updates) is the main experiment; read-only YCSB C
+is a control because reads use the same MVCC path in both modes.
+This is not a comparison of multi-statement transactions.
 
-BatStore's YCSB driver can run every point operation one of two ways
-(`BATSTORE_YCSB_MODE`, see src/bat_bench/ycsb_txn.rs's `YcsbExecutionMode`):
-
-  - "atomic"      - autocommit: the op commits itself before publishing, no
-                    write-set/conflict-retry bookkeeping.
-  - "transaction" - an ordinary registered SI transaction: write-set tracked,
-                    conflict-checked, retried with a spin-loop on abort.
-
-Both still read/scan through the same always-on MVCC snapshot machinery -
-this flag only changes how a *write* op commits, so it only has something to
-bite on for workloads that write. We therefore run two workloads:
-
-  - ycsb_a (50% read / 50% update) - where the two modes should actually differ.
-  - ycsb_c (100% read)             - a negative control: mode must NOT matter here,
-                                     since a plain read never goes through either
-                                     commit path. If ycsb_c shows a gap, that's a
-                                     sign of a measurement artifact, not real SI cost.
-
-For each (workload, thread count) we run both modes and compare throughput,
-peak RSS, and per-operation latency (read from BatStore's own
-ycsb_operation_latency_summary.csv, sampled directly by the Rust driver - see
-COUNTER_NAMES in ycsb_driver.rs for the exact operation names).
-
-Usage:
-    python3 scripts/h1.py
-    python3 scripts/h1.py --threads 1,2,4,8,16,32 --duration 20
+Fixed: record count, duration, GC, allocator and scrambled Zipfian theta=0.99.
+Measured: throughput, sampled read/update latency, and peak RSS.
+h1_comparison.csv reports SI throughput loss: 100 * (1 - SI / AutoCommit).
+Negative loss means SI was faster in that measurement. No pass/fail threshold
+for "small overhead" is assumed. Repeat runs to assess measurement variability.
 """
 from __future__ import annotations
 
@@ -45,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib.pyplot as plt
 
-from hypothesis_common import configure_checkout, thread_counts, check_run
+from hypothesis_common import configure_checkout, thread_counts, check_run, read_op_latency, positive_int, record_setup
 
 configure_checkout()
 from engines import batstore, common
@@ -59,35 +40,13 @@ MODE_COLORS = {"atomic": "#0072B2", "transaction": "#D55E00"}  # Okabe-Ito blue/
 PERCENTILE_STYLE = {"p50": "-", "p99": "--"}
 
 
-def read_op_latency(csv_path: Path, operation: str) -> dict:
-    """One row of ycsb_operation_latency_summary.csv (already in microseconds) for
-    `operation` ("read"/"update"/"insert"/"scan"/"read_modify_write"). All-zero if the
-    file or that operation's row doesn't exist (e.g. ycsb_c has no "update" rows).
-    """
-    empty = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
-    if not csv_path.exists():
-        return empty
-    with open(csv_path, newline="") as f:
-        for row in csv.DictReader(f):
-            if row.get("operation") == operation:
-                try:
-                    return {
-                        "p50": float(row["p50_us"]), "p95": float(row["p95_us"]),
-                        "p99": float(row["p99_us"]), "avg": float(row["avg_us"]),
-                        "count": int(row["count"]),
-                    }
-                except (KeyError, ValueError):
-                    return empty
-    return empty
-
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--output-root", default="h1_results")
     p.add_argument("--threads", default=",".join(str(t) for t in DEFAULT_THREADS))
     p.add_argument("--workloads", default=",".join(WORKLOADS))
-    p.add_argument("--records", type=int, default=2_000_000)
-    p.add_argument("--duration", type=int, default=20)
+    p.add_argument("--records", type=positive_int, default=2_000_000)
+    p.add_argument("--duration", type=positive_int, default=20)
     p.add_argument("--gc", choices=["on", "off"], default="on")
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--batstore-allocator", choices=["jemalloc", "mimalloc"], default="jemalloc")
@@ -101,11 +60,17 @@ def main() -> None:
     threads_list = thread_counts(args.threads)
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
 
+    if not workloads or any(w not in WORKLOADS for w in workloads):
+        sys.exit("--workloads must contain ycsb_a and/or ycsb_c")
+
     if not args.skip_build:
         print("[build] batstore...")
         batstore.ensure_built()
 
     run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
+    record_setup(run_dir, "H1", args, varies="execution mode and OLTP threads",
+                 fixed=f"records={args.records}, duration={args.duration}s, GC={args.gc}, theta=0.99",
+                 measures="throughput, SI throughput loss vs AutoCommit, operation latency; C is a read-only control")
     manifest_path = run_dir / "manifest.csv"
     common.write_manifest_header(manifest_path)
     op_latency_path = run_dir / "h1_op_latency.csv"
@@ -128,9 +93,10 @@ def main() -> None:
     results = {w: {m: {} for m in MODES} for w in workloads}
     for workload in workloads:
         ops_to_track = ["read", "update"] if workload == "ycsb_a" else ["read"]
-        for mode in MODES:
-            os.environ["BATSTORE_YCSB_MODE"] = mode
-            for threads in threads_list:
+        for index, threads in enumerate(threads_list):
+            # Pair modes closely and alternate order to reduce systematic run-order bias.
+            for mode in (MODES if index % 2 == 0 else list(reversed(MODES))):
+                os.environ["BATSTORE_YCSB_MODE"] = mode
                 scale = dataclasses.replace(
                     scale_base, ycsb_threads=threads,
                     label=f"h1 mode={mode} threads={threads}",
@@ -163,6 +129,15 @@ def main() -> None:
                 print(f"{workload:8s} mode={mode:11s} threads={threads:3d}  "
                       f"throughput={result.primary_metric_value:10.1f} ops/s  "
                       f"peak_rss={result.peak_rss_mb:7.1f} MB  [{status}]")
+
+    with (run_dir / "h1_comparison.csv").open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["workload", "threads", "autocommit_ops_sec", "si_ops_sec", "si_throughput_loss_pct"])
+        for workload, per_mode in results.items():
+            for threads in threads_list:
+                atomic = per_mode["atomic"][threads]["throughput"]
+                si = per_mode["transaction"][threads]["throughput"]
+                writer.writerow([workload, threads, atomic, si, 100 * (1 - si / atomic)])
 
     print(f"\nmanifest         : {manifest_path}")
     print(f"op latency table : {op_latency_path}")

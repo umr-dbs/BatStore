@@ -184,7 +184,7 @@ def run(
         # (write_all_fields=false, standard YCSB default) are reachable.
         args = [
             str(BINARY), "ycsb", letter, str(scale.ycsb_records), str(threads),
-            str(duration), "default", str(scale.ycsb_theta),
+            str(duration), ("latest" if letter == "d" else "uniform" if scale.ycsb_theta == 0 else "zipfian"), str(scale.ycsb_theta),
             str(field_count), str(field_length), "100", "fg", gc_bool, "false", wal_enabled_str, str(wal_path), "5", "false",
             str(read_payload).lower(),
             os.environ.get("BATSTORE_YCSB_MODE", "atomic"),

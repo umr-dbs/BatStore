@@ -1198,7 +1198,10 @@ impl TpccDatabase {
         self.db.scan_pool(self.table_ids[table as usize])
     }
 
-    pub fn truncate_commit_log(&self, enabled: bool) {
+    /// Retain historical versions and commit-log entries across all tables.
+    /// Configure before running workers; enabling this overrides GC settings.
+    pub fn allow_historic_query(&self, enabled: bool) {
+        self.set_vacuum(None);
         self.db.allow_historic_query(enabled);
         match &self.big_trees {
             BigTrees::KiB1 {
