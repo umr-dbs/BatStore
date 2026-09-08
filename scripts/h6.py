@@ -1,48 +1,15 @@
 #!/usr/bin/env python3
-"""H6: GC cost is a small, roughly-fixed cost per OLTP thread.
+"""H6: Memory reuse.
 
-    H6) Die Allokation von Speicher kann bei BatStore durch lokale
-        GC-Listen erfolgen. Die Anzahl der Aufrufe fuer Stealing (also
-        Entnahme von Seiten aus der GC anderer Threads) und die Allokation
-        ueber das Betriebssystem ist niedrig und hat wenig Einfluss auf die
-        Gesamtkosten.
+Measure local reuse, cross-thread stealing and fresh global-allocator requests
+under ycsb_a across OLTP thread counts. gc_stats.csv contains whole-run totals;
+gc_stats_after_load.csv is subtracted to exclude initial population.
 
-BatStore's block allocator (src/bat_gc/tracker_handle.rs) frees a page by
-trying, in order: (1) its own per-shard reuse cache, (2) its own shard's
-dead-page queue, (3) *stealing* from another shard's dead-page queue
-(src/bat_gc/block_tracer.rs::reclaim_batch), and only if all three come up
-empty, (4) a real allocation from the global allocator
-(src/bat_sync/block_sync.rs::into_cell). Until this script's own change,
-none of this was counted anywhere - `local_reuse`/`steal`/`fresh_alloc`
-atomic counters (one triple per shard) and a `gc_stats.csv` dump were added
-to bat_gc/tracker_handle.rs, bat_block/block_handle.rs, and
-bat_bench/ycsb_driver.rs specifically to make this hypothesis measurable.
+These are event counts, not allocation timings. A fresh global-allocator
+request is not necessarily an OS allocation (jemalloc can reuse memory).
+Frequency shares alone cannot establish the fraction of allocation time.
 
-These counters sit behind the `gc-stats` Cargo feature (off by default - see
-its doc in Cargo.toml): a normal release build never pays the extra atomic
-RMWs on the block-alloc/reclaim hot path. This script therefore builds its
-own binary with `--features mdbx-backend,gc-stats` instead of using
-`batstore.ensure_built()` (which only asks for `mdbx-backend`) - every other
-h*.py script's binary is unaffected/unchanged by this.
-
-We run ycsb_a (50% read / 50% update - update is what dies+reuses pages)
-with GC on across an increasing OLTP thread count, and check:
-
-  - steal_share = steal / (local_reuse + steal)          - should stay LOW
-  - fresh_alloc_share = fresh_alloc / all reclaim events  - should stay LOW
-  - steal / threads, fresh_alloc / threads                - should stay ~FLAT
-    (not grow superlinearly) as threads increases - the "fixed cost per
-    thread" claim.
-
-Caveat: gc_stats.csv accumulates over the WHOLE run including the initial
-population/load phase (which is a single-threaded burst of fresh
-allocations, independent of the timed phase's thread count) - we use a long
-enough timed-phase duration relative to record_count that this fixed,
-one-time cost doesn't dominate the totals.
-
-Usage:
-    python3 scripts/h6.py
-    python3 scripts/h6.py --threads 1,2,4,8,16,32 --duration 30 --records 200000
+Usage: python3 scripts/h6.py --threads 1,2,4,8,16,32,48,64,80,96,112,128 --duration 60
 """
 from __future__ import annotations
 
@@ -58,10 +25,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib.pyplot as plt
 
+from hypothesis_common import configure_checkout, thread_counts, check_run
+
+configure_checkout()
 from engines import batstore, common
 from plot_styles import measurement_positions, measurement_values, set_measurement_axis
 
-DEFAULT_THREADS = [1, 2, 4, 8, 16, 32]
+DEFAULT_THREADS = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
 EVENT_COLORS = {"steal": "#D55E00", "fresh_alloc": "#009E73"}  # Okabe-Ito vermillion/bluish-green
 
 
@@ -69,6 +39,15 @@ def ensure_built_with_gc_stats() -> None:
     """Same as batstore.ensure_built(), plus the `gc-stats` feature (off by default - see
     its doc in Cargo.toml) so gc_stats.csv actually gets written.
     """
+    import json
+    metadata = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=batstore.REPO_ROOT, check=True, capture_output=True, text=True,
+    )
+    packages = json.loads(metadata.stdout)["packages"]
+    if not any(p["name"] == "BatStore" and "gc-stats" in p["features"] for p in packages):
+        sys.exit(f"{batstore.REPO_ROOT}: missing gc-stats feature; update the complete checkout, "
+                 "including Cargo.toml and src/, or correct BATSTORE_REPO.")
     subprocess.run(
         common.batstore_cargo_build_args("mdbx-backend", "gc-stats"),
         cwd=batstore.REPO_ROOT, check=True,
@@ -99,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-root", default="h6_results")
     p.add_argument("--threads", default=",".join(str(t) for t in DEFAULT_THREADS))
     p.add_argument("--records", type=int, default=200_000)
-    p.add_argument("--duration", type=int, default=30)
+    p.add_argument("--duration", type=int, default=60)
     p.add_argument("--skip-build", action="store_true")
     return p.parse_args()
 
@@ -110,7 +89,7 @@ def main() -> None:
         print("[build] batstore (with --features gc-stats)...")
         ensure_built_with_gc_stats()
 
-    threads_list = [int(t) for t in args.threads.split(",") if t.strip()]
+    threads_list = thread_counts(args.threads)
     run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
     manifest_path = run_dir / "manifest.csv"
     common.write_manifest_header(manifest_path)
@@ -118,10 +97,10 @@ def main() -> None:
     with open(gc_summary_path, "w", newline="") as f:
         csv.writer(f).writerow([
             "threads", "throughput_ops_sec", "local_reuse", "steal", "fresh_alloc",
-            "steal_share", "fresh_alloc_share", "steal_per_thread", "fresh_alloc_per_thread",
+            "steal_share", "fresh_alloc_share", "steal_per_thread", "fresh_alloc_per_thread", "local_reuse_share",
         ])
 
-    print("\n########## H6: GC cost per OLTP thread ##########")
+    print("\n########## H6: Memory reuse ##########")
     print(f"run directory : {run_dir}")
     print(f"threads       : {threads_list}")
     print(f"records={args.records} duration={args.duration}s workload=ycsb_a gc=on")
@@ -135,11 +114,18 @@ def main() -> None:
         out_dir = run_dir / f"threads_{threads}"
         result = batstore.run("ycsb_a", scale, out_dir, gc="on")
         common.append_manifest_row(manifest_path, result)
+        check_run(result, out_dir)
 
         gc, found = read_gc_stats(out_dir / "gc_stats.csv")
         if not found:
             sys.exit(f"{out_dir / 'gc_stats.csv'} not found - was the binary built with "
                      f"--features gc-stats? (pass --skip-build only if you already did this yourself)")
+        loaded, baseline_found = read_gc_stats(out_dir / "gc_stats_after_load.csv")
+        if not baseline_found:
+            sys.exit("Missing gc_stats_after_load.csv; rebuild with the updated Rust sources.")
+        gc = {key: gc[key] - loaded[key] for key in gc}
+        if any(value < 0 for value in gc.values()):
+            sys.exit("Invalid GC counters: final totals are below the post-load baseline.")
         reclaimed = gc["local_reuse"] + gc["steal"]
         all_events = reclaimed + gc["fresh_alloc"]
         steal_share = gc["steal"] / reclaimed if reclaimed else 0.0
@@ -156,6 +142,7 @@ def main() -> None:
                 threads, f"{row['throughput']:.2f}", gc["local_reuse"], gc["steal"], gc["fresh_alloc"],
                 f"{steal_share:.5f}", f"{fresh_alloc_share:.5f}",
                 f"{row['steal_per_thread']:.2f}", f"{row['fresh_alloc_per_thread']:.2f}",
+                f"{gc['local_reuse'] / all_events if all_events else 0.0:.5f}",
             ])
         status = result.notes or "OK"
         print(f"threads={threads:3d}  throughput={result.primary_metric_value:10.1f} ops/s  "
@@ -194,14 +181,14 @@ def plot(rows: list, out_dir: Path) -> None:
                         label="fresh allocs / thread")
     set_measurement_axis(ax_per_thread, threads_list, "OLTP threads")
     ax_per_thread.set_ylabel("events per thread")
-    ax_per_thread.set_yscale("log")
-    ax_per_thread.set_title("Per-thread steal/fresh-alloc cost vs. thread count")
+    ax_per_thread.set_yscale("symlog", linthresh=1)
+    ax_per_thread.set_title("Per-thread steal/fresh-allocation events")
     ax_per_thread.legend(frameon=False)
 
-    fig.suptitle("H6: GC cost per OLTP thread (ycsb_a, gc=on)")
+    fig.suptitle("H6: Memory reuse (ycsb_a, gc=on)")
     fig.tight_layout()
     for ext in ("pdf", "png"):
-        fig.savefig(out_dir / f"h6_gc_cost.{ext}", dpi=150)
+        fig.savefig(out_dir / f"h6_memory_reuse.{ext}", dpi=150)
     plt.close(fig)
     print(f"plots     : {out_dir}")
 

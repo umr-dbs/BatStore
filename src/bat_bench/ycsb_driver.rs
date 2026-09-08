@@ -291,8 +291,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         "ycsb: record_count must be >= 1"
     );
 
-    let max_threads = crate::bat_tree::mvbt::default_max_workers().max(1);
-    let mut num_threads = cfg.num_threads.max(1);
+    let num_threads = cfg.num_threads.max(1);
     // One more permanent WorkerId if idle compaction is enabled — see
     // `tpcc_driver::run_tpcc`'s identical `idle_compaction_cost`: the
     // vacuum thread `spawn_vacuum_thread` starts below calls
@@ -308,12 +307,14 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     // +1: the main thread also acquires a WorkerId, for the sequential
     // population phase before any worker thread is spawned (see tpcc_driver).
     let fixed_cost = 1 + idle_compaction_cost;
-    if fixed_cost + num_threads > max_threads {
-        println!(
-            "!! {fixed_cost} loader/idle-compaction + {num_threads} workers > max_workers ({max_threads} = num_cpus); clamping."
-        );
-        num_threads = max_threads.saturating_sub(fixed_cost).max(1);
-    }
+    // WorkerIds are registration slots, not CPUs. The loader keeps its slot
+    // after population, so size the registry for all participants rather than
+    // reducing requested concurrency to fit the machine's logical CPU count.
+    // This matches TPC-C and permits 128 benchmark workers on a 128-thread node.
+    let worker_capacity = num_threads
+        .checked_add(fixed_cost)
+        .filter(|&capacity| capacity <= u16::MAX as usize)
+        .expect("ycsb: requested concurrency exceeds WorkerId capacity");
 
     fs::create_dir_all(&cfg.output_dir).unwrap_or_else(|e| {
         panic!(
@@ -331,7 +332,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
             let _ = fs::remove_file(wal_path);
             let base = YcsbTree::make_standard_with_max_workers(
                 cfg.root_star_index,
-                fixed_cost + num_threads,
+                worker_capacity,
             );
             Arc::new(
                 match cfg.wal_lockfree_batch_size {
@@ -345,7 +346,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         }
         None => Arc::new(YcsbTree::make_standard_with_max_workers(
             cfg.root_star_index,
-            fixed_cost + num_threads,
+            worker_capacity,
         )),
     };
     if cfg.gc {
@@ -365,7 +366,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     // never calls `tree.worker_id()` (it only ever runs jobs built around
     // `READ_ONLY_SCAN_WORKER_ID`, same as `ycsb_txn::scan_parallel`'s own
     // sequential path), so unlike `num_threads` this is never counted
-    // against `max_threads`/`fixed_cost + num_threads` above.
+    // against `worker_capacity` above.
     let scan_pool: Option<Arc<YcsbScanPool>> = cfg.scan_pool_workers.filter(|&n| n > 0).map(|n| {
         Arc::new(YcsbScanPool::spawn(
             tree.clone(),
@@ -427,6 +428,9 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         load_start.elapsed()
     );
 
+    #[cfg(feature = "gc-stats")]
+    write_gc_stats(&tree, &cfg.output_dir, "gc_stats_after_load.csv");
+
     let sampler = Arc::new(KeySampler::new(cfg.distribution, cfg.ycsb.record_count));
     let current_max_key = Arc::new(AtomicU64::new(cfg.ycsb.record_count));
     let stop = Arc::new(AtomicBool::new(false));
@@ -483,7 +487,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
 
     mem_sampler.stop();
     #[cfg(feature = "gc-stats")]
-    write_gc_stats(&tree, &cfg.output_dir);
+    write_gc_stats(&tree, &cfg.output_dir, "gc_stats.csv");
 
     write_results(&stats, duration, actual_wall, &cfg.output_dir)
 }
@@ -497,8 +501,8 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
 /// all-zero/misleading one), so a Python reader can tell "feature off" apart
 /// from "no reclaim activity happened."
 #[cfg(feature = "gc-stats")]
-fn write_gc_stats(tree: &YcsbTree, out_dir: &Path) {
-    let path = out_dir.join("gc_stats.csv");
+fn write_gc_stats(tree: &YcsbTree, out_dir: &Path, filename: &str) {
+    let path = out_dir.join(filename);
     let _ = fs::remove_file(&path);
     let mut file = OpenOptions::new()
         .create(true)

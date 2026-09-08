@@ -1,35 +1,32 @@
 #!/usr/bin/env python3
-"""H2: range-scan performance is independent of *when* the scan runs.
+"""H2: key skew shouldn't hurt BatStore's throughput.
 
-    H2) BatStore garantiert die gleiche Performance von Range-Scans
-        unabhaengig von dem Zeitpunkt, wann der Scanablaeuft.
+    H2) Die Performance von BatStore wird nicht durch den Skew der Schluessel
+        beeintraechtigt, wenn der Skew gleichverteilt ueber die Seiten ist.
 
-`batstore.py`'s `run()` wrapper hardcodes TPC-C's `olap_mode` to "none", so it
-can't drive this - we invoke the release binary directly (mirroring what
-`batstore.py` itself does) with `olap_mode="fresh"`
-(`OlapMode::RepeatedFreshFullScan`, src/bat_bench/olap_scan.rs): one dedicated
-OLAP thread opens a fresh MVCC snapshot, scans every TPC-C table back-to-back,
-commits, and repeats for the whole run - producing one `tpcc_scan.csv` row per
-scan attempt, each stamped with `elapsed_secs` (wall-clock time since the
-timed phase started) and `scanned_tuples`/`latency_ns`.
+This is the same axis `scripts/run_skew_sweep.py` already covers across every
+engine; this script is a focused, BatStore-only re-run with its own inline
+plot, at several thread counts, so H2 can be checked without
+wading through a multi-engine sweep's manifest.
 
-Caveat: BatStore's TPC-C driver always keeps at least one OLTP terminal
-running (no "writers off" mode exists), so the scanned tables are not
-perfectly static across the run - NewOrder/Payment keep inserting. We use a
-minimal terminal count and report the scanned_tuples growth ratio alongside
-the latency numbers, and treat `tuples_per_sec` (scan throughput normalized
-for how much data there was to scan) as the primary "is it time-dependent"
-signal, since it isn't confounded by slow, roughly-linear data growth the way
-raw scanned_tuples/latency_ns are.
+Workload: ycsb_a (50% read / 50% update - skew affects hot-page contention on
+both paths) with BatStore's scrambled Zipfian key generator (hot ranks are hashed across the key space), theta swept from
+uniform (0.0) up to strongly skewed (1.4) - same skew points as
+run_skew_sweep.py's default, so results are directly comparable to that
+sweep. We report both throughput and tail (p99) read/update latency: if a
+skewed key range concentrated updates onto one page, we'd expect not just
+lower throughput but a blown-up p99 (latch contention), so tail latency is
+the more sensitive signal.
 
 Usage:
     python3 scripts/h2.py
-    python3 scripts/h2.py --duration 180 --terminals 2 --buckets 6
+    python3 scripts/h2.py --threads 16 --skews uniform,0.4,0.99,1.4
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import datetime
 import sys
 from pathlib import Path
@@ -38,111 +35,45 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib.pyplot as plt
 
+from hypothesis_common import configure_checkout, thread_counts, check_run
+
+configure_checkout()
 from engines import batstore, common
 
-SERIES_COLOR = "#0072B2"  # Okabe-Ito blue - single series, no legend needed
+DEFAULT_SKEWS = ["uniform", "0.1", "0.4", "0.8", "0.99", "1.4"]
+OP_COLORS = {"read": "#0072B2", "update": "#D55E00"}  # Okabe-Ito blue/vermillion
 
 
-def build_args(
-    warehouses: int, terminals: int, duration: int, olap_threads: int, wal_path: Path,
-) -> list:
-    # Positional spec: src/bat_bench/tpcc_driver.rs::main_tpcc (see project research notes).
-    return [
-        str(batstore.BINARY), "tpcc", str(warehouses), str(terminals), str(duration),
-        "false",  # affinity
-        "true",   # gc
-        "false",  # update_in_place
-        "fg",     # root_star_index
-        "fresh",  # olap_mode -> OlapMode::RepeatedFreshFullScan
-        str(olap_threads),
-        "0",      # olap_param (unused by "fresh")
-        "100000", # num_items
-        "3000",   # customers_per_district
-        "3000",   # initial_orders_per_district
-        "false",  # wal_enabled
-        str(wal_path),
-        "5",      # wal_flush_ms
-        "EUROPE", # ch_region
-        "10000",  # num_suppliers
-        "0",      # htap_baseline_secs
-        "32kib",  # big_tree_size
-    ]
+def skew_to_theta(skew: str) -> float:
+    return 0.0 if skew == "uniform" else float(skew)
 
 
-def run_fresh_scan(warehouses: int, terminals: int, duration: int, olap_threads: int, output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    wal_path = output_dir / "tpcc_wal.log"
-    args = build_args(warehouses, terminals, duration, olap_threads, wal_path)
-    timeout = common.default_subprocess_timeout(duration)
-    returncode, _ = common.run_and_track_rss(
-        args, cwd=output_dir, stdout_path=output_dir / "stdout.log", timeout=timeout,
-    )
-    if returncode != 0:
-        raise RuntimeError(f"batstore tpcc (olap_mode=fresh) failed (returncode={returncode}); "
-                            f"see {output_dir / 'stdout.log'}")
-
-
-def read_fresh_scan_rows(scan_csv: Path) -> list:
-    if not scan_csv.exists():
-        return []
-    rows = []
-    with open(scan_csv, newline="") as f:
+def read_op_latency(csv_path: Path, operation: str) -> dict:
+    empty = {"p50": 0.0, "p95": 0.0, "p99": 0.0, "avg": 0.0, "count": 0}
+    if not csv_path.exists():
+        return empty
+    with open(csv_path, newline="") as f:
         for row in csv.DictReader(f):
-            if row.get("mode") != "fresh_full_scan":
-                continue
-            try:
-                rows.append({
-                    "elapsed_secs": float(row["elapsed_secs"]),
-                    "scanned_tuples": int(row["scanned_tuples"]),
-                    "latency_ns": int(row["latency_ns"]),
-                    "tuples_per_sec": float(row["tuples_per_sec"]),
-                })
-            except (KeyError, ValueError):
-                continue
-    return rows
-
-
-def bucket_rows(rows: list, duration: int, num_buckets: int) -> list:
-    """Splits `rows` into `num_buckets` equal wall-clock windows over [0, duration] and
-    returns one summary dict per (non-empty) bucket: window bounds, sample count, median
-    latency (us), median tuples_per_sec, median scanned_tuples.
-    """
-    width = duration / num_buckets
-    buckets = [[] for _ in range(num_buckets)]
-    for r in rows:
-        idx = min(num_buckets - 1, int(r["elapsed_secs"] // width)) if width > 0 else 0
-        buckets[idx].append(r)
-
-    def median(values):
-        values = sorted(values)
-        n = len(values)
-        return 0.0 if n == 0 else values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2.0
-
-    summaries = []
-    for idx, bucket in enumerate(buckets):
-        if not bucket:
-            continue
-        summaries.append({
-            "window_start": idx * width,
-            "window_end": (idx + 1) * width,
-            "count": len(bucket),
-            "median_latency_us": median([r["latency_ns"] for r in bucket]) / 1000.0,
-            "median_tuples_per_sec": median([r["tuples_per_sec"] for r in bucket]),
-            "median_scanned_tuples": median([r["scanned_tuples"] for r in bucket]),
-        })
-    return summaries
+            if row.get("operation") == operation:
+                try:
+                    return {
+                        "p50": float(row["p50_us"]), "p95": float(row["p95_us"]),
+                        "p99": float(row["p99_us"]), "avg": float(row["avg_us"]),
+                        "count": int(row["count"]),
+                    }
+                except (KeyError, ValueError):
+                    return empty
+    return empty
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--output-root", default="h2_results")
-    p.add_argument("--warehouses", type=int, default=8)
-    p.add_argument("--terminals", type=int, default=2,
-                   help="minimal OLTP terminal count (BatStore has no writers-off mode; "
-                        "this minimizes how much the scanned tables mutate during the run)")
-    p.add_argument("--duration", type=int, default=180)
-    p.add_argument("--olap-threads", type=int, default=1)
-    p.add_argument("--buckets", type=int, default=6, help="number of equal wall-clock windows to bucket scans into")
+    p.add_argument("--skews", default=",".join(DEFAULT_SKEWS))
+    p.add_argument("--threads", default="1,8,16,32,48,64,80,96,112,128", help="comma-separated OLTP thread counts")
+    p.add_argument("--records", type=int, default=2_000_000)
+    p.add_argument("--duration", type=int, default=20)
+    p.add_argument("--gc", choices=["on", "off"], default="on")
     p.add_argument("--skip-build", action="store_true")
     return p.parse_args()
 
@@ -153,76 +84,77 @@ def main() -> None:
         print("[build] batstore...")
         batstore.ensure_built()
 
+    skews = [s.strip() for s in args.skews.split(",") if s.strip()]
     run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
-    out_dir = run_dir / "tpcc_fresh_scan"
+    manifest_path = run_dir / "manifest.csv"
+    common.write_manifest_header(manifest_path)
 
-    print("\n########## H2: range-scan latency vs. time-in-run ##########")
+    print("\n########## H2: key-skew sensitivity ##########")
     print(f"run directory : {run_dir}")
-    print(f"warehouses={args.warehouses} terminals={args.terminals} olap_threads={args.olap_threads} "
-          f"duration={args.duration}s buckets={args.buckets}")
-    print("###############################################################\n")
+    print(f"skews         : {skews}")
+    print(f"threads       : {args.threads}")
+    print("################################################\n")
 
-    run_fresh_scan(args.warehouses, args.terminals, args.duration, args.olap_threads, out_dir)
+    scale_base = common.Scale(ycsb_records=args.records, ycsb_duration=args.duration)
 
-    rows = read_fresh_scan_rows(out_dir / "tpcc_scan.csv")
-    if not rows:
-        sys.exit(f"no 'fresh_full_scan' rows found in {out_dir / 'tpcc_scan.csv'} - run failed?")
-    rows.sort(key=lambda r: r["elapsed_secs"])
+    for threads in thread_counts(args.threads):
+        throughput_by_skew = {}
+        latency_by_skew = {}
+        for skew in skews:
+            theta = skew_to_theta(skew)
+            scale = dataclasses.replace(scale_base, ycsb_threads=threads, ycsb_theta=theta, label=f"h2 threads={threads} skew={skew}")
+            out_dir = run_dir / f"threads_{threads}" / f"skew_{skew}"
+            result = batstore.run("ycsb_a", scale, out_dir, gc=args.gc)
+            result.config_label = f"{result.config_label} skew={skew}"
+            common.append_manifest_row(manifest_path, result)
+            check_run(result, out_dir)
 
-    summaries = bucket_rows(rows, args.duration, args.buckets)
-    summary_path = run_dir / "h2_time_buckets.csv"
-    with open(summary_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["window_start_s", "window_end_s", "count", "median_latency_us",
-                    "median_tuples_per_sec", "median_scanned_tuples"])
-        for s in summaries:
-            w.writerow([f"{s['window_start']:.1f}", f"{s['window_end']:.1f}", s["count"],
-                        f"{s['median_latency_us']:.2f}", f"{s['median_tuples_per_sec']:.2f}",
-                        f"{s['median_scanned_tuples']:.1f}"])
+            op_csv = out_dir / "ycsb_operation_latency_summary.csv"
+            latency_by_skew[skew] = {op: read_op_latency(op_csv, op) for op in ("read", "update")}
+            throughput_by_skew[skew] = result.primary_metric_value
 
-    growth = (summaries[-1]["median_scanned_tuples"] / summaries[0]["median_scanned_tuples"] - 1.0) * 100.0 \
-        if summaries and summaries[0]["median_scanned_tuples"] else 0.0
-    print(f"total scan samples : {len(rows)}")
-    print(f"scanned_tuples growth (first bucket -> last bucket): {growth:+.2f}%")
-    print(f"per-bucket summary : {summary_path}")
-    for s in summaries:
-        print(f"  [{s['window_start']:6.1f}s, {s['window_end']:6.1f}s)  n={s['count']:4d}  "
-              f"median_latency={s['median_latency_us']:10.1f} us  "
-              f"median_tuples/sec={s['median_tuples_per_sec']:12.1f}")
+            status = result.notes or "OK"
+            print(f"threads={threads:3d} skew={skew:8s} theta={theta:5.2f}  throughput={result.primary_metric_value:10.1f} ops/s  "
+                  f"read_p99={latency_by_skew[skew]['read']['p99']:8.1f}us  "
+                  f"update_p99={latency_by_skew[skew]['update']['p99']:8.1f}us  [{status}]")
 
-    plot(rows, summaries, run_dir / "plots")
+        plot(skews, throughput_by_skew, latency_by_skew, run_dir / "plots" / f"threads_{threads}")
+    print(f"\nmanifest : {manifest_path}")
 
 
-def plot(rows: list, summaries: list, out_dir: Path) -> None:
+def plot(skews: list, throughput_by_skew: dict, latency_by_skew: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    positions = list(range(len(skews)))
 
-    fig, (ax_lat, ax_tup) = plt.subplots(1, 2, figsize=(13, 5))
+    fig, (ax_tp, ax_lat) = plt.subplots(1, 2, figsize=(13, 5))
 
-    ax_lat.scatter([r["elapsed_secs"] for r in rows], [r["latency_ns"] / 1000.0 for r in rows],
-                    s=10, alpha=0.35, color=SERIES_COLOR, label="individual scan")
-    bucket_mid = [(s["window_start"] + s["window_end"]) / 2.0 for s in summaries]
-    ax_lat.plot(bucket_mid, [s["median_latency_us"] for s in summaries], color="#D55E00",
-                marker="o", markersize=7, markeredgecolor="white", markeredgewidth=0.8,
-                linewidth=2.2, label="per-window median")
-    ax_lat.set_xlabel("elapsed time in run (s)")
-    ax_lat.set_ylabel("full-table-scan latency (µs)")
-    ax_lat.set_title("Scan latency over time")
+    ax_tp.plot(positions, [throughput_by_skew[s] for s in skews], color="#222222",
+               marker="o", markersize=7, markeredgecolor="white", markeredgewidth=0.8, linewidth=2.2)
+    ax_tp.set_xticks(positions)
+    ax_tp.set_xticklabels(skews)
+    ax_tp.set_xlabel("skew (zipfian theta, 'uniform' = 0.0)")
+    ax_tp.set_ylabel("throughput (ops/sec)")
+    ax_tp.set_title("ycsb_a throughput vs. skew")
+    ax_tp.grid(alpha=0.3)
+
+    for op, color in OP_COLORS.items():
+        ax_lat.plot(positions, [latency_by_skew[s][op]["p99"] for s in skews], color=color,
+                    marker="o", markersize=6, markeredgecolor="white", markeredgewidth=0.7,
+                    linewidth=1.8, label=f"{op} p99")
+    ax_lat.set_xticks(positions)
+    ax_lat.set_xticklabels(skews)
+    ax_lat.set_xlabel("skew (zipfian theta, 'uniform' = 0.0)")
+    ax_lat.set_ylabel("p99 latency (µs)")
+    ax_lat.set_title("ycsb_a tail latency vs. skew")
     ax_lat.legend(frameon=False)
     ax_lat.grid(alpha=0.3)
 
-    ax_tup.plot(bucket_mid, [s["median_tuples_per_sec"] for s in summaries], color=SERIES_COLOR,
-                marker="o", markersize=7, markeredgecolor="white", markeredgewidth=0.8, linewidth=2.2)
-    ax_tup.set_xlabel("elapsed time in run (s)")
-    ax_tup.set_ylabel("scan throughput (tuples/sec)")
-    ax_tup.set_title("Scan throughput over time (data-size-normalized)")
-    ax_tup.grid(alpha=0.3)
-
-    fig.suptitle("H2: range-scan performance vs. time-in-run")
+    fig.suptitle("H2: key-skew sensitivity (ycsb_a)")
     fig.tight_layout()
     for ext in ("pdf", "png"):
-        fig.savefig(out_dir / f"h2_scan_vs_time.{ext}", dpi=150)
+        fig.savefig(out_dir / f"h2_skew.{ext}", dpi=150)
     plt.close(fig)
-    print(f"plots            : {out_dir}")
+    print(f"plots    : {out_dir}")
 
 
 if __name__ == "__main__":
