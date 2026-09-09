@@ -18,13 +18,14 @@ from pathlib import Path
 
 import plot_compare
 import plot_htap_analytical
+import plot_hypotheses
 import plot_results
 import plot_skew_sweep
 import plot_suite
 from plot_styles import set_compact
 
 
-KINDS = ("auto", "comparison", "htap", "skew", "suite", "raw")
+KINDS = ("auto", "comparison", "htap", "skew", "suite", "hypothesis", "hypotheses", "raw")
 
 
 def _manifest_sample(manifest_path: Path) -> tuple[set[str], list[str]]:
@@ -53,6 +54,10 @@ def _run_config(run_dir: Path) -> dict:
 
 def detect_kind(run_dir: Path) -> str:
     """Return the plotting format used by *run_dir*."""
+    if plot_hypotheses.hypothesis_id(run_dir):
+        return "hypothesis"
+    if plot_hypotheses.find_runs(run_dir):
+        return "hypotheses"
     manifest_path = run_dir / "manifest.csv"
     if not manifest_path.exists():
         return "raw"
@@ -161,6 +166,14 @@ def main() -> None:
         plot_skew(run_dir, args.ref_threads)
     elif kind == "suite":
         plot_benchmark_suite(run_dir)
+    elif kind == "hypothesis":
+        plot_hypotheses.plot_run(run_dir)
+    elif kind == "hypotheses":
+        runs = plot_hypotheses.find_runs(run_dir)
+        for hypothesis, hypothesis_run in runs.items():
+            print(f"Plotting {hypothesis.upper()} from {hypothesis_run}")
+            plot_hypotheses.plot_run(hypothesis_run)
+        plot_hypotheses.plot_overview(run_dir, runs)
     else:
         out_dir = run_dir / "plots"
         out_dir.mkdir(parents=True, exist_ok=True)

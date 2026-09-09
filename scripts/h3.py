@@ -32,6 +32,7 @@ from hypothesis_common import configure_checkout, check_worker_log
 
 configure_checkout()
 from engines import batstore, common
+from plot_styles import finalize_layout, set_compact
 
 SERIES_COLOR = "#0072B2"  # Okabe-Ito blue - single series, no legend needed
 
@@ -138,6 +139,7 @@ def parse_args() -> argparse.Namespace:
                    help="one fixed snapshot to isolate the effect of snapshot age")
     p.add_argument("--buckets", type=int, default=12, help="number of equal snapshot-age windows to bucket scans into")
     p.add_argument("--skip-build", action="store_true")
+    p.add_argument("--compact", action="store_true", help="use a paper-friendly layout with a shared legend")
     args = p.parse_args()
     if min(args.duration, args.buckets, args.warehouses, args.terminals) < 1:
         p.error("duration, buckets, warehouses and terminals must be positive")
@@ -146,6 +148,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    set_compact(args.compact)
     if not args.skip_build:
         print("[build] batstore...")
         batstore.ensure_built()
@@ -219,7 +222,7 @@ def plot(rows: list, summaries: list, out_dir: Path) -> None:
     ax_tup.grid(alpha=0.3)
 
     fig.suptitle("H3: historical scan performance vs. snapshot age")
-    fig.tight_layout()
+    finalize_layout(fig)
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h3_scan_vs_snapshot_age.{ext}", dpi=150)
     plt.close(fig)

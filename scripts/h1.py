@@ -30,7 +30,7 @@ from hypothesis_common import configure_checkout, thread_counts, check_run, read
 
 configure_checkout()
 from engines import batstore, common
-from plot_styles import measurement_positions, measurement_values, set_measurement_axis
+from plot_styles import finalize_layout, measurement_positions, measurement_values, set_compact, set_measurement_axis
 
 DEFAULT_THREADS = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
 WORKLOADS = ["ycsb_a", "ycsb_c"]
@@ -50,11 +50,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gc", choices=["on", "off"], default="on")
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--batstore-allocator", choices=["jemalloc", "mimalloc"], default="jemalloc")
+    p.add_argument("--compact", action="store_true", help="use a paper-friendly layout with a shared legend")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    set_compact(args.compact)
     os.environ["BATSTORE_ALLOCATOR"] = args.batstore_allocator
 
     threads_list = thread_counts(args.threads)
@@ -163,7 +165,7 @@ def plot(results: dict, threads_list: list, out_dir: Path) -> None:
         ax.set_title(workload)
         ax.legend(frameon=False)
     fig.suptitle("H1: throughput, autocommit vs. SI transaction")
-    fig.tight_layout()
+    finalize_layout(fig)
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h1_throughput.{ext}", dpi=150)
     plt.close(fig)
@@ -187,7 +189,7 @@ def plot(results: dict, threads_list: list, out_dir: Path) -> None:
             ax.set_title(f"ycsb_a: {op}")
             ax.legend(frameon=False, fontsize=8)
         fig.suptitle("H1: per-operation latency, autocommit vs. SI transaction")
-        fig.tight_layout()
+        finalize_layout(fig)
         for ext in ("pdf", "png"):
             fig.savefig(out_dir / f"h1_latency.{ext}", dpi=150)
         plt.close(fig)

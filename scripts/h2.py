@@ -27,6 +27,7 @@ from hypothesis_common import configure_checkout, thread_counts, check_run, read
 
 configure_checkout()
 from engines import batstore, common
+from plot_styles import finalize_layout, set_compact
 
 DEFAULT_SKEWS = ["uniform", "0.1", "0.4", "0.8", "0.99", "1.4"]
 OP_COLORS = {"read": "#0072B2", "update": "#D55E00"}  # Okabe-Ito blue/vermillion
@@ -52,11 +53,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gc", choices=["on", "off"], default="on")
     p.add_argument("--mode", choices=["atomic", "transaction"], default="atomic", help="fixed YCSB execution mode")
     p.add_argument("--skip-build", action="store_true")
+    p.add_argument("--compact", action="store_true", help="use a paper-friendly layout with a shared legend")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    set_compact(args.compact)
     os.environ["BATSTORE_YCSB_MODE"] = args.mode
     threads_list = thread_counts(args.threads)
     skews = list(dict.fromkeys(s.strip() for s in args.skews.split(",")))
@@ -143,7 +146,7 @@ def plot(skews: list, throughput_by_skew: dict, latency_by_skew: dict, out_dir: 
     ax_lat.grid(alpha=0.3)
 
     fig.suptitle(f"H2: key-skew sensitivity (YCSB A, {threads} OLTP threads)")
-    fig.tight_layout()
+    finalize_layout(fig)
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h2_skew.{ext}", dpi=150)
     plt.close(fig)
