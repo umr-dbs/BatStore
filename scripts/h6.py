@@ -35,7 +35,7 @@ from hypothesis_common import configure_checkout, thread_counts, check_run, posi
 
 configure_checkout()
 from engines import batstore, common
-from plot_styles import measurement_positions, measurement_values, set_measurement_axis
+from plot_styles import finalize_layout, measurement_positions, measurement_values, set_compact, set_measurement_axis
 
 DEFAULT_THREADS = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
 EVENT_COLORS = {"local_reuse": "#0072B2", "steal": "#D55E00", "fresh_alloc": "#009E73"}  # Okabe-Ito vermillion/bluish-green
@@ -99,11 +99,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--duration", type=positive_int, default=60)
     p.add_argument("--mode", choices=["atomic", "transaction"], default="atomic", help="fixed YCSB execution mode")
     p.add_argument("--skip-build", action="store_true")
+    p.add_argument("--compact", action="store_true", help="use a paper-friendly layout with a shared legend")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    set_compact(args.compact)
     os.environ["BATSTORE_YCSB_MODE"] = args.mode
     threads_list = thread_counts(args.threads)
     if not args.skip_build:
@@ -214,7 +216,7 @@ def plot(rows: list, out_dir: Path) -> None:
     ax_per_thread.legend(frameon=False)
 
     fig.suptitle("H6: Memory reuse (ycsb_a, gc=on)")
-    fig.tight_layout()
+    finalize_layout(fig)
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h6_memory_reuse.{ext}", dpi=150)
     plt.close(fig)

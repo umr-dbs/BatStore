@@ -22,6 +22,14 @@ def compact_enabled() -> bool:
     return _COMPACT
 
 
+def finalize_layout(fig) -> None:
+    """Apply either the normal tight layout or the shared compact layout."""
+    if _COMPACT:
+        apply_compact_layout(fig)
+    else:
+        fig.tight_layout()
+
+
 def apply_compact_layout(fig) -> None:
     """Remove the overall title and use one prominent shared figure legend.
 
@@ -32,6 +40,7 @@ def apply_compact_layout(fig) -> None:
     """
     if not _COMPACT:
         return
+    fig._compact_layout_applied = True
 
     overall_title = fig._suptitle.get_text() if fig._suptitle is not None else ""
     active_axes = [ax for ax in fig.axes if ax.get_visible() and ax.axison]

@@ -5,9 +5,10 @@ Vary OLAP callers while fixing OLTP terminals (default 4). Each caller
 repeatedly runs Q1 (default) or Q6; queries are separate configurations.
 Report committed New-Orders/sec relative to the mandatory zero-OLAP baseline.
 
-The shared parallel scan pool is additional to OLAP callers. Its default auto
-size can grow with concurrency; use --scan-pool-workers N for a fixed pool
-or 0 for no extra pool. Caller count is not total OS thread count.
+The shared parallel scan pool is additional to OLAP callers.  It is fixed at
+12 workers by default so changing OLAP concurrency does not silently change
+the amount of scan parallelism; use --scan-pool-workers 0 to disable it.
+Caller count is not total OS thread count.
 """
 from __future__ import annotations
 
@@ -24,9 +25,10 @@ from hypothesis_common import configure_checkout, thread_counts, check_run, posi
 
 configure_checkout()
 from engines import batstore, common
-from plot_styles import latency_line_style, measurement_positions, measurement_values, set_measurement_axis
+from plot_styles import finalize_layout, measurement_positions, measurement_values, set_compact, set_measurement_axis
 
 DEFAULT_OLAP_THREADS = [0, 1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
+DEFAULT_SCAN_POOL_WORKERS = 12
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,10 +40,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--olap-threads", default=",".join(str(t) for t in DEFAULT_OLAP_THREADS),
                    help="Experiment A (H4): OLAP thread counts to sweep, OLTP terminals fixed by --fixed-oltp-terminals")
     p.add_argument("--fixed-oltp-terminals", type=positive_int, default=4)
-    p.add_argument("--scan-pool-workers", type=nonnegative_int, default=None,
-                   help="extra shared scan workers: omitted=driver auto, 0=disabled, N=fixed pool")
+    p.add_argument("--scan-pool-workers", type=nonnegative_int, default=DEFAULT_SCAN_POOL_WORKERS,
+                   help=f"fixed extra shared scan workers (default: {DEFAULT_SCAN_POOL_WORKERS}; 0=disabled)")
     p.add_argument("--gc", choices=["on", "off"], default="on")
     p.add_argument("--skip-build", action="store_true")
+    p.add_argument("--compact", action="store_true", help="use a paper-friendly layout with a shared legend")
     return p.parse_args()
 
 
@@ -49,12 +52,13 @@ def run_point(workload: str, warehouses: int, terminals: int, olap_threads: int,
               out_dir: Path, scan_pool_workers=None) -> common.NormalizedResult:
     scale = common.Scale(tpcc_warehouses=warehouses, tpcc_terminals=terminals, tpcc_duration=duration,
                           htap_olap_threads=olap_threads,
-                          label=f"h4/h5 terminals={terminals} olap_threads={olap_threads}")
+                          label=f"h4/h5 warehouses={warehouses} terminals={terminals} olap_threads={olap_threads}")
     return batstore.run(workload, scale, out_dir, gc=gc, scan_pool_workers=scan_pool_workers)
 
 
 def main() -> None:
     args = parse_args()
+    set_compact(args.compact)
     olap_thread_list = thread_counts(args.olap_threads, allow_zero=True)
     olap_thread_list = [0] + [t for t in olap_thread_list if t != 0]
     if not args.skip_build:
@@ -63,7 +67,7 @@ def main() -> None:
 
     run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
     record_setup(run_dir, "H4", args, varies=f"OLAP callers={olap_thread_list}",
-                 fixed=f"OLTP terminals={args.fixed_oltp_terminals}, query={args.workload}, warehouses={args.warehouses}, duration={args.duration}s, GC={args.gc}, scan pool={args.scan_pool_workers if args.scan_pool_workers is not None else 'auto'}",
+                 fixed=f"OLTP terminals={args.fixed_oltp_terminals}, query={args.workload}, warehouses={args.warehouses}, duration={args.duration}s, GC={args.gc}, scan pool={args.scan_pool_workers}",
                  measures="New-Order throughput, normalized to the zero-OLAP baseline")
     manifest_path = run_dir / "manifest.csv"
     common.write_manifest_header(manifest_path)
@@ -109,7 +113,7 @@ def plot(olap_thread_list, oltp_throughput, fixed_oltp_terminals, out_dir: Path)
     ax_h4.set_ylabel(f"OLTP throughput (% of olap_threads=0, oltp_terminals={fixed_oltp_terminals})")
     ax_h4.set_title("H4: OLTP throughput vs. OLAP thread count")
 
-    fig.tight_layout()
+    finalize_layout(fig)
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h4_oltp_vs_olap.{ext}", dpi=150)
     plt.close(fig)
