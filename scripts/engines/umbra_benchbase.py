@@ -379,6 +379,14 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     no cheaper "skip --create/--load" path to offer here.
     """
     del reload
+    if workload == "s_htap":
+        return common.NormalizedResult(
+            "umbra", workload, scale.label, scale.s_htap_duration,
+            "write_ops_per_sec", 0.0, 0.0, threads=scale.ycsb_threads,
+            gc_enabled=gc,
+            notes="SKIPPED: the pinned BenchBase build has no s_htap plugin",
+            memory_source="not_measured",
+        )
     if common.NO_DURABILITY:
         # See module doc: Umbra has no software fsync/durability toggle to turn off, so
         # compare_engines_new.py's whole premise (real disk, relying on the engine's own

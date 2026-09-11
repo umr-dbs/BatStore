@@ -253,17 +253,40 @@ SHTAP_CONFIG_TEMPLATE = """<?xml version="1.0"?>
 
 
 def _find_postmaster_pid() -> Optional[int]:
-    """The oldest process matching the postmaster's own invocation - `-o` asks pgrep for
-    the single oldest match, which is the postmaster itself (every backend/checkpointer/
-    etc. process is younger and forked from it, so this is stable even with active
-    connections)."""
-    result = subprocess.run(
-        ["pgrep", "-o", "-f", "postgres -D"], capture_output=True, text=True,
+    """Return the postmaster serving the configured BenchBase database.
+
+    A host may run several PostgreSQL clusters.  Searching the process table and taking
+    the oldest postmaster can therefore select a different cluster from the one reached
+    by the JDBC URL.  A normal client backend is a direct postmaster child, so ask the
+    target server for that backend PID and read its PPID from procfs instead.
+    """
+    env = os.environ.copy()
+    env["PGPASSWORD"] = common.PG_PASSWORD
+    proc = subprocess.Popen(
+        ["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", common.PG_ROLE,
+         "-h", "localhost", "-d", common.PG_DATABASE],
+        env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True,
     )
     try:
-        return int(result.stdout.strip().splitlines()[0])
-    except (ValueError, IndexError):
+        assert proc.stdin is not None and proc.stdout is not None
+        # Keep psql waiting for its next command after it prints the PID.  That keeps the
+        # corresponding backend alive while its procfs parent is inspected.
+        proc.stdin.write("SELECT pg_backend_pid();\n")
+        proc.stdin.flush()
+        backend_pid = int(proc.stdout.readline().strip())
+        stat = Path(f"/proc/{backend_pid}/stat").read_text()
+        # /proc/<pid>/stat's comm field is parenthesized and may contain spaces.
+        return int(stat.rsplit(")", 1)[1].split()[1])
+    except (BrokenPipeError, OSError, ValueError, IndexError):
         return None
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
 
 def _verify_postmaster_numa_binding() -> int:
@@ -578,6 +601,19 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     callers. compare_engines.py deliberately passes reload=True for every PostgreSQL point
     so every measurement starts from freshly created and loaded benchmark tables.
     """
+    # The pinned BenchBase distribution has no S-YCSB plugin.  The native engines have
+    # dedicated implementations, but sending `-b s_htap` to BenchBase only produces
+    # "Plugin s_htap is undefined" after touching server state.  Make that limitation an
+    # explicit skipped point until a real BenchBase plugin is added and built.
+    if workload == "s_htap":
+        return common.NormalizedResult(
+            "postgres", workload, scale.label, scale.s_htap_duration,
+            "write_ops_per_sec", 0.0, 0.0, threads=scale.ycsb_threads,
+            gc_enabled=gc,
+            notes="SKIPPED: the pinned BenchBase build has no s_htap plugin",
+            memory_source="not_measured",
+        )
+
     # patches/ycsb_skew_factor_benchbase.patch (applied by setup_environment.py's
     # step_benchbase) makes BenchBase's YCSBBenchmark/YCSBWorker treat skewFactor<=0 as a
     # genuine "uniform" sentinel - YCSBWorker builds a real UniformGenerator for read-key

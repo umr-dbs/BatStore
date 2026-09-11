@@ -97,7 +97,11 @@ def apply_compact_layout(fig) -> None:
         # A one-panel axes title is the plot's overall title.  In an overview,
         # axes titles are necessary panel names and should remain visible.
         if len(active_axes) == 1:
-            ax.set_title("")
+            # Matplotlib stores left/center/right titles separately; clearing
+            # only the default centered title leaves a left-aligned title in
+            # place and makes compact figures look duplicated and crowded.
+            for location in ("left", "center", "right"):
+                ax.set_title("", loc=location)
         # Shared x-axes hide non-bottom tick labels by default.  Compact
         # overviews still need the measurement values on every active panel.
         ax.tick_params(axis="x", which="both", labelbottom=True)
@@ -127,7 +131,7 @@ def apply_compact_layout(fig) -> None:
         fig.tight_layout()
         return
 
-    ncol = min(5, len(unique))
+    ncol = min(getattr(fig, "_compact_legend_ncol", 5), len(unique))
     rows = math.ceil(len(unique) / ncol)
     if is_latency and not is_overview:
         top = max(0.73, 0.965 - 0.055 * rows)

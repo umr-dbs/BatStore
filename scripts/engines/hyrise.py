@@ -243,6 +243,14 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "on", re
     is no cheaper "skip --create/--load" path to offer here, same as umbra_benchbase.py.
     """
     del reload
+    if workload == "s_htap":
+        return common.NormalizedResult(
+            "hyrise", workload, scale.label, scale.s_htap_duration,
+            "write_ops_per_sec", 0.0, 0.0, threads=scale.ycsb_threads,
+            gc_enabled=gc,
+            notes="SKIPPED: the pinned BenchBase build has no s_htap plugin",
+            memory_source="not_measured",
+        )
     if workload in BROKEN_WORKLOADS:
         # See module doc / BROKEN_WORKLOADS's own comment: confirmed, raw-wire-protocol
         # bug in hyriseServer's UPDATE/DELETE CommandComplete tags breaks every workload

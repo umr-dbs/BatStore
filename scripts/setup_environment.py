@@ -2,8 +2,9 @@
 """Bootstraps the standard engines used by scripts/compare_engines.py, FROM NOTHING:
 clones their sibling repos (BatStore itself only if it's reachable, see step_batstore), applies
 this harness's required patches, then builds each one, sets up PostgreSQL, and creates the
-Python plotting venv. The failure-prone vWeaver/ERMIA variants and their hugepage setup are
-excluded by default; pass --full to include them.
+Python plotting venv. The default engine set is BatStore (including its libmdbx backend),
+WiredTiger, LeanStore, and PostgreSQL. Hyrise, Umbra, both vWeaver/ERMIA variants, and
+ERMIA's hugepage setup are excluded by default; pass --full to include them.
 
 Everything is cloned/built under WORKSPACE_ROOT (scripts/engines/common.py -
 <the directory you invoke this script from>/tx_tests by default, override via the
@@ -247,7 +248,10 @@ def apply_patch_once(repo: Path, patch_path: Path, marker_file: str, marker: str
 
 def step_apt_packages(full: bool = False) -> None:
     log("Checking apt dependencies")
-    packages = APT_PACKAGES + HYRISE_APT_PACKAGES + (VWEAVER_APT_PACKAGES if full else [])
+    optional_packages = HYRISE_APT_PACKAGES + VWEAVER_APT_PACKAGES if full else []
+    # Preserve declaration order while de-duplicating dependencies shared by Hyrise and
+    # ERMIA (notably libnuma-dev).
+    packages = list(dict.fromkeys(APT_PACKAGES + optional_packages))
     missing = [p for p in packages if not is_apt_package_installed(p)]
     if not missing:
         print("All required apt packages already installed.")
@@ -258,7 +262,7 @@ def step_apt_packages(full: bool = False) -> None:
     run(["sudo", "apt-get", "install"] + missing)
 
 
-def step_fresh_checkouts() -> None:
+def step_fresh_checkouts(full: bool = False) -> None:
     """Delete only checkouts owned by this setup under WORKSPACE_ROOT.
 
     Exact-path and containment checks make WORKSPACE_ROOT/environment overrides unable to
@@ -267,10 +271,9 @@ def step_fresh_checkouts() -> None:
     """
     log("Removing setup-managed checkouts for a reproducible fresh build")
     workspace = WORKSPACE_ROOT.resolve()
-    targets = [
-        WIREDTIGER_REPO, LEANSTORE_REPO, BENCHBASE_REPO, VWEAVER_REPO, HYRISE_REPO,
-        BATSTORE_WORKSPACE_CLONE,
-    ]
+    targets = [WIREDTIGER_REPO, LEANSTORE_REPO, BENCHBASE_REPO, BATSTORE_WORKSPACE_CLONE]
+    if full:
+        targets += [VWEAVER_REPO, HYRISE_REPO]
     for target in targets:
         resolved = target.resolve(strict=False)
         if resolved.parent != workspace:
@@ -591,19 +594,30 @@ def step_postgres() -> None:
             sys.exit(f"PostgreSQL command failed:\n{result.stderr.strip()}")
         return result
 
-    check = postgres_sql(f"SELECT 1 FROM pg_roles WHERE rolname='{PG_ROLE}'")
-    if check.stdout.strip() == "1":
-        print(f"Role '{PG_ROLE}' already exists, skipping.")
-    else:
-        run(["sudo", "-u", "postgres", "psql", "-c",
-             f"CREATE ROLE {PG_ROLE} WITH LOGIN SUPERUSER PASSWORD '{PG_PASSWORD}';"])
+    role_literal = _postgres_literal(PG_ROLE)
+    role_identifier = _postgres_identifier(PG_ROLE)
+    password_literal = _postgres_literal(PG_PASSWORD)
+    database_literal = _postgres_literal(PG_DATABASE)
+    database_identifier = _postgres_identifier(PG_DATABASE)
 
-    check_db = postgres_sql(f"SELECT 1 FROM pg_database WHERE datname='{PG_DATABASE}'")
-    if check_db.stdout.strip() == "1":
-        print(f"Database '{PG_DATABASE}' already exists, skipping.")
+    check = postgres_sql(f"SELECT 1 FROM pg_roles WHERE rolname={role_literal}")
+    if check.stdout.strip() == "1":
+        # Existing does not necessarily mean usable: an earlier role may lack LOGIN or
+        # SUPERUSER, or have a different password.  Reassert the contract the wrapper
+        # relies on, while keeping the operation idempotent.
+        run(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-c",
+             f"ALTER ROLE {role_identifier} WITH LOGIN SUPERUSER PASSWORD {password_literal};"])
     else:
-        run(["sudo", "-u", "postgres", "psql", "-c",
-             f"CREATE DATABASE {PG_DATABASE} OWNER {PG_ROLE};"])
+        run(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-c",
+             f"CREATE ROLE {role_identifier} WITH LOGIN SUPERUSER PASSWORD {password_literal};"])
+
+    check_db = postgres_sql(f"SELECT 1 FROM pg_database WHERE datname={database_literal}")
+    if check_db.stdout.strip() == "1":
+        run(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-c",
+             f"ALTER DATABASE {database_identifier} OWNER TO {role_identifier};"])
+    else:
+        run(["sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-c",
+             f"CREATE DATABASE {database_identifier} OWNER {role_identifier};"])
 
     # Give PostgreSQL an explicit, reproducible tuning profile instead of benchmarking
     # the distro defaults (typically only 128MB shared_buffers) against embedded engines
@@ -637,9 +651,7 @@ def step_postgres() -> None:
     # cgroup constraints are inherited by the postmaster and every backend it forks.
     # --runtime is deliberate: PostgreSQL's tmpfs setup also needs to be restored after a
     # reboot, so rerunning this setup re-establishes both volatile benchmark properties.
-    cluster = subprocess.run(
-        ["pg_lsclusters", "-h"], capture_output=True, text=True, check=True,
-    ).stdout.splitlines()[0].split()
+    cluster = _pg_cluster()
     pg_unit = f"postgresql@{cluster[0]}-{cluster[1]}.service"
     cpu_list = common.numa_node_cpu_list()
     log(f"Pinning {pg_unit} to NUMA node {common.NUMA_NODE} (CPUs {cpu_list})")
@@ -655,17 +667,40 @@ def step_postgres() -> None:
         print(f"{name}={actual} (configured {expected})")
 
 
+def _postgres_literal(value: str) -> str:
+    """Quote a PostgreSQL string literal without relying on shell interpolation."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _postgres_identifier(value: str) -> str:
+    """Quote a PostgreSQL role/database identifier."""
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _pg_cluster() -> list[str]:
+    """Return the cluster served on BenchBase's fixed PostgreSQL port (5432)."""
+    result = subprocess.run(["pg_lsclusters", "-h"], capture_output=True, text=True, check=True)
+    clusters = [line.split() for line in result.stdout.splitlines() if line.strip()]
+    matches = [fields for fields in clusters if len(fields) >= 6 and fields[2] == "5432"]
+    if not matches:
+        available = ", ".join(
+            f"{fields[0]}/{fields[1]}:{fields[2]}" for fields in clusters if len(fields) >= 3
+        ) or "none"
+        sys.exit(
+            "pg_lsclusters found no PostgreSQL cluster on port 5432, which is the port "
+            f"used by the BenchBase JDBC config (available clusters: {available})."
+        )
+    if len(matches) > 1:
+        sys.exit("pg_lsclusters reported multiple PostgreSQL clusters on port 5432")
+    return matches[0]
+
+
 def _pg_data_directory() -> Path:
-    """Data directory of the (first) PostgreSQL cluster, via `pg_lsclusters` - unlike
+    """Data directory of the port-5432 PostgreSQL cluster, via `pg_lsclusters` - unlike
     `SHOW data_directory` over psql, this doesn't need the server to actually be up, which
     matters for step_postgres_tmpfs's post-reboot recovery path (the server is down at
     exactly the point this needs to find where to restore its data TO)."""
-    result = subprocess.run(["pg_lsclusters", "-h"], capture_output=True, text=True, check=True)
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    if not lines:
-        sys.exit("pg_lsclusters found no PostgreSQL cluster - is PostgreSQL installed (see step above)?")
-    fields = lines[0].split()
-    return Path(fields[5])
+    return Path(_pg_cluster()[5])
 
 
 def step_postgres_tmpfs() -> None:
@@ -1002,8 +1037,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--full", action="store_true",
-        help="also set up both vWeaver/ERMIA variants and their required hugepages "
-             "(excluded from the default setup)",
+        help="also set up Hyrise, Umbra, both vWeaver/ERMIA variants, and ERMIA's "
+             "required hugepages (all excluded from the default setup)",
     )
     parser.add_argument(
         "--reuse-checkouts", action="store_true",
@@ -1053,19 +1088,19 @@ def main() -> None:
         args.skip_venv = True
 
     if not args.reuse_checkouts:
-        step_fresh_checkouts()
+        step_fresh_checkouts(args.full)
 
     steps = [
         ("apt", args.skip_apt, lambda: step_apt_packages(args.full)),
         ("wiredtiger", args.skip_wiredtiger, step_wiredtiger),
         ("leanstore", args.skip_leanstore, step_leanstore),
-        ("hyrise", args.skip_hyrise, step_hyrise),
+        ("hyrise", not args.full or args.skip_hyrise, step_hyrise),
         ("hugepages", not args.full or args.skip_hugepages, step_vweaver_hugepages),
         ("vweaver", not args.full or args.skip_vweaver, step_vweaver_ermia),
         ("vweaver-frugal", not args.full or args.skip_vweaver_frugal, step_vweaver_ermia_frugal),
         ("postgres", args.skip_postgres, step_postgres),
         ("benchbase", args.skip_benchbase, step_benchbase),
-        ("umbra", args.skip_umbra, step_umbra),
+        ("umbra", not args.full or args.skip_umbra, step_umbra),
         ("batstore", args.skip_batstore, step_batstore),
         ("venv", args.skip_venv, step_python_venv),
     ]
@@ -1074,7 +1109,7 @@ def main() -> None:
     print(f"workspace root: {WORKSPACE_ROOT}")
     for name, skip, fn in steps:
         if skip:
-            if name in {"hugepages", "vweaver", "vweaver-frugal"} and not args.full:
+            if name in {"hyrise", "hugepages", "vweaver", "vweaver-frugal", "umbra"} and not args.full:
                 print(f"\n>>> Skipping {name} (excluded by default; pass --full to include it)")
             else:
                 print(f"\n>>> Skipping {name} (--skip-{name})")
@@ -1097,7 +1132,11 @@ def main() -> None:
         print(f"\n>>> Skipping postgres-tmpfs ({reason})")
 
     print("\n########## setup complete ##########")
-    print(f"Run the comparison with: python3 scripts/compare_engines.py --tiny")
+    comparison_engines = (
+        "" if args.full else
+        " --engines batstore,wiredtiger,leanstore,libmdbx,postgres"
+    )
+    print(f"Run the comparison with: python3 scripts/compare_engines.py --tiny{comparison_engines}")
     print("################################################################\n")
 
 

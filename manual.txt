@@ -91,11 +91,10 @@ anything, so re-running after a partial failure (e.g. you had to fix a missing d
 package) just picks up where it left off, without redoing finished steps.
 
 What it does, in order:
-  1. apt packages (see APT_PACKAGES in the script - cmake, libtbb-dev, libaio-dev,
-     compression libs, liburing-dev, numactl, postgresql, postgresql-contrib, maven,
-     clang, libnuma-dev, libgoogle-glog-dev, libibverbs-dev, plus HYRISE_APT_PACKAGES -
-     libboost-all-dev, libhwloc-dev, libncurses-dev, libpq-dev, libreadline-dev,
-     libsqlite3-dev).
+  1. apt packages for the default BatStore/libmdbx, WiredTiger, LeanStore, and PostgreSQL
+     set (see APT_PACKAGES in the script - cmake, libtbb-dev, libaio-dev, compression
+     libs, liburing-dev, numactl, postgresql, postgresql-contrib, Java, and Maven).
+     `--full` additionally installs the ERMIA and Hyrise development dependencies.
   2. Clones (if missing) and builds WiredTiger from source (Release, -DENABLE_PYTHON=OFF)
      into <workspace>/wiredtiger/cmake-build-debug (the directory name is a stale holdover
      from an old CLion default - it IS a Release build, not Debug; a build-type sanity
@@ -105,22 +104,22 @@ What it does, in order:
      YCSB-E/HTAP scan-latency instrumentation, New-Order-only counters - see section 5),
      then builds its native + WiredTiger-adapter frontends (Release) into
      <workspace>/leanstore/build.
-  4. Clones (if missing) Hyrise and its ~20 git submodules (`git submodule update --init
+  4. With `--full` only: clones (if missing) Hyrise and its ~20 git submodules (`git submodule update --init
      --recursive --depth 1` - a plain clone alone doesn't fetch them), then builds its
      `hyriseServer` target (Release, -DHYRISE_RELAXED_BUILD=On - NOT upstream's own
      pinned clang-19/gcc-15/LLVM toolchain; -DNO_LTO=On - upstream's LTO default is
      impractically slow/memory-hungry with GCC, confirmed live, see section 5) into
      <workspace>/hyrise/cmake-build-release.
-  5. Reserves hugepages for vWeaver_ermia's node-memory pool (sudo sysctl -w
+  5. With `--full` only: reserves hugepages for vWeaver_ermia's node-memory pool (sudo sysctl -w
      vm.nr_hugepages=N, sized off common.Scale().dram_gib - see section 5).
-  6. Clones (if missing) vWeaver_ermia, checks out the pinned commit patches/
+  6. With `--full` only: clones (if missing) vWeaver_ermia, checks out the pinned commit patches/
      vweaver_ermia.patch was generated against, applies it (a dead include - see section
      5), applies patches/vweaver_ermia_frugal.patch (fixes two upstream bugs that only
      affect the frugal-list build below - a no-op for this one, see section 5), generates
      dbcore/burt-hash.cpp via patches/vweaver_burt_hash_gen.py (a Python 3 port of
      upstream's Python-2-only generator), then builds `ermia_SI` (CC=clang CXX=clang++,
      -DCMAKE_BUILD_PARAM=Vweaver) into <workspace>/vWeaver_ermia/build.
-  7. Builds a SECOND `ermia_SI` from that same checkout (CC=clang CXX=clang++,
+  7. With `--full` only: builds a SECOND `ermia_SI` from that same checkout (CC=clang CXX=clang++,
      -DCMAKE_BUILD_PARAM=Eval_skiplist - "just frugal lists", no vWeaver) into
      <workspace>/vWeaver_ermia/build_frugal - see engines/vweaver_ermia_frugal.py and
      section 5 for why this needed patches/vweaver_ermia_frugal.patch to even link.
@@ -135,7 +134,7 @@ What it does, in order:
      is idempotent too (safe to re-run, detects if the plugin block is already gone). This
      same jar drives PostgreSQL, Umbra, AND Hyrise (all three via the POSTGRES JDBC
      target) - no separate build for Hyrise.
-  10. Installs Docker (if missing), adds you to the `docker` group, and pulls the pinned
+  10. With `--full` only: installs Docker (if missing), adds you to the `docker` group, and pulls the pinned
      umbradb/umbra image (common.UMBRA_IMAGE) - see engines/umbra_benchbase.py, which
      starts/stops one throwaway container per benchmark run rather than a checkout+build
      this script performs itself (Umbra has no native package).
@@ -146,9 +145,10 @@ What it does, in order:
   12. Sets up the Python venv at scripts/.venv with pandas + matplotlib (needed only for
      plot_compare.py, not for running experiments).
 
-By default the setup removes and freshly clones every setup-managed checkout under
-WORKSPACE_ROOT. Pass `--reuse-checkouts` only when you intentionally want incremental
-builds. vWeaver and its hugepage setup remain excluded unless `--full` is passed.
+By default the setup removes and freshly clones only the default setup-managed checkouts
+under WORKSPACE_ROOT; existing Hyrise and ERMIA checkouts are left untouched. Pass
+`--reuse-checkouts` only when you intentionally want incremental builds. Hyrise, Umbra,
+both ERMIA variants, and ERMIA's hugepage setup remain excluded unless `--full` is passed.
 
 Flags to skip individual steps:
 
@@ -413,6 +413,12 @@ this rather than papering over it:
   htap_q6_variant. They intentionally preserve the old behavior and are not suitable for
   cross-engine result comparisons (PostgreSQL's variant aliases equal canonical because
   it already ran the BenchBase SQL).
+
+- S-YCSB (`s_htap`) is not implemented by the pinned BenchBase distribution. PostgreSQL,
+  Umbra, and Hyrise therefore record an explicit SKIPPED result instead of launching the
+  nonexistent `s_htap` plugin; the dedicated `run_s_ycsb_sweep.py` defaults to the native
+  BatStore, LeanStore, WiredTiger, and libmdbx implementations. PostgreSQL remains
+  selectable there so the unsupported point is visible when requested.
 
   CH-benCHmark has 22 standard analytical queries;
   only Q1 ("Pricing Summary Report") and Q6 ("Forecasting Revenue Change") are
