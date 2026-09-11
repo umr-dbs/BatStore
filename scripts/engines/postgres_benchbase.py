@@ -46,7 +46,8 @@ def ensure_built() -> None:
             f"--workspace-root to scripts/run_s_ycsb_sweep.py."
         )
     subprocess.run(["mvn", "package", "-P", "postgres", "-DskipTests",
-                    "-Dmaven.compiler.release=21"], cwd=repo, check=True)
+                    "-Dmaven.compiler.release=21"], cwd=repo, check=True,
+                   env=common.jdk_21_env())
     tgz = repo / "target" / "benchbase-postgres.tgz"
     subprocess.run(["tar", "xzf", str(tgz), "-C", str(repo / "target")], check=True)
 

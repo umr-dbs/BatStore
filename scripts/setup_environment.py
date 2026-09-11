@@ -946,10 +946,12 @@ def step_benchbase() -> None:
     # JDK's bundled ct.sym API data for the target release instead, which avoids the
     # warning entirely (confirmed: plain source/target 21 fails on JDK 25 here, release=21
     # builds clean).
+    java_env = common.jdk_21_env()
+    print(f"Using JAVA_HOME={java_env['JAVA_HOME']} for BenchBase")
     run([
         "mvn", "clean", "package", "-P", "postgres",
         "-DskipTests", "-Dmaven.compiler.release=21",
-    ], cwd=BENCHBASE_REPO)
+    ], cwd=BENCHBASE_REPO, env=java_env)
 
     tgz = BENCHBASE_REPO / "target" / "benchbase-postgres.tgz"
     if not tgz.exists():
