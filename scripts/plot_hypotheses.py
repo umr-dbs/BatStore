@@ -13,7 +13,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from plot_styles import (apply_compact_layout, compact_enabled, latency_line_style,
+from plot_styles import (ENGINE_COLORS, ENGINE_LABELS, ENGINE_MARKERS,
+                         apply_compact_layout, compact_enabled, latency_line_style,
                          measurement_positions, measurement_values,
                          set_compact, set_measurement_axis)
 
@@ -221,41 +222,23 @@ def _h2_latency(ax, run_dir: Path) -> None:
 
 def _h3(ax, run_dir: Path, overview: bool = False) -> None:
     frame = pd.read_csv(run_dir / "h3_time_buckets.csv")
-    age = (frame["window_start_s"] + frame["window_end_s"]) / 2
-    if not overview:
-        raw_path = run_dir / "tpcc_historic_scan" / "tpcc_scan.csv"
-        if raw_path.exists():
-            raw = pd.read_csv(raw_path)
-            raw = raw[raw.get("mode", "") == "historic_full_scan"]
-            if not raw.empty:
-                snapshot_age = raw["delay_secs"] if "delay_secs" in raw else raw["elapsed_secs"]
-                ax.scatter(snapshot_age, raw["latency_ns"] / 1_000_000,
-                           s=4, alpha=0.11, color=COLORS["blue"], edgecolors="none",
-                           rasterized=True, label="_individual scans")
-                ax.plot([], [], linestyle="none", marker="o", markersize=5,
-                        color=COLORS["blue"], alpha=0.75, label="individual scan")
-    median_label = "50 s window median" if not overview else None
-    ax.plot(age, frame["median_latency_us"] / 1000, color=COLORS["orange"], marker="o",
-            linewidth=2.2, label=median_label, zorder=3)
+    if "engine" not in frame:
+        frame["engine"] = "batstore"  # legacy H3 output
+    for engine, group in frame.groupby("engine", sort=False):
+        age = (group["window_start_s"] + group["window_end_s"]) / 2
+        ax.plot(age, group["median_latency_us"] / 1000,
+                color=ENGINE_COLORS.get(engine, COLORS["blue"]),
+                marker=ENGINE_MARKERS.get(engine, "o"), linewidth=2.2,
+                label=ENGINE_LABELS.get(engine, engine), zorder=3)
     ax.set_xlabel("snapshot age (s)")
     ax.set_ylabel("median latency (ms)")
     if overview:
         _label_hypothesis(ax, "H3", "Snapshot age")
-        cardinality = frame["median_scanned_tuples"].median()
-        ax.text(0.975, 0.05, f"{cardinality / 1_000_000:.2f}M tuples/scan",
-                transform=ax.transAxes, ha="right", va="bottom", fontsize=8,
-                color="#555555")
+        ax.legend(frameon=False, fontsize=7)
     else:
         ax.set_title("Snapshot age", loc="left", fontweight="semibold")
         ax.grid(axis="y", alpha=0.25)
-        cardinality = frame["median_scanned_tuples"].median()
-        ax.text(
-            0.985, 0.04, f"{int(round(cardinality)):,} tuples per scan",
-            transform=ax.transAxes, ha="right", va="bottom", fontsize=9,
-            color="#444444",
-            bbox={"boxstyle": "round,pad=0.25", "facecolor": "white",
-                  "edgecolor": "#cccccc", "alpha": 0.9},
-        )
+        ax.legend(frameon=False, fontsize=8)
     if not overview:
         ax.set_ylabel("full-scan latency (ms)")
         ax.legend(frameon=False)
