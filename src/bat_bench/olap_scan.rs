@@ -444,7 +444,13 @@ pub fn run_olap_worker(
             while !stop.load(Relaxed) {
                 let age = snapshot_started.elapsed();
                 let start = Instant::now();
-                let scanned = Table::ALL.iter()
+                // H3's cross-engine scan set: the nine logical TPC-C relations shared by
+                // PostgreSQL, libmdbx and WiredTiger. Exclude BatStore's two derived
+                // indexes and the three CH-benCHmark extension tables.
+                let scanned = [
+                    Table::Warehouse, Table::District, Table::Customer, Table::History,
+                    Table::NewOrder, Table::Orders, Table::OrderLine, Table::Item, Table::Stock,
+                ].iter()
                     .map(|&table| tx.range_count(table, full_range))
                     .sum();
                 let latency = start.elapsed();

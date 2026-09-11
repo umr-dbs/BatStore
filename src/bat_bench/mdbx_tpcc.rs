@@ -77,6 +77,7 @@ pub struct MdbxTpccConfig {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MdbxHtapMode {
     None,
+    Historic,
     Q1,
     Q6,
     Q1Selective,
@@ -868,12 +869,49 @@ fn olap_thread(
     let run_start = Instant::now();
     let mut out = Vec::new();
 
+    if mode == MdbxHtapMode::Historic {
+        // Keep one MDBX reader transaction registered for the whole timed phase.  MDBX
+        // consequently retains every page version needed by this snapshot while OLTP
+        // writers continue to commit, which is the direct analogue of BatStore H3's
+        // long-lived historic transaction.
+        let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (historic)");
+        let snapshot = txn.id();
+        let mut expected = None;
+        while !stop.load(Relaxed) {
+            let elapsed_secs = run_start.elapsed().as_secs_f64();
+            let started = Instant::now();
+            let scanned_tuples: usize = [
+                Table::Warehouse, Table::District, Table::Customer, Table::History,
+                Table::NewOrder, Table::Orders, Table::OrderLine, Table::Item, Table::Stock,
+            ]
+                .iter()
+                .map(|table| range_rows(&txn, *table, TpccKey::MIN, TpccKey::MAX).len())
+                .sum();
+            if let Some(expected) = expected {
+                assert_eq!(scanned_tuples, expected, "historic snapshot cardinality changed");
+            } else {
+                expected = Some(scanned_tuples);
+            }
+            out.push(MdbxScanResult {
+                mode: "historic_full_scan",
+                elapsed_secs,
+                snapshot,
+                scanned_tuples,
+                latency_ns: started.elapsed().as_nanos(),
+                summary: None,
+                staleness_versions: 0,
+            });
+        }
+        return out;
+    }
+
     while !stop.load(Relaxed) {
         out.push(match mode {
             MdbxHtapMode::Q1 => ch_q1_once(&db, date_hi, run_start, false),
             MdbxHtapMode::Q6 => ch_q6_once(&db, date_lo, date_hi, run_start, false),
             MdbxHtapMode::Q1Selective => ch_q1_once(&db, date_hi, run_start, true),
             MdbxHtapMode::Q6Selective => ch_q6_once(&db, date_lo, date_hi, run_start, true),
+            MdbxHtapMode::Historic => unreachable!(),
             MdbxHtapMode::None => break,
         });
     }
@@ -983,7 +1021,7 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
         let (date_lo, date_hi) = match cfg.htap_mode {
             MdbxHtapMode::Q1 | MdbxHtapMode::Q1Selective => (i64::MIN, q1_cutoff),
             MdbxHtapMode::Q6 | MdbxHtapMode::Q6Selective => (q6_date_lo, q6_date_hi),
-            MdbxHtapMode::None => (i64::MIN, i64::MAX),
+            MdbxHtapMode::None | MdbxHtapMode::Historic => (i64::MIN, i64::MAX),
         };
         thread::spawn(move || olap_thread(db, date_lo, date_hi, stop, barrier, cfg.htap_mode))
     }).collect();
@@ -1085,6 +1123,7 @@ pub fn main_mdbx_tpcc(parms: Vec<String>) {
         "ch_q6" => MdbxHtapMode::Q6,
         "ch_q1_variant" => MdbxHtapMode::Q1Selective,
         "ch_q6_variant" => MdbxHtapMode::Q6Selective,
+        "historic" => MdbxHtapMode::Historic,
         _ => MdbxHtapMode::None,
     };
     let num_olap_threads: usize = arg(&parms, 10, 1);

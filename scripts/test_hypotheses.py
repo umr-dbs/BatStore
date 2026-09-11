@@ -83,12 +83,14 @@ class HypothesesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "tpcc_scan.csv"
             path.write_text("mode,elapsed_secs,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec\n"
-                            "historic_full_scan,100,9,42,100,2000000000,50\n")
+                            "historic_full_scan,100,9,42,100,2000000000,50\n"
+                            "historic_full_scan,101,10,42:99:,100,1000000000,100\n")
             rows = read_historic_scan_rows(path)
         args = build_args(1, 2, 600, 1, Path("wal.log"))
         self.assertEqual(args[9], "historic")
         self.assertEqual(args[6], "false")
         self.assertEqual(rows[0]["snapshot"], 42)
+        self.assertEqual(rows[1]["snapshot"], "42:99:")
         self.assertEqual(rows[0]["elapsed_secs"], 9)
         self.assertEqual(bucket_rows(rows, 20, 2)[0]["window_start"], 0)
 

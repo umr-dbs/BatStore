@@ -66,6 +66,7 @@ LEANSTORE_YCSB_FIELDS_PATCH_PATH = Path(__file__).resolve().parent.parent / "pat
 LEANSTORE_YCSB_OPERATION_LATENCY_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "ycsb_operation_latency_leanstore.patch"
 LEANSTORE_TPCC_SEMANTICS_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "tpcc_semantics_leanstore.patch"
 LEANSTORE_S_HTAP_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "s_htap_leanstore.patch"
+LEANSTORE_H3_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "h3_wiredtiger.patch"
 LEANSTORE_GIT_HTTP1_PATCH_PATH = Path(__file__).resolve().parent.parent / "patches" / "git_http1_leanstore.patch"
 WIREDTIGER_URL = "https://github.com/wiredtiger/wiredtiger.git"
 BENCHBASE_URL = "https://github.com/cmu-db/benchbase.git"
@@ -335,6 +336,8 @@ def step_leanstore() -> None:
          "TPC-C: 1% expected rollback", "TPC-C 1% New-Order rollback"),
         (LEANSTORE_S_HTAP_PATCH_PATH, "frontend/ycsb/s_htap.cpp",
          "DEFINE_uint64(s_htap_record_count", "native + WiredTiger-adapter S-YCSB frontends"),
+        (LEANSTORE_H3_PATCH_PATH, "frontend/tpc-c/wiredtiger_tpcc.cpp",
+         "DEFINE_bool(h3_historic", "fixed-snapshot H3 scans for WiredTiger"),
         (LEANSTORE_GIT_HTTP1_PATCH_PATH, "libs/gflags.cmake",
          "GIT_CONFIG http.version=HTTP/1.1", "HTTP/1.1 for CMake's nested dependency fetches"),
     ]
