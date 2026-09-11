@@ -35,10 +35,16 @@ from hypothesis_common import configure_checkout, thread_counts, check_run, posi
 
 configure_checkout()
 from engines import batstore, common
-from plot_styles import finalize_layout, measurement_positions, measurement_values, set_compact, set_measurement_axis
+from plot_styles import (compact_enabled, finalize_layout, measurement_positions,
+                         measurement_values, set_compact, set_measurement_axis)
 
 DEFAULT_THREADS = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
-EVENT_COLORS = {"local_reuse": "#0072B2", "steal": "#D55E00", "fresh_alloc": "#009E73"}  # Okabe-Ito vermillion/bluish-green
+EVENT_COLORS = {
+    "local_reuse": "#2A9D8F",  # teal
+    "steal": "#E9C46A",        # gold
+    "fresh_alloc": "#E76F51",  # coral
+    "throughput": "#B07AA1",   # purple
+}  # color-vision-friendly palette
 
 
 def ensure_built_with_gc_stats() -> None:
@@ -181,42 +187,78 @@ def main() -> None:
 
     print(f"\nmanifest  : {manifest_path}")
     print(f"gc stats  : {gc_summary_path}")
-    plot(rows, run_dir / "plots")
+    plot(rows, run_dir / "plots", duration_s=args.duration)
 
 
-def plot(rows: list, out_dir: Path) -> None:
+def plot(rows: list, out_dir: Path, duration_s: int = 60) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    if compact_enabled():
+        compact_threads = {1, 2, 4, 8, 16, 32, 64, 128}
+        rows = [row for row in rows if int(row["threads"]) in compact_threads]
     threads_list = [r["threads"] for r in rows]
     axis_values = measurement_values(threads_list)
     positions = measurement_positions(threads_list, axis_values)
 
-    fig, (ax_share, ax_per_thread) = plt.subplots(1, 2, figsize=(13, 5))
-
-    for source, label, marker in (("local_reuse", "local-shard reuse", "o"),
-                                  ("steal", "cross-shard reuse", "s"),
-                                  ("fresh_alloc", "global allocator", "^")):
-        share_key = "steal_all_events_share" if source == "steal" else f"{source}_share"
-        ax_share.plot(positions, [r[share_key] * 100.0 for r in rows],
-                      color=EVENT_COLORS[source], marker=marker, linewidth=2, label=label)
+    figsize = (10.5, 2.6) if compact_enabled() else (13, 5)
+    fig, (ax_share, ax_throughput) = plt.subplots(1, 2, figsize=figsize)
+    local_share = [r["local_reuse_share"] * 100.0 for r in rows]
+    cross_share = [r["steal_all_events_share"] * 100.0 for r in rows]
+    ax_share.bar(positions, local_share, width=0.72, color=EVENT_COLORS["local_reuse"],
+                 edgecolor="white", linewidth=0.6, label="Local reuse")
+    ax_share.bar(positions, cross_share, width=0.72, bottom=local_share,
+                 color=EVENT_COLORS["steal"], edgecolor="white", linewidth=0.6,
+                 label="Cross-worker reuse")
+    reuse_share = [local + cross for local, cross in zip(local_share, cross_share)]
+    # Draw allocator last and force it to end exactly at 100%; it is the
+    # remainder after both reuse sources, not a layer between them.
+    allocator_remainder = [max(0.0, 100.0 - reuse) for reuse in reuse_share]
+    ax_share.bar(positions, allocator_remainder, width=0.72, bottom=reuse_share,
+                 color=EVENT_COLORS["fresh_alloc"], edgecolor="white", linewidth=0.6,
+                 label="_Allocator")
     set_measurement_axis(ax_share, threads_list, "OLTP threads")
-    ax_share.set_ylabel("share of allocation requests (%)")
-    ax_share.set_title("Allocation sources (common denominator)")
-    ax_share.legend(frameon=False)
+    ax_share.set_ylim(0, 100)
+    ax_share.set_ylabel("Allocation share (%)")
+    ax_share.set_title("Allocation-source composition", pad=9)
+    ax_share.grid(axis="y", alpha=0.25)
 
-    ax_per_thread.plot(positions, [r["steal_per_thread"] for r in rows], color=EVENT_COLORS["steal"],
-                        marker="o", markersize=6, markeredgecolor="white", markeredgewidth=0.7, linewidth=2.0,
-                        label="steals / thread")
-    ax_per_thread.plot(positions, [r["fresh_alloc_per_thread"] for r in rows], color=EVENT_COLORS["fresh_alloc"],
-                        marker="s", markersize=6, markeredgecolor="white", markeredgewidth=0.7, linewidth=2.0,
-                        label="fresh allocs / thread")
-    set_measurement_axis(ax_per_thread, threads_list, "OLTP threads")
-    ax_per_thread.set_ylabel("events per thread")
-    ax_per_thread.set_yscale("symlog", linthresh=1)
-    ax_per_thread.set_title("Per-thread steal/fresh-allocation events")
-    ax_per_thread.legend(frameon=False)
+    throughput_ops_sec = [
+        float(r.get("throughput_ops_sec", r.get("throughput"))) for r in rows
+    ]
+    allocator_per_million_ops = [
+        r["fresh_alloc"] / (throughput * duration_s) * 1_000_000
+        for r, throughput in zip(rows, throughput_ops_sec)
+    ]
+    bars = ax_throughput.bar(positions, allocator_per_million_ops, width=0.68,
+                             color=EVENT_COLORS["fresh_alloc"],
+                             edgecolor="white", linewidth=0.6, label="Allocator")
+    for bar, value in zip(bars, allocator_per_million_ops):
+        ax_throughput.text(bar.get_x() + bar.get_width() / 2, value,
+                           f"{value:.2f}", ha="center", va="bottom", fontsize=7,
+                           color="#333333")
+    set_measurement_axis(ax_throughput, threads_list, "OLTP threads")
+    ax_throughput.set_ylim(0, max(allocator_per_million_ops) * 1.16)
+    ax_throughput.set_ylabel("Allocator requests\nper million ops")
+    ax_throughput.set_title("Global allocator pressure", pad=9)
+    ax_throughput.grid(axis="y", alpha=0.25)
 
-    fig.suptitle("H6: Memory reuse (ycsb_a, gc=on)")
-    finalize_layout(fig)
+    if compact_enabled():
+        share_handles, share_labels = ax_share.get_legend_handles_labels()
+        allocator_handles, allocator_labels = ax_throughput.get_legend_handles_labels()
+        fig.legend(share_handles, share_labels, loc="upper center",
+                   bbox_to_anchor=(0.255, 0.995), ncol=2, frameon=False,
+                   fontsize=9, columnspacing=1.2,
+                   handletextpad=0.5)
+        fig.legend(allocator_handles, allocator_labels, loc="upper center",
+                   bbox_to_anchor=(0.755, 0.995), ncol=1, frameon=False,
+                   fontsize=9, handletextpad=0.5)
+        fig.tight_layout(rect=(0, 0, 1, 0.92), w_pad=2.8)
+        fig.text(0.5, 0.075, "YCSB A", ha="center", va="center",
+                 fontsize=10, fontweight="semibold")
+    else:
+        ax_share.legend(frameon=False, loc="upper right")
+        ax_throughput.legend(frameon=False, loc="upper right")
+        fig.suptitle("H6: YCSB A memory reuse (GC on)")
+        finalize_layout(fig)
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h6_memory_reuse.{ext}", dpi=150)
     plt.close(fig)

@@ -49,7 +49,10 @@ ENGINE_MODULES = {
     "hyrise": hyrise,
     "libmdbx": libmdbx,
 }
-DEFAULT_ENGINES = ["batstore", "leanstore", "wiredtiger", "postgres", "libmdbx"]
+# S-YCSB has native drivers for these engines.  The pinned BenchBase distribution used
+# by PostgreSQL has no s_htap plugin, so PostgreSQL remains explicitly selectable (and
+# reports SKIPPED) but is not included in a default sweep that cannot measure it.
+DEFAULT_ENGINES = ["batstore", "leanstore", "wiredtiger", "libmdbx"]
 DEFAULT_SKEWS = ["uniform", "0.1", "0.4", "0.8", "0.99", "1.4"]
 DEFAULT_THREADS = [2, 4, 8, 16, 32, 64, 128]
 

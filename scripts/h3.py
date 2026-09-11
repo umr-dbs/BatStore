@@ -32,9 +32,11 @@ from hypothesis_common import configure_checkout, check_worker_log
 
 configure_checkout()
 from engines import batstore, common
-from plot_styles import finalize_layout, set_compact
+from plot_styles import compact_enabled, finalize_layout, set_compact
 
-SERIES_COLOR = "#0072B2"  # Okabe-Ito blue - single series, no legend needed
+SERIES_COLOR = "#4C78A8"       # muted blue for raw observations
+MEDIAN_COLOR = "#E45756"       # coral for the latency trend
+THROUGHPUT_COLOR = "#2A9D8F"   # teal for the secondary metric
 
 
 def build_args(
@@ -113,15 +115,28 @@ def bucket_rows(rows: list, duration: int, num_buckets: int) -> list:
         n = len(values)
         return 0.0 if n == 0 else values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2.0
 
+    def percentile(values, fraction):
+        values = sorted(values)
+        if not values:
+            return 0.0
+        position = fraction * (len(values) - 1)
+        lower = int(position)
+        upper = min(lower + 1, len(values) - 1)
+        weight = position - lower
+        return values[lower] * (1.0 - weight) + values[upper] * weight
+
     summaries = []
     for idx, bucket in enumerate(buckets):
         if not bucket:
             continue
+        latency_us = [r["latency_ns"] / 1000.0 for r in bucket]
         summaries.append({
             "window_start": idx * width,
             "window_end": (idx + 1) * width,
             "count": len(bucket),
-            "median_latency_us": median([r["latency_ns"] for r in bucket]) / 1000.0,
+            "median_latency_us": median(latency_us),
+            "p25_latency_us": percentile(latency_us, 0.25),
+            "p75_latency_us": percentile(latency_us, 0.75),
             "median_tuples_per_sec": median([r["tuples_per_sec"] for r in bucket]),
             "median_scanned_tuples": median([r["scanned_tuples"] for r in bucket]),
         })
@@ -200,28 +215,80 @@ def main() -> None:
 def plot(rows: list, summaries: list, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    fig, (ax_lat, ax_tup) = plt.subplots(1, 2, figsize=(13, 5))
+    if compact_enabled():
+        # The throughput panel is the inverse of latency because every scan
+        # visits the same cardinality.  Omit that redundant panel in the
+        # paper layout and spend the available ink on raw variation + trend.
+        fig, ax_lat = plt.subplots(figsize=(11.5, 7.5))
+        ax_lat.scatter(
+            [r["elapsed_secs"] for r in rows],
+            [r["latency_ns"] / 1_000_000.0 for r in rows],
+            s=4, alpha=0.11, color=SERIES_COLOR, edgecolors="none",
+            rasterized=True, label="_individual scans",
+        )
+        # Use an independent proxy so the legend marker remains legible even
+        # though thousands of raw observations are intentionally very faint.
+        ax_lat.plot([], [], linestyle="none", marker="o", markersize=5,
+                    color=SERIES_COLOR, alpha=0.75, label="individual scan")
+        bucket_mid = [(s["window_start"] + s["window_end"]) / 2.0 for s in summaries]
+        ax_lat.plot(
+            bucket_mid, [s["median_latency_us"] / 1000.0 for s in summaries],
+            color=MEDIAN_COLOR, marker="o", markersize=5,
+            markeredgecolor="white", markeredgewidth=0.7,
+            linewidth=2.2, label="50 s window median", zorder=3,
+        )
+        ax_lat.set_xlabel("Snapshot age at scan start (s)")
+        ax_lat.set_ylabel("Full-scan latency (ms)")
+        ax_lat.grid(axis="y", alpha=0.25)
+        scanned_tuples = rows[0]["scanned_tuples"]
+        ax_lat.text(
+            0.985, 0.04, f"{scanned_tuples:,} tuples per scan",
+            transform=ax_lat.transAxes, ha="right", va="bottom", fontsize=9,
+            color="#444444",
+            bbox={"boxstyle": "round,pad=0.25", "facecolor": "white",
+                  "edgecolor": "#cccccc", "alpha": 0.9},
+        )
+        finalize_layout(fig)
+        for ext in ("pdf", "png"):
+            fig.savefig(out_dir / f"h3_scan_vs_snapshot_age_compact.{ext}", dpi=200,
+                        bbox_inches="tight")
+        plt.close(fig)
+        print(f"plots            : {out_dir}")
+        return
 
-    ax_lat.scatter([r["elapsed_secs"] for r in rows], [r["latency_ns"] / 1000.0 for r in rows],
-                    s=10, alpha=0.35, color=SERIES_COLOR, label="individual scan")
+    fig, (ax_lat, ax_tup) = plt.subplots(1, 2, figsize=(8.2, 2.35))
+
     bucket_mid = [(s["window_start"] + s["window_end"]) / 2.0 for s in summaries]
-    ax_lat.plot(bucket_mid, [s["median_latency_us"] for s in summaries], color="#D55E00",
-                marker="o", markersize=7, markeredgecolor="white", markeredgewidth=0.8,
-                linewidth=2.2, label="per-window median")
-    ax_lat.set_xlabel("snapshot age at scan start (s)")
-    ax_lat.set_ylabel("full-table-scan latency (µs)")
-    ax_lat.set_title("Historical scan latency")
-    ax_lat.legend(frameon=False)
-    ax_lat.grid(alpha=0.3)
+    ax_lat.fill_between(
+        bucket_mid,
+        [s["p25_latency_us"] / 1000.0 for s in summaries],
+        [s["p75_latency_us"] / 1000.0 for s in summaries],
+        color=SERIES_COLOR, alpha=0.32, linewidth=0,
+        label="middle 50% of scans",
+    )
+    ax_lat.plot(bucket_mid, [s["median_latency_us"] / 1000.0 for s in summaries], color=MEDIAN_COLOR,
+                marker="o", markersize=5, markeredgecolor="white", markeredgewidth=0.7,
+                linewidth=1.8, label="window median")
+    ax_lat.set_xlabel("Snapshot age (s)")
+    ax_lat.set_ylabel("Full-scan latency (ms)")
+    ax_lat.set_ylim(0, 160)
+    ax_lat.set_yticks([0, 40, 80, 120, 160])
+    ax_lat.legend(frameon=False, fontsize=7.5, loc="lower right",
+                  handlelength=1.7, labelspacing=0.25)
+    ax_lat.grid(axis="y", alpha=0.25)
 
-    ax_tup.plot(bucket_mid, [s["median_tuples_per_sec"] for s in summaries], color=SERIES_COLOR,
-                marker="o", markersize=7, markeredgecolor="white", markeredgewidth=0.8, linewidth=2.2)
-    ax_tup.set_xlabel("snapshot age at scan start (s)")
-    ax_tup.set_ylabel("scan throughput (tuples/sec)")
-    ax_tup.set_title("Historical scan throughput")
-    ax_tup.grid(alpha=0.3)
+    ax_tup.plot(bucket_mid, [s["median_tuples_per_sec"] / 1_000_000.0 for s in summaries],
+                color=THROUGHPUT_COLOR, marker="o", markersize=5,
+                markeredgecolor="white", markeredgewidth=0.7, linewidth=1.8)
+    ax_tup.set_xlabel("Snapshot age (s)")
+    ax_tup.set_ylabel("Throughput (M tuples/s)")
+    # Throughput only varies by a few percent.  A zero-based axis communicates
+    # that stability instead of visually magnifying the small fluctuations.
+    upper_limit = max(40.0, max(s["median_tuples_per_sec"] for s in summaries) / 1_000_000.0 * 1.04)
+    ax_tup.set_ylim(0, upper_limit)
+    ax_tup.set_yticks([0, 10, 20, 30, 40])
+    ax_tup.grid(axis="y", alpha=0.25)
 
-    fig.suptitle("H3: historical scan performance vs. snapshot age")
     finalize_layout(fig)
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h3_scan_vs_snapshot_age.{ext}", dpi=150)

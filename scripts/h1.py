@@ -25,18 +25,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 from hypothesis_common import configure_checkout, thread_counts, check_run, read_op_latency, positive_int, record_setup
 
 configure_checkout()
 from engines import batstore, common
-from plot_styles import finalize_layout, measurement_positions, measurement_values, set_compact, set_measurement_axis
+from plot_styles import (compact_enabled, finalize_layout, measurement_positions,
+                         measurement_values, set_compact, set_measurement_axis)
 
 DEFAULT_THREADS = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
 WORKLOADS = ["ycsb_a", "ycsb_c"]
 MODES = ["atomic", "transaction"]
-MODE_LABELS = {"atomic": "Autocommit (atomic)", "transaction": "Transaction (SI)"}
-MODE_COLORS = {"atomic": "#0072B2", "transaction": "#D55E00"}  # Okabe-Ito blue/vermillion
+MODE_LABELS = {"atomic": "Auto-commit", "transaction": "SI"}
+MODE_COLORS = {"atomic": "#777777", "transaction": "#111111"}
+MODE_MARKERS = {"atomic": "o", "transaction": "s"}
 PERCENTILE_STYLE = {"p50": "-", "p99": "--"}
 
 
@@ -148,24 +151,38 @@ def main() -> None:
 
 def plot(results: dict, threads_list: list, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    axis_values = measurement_values(threads_list)
+    display_threads = threads_list
+    if compact_enabled():
+        compact_threads = {1, 2, 4, 8, 16, 32, 64, 128}
+        display_threads = [threads for threads in threads_list if threads in compact_threads]
+    axis_values = measurement_values(display_threads)
 
     # --- Figure 1: throughput, atomic vs. transaction, one panel per workload ---
-    fig, axes = plt.subplots(1, len(results), figsize=(6.5 * len(results), 5), squeeze=False)
+    throughput_size = (10.5, 2.6) if compact_enabled() else (6.5 * len(results), 5)
+    fig, axes = plt.subplots(1, len(results), figsize=throughput_size, squeeze=False)
     axes = axes[0]
     for ax, (workload, per_mode) in zip(axes, results.items()):
         for mode in MODES:
-            values = [per_mode[mode][t]["throughput"] for t in threads_list]
-            positions = measurement_positions(threads_list, axis_values)
+            values = [per_mode[mode][t]["throughput"] / 1_000_000 for t in display_threads]
+            positions = measurement_positions(display_threads, axis_values)
             ax.plot(positions, values, label=MODE_LABELS[mode], color=MODE_COLORS[mode],
-                     marker="o", markersize=6, markeredgecolor="white", markeredgewidth=0.7,
+                     marker=MODE_MARKERS[mode], markersize=6,
+                     markeredgecolor="white", markeredgewidth=0.7,
                      linewidth=2.0)
-        set_measurement_axis(ax, threads_list, "OLTP threads")
-        ax.set_ylabel("throughput (ops/sec)")
-        ax.set_title(workload)
-        ax.legend(frameon=False)
-    fig.suptitle("H1: throughput, autocommit vs. SI transaction")
-    finalize_layout(fig)
+        set_measurement_axis(ax, display_threads, "Workers")
+        ax.set_ylabel("Throughput (million ops/s)")
+        ax.set_title(workload.replace("_", " ").upper(), pad=8)
+        ax.grid(axis="y", alpha=0.25)
+    if compact_enabled():
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.995),
+                   ncol=2, frameon=False, fontsize=9)
+        fig.tight_layout(rect=(0, 0, 1, 0.90), w_pad=2.8)
+    else:
+        for ax in axes:
+            ax.legend(frameon=False)
+        fig.suptitle("H1: throughput, autocommit vs. SI transaction")
+        finalize_layout(fig)
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h1_throughput.{ext}", dpi=150)
     plt.close(fig)
@@ -174,22 +191,54 @@ def plot(results: dict, threads_list: list, out_dir: Path) -> None:
     ops_present = sorted({op for per_mode in results.get("ycsb_a", {}).values()
                            for t in per_mode.values() for op in t["ops"]})
     if ops_present:
-        fig, axes = plt.subplots(1, len(ops_present), figsize=(6.5 * len(ops_present), 5), squeeze=False)
+        latency_size = (10.5, 2.75) if compact_enabled() else (6.5 * len(ops_present), 5)
+        fig, axes = plt.subplots(1, len(ops_present), figsize=latency_size, squeeze=False)
         axes = axes[0]
         for ax, op in zip(axes, ops_present):
             for mode in MODES:
-                positions = measurement_positions(threads_list, axis_values)
+                positions = measurement_positions(display_threads, axis_values)
                 for pct in ("p50", "p99"):
-                    values = [results["ycsb_a"][mode][t]["ops"].get(op, {}).get(pct, 0.0) for t in threads_list]
+                    values = [results["ycsb_a"][mode][t]["ops"].get(op, {}).get(pct, 0.0) for t in display_threads]
                     ax.plot(positions, values, color=MODE_COLORS[mode], linestyle=PERCENTILE_STYLE[pct],
-                             marker="o", markersize=5, markeredgecolor="white", markeredgewidth=0.6,
-                             linewidth=1.8, label=f"{MODE_LABELS[mode]} ({pct})")
-            set_measurement_axis(ax, threads_list, "OLTP threads")
-            ax.set_ylabel("latency (µs)")
-            ax.set_title(f"ycsb_a: {op}")
-            ax.legend(frameon=False, fontsize=8)
-        fig.suptitle("H1: per-operation latency, autocommit vs. SI transaction")
-        finalize_layout(fig)
+                             marker=MODE_MARKERS[mode], markersize=5,
+                             markeredgecolor="white", markeredgewidth=0.6,
+                             linewidth=1.8, label=f"{MODE_LABELS[mode]} · {pct}")
+            set_measurement_axis(ax, display_threads, "Workers")
+            ax.set_ylabel("Latency (µs)")
+            ax.set_yscale("log")
+            if op == "update":
+                ax.set_ylim(4, 12_000)
+            ax.set_title(f"{op.capitalize()} latency", pad=8)
+            ax.grid(axis="y", which="major", alpha=0.25)
+        if compact_enabled():
+            mode_handles = [
+                Line2D([0], [0], color=MODE_COLORS[mode], marker=MODE_MARKERS[mode],
+                       linewidth=2, markersize=5, label=MODE_LABELS[mode])
+                for mode in MODES
+            ]
+            percentile_handles = [
+                Line2D([0], [0], color="#333333", linestyle=PERCENTILE_STYLE[pct],
+                       linewidth=2, label=pct)
+                for pct in ("p50", "p99")
+            ]
+            fig.legend(mode_handles, [handle.get_label() for handle in mode_handles],
+                       title="Mode", loc="upper center", bbox_to_anchor=(0.27, 0.995),
+                       ncol=2, frameon=False, fontsize=8.5, title_fontsize=8.5,
+                       columnspacing=1.2, handletextpad=0.5)
+            fig.legend(percentile_handles,
+                       [handle.get_label() for handle in percentile_handles],
+                       title="Percentile", loc="upper center",
+                       bbox_to_anchor=(0.75, 0.995), ncol=2, frameon=False,
+                       fontsize=8.5, title_fontsize=8.5, columnspacing=1.2,
+                       handletextpad=0.5)
+            fig.tight_layout(rect=(0, 0, 1, 0.89), w_pad=2.8)
+            fig.text(0.5, 0.06, "YCSB A", ha="center", va="center",
+                     fontsize=9, fontweight="semibold")
+        else:
+            for ax in axes:
+                ax.legend(frameon=False, fontsize=8)
+            fig.suptitle("H1: per-operation latency, autocommit vs. SI transaction")
+            finalize_layout(fig)
         for ext in ("pdf", "png"):
             fig.savefig(out_dir / f"h1_latency.{ext}", dpi=150)
         plt.close(fig)
