@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import dataclasses
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -16,6 +17,64 @@ import sys
 import threading
 from pathlib import Path
 from typing import Optional
+
+
+def _jdk_candidates() -> list[Path]:
+    """Return likely JDK homes, preferring the JDK 21 package installed by setup."""
+    candidates: list[Path] = []
+    override = os.environ.get("BATSTORE_JAVA_HOME")
+    if override:
+        candidates.append(Path(override))
+    candidates.extend(sorted(Path("/usr/lib/jvm").glob("java-21-openjdk-*")))
+    if os.environ.get("JAVA_HOME"):
+        candidates.append(Path(os.environ["JAVA_HOME"]))
+    javac = shutil.which("javac")
+    if javac:
+        candidates.append(Path(javac).resolve().parent.parent)
+    candidates.extend(sorted(Path("/usr/lib/jvm").glob("java-*-openjdk-*")))
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve(strict=False)
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(resolved)
+    return unique
+
+
+def jdk_21_env() -> dict[str, str]:
+    """Build an environment that makes Maven run with a Java 21+ JDK.
+
+    Maven gives JAVA_HOME precedence over the system alternatives. In particular, an
+    old JAVA_HOME inherited by setup can make Maven use an older Java even immediately
+    after openjdk-21-jdk-headless was installed.
+    """
+    checked: list[str] = []
+    for home in _jdk_candidates():
+        javac = home / "bin" / "javac"
+        try:
+            result = subprocess.run(
+                [str(javac), "-version"], capture_output=True, text=True, check=False,
+            )
+        except OSError as exc:
+            checked.append(f"{home} ({exc})")
+            continue
+        version_text = (result.stdout + result.stderr).strip()
+        match = re.search(r"javac\s+(\d+)(?:\.|$)", version_text)
+        if result.returncode == 0 and match and int(match.group(1)) >= 21:
+            env = os.environ.copy()
+            env["JAVA_HOME"] = str(home)
+            env["PATH"] = str(home / "bin") + os.pathsep + env.get("PATH", "")
+            return env
+        checked.append(f"{home} ({version_text or 'javac unavailable'})")
+
+    details = "; ".join(checked) if checked else "no candidate JDK installations found"
+    raise RuntimeError(
+        "BenchBase requires a JDK version 21 or newer, but setup could not find one. "
+        "Install openjdk-21-jdk-headless or set BATSTORE_JAVA_HOME to a suitable JDK "
+        f"directory. Checked: {details}"
+    )
 
 # Every sibling-repo checkout this harness drives lives under one workspace, rooted at
 # wherever setup_environment.py was invoked FROM - not a hardcoded absolute path - so the
