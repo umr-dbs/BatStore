@@ -7,12 +7,14 @@ not individual table scans; percentiles pool completed queries across callers.
 For every point, also report committed New-Orders/sec from the OLTP side.
 "Low latency" needs an application-specific threshold; none is assumed here.
 
-The main experiment uses 16 warehouses and stops at 32 OLTP terminals.  This
-reduces warehouse/district hot-row contention without turning the headline
-result into a severe CPU-oversubscription and memory-pressure experiment.
+The main experiment starts with at least 16 warehouses.  Once the OLTP terminal
+count exceeds that floor, the warehouse count grows one-for-one with terminals.
+This avoids introducing progressively worse warehouse/district hot-row
+contention while keeping the scale factor considerably smaller than preserving
+the 16-warehouse/2-terminal ratio at every point.
 
-The shared parallel scan pool is fixed at 12 workers by default so concurrency
-is the only scheduling variable.  Caller count is not total OS thread count.
+The shared parallel scan pool is fixed at 12 workers by default so it does not
+silently grow with concurrency.  Caller count is not total OS thread count.
 
 For the scale-factor control, run the representative 4/16/32 points once at
 each warehouse count (every other option remains identical):
@@ -47,7 +49,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--output-root", default="h5_results")
     p.add_argument("--workload", default="htap_q1", choices=list(common.HTAP_CANONICAL_WORKLOADS))
-    p.add_argument("--warehouses", type=positive_int, default=DEFAULT_WAREHOUSES)
+    p.add_argument("--warehouses", type=positive_int, default=DEFAULT_WAREHOUSES,
+                   help=(f"minimum warehouse count for the main sweep (default: {DEFAULT_WAREHOUSES}); "
+                         "each point uses max(this value, OLTP terminals)"))
     p.add_argument("--duration", type=positive_int, default=60)
     p.add_argument("--oltp-terminals", default=",".join(str(t) for t in DEFAULT_OLTP_TERMINALS),
                    help="Experiment B (H5): OLTP terminal counts to sweep, OLAP threads fixed by --fixed-olap-threads")
@@ -66,23 +70,38 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def warehouses_for_terminals(minimum_warehouses: int, terminals: int) -> int:
+    """Keep a stable scale floor, then provide at least one warehouse per terminal."""
+    return max(minimum_warehouses, terminals)
+
+
 def main() -> None:
     args = parse_args()
     set_compact(args.compact)
     if args.warehouse_sensitivity:
         warehouse_list = thread_counts(args.sensitivity_warehouses)
         oltp_terminal_list = thread_counts(args.sensitivity_terminals)
+        run_points = [(warehouses, terminals)
+                      for warehouses in warehouse_list for terminals in oltp_terminal_list]
     else:
-        warehouse_list = [args.warehouses]
         oltp_terminal_list = thread_counts(args.oltp_terminals)
+        warehouse_schedule = {
+            terminals: warehouses_for_terminals(args.warehouses, terminals)
+            for terminals in oltp_terminal_list
+        }
+        warehouse_list = list(dict.fromkeys(warehouse_schedule.values()))
+        run_points = [(warehouse_schedule[terminals], terminals)
+                      for terminals in oltp_terminal_list]
     if not args.skip_build:
         batstore.ensure_built()
     run_dir = Path(args.output_root).resolve() / f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}"
     varies = (f"warehouses={warehouse_list}, OLTP terminals={oltp_terminal_list}"
-              if args.warehouse_sensitivity else f"OLTP terminals={oltp_terminal_list}")
-    fixed_warehouses = "varied" if args.warehouse_sensitivity else str(args.warehouses)
+              if args.warehouse_sensitivity else
+              f"OLTP terminals={oltp_terminal_list}, warehouses_by_terminal={warehouse_schedule}")
+    warehouse_description = ("varied independently" if args.warehouse_sensitivity else
+                             f"max({args.warehouses}, OLTP terminals)")
     record_setup(run_dir, "H5", args, varies=varies,
-                 fixed=f"OLAP callers={args.fixed_olap_threads}, query={args.workload}, warehouses={fixed_warehouses}, duration={args.duration}s, GC={args.gc}, scan pool={args.scan_pool_workers}",
+                 fixed=f"OLAP callers={args.fixed_olap_threads}, query={args.workload}, warehouse rule={warehouse_description}, duration={args.duration}s, GC={args.gc}, scan pool={args.scan_pool_workers}",
                  measures="committed New-Order throughput and per-query OLAP latency p50/p95/p99 across completed queries")
     manifest_path = run_dir / "manifest.csv"
     common.write_manifest_header(manifest_path)
@@ -94,39 +113,41 @@ def main() -> None:
             "olap_avg_us", "olap_query_count",
         ])
 
-    # OLTP terminals are the only independent variable in the main experiment. The
-    # OLAP caller count and shared scan-pool size remain fixed at every point.
+    # OLTP terminals are the independent variable in the main experiment. Warehouse
+    # scale follows the documented rule; OLAP callers and scan-pool size remain fixed.
     measurements_by_warehouse = {}
-    for warehouses in warehouse_list:
-        measurements = {}
-        for terminals in oltp_terminal_list:
-            out_dir = (run_dir / "h5_fixed_olap_vs_oltp_terminals" /
-                       f"warehouses_{warehouses}" / f"terminals_{terminals}")
-            result = run_point(args.workload, warehouses, terminals, args.fixed_olap_threads,
-                               args.duration, args.gc, out_dir, scan_pool_workers=args.scan_pool_workers)
-            result.config_label = f"{result.config_label} terminals={terminals}"
-            common.append_manifest_row(manifest_path, result)
-            check_run(result, out_dir)
-            check_scan_samples(result, out_dir)
-            measurements[terminals] = {
-                "throughput": result.primary_metric_value,
-                "p50": result.scan_p50_us, "p95": result.scan_p95_us,
-                "p99": result.scan_p99_us, "avg": result.scan_avg_us,
-                "count": result.scan_count,
-            }
-            with summary_path.open("a", newline="") as f:
-                csv.writer(f).writerow([
-                    warehouses, terminals, args.fixed_olap_threads,
-                    f"{result.primary_metric_value:.3f}", f"{result.scan_p50_us:.2f}",
-                    f"{result.scan_p95_us:.2f}", f"{result.scan_p99_us:.2f}",
-                    f"{result.scan_avg_us:.2f}", result.scan_count,
-                ])
-            status = result.notes or "OK"
-            print(f"[H5] warehouses={warehouses:2d} terminals={terminals:3d}  "
-                  f"oltp={result.primary_metric_value:10.2f} {result.primary_metric_name}  "
-                  f"query p50={result.scan_p50_us:9.1f}us  p95={result.scan_p95_us:9.1f}us  "
-                  f"p99={result.scan_p99_us:9.1f}us  [{status}]")
-        measurements_by_warehouse[warehouses] = measurements
+    main_measurements = {}
+    for warehouses, terminals in run_points:
+        out_dir = (run_dir / "h5_fixed_olap_vs_oltp_terminals" /
+                   f"warehouses_{warehouses}" / f"terminals_{terminals}")
+        result = run_point(args.workload, warehouses, terminals, args.fixed_olap_threads,
+                           args.duration, args.gc, out_dir, scan_pool_workers=args.scan_pool_workers)
+        result.config_label = f"{result.config_label} terminals={terminals}"
+        common.append_manifest_row(manifest_path, result)
+        check_run(result, out_dir)
+        check_scan_samples(result, out_dir)
+        measurement = {
+            "warehouses": warehouses,
+            "throughput": result.primary_metric_value,
+            "p50": result.scan_p50_us, "p95": result.scan_p95_us,
+            "p99": result.scan_p99_us, "avg": result.scan_avg_us,
+            "count": result.scan_count,
+        }
+        measurements_by_warehouse.setdefault(warehouses, {})[terminals] = measurement
+        if not args.warehouse_sensitivity:
+            main_measurements[terminals] = measurement
+        with summary_path.open("a", newline="") as f:
+            csv.writer(f).writerow([
+                warehouses, terminals, args.fixed_olap_threads,
+                f"{result.primary_metric_value:.3f}", f"{result.scan_p50_us:.2f}",
+                f"{result.scan_p95_us:.2f}", f"{result.scan_p99_us:.2f}",
+                f"{result.scan_avg_us:.2f}", result.scan_count,
+            ])
+        status = result.notes or "OK"
+        print(f"[H5] warehouses={warehouses:3d} terminals={terminals:3d}  "
+              f"oltp={result.primary_metric_value:10.2f} {result.primary_metric_name}  "
+              f"query p50={result.scan_p50_us:9.1f}us  p95={result.scan_p95_us:9.1f}us  "
+              f"p99={result.scan_p99_us:9.1f}us  [{status}]")
 
     print(f"\nmanifest : {manifest_path}")
     print(f"summary  : {summary_path}")
@@ -136,8 +157,8 @@ def main() -> None:
             args.fixed_olap_threads, run_dir / "plots",
         )
     else:
-        plot(oltp_terminal_list, measurements_by_warehouse[args.warehouses],
-             args.fixed_olap_threads, run_dir / "plots")
+        plot(oltp_terminal_list, main_measurements, args.fixed_olap_threads,
+             run_dir / "plots")
 
 
 def plot(oltp_terminal_list, measurements, fixed_olap_threads, out_dir: Path) -> None:
@@ -163,7 +184,7 @@ def plot(oltp_terminal_list, measurements, fixed_olap_threads, out_dir: Path) ->
     ax_latency.grid(axis="y", alpha=0.3)
     ax_latency.legend(frameon=False)
 
-    fig.suptitle("H5: Fixed OLAP workers, increasing OLTP concurrency")
+    fig.suptitle("H5: Fixed OLAP workers, increasing OLTP concurrency and warehouse scale")
     finalize_layout(fig)
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h5_oltp_throughput_and_olap_latency.{ext}", dpi=150)

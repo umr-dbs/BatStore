@@ -36,9 +36,10 @@ of compare_engines.py's thread sweep) are split by workload group rather than on
 figure or one-file-per-workload: threads_sweep_tpcc.svg (TPC-C, its own figure),
 threads_sweep_ycsb.svg (ONE figure, all loaded YCSB A-F workloads as subplots, so the
 whole YCSB sweep reads off a single file), and GC-specific HTAP files such as
-threads_sweep_htap_q1_gc_on.svg and threads_sweep_htap_q1_gc_off.svg. Each HTAP
-figure has separate OLTP-throughput and OLAP-throughput panels, and GC states are never
-overlaid; see plot_throughput_vs_threads_htap's docstring.
+threads_sweep_htap_q1_gc_on.svg and threads_sweep_htap_q1_gc_off.svg. HTAP metrics are
+written as separate, consistently sized figures: OLTP throughput, analytical query rate,
+and p50/p95/p99 analytical latency. GC states are never overlaid; see
+plot_throughput_vs_threads_htap's docstring.
 
 Requires: pandas, matplotlib (see requirements.txt).
 """
@@ -372,14 +373,15 @@ def plot_throughput_vs_threads_ycsb(manifest: pd.DataFrame, out_dir: Path):
 
 
 def plot_throughput_vs_threads_htap(manifest: pd.DataFrame, out_dir: Path):
-    """HTAP: one figure per query and GC state, with separate OLTP/OLAP panels.
+    """HTAP: clean, standalone H4-style sweeps for every measured metric.
 
     The comparison harness sweeps the number of OLTP terminals while keeping
     ``htap_olap_threads`` fixed. Consequently, x is the manifest's ``threads`` value,
     OLTP throughput is the normalized primary metric (New-Order/sec), and aggregate OLAP
     throughput is the number of completed Q1/Q6 scans divided by measured run duration.
-    Separate panels avoid forcing these differently-scaled metrics onto a misleading
-    shared y-axis.
+    Each metric gets its own 8x5 figure so differently-scaled measurements are not forced
+    into a wide two-panel layout. Cross-engine values use a log scale because these runs
+    commonly span multiple orders of magnitude.
     """
     for workload in HTAP_WORKLOADS:
         df = manifest[manifest["workload"] == workload].copy()
@@ -388,27 +390,53 @@ def plot_throughput_vs_threads_htap(manifest: pd.DataFrame, out_dir: Path):
             continue
         for gc_choice, gc_df in _gc_plot_slices(df):
             gc_df = gc_df.copy()
+            query_label = {
+                "htap_q1": "Q1",
+                "htap_q6": "Q6",
+                "htap_q1_variant": "Q1 variant",
+                "htap_q6_variant": "Q6 variant",
+            }[workload]
             duration = pd.to_numeric(
                 gc_df["duration_secs"], errors="coerce",
             ).replace(0, float("nan"))
             gc_df["olap_queries_per_sec"] = (
                 pd.to_numeric(gc_df["scan_count"], errors="coerce") / duration
             )
+            for percentile in ("p50", "p95", "p99"):
+                source = f"scan_{percentile}_us"
+                gc_df[f"olap_latency_{percentile}_s"] = (
+                    pd.to_numeric(gc_df[source], errors="coerce") / 1_000_000.0
+                )
 
-            fig, (ax_oltp, ax_olap) = plt.subplots(1, 2, figsize=(12, 5.5))
-            _plot_engine_lines(ax_oltp, gc_df)
-            _plot_engine_lines(ax_olap, gc_df, "olap_queries_per_sec")
+            def save_metric(value_col: str, ylabel: str, title: str, filename: str) -> None:
+                fig, ax = plt.subplots(figsize=(8, 5))
+                _plot_engine_lines(ax, gc_df, value_col)
+                ax.set_xlabel("OLTP terminals")
+                ax.set_ylabel(ylabel)
+                ax.set_title(f"H5 ({query_label}): {title} (GC {gc_choice})")
+                ax.set_yscale("log")
+                ax.legend(fontsize=8, frameon=False)
+                _save(fig, out_dir, filename)
 
-            ax_oltp.set_ylabel("New-Order transactions / sec")
-            ax_oltp.set_title("OLTP throughput")
-            ax_olap.set_ylabel("Completed analytical queries / sec")
-            ax_olap.set_title("OLAP throughput")
-            ax_oltp.legend(fontsize=8)
-            ax_olap.legend(fontsize=8)
-            fig.suptitle(
-                f"{workload}: HTAP throughput vs. number of OLTP threads (GC {gc_choice})"
+            save_metric(
+                "primary_metric_value",
+                "New-Order transactions / sec",
+                "OLTP throughput vs. OLTP terminal count",
+                f"threads_sweep_{workload}_gc_{gc_choice}",
             )
-            _save(fig, out_dir, f"threads_sweep_{workload}_gc_{gc_choice}")
+            save_metric(
+                "olap_queries_per_sec",
+                "Completed analytical queries / sec",
+                "analytical query rate vs. OLTP terminal count",
+                f"olap_rate_sweep_{workload}_gc_{gc_choice}",
+            )
+            for percentile in ("p50", "p95", "p99"):
+                save_metric(
+                    f"olap_latency_{percentile}_s",
+                    f"{percentile} analytical query latency (sec)",
+                    f"{percentile} analytical latency vs. OLTP terminal count",
+                    f"latency_sweep_{workload}_{percentile}_gc_{gc_choice}",
+                )
 
 
 def plot_gc_comparison(manifest: pd.DataFrame, ref_threads: int, out_dir: Path):
