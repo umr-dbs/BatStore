@@ -44,8 +44,12 @@ class HypothesesTests(unittest.TestCase):
             if number == 5:
                 with next(Path(tmp).rglob("h5_summary.csv")).open() as f:
                     rows = list(csv.DictReader(f))
-                self.assertEqual([int(row["oltp_terminals"]) for row in rows], [1, 4])
-                self.assertEqual({int(row["fixed_olap_threads"]) for row in rows}, {2})
+                self.assertEqual([int(row["oltp_terminals"]) for row in rows],
+                                 [scale.tpcc_terminals for _, scale in calls])
+                self.assertEqual([int(row["warehouses"]) for row in rows],
+                                 [scale.tpcc_warehouses for _, scale in calls])
+                self.assertEqual({int(row["fixed_olap_threads"]) for row in rows},
+                                 {scale.htap_olap_threads for _, scale in calls})
                 self.assertEqual({float(row["new_order_per_sec"]) for row in rows}, {100.0})
             if number == 6:
                 with next(Path(tmp).rglob("h6_gc_stats.csv")).open() as f:
@@ -72,8 +76,13 @@ class HypothesesTests(unittest.TestCase):
 
     def test_h5_only_transactional_sweep(self):
         calls = self.exercise(5, ["--oltp-terminals", "1,4", "--fixed-olap-threads", "2"])
-        self.assertEqual([(s.tpcc_terminals, s.htap_olap_threads) for _, s in calls],
-                         [(1,2), (4,2)])
+        self.assertEqual([(s.tpcc_warehouses, s.tpcc_terminals, s.htap_olap_threads)
+                          for _, s in calls], [(16,1,2), (16,4,2)])
+
+    def test_h5_warehouses_scale_with_transactional_threads(self):
+        calls = self.exercise(5, ["--warehouses", "4", "--oltp-terminals", "2,8,32"])
+        self.assertEqual([(s.tpcc_warehouses, s.tpcc_terminals) for _, s in calls],
+                         [(4,2), (8,8), (32,32)])
 
     def test_h6_excludes_load(self):
         self.exercise(6, ["--threads", "1,4"])

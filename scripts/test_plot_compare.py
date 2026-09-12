@@ -13,6 +13,41 @@ import plot_compare
 
 
 class AffinityPlotTests(unittest.TestCase):
+    def test_htap_sweep_uses_clean_single_metric_figures(self):
+        rows = []
+        for engine, scale in (("batstore", 100.0), ("postgres", 1.0)):
+            for threads in (1, 4):
+                rows.append(dict(
+                    engine=engine, workload="htap_q1", threads=threads,
+                    affinity="off", gc_enabled="on", failed=False,
+                    primary_metric_name="new_order_per_sec",
+                    primary_metric_value=scale * threads,
+                    duration_secs=60.0, scan_count=120,
+                    scan_p50_us=scale * 1_000,
+                    scan_p95_us=scale * 2_000,
+                    scan_p99_us=scale * 3_000,
+                ))
+        manifest = pd.DataFrame(rows)
+        with patch.object(plot_compare, "_save") as save:
+            plot_compare.plot_throughput_vs_threads_htap(manifest, Path("unused"))
+            self.assertEqual(save.call_count, 5)
+            self.assertEqual(
+                [call.args[2] for call in save.call_args_list],
+                [
+                    "threads_sweep_htap_q1_gc_on",
+                    "olap_rate_sweep_htap_q1_gc_on",
+                    "latency_sweep_htap_q1_p50_gc_on",
+                    "latency_sweep_htap_q1_p95_gc_on",
+                    "latency_sweep_htap_q1_p99_gc_on",
+                ],
+            )
+            for call in save.call_args_list:
+                fig = call.args[0]
+                self.assertEqual(len(fig.axes), 1)
+                self.assertEqual(fig.axes[0].get_xlabel(), "OLTP terminals")
+                self.assertEqual(fig.axes[0].get_yscale(), "log")
+                plt.close(fig)
+
     def test_affinity_sweep_keeps_distinct_curves_and_shared_baseline(self):
         rows = []
         for threads in (2, 4):

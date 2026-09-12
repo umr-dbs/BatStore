@@ -17,7 +17,7 @@ unless the binary has the correct features for that experiment.
 | `h2.py` | Access skew: scrambled Zipfian theta uniform,0.1,0.4,0.8,0.99,1.4 at 1,8,16,32,48,64,80,96,112,128 threads; 2M records, 20s per point. Separate plots per thread count. |
 | `h3.py` | Historical scan performance: one fixed snapshot repeatedly scanned over 600s, grouped into 12 snapshot-age windows; 8 warehouses, 2 OLTP terminals, 1 scan thread. Historic retention overrides GC and prevents commit-log truncation. |
 | `h4.py` | Increasing analytical concurrency: 0,1,2,4,8,16,32,48,64,80,96,112,128 OLAP threads, 4 fixed OLTP terminals, 8 warehouses, 60s per point. Always includes a zero-scan baseline. |
-| `h5.py` | Increasing transactional concurrency: 1,2,4,8,16,32,48,64,80,96,112,128 OLTP terminals, 2 fixed OLAP threads, 8 warehouses, 60s per point. Reports scan p50/p95/p99. |
+| `h5.py` | Increasing transactional concurrency: 1,2,4,8,16,32,48,64,80,96,112,128 OLTP terminals, 2 fixed OLAP threads, and `max(16, terminals)` warehouses, 60s per point. Reports OLTP throughput and scan p50/p95/p99. |
 | `h6.py` | Memory reuse: 1,2,4,8,16,32,48,64,80,96,112,128 threads, YCSB A, 200k records, 60s per point. Subtracts post-load counters from final counters. |
 
 H2 and H3 used to have the opposite numbering. H4 no longer also runs H5.
