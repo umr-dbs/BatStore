@@ -66,7 +66,11 @@ pub fn is_visible(
 
     let index = stamp.worker_id() as usize;
 
-    if cache.lcb[index] > stamp.ts_start() {
+    if cache.snapshot_versions[index] > reader_ts_start {
+        cache.lcb[index] = commit_logs[index].lcb(reader_ts_start);
+        cache.snapshot_versions[index] = reader_ts_start;
+    }
+    else if cache.lcb[index] > stamp.ts_start() {
         return true; // cache hit: already known-visible
     }
 
