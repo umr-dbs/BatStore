@@ -564,7 +564,7 @@ def step_postgres() -> None:
     # and the connection probe below would fail before the normal tmpfs step at the end of
     # setup got a chance to restore it. Recover that known state first.
     real_datadir = _pg_data_directory()
-    if real_datadir.is_symlink() and not (PG_TMPFS_DATA_DIR / "PG_VERSION").exists():
+    if real_datadir.is_symlink() and not _postgres_file_exists(PG_TMPFS_DATA_DIR / "PG_VERSION"):
         log("PostgreSQL tmpfs data vanished after reboot; restoring it before server setup")
         step_postgres_tmpfs()
 
@@ -706,6 +706,16 @@ def _pg_data_directory() -> Path:
     return Path(_pg_cluster()[5])
 
 
+def _postgres_file_exists(path: Path) -> bool:
+    """Check a postgres-owned file without traversing its mode-0700 directory as the
+    invoking user."""
+    return subprocess.run(
+        ["sudo", "-u", "postgres", "test", "-f", str(path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
 def step_postgres_tmpfs() -> None:
     """Moves the real PostgreSQL server's data directory onto tmpfs (PG_TMPFS_DATA_DIR,
     under common.SCRATCH_ROOT - the same tmpfs-verified root every other engine's data now
@@ -742,10 +752,7 @@ def step_postgres_tmpfs() -> None:
     backup_dir = real_datadir.with_name(real_datadir.name + ".diskbackup")
 
     already_linked = real_datadir.is_symlink() and real_datadir.resolve() == PG_TMPFS_DATA_DIR.resolve()
-    tmpfs_populated = subprocess.run(
-        ["sudo", "-u", "postgres", "test", "-f",
-         str(PG_TMPFS_DATA_DIR / "PG_VERSION")]
-    ).returncode == 0
+    tmpfs_populated = _postgres_file_exists(PG_TMPFS_DATA_DIR / "PG_VERSION")
 
     # Running the whole script through sudo makes mkdir(parents=True) create the shared
     # scratch root as root. Restore the actual invoking user's ownership so subsequent
@@ -793,7 +800,7 @@ def step_postgres_tmpfs() -> None:
     if not backup_dir.exists():
         sys.exit(f"{backup_dir} (the on-disk backup) doesn't exist - can't restore tmpfs from it.")
 
-    if not (PG_TMPFS_DATA_DIR / "PG_VERSION").exists():
+    if not tmpfs_populated:
         log(f"Populating {PG_TMPFS_DATA_DIR} (tmpfs) from {backup_dir}")
         PG_TMPFS_DATA_DIR.mkdir(parents=True, exist_ok=True)
         run(["sudo", "rsync", "-a", "--delete", f"{backup_dir}/", f"{PG_TMPFS_DATA_DIR}/"])
