@@ -1,0 +1,68 @@
+--- a/frontend/tpc-c/wiredtiger_tpcc.cpp
++++ b/frontend/tpc-c/wiredtiger_tpcc.cpp
+@@ -11,6 +11,7 @@
+ // -------------------------------------------------------------------------------------
+ 
+ #include <chrono>
++#include <fstream>
+ #include <iostream>
+ #include <string>
+ #include <thread>
+@@ -29,6 +30,7 @@
+ DEFINE_uint64(ch_a_rounds, 1, "");
+ DEFINE_uint64(ch_a_query, 2, "");
+ DEFINE_uint64(ch_a_start_delay_sec, 0, "");
++DEFINE_bool(h3_historic, false, "hold one snapshot and repeatedly scan every TPC-C table");
+ // -------------------------------------------------------------------------------------
+ DEFINE_bool(print_header, true, "");
+ // -------------------------------------------------------------------------------------
+@@ -119,6 +121,49 @@
+          tpcc.prepare();
+          wiredtiger_db.commitTX();
+          // -------------------------------------------------------------------------------------
++         if (FLAGS_h3_historic) {
++            wiredtiger_db.startTX();
++            ofstream scan_file("tpcc_scan.csv", ios::trunc);
++            scan_file << "mode,elapsed_secs,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary,staleness_versions\n";
++            const auto run_start = chrono::steady_clock::now();
++            u64 expected_tuples = 0;
++            bool first_scan = true;
++            while (keep_running) {
++               const auto scan_start = chrono::steady_clock::now();
++               u64 scanned = 0;
++               auto count_row = [&](const auto&, const auto&) { scanned++; return true; };
++               warehouse.scan(warehouse_t::Key{}, count_row, [] {});
++               district.scan(district_t::Key{}, count_row, [] {});
++               customer.scan(customer_t::Key{}, count_row, [] {});
++               history.scan(history_t::Key{}, count_row, [] {});
++               neworder.scan(neworder_t::Key{}, count_row, [] {});
++               order.scan(order_t::Key{}, count_row, [] {});
++               orderline.scan(orderline_t::Key{}, count_row, [] {});
++               item.scan(item_t::Key{}, count_row, [] {});
++               stock.scan(stock_t::Key{}, count_row, [] {});
++               if (first_scan) {
++                  expected_tuples = scanned;
++                  first_scan = false;
++               } else if (scanned != expected_tuples) {
++                  cerr << "historic snapshot cardinality changed" << endl;
++                  abort();
++               }
++               const auto latency_ns = chrono::duration_cast<chrono::nanoseconds>(
++                  chrono::steady_clock::now() - scan_start).count();
++               const double elapsed = chrono::duration<double>(scan_start - run_start).count();
++               const double tuples_per_sec = latency_ns ? scanned * 1e9 / latency_ns : 0.0;
++               // WiredTiger exposes timestamp snapshots only when applications assign commit
++               // timestamps. This adapter does not, so the stable reader is identified by a
++               // constant local token; transaction lifetime is the actual invariant.
++               scan_file << "historic_full_scan," << elapsed << ',' << elapsed
++                         << ",1," << scanned << ',' << latency_ns << ',' << tuples_per_sec
++                         << ",,0\n";
++            }
++            wiredtiger_db.commitTX();
++            running_threads_counter--;
++            return;
++         }
++         // -------------------------------------------------------------------------------------
+          if (FLAGS_ch_a_start_delay_sec) {
+             sleep(FLAGS_ch_a_start_delay_sec);
+          }
