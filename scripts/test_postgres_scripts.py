@@ -97,6 +97,24 @@ class PostgresSetupTests(unittest.TestCase):
         self.assertEqual(setup_environment._postgres_identifier('a"b'), '"a""b"')
         self.assertEqual(setup_environment._postgres_literal("p'ass"), "'p''ass'")
 
+    def test_postgres_owned_file_check_runs_as_postgres(self):
+        path = Path("/restricted/postgresql_data/PG_VERSION")
+        completed = subprocess.CompletedProcess([], 0)
+        with patch.object(subprocess, "run", return_value=completed) as run:
+            self.assertTrue(setup_environment._postgres_file_exists(path))
+        run.assert_called_once_with(
+            ["sudo", "-u", "postgres", "test", "-f", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def test_postgres_owned_file_check_reports_missing(self):
+        completed = subprocess.CompletedProcess([], 1)
+        with patch.object(subprocess, "run", return_value=completed):
+            self.assertFalse(
+                setup_environment._postgres_file_exists(Path("/restricted/PG_VERSION"))
+            )
+
 
 class SetupModeTests(unittest.TestCase):
     STEP_FUNCTIONS = (
