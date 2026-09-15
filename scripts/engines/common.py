@@ -114,8 +114,13 @@ PG_ROLE = os.environ.get("PG_ROLE", "admin")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "password")
 PG_DATABASE = os.environ.get("PG_DATABASE", "benchbase")
 # Shared by setup and runtime verification. Allow headroom for TPC-C's tmpfs
-# database/WAL storage, which is charged to the service along with server memory.
-POSTGRES_MEMORY_BUDGET_GIB = float(os.environ.get("POSTGRES_MEMORY_BUDGET_GIB", "16"))
+# database/WAL storage, which is charged to the service along with server memory. Unlike
+# dram_gib_for's per-run sizing for every other engine, this is a single fixed budget
+# applied once at setup time (see setup_environment.py::step_postgres) - it must cover the
+# largest scale any sweep will reach, or the cgroup OOM-kills the postmaster partway
+# through a sweep (confirmed: h5.sh's htap_q1/q6 sweep up to warehouses=240 needs
+# dram_gib=96 - the old 16GiB default died on every point from warehouses=64 onward).
+POSTGRES_MEMORY_BUDGET_GIB = float(os.environ.get("POSTGRES_MEMORY_BUDGET_GIB", "100"))
 
 # umbradb/umbra (see engines/umbra_benchbase.py) - a research OLTP+OLAP engine from TUM's
 # database group (db.in.tum.de) that speaks the PostgreSQL wire protocol, so it can be

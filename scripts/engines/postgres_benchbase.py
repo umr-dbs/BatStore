@@ -295,7 +295,7 @@ def _verify_postmaster_numa_binding() -> int:
     and memory-node masks are exactly the node used for every embedded engine."""
     pid = _find_postmaster_pid()
     if pid is None:
-        sys.exit("cannot locate the PostgreSQL postmaster; is the cluster running?")
+        raise RuntimeError("cannot locate the PostgreSQL postmaster; is the cluster running?")
     status: dict[str, str] = {}
     for line in Path(f"/proc/{pid}/status").read_text().splitlines():
         if ":" in line:
@@ -305,7 +305,7 @@ def _verify_postmaster_numa_binding() -> int:
     actual_cpus = common.expand_cpu_list(status.get("Cpus_allowed_list", ""))
     actual_nodes = common.expand_cpu_list(status.get("Mems_allowed_list", ""))
     if actual_cpus != expected_cpus or actual_nodes != {common.NUMA_NODE}:
-        sys.exit(
+        raise RuntimeError(
             f"PostgreSQL postmaster PID {pid} is not pinned to NUMA node {common.NUMA_NODE}: "
             f"Cpus_allowed_list={status.get('Cpus_allowed_list')!r}, "
             f"Mems_allowed_list={status.get('Mems_allowed_list')!r}; expected CPUs "
@@ -500,7 +500,7 @@ def _verify_benchmark_configuration(
                 errors.append(f"{filename}={actual!r} (expected {expected})")
 
     if errors:
-        sys.exit(
+        raise RuntimeError(
             "PostgreSQL benchmark tuning is not active:\n  - "
             + "\n  - ".join(errors)
             + "\nRe-run `python3 scripts/setup_environment.py --postgres-only` "
@@ -523,7 +523,7 @@ def _verify_tmpfs_datadir() -> None:
     data_dir = Path(_psql_scalar("SHOW data_directory;"))
     fstype = common._mount_fstype(data_dir)
     if fstype != "tmpfs":
-        sys.exit(
+        raise RuntimeError(
             f"PostgreSQL's data_directory ({data_dir}) is not tmpfs-backed (fstype={fstype!r}) - "
             f"refusing to run, since every other engine in this harness is guaranteed "
             f"in-memory-only (see common.fresh_scratch_dir). Run "
