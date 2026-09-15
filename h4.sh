@@ -1,0 +1,11 @@
+python3 scripts/compare_engines.py \
+  --engines batstore,wiredtiger,postgres,libmdbx \
+  --workloads htap_q1,htap_q6 \
+  --threads 1,2,4,8,16,32,48,64,80,96,112,128 \
+  --htap-olap-threads 2 \
+  --warehouses 16 \
+  --tpcc-duration 60 \
+  --affinity off \
+  --gc on \
+  --scan-pool-workers 12 \
+  --output-root h5_cross_engine_results
