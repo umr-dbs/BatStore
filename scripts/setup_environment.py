@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -577,15 +578,35 @@ def step_postgres() -> None:
                  "-tAc", "SELECT 1"]
     probe = subprocess.run(probe_cmd, capture_output=True, text=True)
     if probe.returncode != 0:
-        log("PostgreSQL is not accepting connections; starting the service")
-        run(["sudo", "systemctl", "start", "postgresql"])
-        probe = subprocess.run(probe_cmd, capture_output=True, text=True)
-        if probe.returncode != 0:
-            sys.exit(
-                "PostgreSQL was started but is still not accepting local connections:\n"
-                f"{probe.stderr.strip()}\n"
-                "Check `sudo systemctl status postgresql` and the PostgreSQL log."
-            )
+        # `systemctl start postgresql` targets only the top-level wrapper unit, which
+        # Debian's postgresql.service considers "active (exited)" for good the moment any
+        # cluster has ever started - restarting it is a no-op and never touches the actual
+        # per-cluster instance unit (postgresql@<ver>-<cluster>.service). If that instance
+        # has since failed (confirmed: a benchmark run's cgroup MemoryMax OOM-killed it),
+        # it stays down forever with the probe failing identically on every re-run unless
+        # that specific unit is reset and restarted directly.
+        cluster = _pg_cluster()
+        pg_unit = f"postgresql@{cluster[0]}-{cluster[1]}.service"
+        log(f"PostgreSQL is not accepting connections; restarting {pg_unit}")
+        run(["sudo", "systemctl", "reset-failed", pg_unit], check=False)
+        run(["sudo", "systemctl", "restart", pg_unit])
+        # `restart` returns as soon as the unit is started, not once the server is done
+        # replaying WAL - crash recovery after an unclean stop (confirmed cause here: a
+        # benchmark's cgroup MemoryMax OOM-killing the postmaster) can take well over a
+        # minute, during which every connection is refused with "the database system is
+        # not yet accepting connections". Poll instead of failing on the first retry.
+        deadline = time.monotonic() + 120
+        while True:
+            probe = subprocess.run(probe_cmd, capture_output=True, text=True)
+            if probe.returncode == 0:
+                break
+            if time.monotonic() >= deadline:
+                sys.exit(
+                    f"PostgreSQL was restarted but is still not accepting local connections "
+                    f"after 120s:\n{probe.stderr.strip()}\n"
+                    f"Check `sudo systemctl status {pg_unit}` and the PostgreSQL log."
+                )
+            time.sleep(2)
 
     def postgres_sql(sql: str) -> subprocess.CompletedProcess:
         result = subprocess.run(
