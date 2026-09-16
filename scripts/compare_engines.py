@@ -123,6 +123,8 @@ def parse_args() -> argparse.Namespace:
                    help="fixed warehouse count for the entire sweep; with affinity on, "
                         "must be at least the largest terminal count (auto-sized if omitted)")
     p.add_argument("--tpcc-duration", type=int)
+    p.add_argument("--libmdbx-timeout", type=int,
+                   help="per-run wall-clock limit in seconds for libmdbx, including data loading")
     p.add_argument("--ycsb-records", type=int)
     p.add_argument("--ycsb-duration", type=int)
     p.add_argument("--theta", type=float)
@@ -288,6 +290,8 @@ def main() -> None:
         sys.exit("--htap-cpu-budget must be a positive integer")
     if args.scan_pool_workers is not None and args.scan_pool_workers < 0:
         sys.exit("--scan-pool-workers must be zero or a positive integer")
+    if args.libmdbx_timeout is not None and args.libmdbx_timeout <= 0:
+        sys.exit("--libmdbx-timeout must be positive")
     if scale.tpcc_warehouses <= 0 or scale.tpcc_duration <= 0:
         sys.exit("--warehouses and --tpcc-duration must be positive")
     if scale.ycsb_records <= 0 or scale.ycsb_duration <= 0:
@@ -492,6 +496,8 @@ def main() -> None:
                             # regardless of what's passed in that case.
                             if engine_name == "batstore":
                                 run_kwargs["affinity"] = affinity_variant
+                            if engine_name == "libmdbx" and args.libmdbx_timeout is not None:
+                                run_kwargs["timeout_seconds"] = args.libmdbx_timeout
                             # scan_pool_workers is a batstore.py-only kwarg (see its `run()`
                             # doc) - every other engine's run() has no such parameter. For
                             # BatStore HTAP, the dynamic CPU-budget calculation supplies it

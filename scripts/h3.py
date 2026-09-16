@@ -81,17 +81,20 @@ def run_batstore_historic_scan(warehouses: int, terminals: int, duration: int, o
                             f"see {output_dir / 'stdout.log'}")
 
 
-def run_libmdbx_historic_scan(warehouses: int, terminals: int, duration: int, output_dir: Path) -> None:
+def run_libmdbx_historic_scan(warehouses: int, terminals: int, duration: int, output_dir: Path,
+                             timeout_seconds: int | None = None) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     db_path = common.fresh_scratch_dir("libmdbx_h3_data") / "db"
     cmd = [str(libmdbx.BINARY), "mdbx_tpcc", str(warehouses), str(terminals),
            str(duration), "100000", "3000", "3000", str(db_path), "historic", "1"]
+    timeout = timeout_seconds or common.default_subprocess_timeout(duration)
     returncode, _ = common.run_and_track_rss(
         cmd, cwd=output_dir, stdout_path=output_dir / "stdout.log",
-        timeout=common.default_subprocess_timeout(duration),
+        timeout=timeout,
     )
     if returncode != 0:
-        raise RuntimeError(f"libmdbx historic TPC-C failed (returncode={returncode}); "
+        reason = f"timed out after {timeout}s" if returncode is None else f"exit={returncode}"
+        raise RuntimeError(f"libmdbx historic TPC-C failed ({reason}); "
                            f"see {output_dir / 'stdout.log'}")
 
 
@@ -284,6 +287,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--terminals", type=int, default=2,
                    help="fixed OLTP terminal count generating updates while the snapshot ages")
     p.add_argument("--duration", type=int, default=600)
+    p.add_argument("--libmdbx-timeout", type=int, default=None,
+                   help="wall-clock limit in seconds for libmdbx, including data loading")
     p.add_argument("--olap-threads", type=int, choices=[1], default=1,
                    help="one fixed snapshot to isolate the effect of snapshot age")
     p.add_argument("--buckets", type=int, default=12, help="number of equal snapshot-age windows to bucket scans into")
@@ -298,6 +303,8 @@ def parse_args() -> argparse.Namespace:
         p.error("at least one engine is required")
     if min(args.duration, args.buckets, args.warehouses, args.terminals) < 1:
         p.error("duration, buckets, warehouses and terminals must be positive")
+    if args.libmdbx_timeout is not None and args.libmdbx_timeout <= 0:
+        p.error("--libmdbx-timeout must be positive")
     return args
 
 
@@ -328,24 +335,30 @@ def main() -> None:
         "postgres": lambda out: run_postgres_historic_scan(
             args.warehouses, args.terminals, args.duration, out),
         "libmdbx": lambda out: run_libmdbx_historic_scan(
-            args.warehouses, args.terminals, args.duration, out),
+            args.warehouses, args.terminals, args.duration, out, args.libmdbx_timeout),
         "wiredtiger": lambda out: run_wiredtiger_historic_scan(
             args.warehouses, args.terminals, args.duration, out),
     }
     rows_by_engine = {}
     summaries_by_engine = {}
+    failures = {}
     for engine in args.engines:
         out_dir = run_dir / "tpcc_historic_scan" / engine
         print(f"\n[run] {ENGINE_LABELS[engine]}")
-        runners[engine](out_dir)
-        check_worker_log(out_dir)
-        rows = read_historic_scan_rows(out_dir / "tpcc_scan.csv")
-        if not rows:
-            sys.exit(f"no historic_full_scan rows found for {engine} in {out_dir / 'tpcc_scan.csv'}")
-        if len({r["snapshot"] for r in rows}) != 1:
-            sys.exit(f"{engine}: historical scans did not use one fixed snapshot")
-        if len({r["scanned_tuples"] for r in rows}) != 1:
-            sys.exit(f"{engine}: historical snapshot cardinality changed during the run")
+        try:
+            runners[engine](out_dir)
+            check_worker_log(out_dir)
+            rows = read_historic_scan_rows(out_dir / "tpcc_scan.csv")
+            if not rows:
+                raise RuntimeError(f"no historic_full_scan rows in {out_dir / 'tpcc_scan.csv'}")
+            if len({r["snapshot"] for r in rows}) != 1:
+                raise RuntimeError("historical scans did not use one fixed snapshot")
+            if len({r["scanned_tuples"] for r in rows}) != 1:
+                raise RuntimeError("historical snapshot cardinality changed during the run")
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            failures[engine] = str(exc)
+            print(f"  FAILED: {exc}", file=sys.stderr)
+            continue
         rows.sort(key=lambda r: r["elapsed_secs"])
         rows_by_engine[engine] = rows
         summaries_by_engine[engine] = bucket_rows(rows, args.duration, args.buckets)
@@ -356,14 +369,22 @@ def main() -> None:
         w = csv.writer(f)
         w.writerow(["engine", "window_start_s", "window_end_s", "count", "median_latency_us",
                     "median_tuples_per_sec", "median_scanned_tuples"])
-        for engine in args.engines:
+        for engine in rows_by_engine:
             for s in summaries_by_engine[engine]:
                 w.writerow([engine, f"{s['window_start']:.1f}", f"{s['window_end']:.1f}", s["count"],
                             f"{s['median_latency_us']:.2f}", f"{s['median_tuples_per_sec']:.2f}",
                             f"{s['median_scanned_tuples']:.1f}"])
 
     print(f"per-bucket summary : {summary_path}")
-    plot(rows_by_engine, summaries_by_engine, run_dir / "plots")
+    if rows_by_engine:
+        plot(rows_by_engine, summaries_by_engine, run_dir / "plots")
+    if failures:
+        failure_path = run_dir / "h3_failures.csv"
+        with failure_path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["engine", "error"])
+            writer.writerows(failures.items())
+        sys.exit(f"H3 incomplete: {len(failures)} engine(s) failed; see {failure_path}")
 
 
 def plot(rows_by_engine: dict, summaries_by_engine: dict, out_dir: Path) -> None:
