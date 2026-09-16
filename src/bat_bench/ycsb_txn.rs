@@ -24,7 +24,7 @@
 //! where a concurrent GC decision can't yet see this read and could reclaim
 //! a page it needs.
 
-use crate::bat_bench::ycsb_random::{random_field_patch, random_row};
+use crate::bat_bench::ycsb_random::{random_row, with_random_field_patch};
 use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbKey, YcsbScanPool, YcsbTree};
 use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
 use crate::bat_crud_model::crud_operation::CRUDOperation;
@@ -210,10 +210,9 @@ fn update_once(
             )
         };
     } else {
-        let (field, bytes) = random_field_patch(cfg);
-        match mode {
+        with_random_field_patch(cfg, |field, bytes| match mode {
             YcsbExecutionMode::Atomic => own_write_result(tree.update_with(key, |old| {
-                old.copy_with_field(field, cfg.field_length, &bytes)
+                old.copy_with_field(field, cfg.field_length, bytes)
             })),
             YcsbExecutionMode::Transaction => {
                 let worker = tree.worker_id();
@@ -221,7 +220,7 @@ fn update_once(
                 let current = point_on_tree(tree, worker, ts_start, key);
                 let result = match current {
                     CRUDOperationResult::MatchedRecords(rows) if !rows.is_empty() => {
-                        let payload = rows[0].payload.copy_with_field(field, cfg.field_length, &bytes);
+                        let payload = rows[0].payload.copy_with_field(field, cfg.field_length, bytes);
                         let (result, wrote) = update_on_tree(tree, worker, ts_start, key, payload);
                         if wrote {
                             let ts_commit = tree.commit_tx(worker);
@@ -234,7 +233,7 @@ fn update_once(
                 tree.end_snapshot(ts_start);
                 result
             }
-        }
+        })
     };
     result
 }
@@ -406,10 +405,11 @@ pub fn read_modify_write_with_execution_mode(
                         let payload = if write_all_fields {
                             random_row(cfg)
                         } else {
-                            let (field, bytes) = random_field_patch(cfg);
-                            rows[0]
-                                .payload
-                                .copy_with_field(field, cfg.field_length, &bytes)
+                            with_random_field_patch(cfg, |field, bytes| {
+                                rows[0]
+                                    .payload
+                                    .copy_with_field(field, cfg.field_length, bytes)
+                            })
                         };
                         let (result, wrote) =
                             update_on_tree(tree, worker, ts_start, key, payload);

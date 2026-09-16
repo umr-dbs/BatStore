@@ -336,26 +336,49 @@ pub fn random_row(cfg: &YcsbConfig) -> YcsbRow {
     })
 }
 
-/// Standard YCSB update (`writeallfields=false`): preserve the row and
-/// replace one uniformly selected field with new opaque bytes.
-pub fn random_field_patch(cfg: &YcsbConfig) -> (usize, Vec<u8>) {
+thread_local! {
+    // Reused across every `with_random_field_patch` call on this thread so
+    // patch generation costs zero heap allocations after the first call
+    // (was one fresh `Vec<u8>` per call - a single-field YCSB update patch
+    // is on the timed path of every non-`writeallfields` update/RMW op).
+    static FIELD_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Standard YCSB update (`writeallfields=false`): generates one uniformly
+/// selected field's replacement bytes into a thread-local scratch buffer and
+/// hands `(field_index, patch_bytes)` to `f`, which must copy what it needs
+/// out of `patch_bytes` before returning (the buffer is reused by the next
+/// call on this thread).
+pub fn with_random_field_patch<R>(cfg: &YcsbConfig, f: impl FnOnce(usize, &[u8]) -> R) -> R {
     if cfg.field_count == 0 || cfg.field_length == 0 {
-        return (0, Vec::new());
+        return f(0, &[]);
     }
-    with_fast_rng(|rng| {
-        let field = rng.random_range(0..cfg.field_count);
-        let mut bytes = vec![0; cfg.field_length];
-        fill_alphanumeric(rng, &mut bytes);
-        (field, bytes)
+    FIELD_SCRATCH.with(|scratch| {
+        let mut bytes = scratch.borrow_mut();
+        with_fast_rng(|rng| {
+            let field = rng.random_range(0..cfg.field_count);
+            bytes.resize(cfg.field_length, 0);
+            fill_alphanumeric(rng, &mut bytes);
+            f(field, &bytes)
+        })
     })
 }
 
 /// Bulk random-byte generation plus rejection mapping. A 1 KiB row now
-/// needs roughly one PRNG bulk fill rather than 1,000 `Distribution::sample`
+/// needs a handful of PRNG bulk fills rather than 1,000 `Distribution::sample`
 /// calls. Rejecting bytes >= 248 keeps all 62 characters equiprobable.
+///
+/// `scratch` is 128 bytes, not larger: the common caller asks for exactly
+/// one YCSB field (`field_length` defaults to 100), and a too-large scratch
+/// buffer means the *last* fill of a loop draws far more random bytes than
+/// it can use once `out.len()` is nearly satisfied (a fixed 1024-byte
+/// scratch drew up to 2048 raw bytes to fill a 1000-byte row, an ~86%
+/// waste). 128 covers the default single-field case in one draw (expected
+/// ~124 accepted of 128, comfortably above 100) while keeping the same
+/// worst-case waste ratio for larger requests via the existing loop.
 fn fill_alphanumeric(rng: &mut SmallRng, out: &mut [u8]) {
     const ALPHABET: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut scratch = [0u8; 1024];
+    let mut scratch = [0u8; 128];
     let mut written = 0;
     while written < out.len() {
         rng.fill_bytes(&mut scratch);
