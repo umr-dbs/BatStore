@@ -53,7 +53,7 @@ fn order_line(
         ol_delivery_d,
         ol_quantity,
         ol_amount,
-        ol_dist_info: String::new(),
+        ol_dist_info: [0u8; 24],
     }))
 }
 

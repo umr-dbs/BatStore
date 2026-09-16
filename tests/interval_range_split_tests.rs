@@ -29,7 +29,7 @@ fn order_line_row() -> TpccRow {
         ol_delivery_d: Some(1),
         ol_quantity: 1,
         ol_amount: 1.0,
-        ol_dist_info: String::new(),
+        ol_dist_info: [0u8; 24],
     }))
 }
 
