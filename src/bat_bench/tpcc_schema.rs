@@ -1696,7 +1696,11 @@ pub struct OrderLine {
     pub ol_delivery_d: Option<i64>,
     pub ol_quantity: u8,
     pub ol_amount: f64,
-    pub ol_dist_info: String,
+    /// Always exactly 24 bytes (TPC-C spec §1.3's `OL_DIST_INFO`: "fixed
+    /// text, size 24") - stored inline rather than as `String` for the same
+    /// reason as `Stock::s_dist`: this is a fresh value every insert, but a
+    /// heap allocation for it is still one per `NewOrder` line item.
+    pub ol_dist_info: [u8; 24],
 }
 
 /// Order-preserving `i64 -> u64` encoding for `MVBTSt::set_zone_map_projection`

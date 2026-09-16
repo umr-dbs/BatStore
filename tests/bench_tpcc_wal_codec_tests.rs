@@ -104,7 +104,7 @@ fn every_variant_round_trips() {
         ol_delivery_d: None,
         ol_quantity: 5,
         ol_amount: 12.34,
-        ol_dist_info: "d".repeat(24),
+        ol_dist_info: [b'd'; 24],
     })));
     round_trip(TpccRow::OrderLine(Box::new(OrderLine {
         ol_i_id: 99,
@@ -112,7 +112,7 @@ fn every_variant_round_trips() {
         ol_delivery_d: Some(99),
         ol_quantity: 5,
         ol_amount: 12.34,
-        ol_dist_info: "d".repeat(24),
+        ol_dist_info: [b'd'; 24],
     })));
     round_trip(TpccRow::Item(Box::new(Item {
         i_im_id: 5,

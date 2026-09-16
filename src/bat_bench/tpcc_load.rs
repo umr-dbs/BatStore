@@ -226,7 +226,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
                     ol_delivery_d,
                     ol_quantity: 5,
                     ol_amount,
-                    ol_dist_info: rnd_astring(24, 24),
+                    ol_dist_info: rnd_astring_exact::<24>(),
                 })));
             }
 

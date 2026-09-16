@@ -770,7 +770,7 @@ pub fn new_order(
             ol_delivery_d: None,
             ol_quantity: line.qty,
             ol_amount,
-            ol_dist_info: rnd_astring(24, 24),
+            ol_dist_info: rnd_astring_exact::<24>(),
             }))
         ));
     }

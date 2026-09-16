@@ -201,7 +201,7 @@ impl WalPayload for TpccRow {
                 w.opt_i64(x.ol_delivery_d);
                 w.u8(x.ol_quantity);
                 w.f64(x.ol_amount);
-                w.str(&x.ol_dist_info);
+                w.fixed(&x.ol_dist_info);
             }
             TpccRow::Item(x) => {
                 w.u8(TAG_ITEM);
@@ -319,7 +319,7 @@ impl WalPayload for TpccRow {
                 ol_delivery_d: r.opt_i64()?,
                 ol_quantity: r.u8()?,
                 ol_amount: r.f64()?,
-                ol_dist_info: r.str()?,
+                ol_dist_info: r.fixed::<24>()?,
             })),
             TAG_ITEM => TpccRow::Item(Box::new(Item {
                 i_im_id: r.u32()?,
@@ -402,7 +402,7 @@ impl WalPayload for TpccRow {
                 TAG + 4 + 8 + opt_len(x.o_carrier_id.is_some(), 4) + 1 + 1
             }
             TpccRow::OrderLine(x) => {
-                TAG + 4 + 4 + opt_len(x.ol_delivery_d.is_some(), 8) + 1 + 8 + str_len(&x.ol_dist_info)
+                TAG + 4 + 4 + opt_len(x.ol_delivery_d.is_some(), 8) + 1 + 8 + 24
             }
             TpccRow::Item(x) => TAG + 4 + str_len(&x.i_name) + 8 + str_len(&x.i_data),
             TpccRow::Stock(x) => {

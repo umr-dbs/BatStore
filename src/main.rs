@@ -134,7 +134,7 @@ fn minimal_repro() {
             ol_delivery_d: None,
             ol_quantity: 5,
             ol_amount: 3.14,
-            ol_dist_info: "s".repeat(24),
+            ol_dist_info: [b's'; 24],
         }))
     }
 

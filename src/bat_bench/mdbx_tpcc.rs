@@ -428,7 +428,7 @@ fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, hist
                     ol_delivery_d,
                     ol_quantity: 5,
                     ol_amount,
-                    ol_dist_info: rnd_astring(24, 24),
+                    ol_dist_info: rnd_astring_exact::<24>(),
                 })));
             }
 
@@ -542,7 +542,7 @@ fn new_order(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> TxnOu
             ol_delivery_d: None,
             ol_quantity: line.qty,
             ol_amount,
-            ol_dist_info: rnd_astring(24, 24),
+            ol_dist_info: rnd_astring_exact::<24>(),
         })));
     }
 
