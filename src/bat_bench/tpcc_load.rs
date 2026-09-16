@@ -214,10 +214,14 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
 
             for ol_number in 1..=ol_cnt {
                 let i_id = with_fast_rng(|rng| rng.u32(1..=cfg.num_items));
+                // Per spec §4.3.3.1: a "new" (undelivered) order line has no
+                // delivery date and a placeholder OL_AMOUNT of 0.00 (it
+                // hasn't been invoiced yet); an already-delivered order line
+                // has its delivery date set and a real, non-zero amount.
                 let (ol_delivery_d, ol_amount) = if is_new {
-                    (None, with_fast_rng(|rng| rng.i32(100..=999_999)) as f64 / 100.0)
+                    (None, 0.0)
                 } else {
-                    (Some(order_timestamp), 0.0)
+                    (Some(order_timestamp), with_fast_rng(|rng| rng.i32(100..=999_999)) as f64 / 100.0)
                 };
 
                 insert(&db.tree_for(Table::OrderLine), k_order_line(w_id, d_id, o_id, ol_number), TpccRow::OrderLine(Box::new(OrderLine {

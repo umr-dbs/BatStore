@@ -416,10 +416,13 @@ fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, hist
 
             for ol_number in 1..=ol_cnt {
                 let i_id = rand::rng().random_range(1..=cfg.num_items);
+                // Per spec §4.3.3.1, see tpcc_load.rs's identical population
+                // logic: "new" (undelivered) order lines get amount 0.00 and
+                // no delivery date; already-delivered ones get a real amount.
                 let (ol_delivery_d, ol_amount) = if is_new {
-                    (None, rand::rng().random_range(100..=999_999) as f64 / 100.0)
+                    (None, 0.0)
                 } else {
-                    (Some(order_timestamp), 0.0)
+                    (Some(order_timestamp), rand::rng().random_range(100..=999_999) as f64 / 100.0)
                 };
 
                 put_row(&txn, Table::OrderLine, k_order_line(w_id, d_id, o_id, ol_number), &TpccRow::OrderLine(Box::new(OrderLine {
