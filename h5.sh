@@ -11,7 +11,7 @@ fi
 # volume. Raising warehouses with terminals changes both scan volume and
 # concurrency, so latency differences could not be attributed to concurrency.
 warehouses=${H5_WAREHOUSES:-32}
-terminals=${H5_TERMINALS:-1,2,4,8,16,32,48,64,80,96,112}
+terminals=${H5_TERMINALS:-1,2,4,8,16,32,48,64,80,96,112,120}
 duration=${H5_DURATION:-60}
 mdbx_timeout=${H5_MDBX_TIMEOUT:-3600}
 output_root="${H5_OUTPUT_ROOT:-comparison_h5}/session_$(date +%Y%m%d_%H%M%S)_$$"
@@ -22,7 +22,7 @@ python3 scripts/compare_engines.py \
   --threads "$terminals" \
   --warehouses "$warehouses" \
   --htap-olap-threads 2 \
-  --scan-pool-workers 12 \
+  --scan-pool-workers 120 \
   --tpcc-duration "$duration" \
   --libmdbx-timeout "$mdbx_timeout" \
   --gc on \
