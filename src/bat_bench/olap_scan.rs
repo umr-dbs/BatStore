@@ -110,11 +110,14 @@ pub enum OlapMode {
         num_warehouses: u32,
     },
     /// Exact pinned-BenchBase CH-benCHmark Q1 SQL semantics. Its fixed delivery-date
-    /// predicate is zone-map pruned by [`tpch_queries::q1_benchbase`].
-    BenchbaseQ1,
+    /// predicate is zone-map pruned by [`tpch_queries::q1_benchbase`]. Fans out across
+    /// `TpccDatabase::enable_scan_pool(Table::OrderLine, _)`'s pool when one is assigned,
+    /// same as [`OlapMode::ChQ1`] - see that variant's doc.
+    BenchbaseQ1 { num_warehouses: u32 },
     /// Exact pinned-BenchBase CH-benCHmark Q6 SQL semantics. Its fixed delivery-date
-    /// interval is zone-map pruned by [`tpch_queries::q6_benchbase`].
-    BenchbaseQ6,
+    /// interval is zone-map pruned by [`tpch_queries::q6_benchbase`]. Fans out across the
+    /// scan pool when one is assigned, same as [`OlapMode::ChQ6`].
+    BenchbaseQ6 { num_warehouses: u32 },
 }
 
 fn sleep_checking_stop(dur: Duration, stop: &AtomicBool) {
@@ -394,9 +397,53 @@ fn benchbase_q1_once(db: &TpccDatabase, run_start: Instant) -> ScanResult {
     }
 }
 
+/// Same shape as `benchbase_q1_once`, but fanned out across `pool` — see
+/// `parallel_scan::q1_benchbase_parallel`'s doc.
+fn benchbase_q1_parallel_once(
+    db: &TpccDatabase,
+    pool: &crate::bat_bench::tpcc_schema::TpccScanWorkerPool,
+    num_warehouses: u32,
+    run_start: Instant,
+) -> ScanResult {
+    let start = Instant::now();
+    let (q1, ts_start) = crate::bat_bench::parallel_scan::q1_benchbase_parallel(db, pool, num_warehouses);
+    ScanResult {
+        mode: "ch_q1_pricing_summary",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        delay_secs: 0.0,
+        snapshot: ts_start,
+        scanned_tuples: q1.len(),
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q1.iter().map(|g| g.sum_amount).sum()),
+        staleness_versions: Some(db.current_version().saturating_sub(ts_start)),
+    }
+}
+
 fn benchbase_q6_once(db: &TpccDatabase, run_start: Instant) -> ScanResult {
     let start = Instant::now();
     let (q6, ts_start) = tpch_queries::q6_benchbase(db);
+    ScanResult {
+        mode: "ch_q6_forecast_revenue",
+        elapsed_secs: run_start.elapsed().as_secs_f64(),
+        delay_secs: 0.0,
+        snapshot: ts_start,
+        scanned_tuples: 1,
+        latency_ns: start.elapsed().as_nanos(),
+        summary: Some(q6),
+        staleness_versions: Some(db.current_version().saturating_sub(ts_start)),
+    }
+}
+
+/// Same shape as `benchbase_q6_once`, but fanned out across `pool` — see
+/// `parallel_scan::q6_benchbase_parallel`'s doc.
+fn benchbase_q6_parallel_once(
+    db: &TpccDatabase,
+    pool: &crate::bat_bench::tpcc_schema::TpccScanWorkerPool,
+    num_warehouses: u32,
+    run_start: Instant,
+) -> ScanResult {
+    let start = Instant::now();
+    let (q6, ts_start) = crate::bat_bench::parallel_scan::q6_benchbase_parallel(db, pool, num_warehouses);
     ScanResult {
         mode: "ch_q6_forecast_revenue",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
@@ -533,15 +580,29 @@ pub fn run_olap_worker(
                 }
             }
         },
-        OlapMode::BenchbaseQ1 => {
-            while !stop.load(Relaxed) {
-                let _ = results.send(benchbase_q1_once(db, run_start));
+        OlapMode::BenchbaseQ1 { num_warehouses } => match db.scan_pool(Table::OrderLine) {
+            Some(pool) => {
+                while !stop.load(Relaxed) {
+                    let _ = results.send(benchbase_q1_parallel_once(db, &pool, num_warehouses, run_start));
+                }
             }
-        }
-        OlapMode::BenchbaseQ6 => {
-            while !stop.load(Relaxed) {
-                let _ = results.send(benchbase_q6_once(db, run_start));
+            None => {
+                while !stop.load(Relaxed) {
+                    let _ = results.send(benchbase_q1_once(db, run_start));
+                }
             }
-        }
+        },
+        OlapMode::BenchbaseQ6 { num_warehouses } => match db.scan_pool(Table::OrderLine) {
+            Some(pool) => {
+                while !stop.load(Relaxed) {
+                    let _ = results.send(benchbase_q6_parallel_once(db, &pool, num_warehouses, run_start));
+                }
+            }
+            None => {
+                while !stop.load(Relaxed) {
+                    let _ = results.send(benchbase_q6_once(db, run_start));
+                }
+            }
+        },
     }
 }

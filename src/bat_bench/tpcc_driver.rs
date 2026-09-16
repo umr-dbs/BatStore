@@ -564,8 +564,8 @@ fn num_olap_mode_summary(mode: &OlapMode) -> &'static str {
         OlapMode::ChBenchmark { .. } => "ch_benchmark",
         OlapMode::ChQ1 { .. } => "ch_q1",
         OlapMode::ChQ6 { .. } => "ch_q6",
-        OlapMode::BenchbaseQ1 => "benchbase_q1",
-        OlapMode::BenchbaseQ6 => "benchbase_q6",
+        OlapMode::BenchbaseQ1 { .. } => "benchbase_q1",
+        OlapMode::BenchbaseQ6 { .. } => "benchbase_q6",
     }
 }
 
@@ -801,8 +801,8 @@ pub fn main_tpcc(parms: Vec<String>) {
             max_qty: 24,
             num_warehouses,
         }, num_olap_threads),
-        "ch_q1" => (OlapMode::BenchbaseQ1, num_olap_threads),
-        "ch_q6" => (OlapMode::BenchbaseQ6, num_olap_threads),
+        "ch_q1" => (OlapMode::BenchbaseQ1 { num_warehouses }, num_olap_threads),
+        "ch_q6" => (OlapMode::BenchbaseQ6 { num_warehouses }, num_olap_threads),
         _ => (
             OlapMode::ScanDelaySweep { delays: (0..=(olap_param.max(0.0) as u64)).map(Duration::from_secs).collect() },
             num_olap_threads,
