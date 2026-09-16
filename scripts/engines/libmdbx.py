@@ -45,7 +45,8 @@ def ensure_built() -> None:
 
 
 def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", reload: bool = True,
-        ycsb_payload: str = "standard", read_payload: bool = True) -> common.NormalizedResult:
+        ycsb_payload: str = "standard", read_payload: bool = True,
+        timeout_seconds: float | None = None) -> common.NormalizedResult:
     """`gc`/`reload` accepted for interface parity with the other engine wrappers but
     unused - see SUPPORTS_GC_TOGGLE above, and every run here is a fresh db_path."""
     del reload
@@ -94,7 +95,7 @@ def run(workload: str, scale: common.Scale, output_dir: Path, gc: str = "n/a", r
         metric_name = "ops_per_sec"
         ts_file, ts_column = "ycsb_timeseries.csv", "ops_completed"
 
-    timeout = common.default_subprocess_timeout(duration)
+    timeout = timeout_seconds if timeout_seconds is not None else common.default_subprocess_timeout(duration)
     returncode, _peak_rss_unused = common.run_and_track_rss(
         args, cwd=output_dir, stdout_path=output_dir / "stdout.log", timeout=timeout,
     )
