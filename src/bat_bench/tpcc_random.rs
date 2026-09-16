@@ -109,6 +109,14 @@ pub fn rnd_astring(min: usize, max: usize) -> String {
     })
 }
 
+/// TPC-C a-string generated directly into a `[u8; N]`, no heap allocation -
+/// for schema fields whose length the spec fixes exactly (e.g. `Stock::s_dist`'s
+/// ten 24-byte entries), equivalent to `rnd_astring(N, N)` but without the
+/// `String` indirection every clone of the owning row would otherwise pay for.
+pub fn rnd_astring_exact<const N: usize>() -> [u8; N] {
+    with_fast_rng(|rng| std::array::from_fn(|_| rng.alphanumeric() as u8))
+}
+
 /// TPC-C n-string: random length in `[min, max]` of decimal digits.
 pub fn rnd_nstring(min: usize, max: usize) -> String {
     with_fast_rng(|rng| {

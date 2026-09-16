@@ -441,7 +441,7 @@ fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, hist
     for i_id in 1..=cfg.num_items {
         put_row(&txn, Table::Stock, k_stock(w_id, i_id), &TpccRow::Stock(Box::new(Stock {
             s_quantity: rand::rng().random_range(10..=100),
-            s_dist: std::array::from_fn(|_| rnd_astring(24, 24)),
+            s_dist: std::array::from_fn(|_| rnd_astring_exact::<24>()),
             s_ytd: 0.0,
             s_order_cnt: 0,
             s_remote_cnt: 0,

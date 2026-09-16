@@ -1732,7 +1732,12 @@ pub struct Item {
 #[derive(Clone, Debug)]
 pub struct Stock {
     pub s_quantity: i32,
-    pub s_dist: [String; 10],
+    /// Always exactly 24 bytes (TPC-C spec §1.3, `rnd_astring_exact::<24>()`
+    /// at load time) - stored inline rather than as `[String; 10]` so
+    /// cloning a `Stock` (every `NewOrder` line item's stock update does
+    /// this, see `tpcc_txn.rs`) is a flat memcpy instead of 10 separate
+    /// heap allocations that `perf` showed dominating `Stock::clone`.
+    pub s_dist: [[u8; 24]; 10],
     pub s_ytd: f64,
     pub s_order_cnt: u32,
     pub s_remote_cnt: u32,

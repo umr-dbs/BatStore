@@ -1,6 +1,15 @@
 use crate::bat_bench::tpcc_schema::*;
 use crate::bat_wal::record::WalPayload;
 
+/// Test-only `Stock::s_dist` entry: `"dist{i}"` left-padded to the field's
+/// fixed 24-byte width with `x`.
+fn dist_bytes(i: usize) -> [u8; 24] {
+    let s = format!("dist{i}");
+    let mut b = [b'x'; 24];
+    b[..s.len()].copy_from_slice(s.as_bytes());
+    b
+}
+
 fn round_trip(row: TpccRow) {
     let mut bytes = Vec::new();
     row.wal_encode(&mut bytes);
@@ -113,7 +122,7 @@ fn every_variant_round_trips() {
     })));
     round_trip(TpccRow::Stock(Box::new(Stock {
         s_quantity: -5,
-        s_dist: std::array::from_fn(|i| format!("dist{i}")),
+        s_dist: std::array::from_fn(dist_bytes),
         s_ytd: 1.0,
         s_order_cnt: 2,
         s_remote_cnt: 3,
@@ -251,7 +260,7 @@ fn crash_recovery_round_trip_for_boxed_rows() {
                 stock_key,
                 TpccRow::Stock(Box::new(Stock {
                     s_quantity: 42,
-                    s_dist: std::array::from_fn(|i| format!("dist{i}")),
+                    s_dist: std::array::from_fn(dist_bytes),
                     s_ytd: 1.0,
                     s_order_cnt: 2,
                     s_remote_cnt: 3,
@@ -294,7 +303,7 @@ fn crash_recovery_round_trip_for_boxed_rows() {
         CRUDOperationResult::MatchedRecords(r) if r.len() == 1 => {
             let s = r[0].payload.as_stock();
             assert_eq!(s.s_quantity, 42);
-            assert_eq!(s.s_dist[3], "dist3");
+            assert_eq!(s.s_dist[3], dist_bytes(3));
             assert_eq!(s.s_data, "ORIGINALxyz");
         }
         other => panic!("stock missing or wrong after recovery: {other}"),
