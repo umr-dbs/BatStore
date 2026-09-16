@@ -239,7 +239,7 @@ pub fn populate_warehouse(db: &TpccDatabase, cfg: &TpccConfig, w_id: u32, histor
     for i_id in 1..=cfg.num_items {
         insert(&db.tree_for(Table::Stock), k_stock(w_id, i_id), TpccRow::Stock(Box::new(Stock {
             s_quantity: with_fast_rng(|rng| rng.i32(10..=100)),
-            s_dist: std::array::from_fn(|_| rnd_astring(24, 24)),
+            s_dist: std::array::from_fn(|_| rnd_astring_exact::<24>()),
             s_ytd: 0.0,
             s_order_cnt: 0,
             s_remote_cnt: 0,

@@ -428,7 +428,7 @@ fn q5_attributes_revenue_to_the_supplying_nation_within_the_requested_region() {
         k_stock(1, 1),
         TpccRow::Stock(Box::new(Stock {
             s_quantity: 50,
-            s_dist: std::array::from_fn(|_| String::new()),
+            s_dist: [[0u8; 24]; 10],
             s_ytd: 0.0,
             s_order_cnt: 0,
             s_remote_cnt: 0,
@@ -442,7 +442,7 @@ fn q5_attributes_revenue_to_the_supplying_nation_within_the_requested_region() {
         k_stock(1, 2),
         TpccRow::Stock(Box::new(Stock {
             s_quantity: 50,
-            s_dist: std::array::from_fn(|_| String::new()),
+            s_dist: [[0u8; 24]; 10],
             s_ytd: 0.0,
             s_order_cnt: 0,
             s_remote_cnt: 0,

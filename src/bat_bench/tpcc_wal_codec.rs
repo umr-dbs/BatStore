@@ -41,6 +41,13 @@ impl<'a> Writer<'a> {
         self.0.extend_from_slice(s.as_bytes());
     }
 
+    /// Raw fixed-width bytes, no length prefix - for fields whose length is
+    /// already known at both encode and decode time (e.g. `Stock::s_dist`'s
+    /// `[u8; 24]` entries), unlike `str`'s variable-length framing.
+    fn fixed<const N: usize>(&mut self, v: &[u8; N]) {
+        self.0.extend_from_slice(v);
+    }
+
     fn opt_u32(&mut self, v: Option<u32>) {
         match v {
             Some(x) => { self.bool(true); self.u32(x); }
@@ -99,6 +106,10 @@ impl<'a> Reader<'a> {
     fn str(&mut self) -> Option<String> {
         let len = self.u32()? as usize;
         std::str::from_utf8(self.take(len)?).ok().map(str::to_string)
+    }
+
+    fn fixed<const N: usize>(&mut self) -> Option<[u8; N]> {
+        self.take(N)?.try_into().ok()
     }
 
     fn opt_u32(&mut self) -> Option<Option<u32>> {
@@ -203,7 +214,7 @@ impl WalPayload for TpccRow {
                 w.u8(TAG_STOCK);
                 w.i32(x.s_quantity);
                 for d in &x.s_dist {
-                    w.str(d);
+                    w.fixed(d);
                 }
                 w.f64(x.s_ytd);
                 w.u32(x.s_order_cnt);
@@ -318,9 +329,9 @@ impl WalPayload for TpccRow {
             })),
             TAG_STOCK => {
                 let s_quantity = r.i32()?;
-                let mut s_dist: [String; 10] = Default::default();
+                let mut s_dist = [[0u8; 24]; 10];
                 for slot in s_dist.iter_mut() {
-                    *slot = r.str()?;
+                    *slot = r.fixed::<24>()?;
                 }
                 TpccRow::Stock(Box::new(Stock {
                     s_quantity,
@@ -395,7 +406,7 @@ impl WalPayload for TpccRow {
             }
             TpccRow::Item(x) => TAG + 4 + str_len(&x.i_name) + 8 + str_len(&x.i_data),
             TpccRow::Stock(x) => {
-                TAG + 4 + x.s_dist.iter().map(|d| str_len(d)).sum::<usize>()
+                TAG + 4 + x.s_dist.len() * 24
                     + 8 + 4 + 4 + str_len(&x.s_data) + 4
             }
             TpccRow::CustLastOrder(_) => TAG + 4,
