@@ -58,8 +58,10 @@
 //! thread instead of queuing behind other callers — see that method's doc.
 
 use crate::bat_bench::tpcc_schema::{
-    TpccDatabase, TpccKey, TpccScanWorkerPool as ScanWorkerPool, TpccTree, encode_signed_zone_value,
-    k_order_line, order_line_table_range,
+    BENCHBASE_Q1_DELIVERY_AFTER_MILLIS, BENCHBASE_Q6_DATE_HI_MILLIS, BENCHBASE_Q6_DATE_LO_MILLIS,
+    BENCHBASE_Q6_QUANTITY_HI, BENCHBASE_Q6_QUANTITY_LO, TpccDatabase, TpccKey,
+    TpccScanWorkerPool as ScanWorkerPool, TpccTree, encode_signed_zone_value, k_order_line,
+    order_line_table_range,
 };
 use crate::bat_bench::tpcc_txn::TpccTxn;
 use crate::bat_bench::tpch_queries::OrderLineSummary;
@@ -242,6 +244,98 @@ pub fn q6_parallel(
             .for_each_ref(|_, row| {
                 let ol = row.as_order_line();
                 if ol.ol_quantity < max_qty {
+                    revenue += ol.ol_amount;
+                }
+            });
+        revenue
+    };
+
+    let revenue: f64 = pool
+        .dispatch_by_fair_share(
+            order_line_table_range(),
+            |fanout| partition_order_line_range(num_warehouses, fanout),
+            reducer,
+        )
+        .into_iter()
+        .sum();
+    tx.commit();
+    (revenue, ts_start)
+}
+
+/// Parallel drop-in replacement for `tpch_queries::q1_benchbase` — see
+/// [`q1_parallel`]'s doc for the dispatch/registration mechanics, which are
+/// identical here; only the (fixed, unparameterized) BenchBase predicate
+/// differs. `BENCHBASE_Q1_DELIVERY_AFTER_MILLIS + 1` reproduces
+/// `q1_benchbase`'s own strict `>` cutoff (ORDER_LINE timestamps are integer
+/// milliseconds), matching that function's identical comment.
+pub fn q1_benchbase_parallel(
+    db: &TpccDatabase,
+    pool: &ScanWorkerPool,
+    num_warehouses: u32,
+) -> (Vec<OrderLineSummary>, Version) {
+    let tx = TpccTxn::begin(db);
+    let ts_start = tx.ts_start();
+
+    let reducer = move |tree: &TpccTree, range| {
+        let mut groups = empty_groups();
+        RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID)
+            .with_zone_predicate(
+                encode_signed_zone_value(BENCHBASE_Q1_DELIVERY_AFTER_MILLIS.saturating_add(1)),
+                encode_signed_zone_value(i64::MAX),
+            )
+            .for_each_ref(|key, row| {
+                let ol = row.as_order_line();
+                let g = &mut groups
+                    [crate::bat_bench::tpcc_schema::decode_order_line_number(key) as usize];
+                g.count += 1;
+                g.sum_qty += ol.ol_quantity as u64;
+                g.sum_amount += ol.ol_amount;
+            });
+        groups
+    };
+
+    let partials = pool.dispatch_by_fair_share(
+        order_line_table_range(),
+        |fanout| partition_order_line_range(num_warehouses, fanout),
+        reducer,
+    );
+    tx.commit();
+
+    let mut total = empty_groups();
+    for partial in partials {
+        for i in 0..16 {
+            total[i].count += partial[i].count;
+            total[i].sum_qty += partial[i].sum_qty;
+            total[i].sum_amount += partial[i].sum_amount;
+        }
+    }
+
+    let mut out: Vec<_> = total.into_iter().filter(|g| g.count > 0).collect();
+    out.sort_by_key(|g| g.ol_number);
+    (out, ts_start)
+}
+
+/// Parallel drop-in replacement for `tpch_queries::q6_benchbase` — see
+/// [`q1_benchbase_parallel`]'s doc.
+pub fn q6_benchbase_parallel(
+    db: &TpccDatabase,
+    pool: &ScanWorkerPool,
+    num_warehouses: u32,
+) -> (f64, Version) {
+    let tx = TpccTxn::begin(db);
+    let ts_start = tx.ts_start();
+
+    let reducer = move |tree: &TpccTree, range| {
+        let mut revenue = 0.0;
+        RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID)
+            .with_zone_predicate(
+                encode_signed_zone_value(BENCHBASE_Q6_DATE_LO_MILLIS),
+                encode_signed_zone_value(BENCHBASE_Q6_DATE_HI_MILLIS.saturating_sub(1)),
+            )
+            .for_each_ref(|_, row| {
+                let ol = row.as_order_line();
+                let qty = ol.ol_quantity as u32;
+                if (BENCHBASE_Q6_QUANTITY_LO..=BENCHBASE_Q6_QUANTITY_HI).contains(&qty) {
                     revenue += ol.ol_amount;
                 }
             });
