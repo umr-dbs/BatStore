@@ -1,10 +1,9 @@
-use crate::bat_gc::block_tracer::{BlockTrace, DeadPageValue};
+use crate::bat_gc::block_tracer::{BlockTrace, DeadPageValue, ALLOC_BATCH_SIZE};
 use crate::bat_page_model::BlockRef;
 use crate::bat_page_model::time_matcher::TimeMatcher;
 use crate::bat_record_model::tx_stamp::WorkerId;
 use crate::bat_record_model::version_info::Version;
 use crate::bat_sync::tx_context::TxContext;
-#[cfg(feature = "gc-stats")]
 use crossbeam_utils::CachePadded;
 use parking_lot::Mutex;
 use std::fmt::Display;
@@ -18,7 +17,7 @@ use triomphe::Arc;
 // Preserve the source of prefetched pages until they actually satisfy a request.
 // Normal builds retain the original cache layout and incur no tagging overhead.
 #[cfg(feature = "gc-stats")]
-type ReusableBlock<const F: usize, const N: usize, K, V> = (BlockRef<F, N, K, V>, bool);
+type ReusableBlock<const F: usize, const N: usize, K, V> = (BlockRef<F, N, K, V>, bool, bool);
 #[cfg(not(feature = "gc-stats"))]
 type ReusableBlock<const F: usize, const N: usize, K, V> = BlockRef<F, N, K, V>;
 
@@ -39,9 +38,15 @@ pub struct GcStats {
     /// Requests satisfied by a page reclaimed from another shard, including
     /// prefetched pages. Each page is counted only when handed to an allocation.
     pub steal: u64,
-    /// No reusable/dead block found anywhere; a brand-new block was
-    /// obtained from the global allocator (see `Block::into_cell`).
+    /// Requests served by a new block, including blocks reserved by a prior
+    /// batch allocation and later handed out from a worker's GC list.
     pub fresh_alloc: u64,
+    pub request_count: u64,
+    pub latency_ns: u64,
+    pub latency_max_ns: u64,
+    pub scan_count: u64,
+    pub lists_checked: u64,
+    pub lists_checked_max: u64,
 }
 
 pub type TrackerHandle<const P_F: usize, const P_N: usize, Key, Payload> =
@@ -68,9 +73,9 @@ pub struct TrackerHandleSt<
     Payload: Clone + Default + 'static,
 > {
     dead_blocks: BlockTrace<P_F, P_N, Key, Payload>,
-    /// Pages already proven reclaimable, filled in batches so the expensive
-    /// all-worker liveness scan is amortized across several allocations.
-    reusable: Vec<Mutex<Vec<ReusableBlock<P_F, P_N, Key, Payload>>>>,
+    /// Pages already proven reclaimable, filled in batches so the liveness
+    /// scan is amortized across several allocations.
+    reusable: Vec<CachePadded<Mutex<Vec<ReusableBlock<P_F, P_N, Key, Payload>>>>>,
     /// Explicit opt-in for block reclaim (`MVBTSt::enable_gc`/`disable_gc`).
     /// `false` by default: a fresh tree never reuses blocks until this is
     /// turned on, matching the pre-existing behavior from when the whole
@@ -87,6 +92,18 @@ pub struct TrackerHandleSt<
     steal: Vec<CachePadded<AtomicU64>>,
     #[cfg(feature = "gc-stats")]
     fresh_alloc: Vec<CachePadded<AtomicU64>>,
+    #[cfg(feature = "gc-stats")]
+    request_count: Vec<CachePadded<AtomicU64>>,
+    #[cfg(feature = "gc-stats")]
+    latency_ns: Vec<CachePadded<AtomicU64>>,
+    #[cfg(feature = "gc-stats")]
+    latency_max_ns: Vec<CachePadded<AtomicU64>>,
+    #[cfg(feature = "gc-stats")]
+    scan_count: Vec<CachePadded<AtomicU64>>,
+    #[cfg(feature = "gc-stats")]
+    lists_checked: Vec<CachePadded<AtomicU64>>,
+    #[cfg(feature = "gc-stats")]
+    lists_checked_max: Vec<CachePadded<AtomicU64>>,
 }
 
 impl<
@@ -100,7 +117,9 @@ impl<
         let shard_count = num_cpus::get().max(1);
         Self {
             dead_blocks: BlockTrace::new(),
-            reusable: (0..shard_count).map(|_| Mutex::new(Vec::new())).collect(),
+            reusable: (0..shard_count)
+                .map(|_| CachePadded::new(Mutex::new(Vec::new())))
+                .collect(),
             block_reclaim_enabled: AtomicBool::new(false),
             #[cfg(feature = "gc-stats")]
             local_reuse: (0..shard_count)
@@ -114,13 +133,44 @@ impl<
             fresh_alloc: (0..shard_count)
                 .map(|_| CachePadded::new(AtomicU64::new(0)))
                 .collect(),
+            #[cfg(feature = "gc-stats")]
+            request_count: Self::zero_counters(shard_count),
+            #[cfg(feature = "gc-stats")]
+            latency_ns: Self::zero_counters(shard_count),
+            #[cfg(feature = "gc-stats")]
+            latency_max_ns: Self::zero_counters(shard_count),
+            #[cfg(feature = "gc-stats")]
+            scan_count: Self::zero_counters(shard_count),
+            #[cfg(feature = "gc-stats")]
+            lists_checked: Self::zero_counters(shard_count),
+            #[cfg(feature = "gc-stats")]
+            lists_checked_max: Self::zero_counters(shard_count),
         }
     }
 
+    #[cfg(feature = "gc-stats")]
+    fn zero_counters(count: usize) -> Vec<CachePadded<AtomicU64>> {
+        (0..count).map(|_| CachePadded::new(AtomicU64::new(0))).collect()
+    }
+
+    pub(crate) fn queue_fresh_blocks(&self, worker_id: WorkerId, pages: impl IntoIterator<Item = BlockRef<P_F, P_N, Key, Payload>>) {
+        self.dead_blocks.register_fresh_batch(worker_id, pages);
+    }
+
+    #[cfg(feature = "gc-stats")]
+    pub(crate) fn record_request_latency(&self, worker_id: WorkerId, nanos: u64) {
+        let i = worker_id as usize % self.request_count.len();
+        self.request_count[i].fetch_add(1, Relaxed);
+        self.latency_ns[i].fetch_add(nanos, Relaxed);
+        self.latency_max_ns[i].fetch_max(nanos, Relaxed);
+    }
+
+    #[cfg(not(feature = "gc-stats"))]
+    pub(crate) fn record_request_latency(&self, _worker_id: WorkerId, _nanos: u64) {}
+
     /// See `GcStats`'s doc. Called from `BlockAllocManager::alloc_block`'s
-    /// fallback branch, once `free_block` has already returned `None` (i.e.
-    /// nothing reusable was found locally, nor by stealing from any other
-    /// shard). A no-op without the `gc-stats` feature.
+    /// fallback branch, once `free_block` has returned `None`. A no-op
+    /// without the `gc-stats` feature.
     #[cfg(feature = "gc-stats")]
     #[inline]
     pub(crate) fn record_fresh_alloc(&self, worker_id: WorkerId) {
@@ -141,6 +191,12 @@ impl<
                 local_reuse: self.local_reuse[i].load(Relaxed),
                 steal: self.steal[i].load(Relaxed),
                 fresh_alloc: self.fresh_alloc[i].load(Relaxed),
+                request_count: self.request_count[i].load(Relaxed),
+                latency_ns: self.latency_ns[i].load(Relaxed),
+                latency_max_ns: self.latency_max_ns[i].load(Relaxed),
+                scan_count: self.scan_count[i].load(Relaxed),
+                lists_checked: self.lists_checked[i].load(Relaxed),
+                lists_checked_max: self.lists_checked_max[i].load(Relaxed),
             })
             .collect()
     }
@@ -215,8 +271,8 @@ impl<
         if let Some(page) = self.reusable[cache_index].lock().pop() {
             #[cfg(feature = "gc-stats")]
             let page = {
-                let (page, stolen) = page;
-                let counter = if stolen { &self.steal } else { &self.local_reuse };
+                let (page, stolen, fresh) = page;
+                let counter = if fresh { &self.fresh_alloc } else if stolen { &self.steal } else { &self.local_reuse };
                 counter[cache_index].fetch_add(1, Relaxed);
                 page
             };
@@ -230,27 +286,35 @@ impl<
         // "wait until nothing anywhere is mid-registration" check needed.
         let live_min_snapshot = ctx.live_min_snapshot();
 
-        const RECLAIM_BATCH: usize = 16;
-        let (reclaimed_roots, _local_count, _steal_count) =
+        let (reclaimed_roots, _local_count, _steal_count, checked) =
             self.dead_blocks
                 .reclaim_batch(
                     worker_id,
-                    RECLAIM_BATCH,
+                    ALLOC_BATCH_SIZE,
                     |(dead_v, _)| match live_min_snapshot {
+            _ if dead_v == 0 => true,
             None => true,
             Some(live_min_snapshot) => dead_v.lt_self_any(live_min_snapshot),
                     },
                 );
+        #[cfg(feature = "gc-stats")]
+        {
+            self.scan_count[cache_index].fetch_add(1, Relaxed);
+            self.lists_checked[cache_index].fetch_add(checked as u64, Relaxed);
+            self.lists_checked_max[cache_index].fetch_max(checked as u64, Relaxed);
+        }
+        #[cfg(not(feature = "gc-stats"))]
+        let _ = checked;
         // reclaim_batch orders own-shard pages first, then stolen pages.
         #[cfg(feature = "gc-stats")]
         let mut reclaimed: Vec<_> = reclaimed_roots.into_iter().enumerate()
-            .map(|(index, page)| (page, index >= _local_count)).collect();
+            .map(|(index, (key, page))| (page, index >= _local_count, key.0 == 0)).collect();
         #[cfg(not(feature = "gc-stats"))]
-        let mut reclaimed = reclaimed_roots;
+        let mut reclaimed: Vec<_> = reclaimed_roots.into_iter().map(|(_, page)| page).collect();
         let result = reclaimed.pop();
         #[cfg(feature = "gc-stats")]
-        let result = result.map(|(page, stolen)| {
-            let counter = if stolen { &self.steal } else { &self.local_reuse };
+        let result = result.map(|(page, stolen, fresh)| {
+            let counter = if fresh { &self.fresh_alloc } else if stolen { &self.steal } else { &self.local_reuse };
             counter[cache_index].fetch_add(1, Relaxed);
             page
         });

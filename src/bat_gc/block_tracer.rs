@@ -1,9 +1,13 @@
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-
+use crossbeam_utils::CachePadded;
 use parking_lot::Mutex;
+
+/// Number of blocks obtained on an allocator miss, including the requested block.
+pub const ALLOC_BATCH_SIZE: usize = 16;
+/// Maximum fraction of worker queues probed on a reclaim miss.
+pub const SCAN_PERCENT: usize = 25;
 
 use crate::bat_page_model::BlockRef;
 use crate::bat_record_model::tx_stamp::WorkerId;
@@ -33,8 +37,7 @@ pub(crate) struct BlockTrace<
     Key: Copy + Default + Hash + Ord + Display + 'static,
     Payload: Clone + Default + 'static,
 > {
-    shards: Vec<Mutex<VecDeque<DeadPageEntry<P_F, P_N, Key, Payload>>>>,
-    next_scan: AtomicUsize,
+    shards: Vec<CachePadded<Mutex<VecDeque<DeadPageEntry<P_F, P_N, Key, Payload>>>>>,
 }
 
 impl<
@@ -48,9 +51,8 @@ impl<
         let shard_count = num_cpus::get().max(1);
         Self {
             shards: (0..shard_count)
-                .map(|_| Mutex::new(VecDeque::new()))
+                .map(|_| CachePadded::new(Mutex::new(VecDeque::new())))
                 .collect(),
-            next_scan: AtomicUsize::new(0),
         }
     }
 
@@ -67,7 +69,7 @@ impl<
         if shard.back().is_none_or(|back| back.0 <= entry.0) {
             shard.push_back(entry);
             return;
-    }
+        }
         let position = shard
             .make_contiguous()
             .partition_point(|existing| existing.0 < entry.0);
@@ -100,33 +102,42 @@ impl<
         }
     }
 
+    /// Unused new blocks have death version zero and sit at the front of the
+    /// owner's queue. They are always eligible, including with live snapshots.
+    pub(crate) fn register_fresh_batch(&self, worker_id: WorkerId, pages: impl IntoIterator<Item = DeadPageValue<P_F, P_N, Key, Payload>>) {
+        let mut shard = self.shards[self.shard_for(worker_id)].lock();
+        for page in pages {
+            shard.push_front(((0, page.0 as usize), page));
+        }
+    }
+
     #[inline]
     fn drain_eligible_from(
         &self,
         shard_index: usize,
         remaining: &mut usize,
         eligible: &mut impl FnMut(DeadPageKey) -> bool,
-        out: &mut Vec<DeadPageValue<P_F, P_N, Key, Payload>>,
+        out: &mut Vec<DeadPageEntry<P_F, P_N, Key, Payload>>,
     ) {
         if *remaining == 0 {
             return;
         }
-        let mut shard = self.shards[shard_index].lock();
+        let Some(mut shard) = self.shards[shard_index].try_lock() else { return; };
         while *remaining != 0 {
             match shard.front() {
                 Some((key, _)) if eligible(*key) => {
-                    let (_, page) = shard.pop_front().expect("front was just observed");
-                    out.push(page);
+                    out.push(shard.pop_front().expect("front was just observed"));
                     *remaining -= 1;
                 }
                 _ => break,
             }
-            }
         }
+    }
 
     /// Reclaims up to `limit` pages using one eligibility bound computed by
-    /// the caller. The owning shard is drained first; only then are remote
-    /// shards visited from a rotating start position.
+    /// the caller. The owning shard is checked first; if empty, remote shards
+    /// are visited linearly from a random start until a usable page is found
+    /// or the configured scan fraction is exhausted.
     ///
     /// Returns `(pages, local_count, stolen_count)` — `local_count` is how
     /// many of `pages` came from `worker_id`'s own shard, `stolen_count` how
@@ -139,26 +150,29 @@ impl<
         worker_id: WorkerId,
         limit: usize,
         mut eligible: impl FnMut(DeadPageKey) -> bool,
-    ) -> (Vec<DeadPageValue<P_F, P_N, Key, Payload>>, usize, usize) {
+    ) -> (Vec<DeadPageEntry<P_F, P_N, Key, Payload>>, usize, usize, usize) {
         let mut out = Vec::with_capacity(limit);
         let mut remaining = limit;
         let own = self.shard_for(worker_id);
         self.drain_eligible_from(own, &mut remaining, &mut eligible, &mut out);
         let local_count = out.len();
-
-        if remaining != 0 && self.shards.len() > 1 {
-            let start = self.next_scan.fetch_add(1, Relaxed) % self.shards.len();
+        let mut checked = 1;
+        if out.is_empty() && self.shards.len() > 1 {
+            let max_checked = self.shards.len().saturating_mul(SCAN_PERCENT).div_ceil(100).max(1);
+            let start = fastrand::usize(..self.shards.len());
             for offset in 0..self.shards.len() {
+                if checked >= max_checked { break; }
                 let shard = (start + offset) % self.shards.len();
                 if shard != own {
+                    checked += 1;
                     self.drain_eligible_from(shard, &mut remaining, &mut eligible, &mut out);
-                    if remaining == 0 {
+                    if !out.is_empty() {
                         break;
-            }
+                    }
                 }
             }
         }
         let stolen_count = out.len() - local_count;
-        (out, local_count, stolen_count)
+        (out, local_count, stolen_count, checked)
     }
 }
