@@ -23,6 +23,41 @@ fn new_db() -> TestDb {
     Database::new(RootIndexType::default(), inc, dec, u64::MIN, u64::MAX)
 }
 
+#[cfg(feature = "tree-viz")]
+#[test]
+fn explorer_bundle_exports_two_tables_at_one_snapshot() {
+    use crate::bat_db::database::DumpColumn;
+    let db = new_db();
+    let a = db.create_table("accounts").table_id().unwrap();
+    let b = db.create_table("orders").table_id().unwrap();
+    let mut tx = DbTransaction::begin(&db);
+    assert!(matches!(tx.insert(a, 7, 70), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(tx.insert(b, 9, 90), CRUDOperationResult::Inserted(_)));
+    tx.commit();
+
+    let path = std::env::temp_dir().join(format!("batstore-explorer-{}.json", std::process::id()));
+    let schemas = vec!["balance", "amount"].into_iter().map(|name| vec![
+        DumpColumn { name: "key".into(), data_type: "integer".into() },
+        DumpColumn { name: name.into(), data_type: "integer".into() },
+    ]).collect::<Vec<_>>();
+    db.dump_explorer_bundle(&path, &schemas, |table, payload| {
+        let field = if table == a { "balance" } else { "amount" };
+        serde_json::Map::from_iter([(field.into(), serde_json::json!(payload))])
+    }).unwrap();
+    let bundle: serde_json::Value = serde_json::from_reader(std::fs::File::open(&path).unwrap()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(bundle["format"], "batstore-explorer-bundle-v1");
+    assert_eq!(bundle["tables"][0]["name"], "accounts");
+    assert_eq!(bundle["tables"][1]["name"], "orders");
+    assert_eq!(bundle["tables"][0]["rows"][0]["balance"], 70);
+    assert_eq!(bundle["tables"][1]["rows"][0]["amount"], 90);
+    assert!(bundle["tables"][0]["tree"]["roots"].as_array().unwrap().len() > 0);
+    assert!(bundle["tables"][1]["tree"]["roots"].as_array().unwrap().len() > 0);
+    assert!(bundle["glc_last"].as_str().unwrap().parse::<u64>().unwrap() > 0);
+    assert_eq!(bundle["tables"][0]["tree"]["glc_last"], bundle["glc_last"]);
+    assert!(bundle["tables"][0]["tree"]["commit_logs"].is_array());
+}
+
 fn new_db_with_wal(path: &std::path::Path) -> TestDb {
     Database::new_with_wal(
         RootIndexType::default(),

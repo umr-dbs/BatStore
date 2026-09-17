@@ -19,6 +19,14 @@ use crate::bat_wal::backend::WalBackend;
 use crate::bat_wal::record::{TableId, WalPayload};
 use crate::bat_wal::recovery;
 
+#[cfg(feature = "tree-viz")]
+#[derive(Clone, serde::Serialize)]
+pub struct DumpColumn {
+    pub name: String,
+    /// Display type, for example "integer", "text", or "decimal".
+    pub data_type: String,
+}
+
 /// Best-effort lowers the calling thread's OS scheduling priority to the
 /// lowest niceness Linux allows (`19`, via `setpriority(PRIO_PROCESS, tid,
 /// ..)` on the thread's own kernel tid — Linux gives each thread, not just
@@ -554,6 +562,59 @@ impl<
     /// `ctx`.
     pub fn current_version(&self) -> Version {
         self.ctx.current_version()
+    }
+
+    /// Export every named table's index and visible rows at one shared SI
+    /// snapshot. Call at a quiescent point: structural page dumping uses raw
+    /// page borrows. The caller supplies the application schema and payload
+    /// encoder because `Database` deliberately has no SQL column catalog.
+    #[cfg(feature = "tree-viz")]
+    pub fn dump_explorer_bundle(
+        &self,
+        path: impl AsRef<Path>,
+        schemas: &[Vec<DumpColumn>],
+        encode_row: impl Fn(TableId, &Payload) -> serde_json::Map<String, serde_json::Value>,
+    ) -> io::Result<()> {
+        use crate::bat_db::transaction::DbTransaction;
+        use crate::bat_query::interval::Interval;
+        use serde_json::{json, Value};
+
+        let tables = self.tables.load();
+        if schemas.len() != tables.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                "one column schema is required for each table"));
+        }
+        let mut tx = DbTransaction::begin(self);
+        let snapshot_version = tx.ts_start().to_string();
+        let mut exported = Vec::with_capacity(tables.len());
+        for (index, entry) in tables.iter().enumerate() {
+            let id = index as TableId;
+            let mut rows = Vec::new();
+            tx.range_for_each(id, Interval::new(self.min_key, self.max_key), |key, payload| {
+                let mut row = encode_row(id, payload);
+                row.insert("key".into(), Value::String(key.to_string()));
+                rows.push(Value::Object(row));
+            });
+            exported.push(json!({
+                "id": id,
+                "name": entry.name,
+                "columns": schemas[index],
+                "rows": rows,
+                "tree": crate::bat_viz::dump::build_tree_dump(&entry.tree, None),
+            }));
+        }
+        tx.abort();
+        let glc_next = self.current_version();
+        let bundle = json!({
+            "format": "batstore-explorer-bundle-v1",
+            "snapshot_version": snapshot_version,
+            "glc_next": glc_next.to_string(),
+            "glc_last": glc_next.saturating_sub(1).to_string(),
+            "max_worker_id": self.ctx.max_worker_id(),
+            "tables": exported,
+        });
+        let file = std::fs::File::create(path)?;
+        serde_json::to_writer_pretty(file, &bundle).map_err(io::Error::other)
     }
 
     pub fn root_star_index(&self) -> RootIndexType {

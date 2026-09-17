@@ -127,6 +127,8 @@
   .workspace-tab { width:100%; display:flex; align-items:center; gap:9px; padding:9px 9px; margin-bottom:3px; text-align:left; color:#929caf; background:transparent; border:1px solid transparent; border-radius:8px; cursor:pointer; font-size:calc(11.5px * var(--font-scale)); transition:background .15s,border-color .15s,color .15s,transform .15s; }
   .workspace-tab::before { content:"•"; display:grid; place-items:center; width:22px; height:22px; flex:0 0 auto; border-radius:6px; color:#8ea4cc; background:#202630; font-size:14px; font-weight:700; transition:background .15s,color .15s; }
   .workspace-tab[data-workspace="dashboard"]::before { content:"▦"; }
+  .workspace-tab[data-workspace="overview"]::before { content:"▤"; }
+  .workspace-tab[data-workspace="animation"]::before { content:"▶"; }
   .workspace-tab[data-workspace="appearance"]::before { content:"◐"; }
   .workspace-tab[data-workspace="health"]::before { content:"♥"; }
   .workspace-tab[data-workspace="queries"]::before { content:"⌕"; }
@@ -140,6 +142,7 @@
   .workspace-tab:hover::before { color:#cddcff; background:#293653; }
   .workspace-tab.active { color:#f1f5ff; background:linear-gradient(90deg,#273a67,#202a42); border-color:#3e5f9f; box-shadow:inset 3px 0 var(--accent),0 3px 12px rgba(0,0,0,.16); }
   .workspace-tab.active::before { color:white; background:var(--accent); box-shadow:0 3px 10px rgba(91,140,255,.35); }
+  .workspace-link[aria-current="true"] { border-color:var(--accent); color:var(--accent-2); }
   .workspace-tab-section { display:flex; align-items:center; gap:7px; margin:15px 8px 7px; color:#6f7b91; font-size:calc(8.5px * var(--font-scale)); font-weight:750; text-transform:uppercase; letter-spacing:.12em; }
   .workspace-tab-section::after { content:""; height:1px; flex:1; background:#2b323e; }
   .workspace-tab-section:first-child { margin-top:5px; }
@@ -289,11 +292,121 @@
   #canvasWrap.grabbing { cursor: grabbing; }
   svg#svg { width: 100%; height: 100%; display: block; }
   #dashboardView { position:absolute; inset:0; z-index:5; overflow:auto; padding:28px; background:var(--bg); }
+  #dataView { position:absolute; inset:0; z-index:5; overflow:auto; padding:28px; background:var(--bg); }
+  #dataView.hidden { display:none; }
+  .data-shell { max-width:1350px; margin:auto; }
+  .data-shell h1 { margin:0 0 8px; }
+  .data-controls { display:flex; flex-wrap:wrap; gap:9px; align-items:end; margin:22px 0; }
+  .data-controls label { display:grid; gap:5px; color:var(--text-dim); font-size:11px; }
+  .data-controls input,.data-controls select,.data-controls textarea { min-width:140px; padding:8px; background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:6px; }
+  #overviewPhantoms { min-width:0; width:16px; height:16px; padding:0; vertical-align:middle; }
+  .data-controls textarea { min-width:260px; min-height:60px; }
+  .data-card { margin:12px 0; padding:15px; border:1px solid var(--border); border-radius:10px; background:var(--panel); }
+  .data-scroll { overflow:auto; max-height:58vh; }
+  .data-table { width:100%; border-collapse:collapse; white-space:nowrap; }
+  .data-table th,.data-table td { padding:9px 12px; border-bottom:1px solid var(--border); text-align:left; }
+  .data-table th { color:var(--accent-2); position:sticky; top:0; background:var(--panel); }
+  .data-table tr.phantom { background:rgba(255,177,66,.16); color:#ffda9c; }
+  .phantom-badge { display:inline-block; padding:2px 7px; border:1px solid #d79b45; border-radius:999px; background:#50371d; color:#ffe1a9; font-weight:800; letter-spacing:.04em; }
+  .data-table small { display:block; color:var(--text-dim); font-weight:400; }
+  .data-pager { display:flex; align-items:center; gap:10px; margin-top:12px; }
+  .animation-step { margin:8px 0; padding:11px; border-left:3px solid var(--accent); background:rgba(91,140,255,.09); border-radius:5px; }
+  .animation-step.active { border-color:#48d69a; background:rgba(72,214,154,.12); }
+  .lego-list { display:flex; flex-direction:column; align-items:stretch; gap:0; }
+  .lego-block { position:relative; border:1px solid #5578b5; border-left:4px solid var(--accent); border-radius:9px; padding:8px 11px; background:#202c42; }
+  .lego-block.op-read { border-color:#527fbd; border-left-color:#6aa9ff; background:#1b304a; }
+  .lego-block.op-scan { border-color:#477f92; border-left-color:#66d2db; background:#19343d; }
+  .lego-block.op-insert { border-color:#4b916b; border-left-color:#54d991; background:#1c392e; }
+  .lego-block.op-update { border-color:#a08245; border-left-color:#f2bf56; background:#3c321f; }
+  .lego-block.op-delete { border-color:#a45a68; border-left-color:#f0788d; background:#3b2530; }
+  .lego-block.completed { border-color:#4ac898; box-shadow:0 0 0 2px rgba(74,200,152,.14); }
+  .lego-block.failed { border-color:#e5586a; box-shadow:0 0 0 2px rgba(229,88,106,.14); }
+  .lego-head { display:flex; align-items:center; gap:10px; }
+  .lego-head b { color:#e7f0ff; }
+  .lego-head select { min-width:95px; padding:4px 7px; border:1px solid currentColor; border-radius:6px; color:#e7f0ff; background:#172235; font-weight:800; }
+  .lego-kind { padding:3px 6px; border-radius:5px; font-size:9px; font-weight:800; letter-spacing:.08em; }
+  .lego-kind.reader { color:#a8deff; background:rgba(98,188,236,.16); }
+  .lego-kind.writer { color:#ffe0a3; background:rgba(240,174,79,.18); }
+  .lego-head .spacer { flex:1; }
+  .lego-palette { display:flex; flex-wrap:wrap; gap:8px; margin:15px 0; }
+  .lego-palette .btn { border-color:#5578b5; }
+  .lego-palette .op-read { border-color:#6aa9ff; color:#c7e1ff; }
+  .lego-palette .op-scan { border-color:#66d2db; color:#c5f4f5; }
+  .lego-palette .op-insert { border-color:#54d991; color:#c9f6df; }
+  .lego-palette .op-update { border-color:#f2bf56; color:#ffebc0; }
+  .lego-palette .op-delete { border-color:#f0788d; color:#ffccd4; }
+  .table-library-head { display:flex; align-items:center; gap:12px; justify-content:space-between; margin-bottom:12px; }
+  .table-library-head h2 { margin:0; }
+  .table-card-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:9px; }
+  .table-card { text-align:left; padding:13px; border:1px solid var(--border); border-radius:9px; background:#1c2431; color:var(--text); cursor:pointer; }
+  .table-card.selected { border-color:var(--accent); background:#263a61; box-shadow:inset 3px 0 var(--accent); }
+  .table-card strong,.table-card small { display:block; }
+  .table-card small { margin-top:5px; color:var(--text-dim); }
+  .txn-canvas { position:relative; padding:16px; border:1px solid #425b82; border-radius:16px; background:radial-gradient(circle at top left,rgba(91,140,255,.12),transparent 38%),#151c28; box-shadow:0 16px 50px rgba(0,0,0,.2); }
+  .txn-node { max-width:690px; margin-left:auto; margin-right:auto; }
+  .lego-block.txn-node { max-width:610px; width:100%; }
+  .txn-begin,.txn-end { border:1px solid #6689c9; border-radius:12px; padding:11px; background:linear-gradient(120deg,#2b4168,#1c293d); }
+  .txn-begin h2,.txn-end h2 { margin:0 0 6px; color:#e0ebff; font-size:14px; }
+  .txn-end { text-align:center; }
+  .txn-connector { width:3px; height:15px; margin:0 auto; background:#6b91d5; position:relative; }
+  .txn-connector::after { content:"▼"; position:absolute; left:-6px; bottom:-8px; color:#8fb2f4; font-size:14px; }
+  .txn-chain { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin:15px 0; color:#a9bbd9; }
+  .txn-chain span { padding:5px 8px; border-radius:6px; background:#202f48; color:#dae6ff; font:11px ui-monospace,monospace; }
+  .txn-chain i { color:#91b3f4; font-style:normal; }
+  .txn-empty { text-align:center; padding:45px 20px; }
+  .txn-mode-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:10px 0 14px; }
+  .txn-mode-bar .btn.active { border-color:#83b3f2; color:#e4f1ff; background:#2a4369; }
+  .txn-mode-bar .mode-hint { flex-basis:100%; color:var(--text-dim); font-size:11px; }
+  .txn-stage-label { max-width:690px; margin:13px auto 7px; color:#a9c4e9; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+  .txn-outline { max-width:690px; margin:8px auto; color:#b8cbe7; font-size:11px; }
+  .txn-outline summary { cursor:pointer; }
+  .txn-canvas .data-controls { margin:8px 0 2px; gap:7px; }
+  .txn-canvas .data-controls input,.txn-canvas .data-controls select { min-width:95px; max-width:230px; padding:5px 7px; }
+  .lego-block .data-controls input,.lego-block .data-controls select { max-width:145px; }
+  .txn-canvas .lego-head { gap:6px; flex-wrap:wrap; }
+  .txn-canvas .lego-head .btn { padding:3px 7px; }
+  .txn-canvas .lego-palette { margin:10px 0; }
+  .txn-clock { display:flex; flex-wrap:wrap; align-items:center; gap:13px; margin:0 0 10px; padding:10px 13px; border:1px solid #4c6591; border-radius:12px; background:#1a2942; }
+  .txn-clock-face { width:62px; height:62px; flex:none; position:relative; border:3px solid #9bc0ff; border-radius:50%; background:radial-gradient(circle,#263d60 0 47%,#172841 48%); box-shadow:0 0 0 4px rgba(110,166,255,.08),inset 0 0 12px #0c172a; }
+  .txn-clock-face::before { content:""; position:absolute; width:3px; height:17px; left:calc(50% - 1.5px); top:10px; border-radius:3px; background:#79ddf3; transform-origin:50% 18px; transform:rotate(var(--clock-angle)); animation:glc-tick .45s ease-out; }
+  @keyframes glc-tick { from { opacity:.4; transform:rotate(calc(var(--clock-angle) - 30deg)); } to { opacity:1; transform:rotate(var(--clock-angle)); } }
+  .txn-clock-face::after { content:""; position:absolute; width:7px; height:7px; left:calc(50% - 3.5px); top:calc(50% - 3.5px); border-radius:50%; background:#e8f5ff; }
+  .txn-clock-face i { position:absolute; left:50%; top:4px; width:2px; height:4px; background:#d3e6ff; transform-origin:0 24px; }
+  .txn-clock-info { display:grid; gap:3px; }
+  .txn-clock-info strong { color:#e8f2ff; font:800 20px ui-monospace,monospace; }
+  .txn-clock-info small { color:#aac2e5; font-size:10px; }
+  .txn-clock-next { margin-left:auto; padding:6px 9px; border:1px solid #53709d; border-radius:7px; color:#d8e9ff; background:#233956; font:11px ui-monospace,monospace; }
+  .txn-snapshot-badge { padding:4px 7px; border:1px solid #6b9cc5; border-radius:7px; color:#d7ecff; background:#183149; cursor:pointer; font:700 10px ui-monospace,monospace; }
+  .txn-snapshot-badge:hover { border-color:#a3d7ff; background:#254a69; }
+  .progress-table { width:100%; border-collapse:collapse; margin:12px 0; }
+  .progress-table th,.progress-table td { padding:8px; border-bottom:1px solid var(--border); text-align:left; }
+  .progress-table th { color:var(--accent-2); }
+  .progress-table tr.own-worker { background:rgba(91,140,255,.11); }
   #dashboardView.hidden { display:none; }
   .dashboard-shell { width:100%; max-width:1580px; margin:0 auto; }
   .dashboard-head { display:flex; align-items:flex-end; justify-content:space-between; gap:20px; margin-bottom:20px; }
   .dashboard-head h1 { margin:0 0 5px; font-size:calc(26px * var(--font-scale)); }
   .dashboard-head p { margin:0; color:var(--text-dim); }
+  .dashboard-clock-panel { padding:16px; border:1px solid #536d9b; border-radius:12px; background:linear-gradient(125deg,rgba(91,140,255,.13),rgba(25,34,50,.95) 55%); }
+  .dashboard-clock-panel h2 { margin:0 0 4px; font-size:calc(16px * var(--font-scale)); }
+  .dashboard-clock-panel p { margin:0; color:var(--text-dim); font-size:calc(11px * var(--font-scale)); }
+  .dashboard-clock-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:9px; margin:12px 0; }
+  .dashboard-clock-metric { padding:10px 12px; border:1px solid #425779; border-radius:9px; background:rgba(17,26,42,.68); }
+  .dashboard-clock-metric span { display:block; color:#a9bad6; font-size:calc(10px * var(--font-scale)); }
+  .dashboard-clock-metric b { display:block; margin-top:3px; color:#e6efff; font:700 calc(19px * var(--font-scale)) ui-monospace,monospace; }
+  .dashboard-worker-groups { display:grid; gap:13px; margin-top:14px; }
+  .dashboard-worker-group h3 { margin:0 0 7px; color:#dce8ff; font-size:calc(12px * var(--font-scale)); }
+  .dashboard-worker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(205px,1fr)); gap:8px; max-height:320px; overflow:auto; }
+  .dashboard-worker-card { padding:10px; border:1px solid #455c80; border-radius:9px; background:#1c2b42; }
+  .dashboard-worker-card.reader { border-color:#417d85; background:#1b3339; }
+  .dashboard-worker-card.idle { border-color:#3e4b60; background:#202938; }
+  .dashboard-worker-card-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+  .dashboard-worker-card-head b { color:#e5efff; font:800 15px ui-monospace,monospace; }
+  .dashboard-worker-card-head small { color:#a7b9d2; font-size:9px; text-transform:uppercase; letter-spacing:.05em; }
+  .dashboard-worker-facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; }
+  .dashboard-worker-facts span { padding:5px 6px; border-radius:5px; background:rgba(255,255,255,.04); color:#aebed4; font-size:9px; }
+  .dashboard-worker-facts strong { display:block; color:#f0f6ff; font:750 13px ui-monospace,monospace; }
+  .dashboard-worker-note { margin-top:10px!important; }
   .dashboard-section { margin:20px 0; }
   .dashboard-section h2 { font-size:calc(15px * var(--font-scale)); margin:0 0 10px; }
   .dashboard-card-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; }
@@ -914,6 +1027,7 @@
     font-family: ui-monospace, monospace; font-size: calc(10px * var(--font-scale));
   }
   .record-row.deleted { color: var(--dead); text-decoration: line-through; opacity: .8; }
+  .record-row.phantom { color:#ffd28d; background:rgba(255,177,66,.14); padding:2px 5px; border-radius:5px; text-decoration:none; opacity:1; }
   .record-row .k { color: var(--text); }
   .record-row.deleted .k { color: var(--dead); }
   .record-row.live .k { color: var(--active); }
@@ -923,12 +1037,14 @@
   }
   .record-row.record-row-detailed:hover { border-color:var(--accent); background:#283142; transform:translateX(1px); }
   .record-row.record-row-detailed.deleted { border-left-color:var(--dead); background:rgba(229,88,106,.045); }
+  .record-row.record-row-detailed.phantom { border-left-color:#e6ad55; background:rgba(255,177,66,.13); }
   .record-detail-head { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:6px; margin-bottom:7px; }
   .record-key-label { color:#7f8ba1; font:750 calc(8px * var(--font-scale)) system-ui,sans-serif; text-transform:uppercase; letter-spacing:.08em; }
   .record-row-key { overflow:hidden; color:var(--keys); font-size:calc(11px * var(--font-scale)); font-weight:750; text-overflow:ellipsis; white-space:nowrap; }
   .record-row.deleted .record-row-key { color:#ff9aaa; text-decoration:none; }
   .record-state-badge { padding:2px 6px; border:1px solid currentColor; border-radius:999px; color:var(--active); font:800 calc(7.5px * var(--font-scale)) system-ui,sans-serif; text-transform:uppercase; letter-spacing:.06em; }
   .record-row.deleted .record-state-badge { color:var(--dead); }
+  .record-row.phantom .record-state-badge { color:#ffd28d; }
   .record-detail-grid { display:grid; grid-template-columns:auto minmax(0,1fr); gap:3px 8px; padding-top:6px; border-top:1px solid rgba(255,255,255,.055); }
   .record-field { display:contents; font-size:calc(9.5px * var(--font-scale)); }
   .record-field .rf-label { color:#7f8ba1; font:650 calc(8.5px * var(--font-scale)) system-ui,sans-serif; }
@@ -944,6 +1060,7 @@
   .record-chip.r-dead {
     background: rgba(229,88,106,.14); border-color: var(--dead); color: var(--text-dim); text-decoration: line-through;
   }
+  .record-chip.r-phantom { border-color:#d79b45; background:#50371d; color:#ffe1a9; }
   .truncated-note { font-size: calc(10.5px * var(--font-scale)); padding-top: 4px; }
   .record-row.record-selected, .record-chip.record-selected {
     position:relative; z-index:2; border-radius:5px; outline:3px solid #ffd166; outline-offset:2px;
@@ -1340,6 +1457,7 @@
       </div>
       <div class="spacer"></div>
       <input type="file" id="fileInput" accept=".json" style="display:none">
+      <input type="file" id="tableFileInput" accept=".json" multiple style="display:none">
       <input type="file" id="dirInput" webkitdirectory multiple style="display:none">
     </div>
   </div>
@@ -1349,6 +1467,8 @@
         <div class="workspace-brand"><div class="workspace-brand-mark">BatStore Explorer</div></div>
         <div class="workspace-tab-section">Views</div>
         <button class="workspace-tab active" data-workspace="dashboard">Dashboard</button>
+        <button class="workspace-tab" data-workspace="overview">Table overview</button>
+        <button class="workspace-tab" data-workspace="animation">Transaction animation</button>
         <button class="workspace-tab" data-workspace="snapshots">Tree view</button>
         <button class="workspace-tab" data-workspace="appearance">Appearance</button>
         <div class="workspace-tab-section">Diagnostics</div>
@@ -1364,8 +1484,11 @@
       </nav>
       <div id="workspaceTabPanels">
         <section class="workspace-tab-panel active" data-panel="dashboard"><h2>Dashboard</h2><div class="dashboard-overview-intro"><span>Explore the loaded tree</span><p>Jump between current health, indexing cost, version history, workload activity, and structural diagnostics.</p></div><nav id="dashboardSectionNav" class="dashboard-section-nav" aria-label="Dashboard sections"></nav></section>
+        <section class="workspace-tab-panel" data-panel="overview"><h2>Tables</h2><div id="overviewTableList"></div><button class="btn" id="addTableSidebar">Add table dumps…</button><p>Each table has its own index. A database bundle can also include column values.</p></section>
+        <section class="workspace-tab-panel" data-panel="animation"><h2>Simulation</h2><p>Replay reads and writes against the exported snapshot without changing the dump.</p></section>
         <section class="workspace-tab-panel" data-panel="snapshots">
           <h2>Tree view</h2>
+          <div id="treeTableList"></div>
           <button class="btn primary" id="currentStateBtn">Jump to current state</button>
           <div id="timelineBar">
             <span class="toolbar-group-label">Root creation timeline</span>
@@ -1403,6 +1526,7 @@
         </g>
       </svg>
       <div id="dashboardView" class="hidden"><div class="dashboard-shell" id="dashboardBody"></div></div>
+      <div id="dataView" class="hidden"></div>
       <div id="statsOverlay" class="hidden"></div>
       <div id="empty">
         <div id="fileBrowser">
@@ -1422,8 +1546,8 @@
           <div id="fileBrowserEmptyNote">
             Generate a dump from the engine, e.g. <code>cargo run --features tree-viz -- viz_demo out.json 15000</code>
             or call <code>tree.dump_to_file(path, None)</code> from your own benchmark/test code at a quiescent point
-            (see <code>src/bat_viz/dump.rs</code>). Only structural metadata (keys, versions, active/dead counts) is
-            ever shown here &mdash; record payload values are never included in a dump.
+            (see <code>src/bat_viz/dump.rs</code>). A single-tree dump contains structural metadata only.
+            A database bundle also contains its exported snapshot rows and column metadata.
           </div>
         </div>
       </div>
@@ -1520,6 +1644,193 @@
     <button class="btn" id="aboutBtn">About</button>
   </div>
 </div>
+<!-- Embedded copy of batstore-snapshot.js keeps this explorer usable as one HTML file. -->
+<script>
+/* Read-only snapshot model for Explorer dumps. No engine state is changed. */
+(function (scope) {
+  "use strict";
+  const bigint = value => { try { return BigInt(value); } catch { return null; } };
+  const compareKeys = (a, b) => {
+    const x = bigint(a), y = bigint(b);
+    return x !== null && y !== null ? (x < y ? -1 : x > y ? 1 : 0)
+      : String(a).localeCompare(String(b), undefined, {numeric:true});
+  };
+  function clockInfo(tree, bundle) {
+    let observed = 0n, worker = 0;
+    for (const root of tree.roots || []) observed = observed > BigInt(root.version) ? observed : BigInt(root.version);
+    for (const node of Object.values(tree.nodes || {})) {
+      for (const child of node.children || []) {
+        const v = bigint(child.version); if (v !== null && v > observed) observed = v;
+      }
+      for (const record of node.records || []) {
+        worker = Math.max(worker, Number(record.insert_worker || 0), Number(record.delete_worker || 0));
+        for (const stamp of [record.insert_ts, record.delete_ts]) {
+          const v = bigint(stamp); if (v !== null && v > observed) observed = v;
+        }
+      }
+    }
+    const next = bigint(tree.glc_next ?? bundle?.glc_next);
+    const explicitLast = bigint(tree.glc_last ?? bundle?.glc_last);
+    return {last: explicitLast ?? (next === null ? observed : next > 0n ? next - 1n : 0n),
+      next: next === null ? observed + 1n : next,
+      maxWorker: Number(tree.max_worker_id ?? bundle?.max_worker_id ?? worker),
+      exact: Array.isArray(tree.commit_logs) && tree.historical_visibility_complete === true,
+      inferredClock: explicitLast === null && next === null};
+  }
+  function overlaps(a, b) {
+    return compareKeys(a.key_lower, b.key_upper) <= 0 && compareKeys(b.key_lower, a.key_upper) <= 0;
+  }
+  function activeChildren(node, ts) {
+    const eligible = (node.children || []).filter(child => {
+      const stamp = bigint(child.version); return stamp !== null && stamp <= ts;
+    });
+    return eligible.filter((child, index) => !eligible.slice(index + 1).some(later => overlaps(child, later)));
+  }
+  function rootAt(tree, ts) {
+    const roots = [...(tree.roots || [])].sort((a,b) => bigint(a.version) < bigint(b.version) ? -1 : 1);
+    if (!roots.length) return null;
+    let result = roots[0];
+    for (const root of roots) { if (bigint(root.version) <= ts) result = root; else break; }
+    return result;
+  }
+  function stampVisible(tree, ts, readerWorker, stampWorker, stampTs, invalid) {
+    if (invalid) return false;
+    const stamp = bigint(stampTs);
+    if (stamp === null || stamp > ts) return false;
+    if (Number(stampWorker) === readerWorker) return true;
+    const log = tree.commit_logs?.[Number(stampWorker)];
+    if (!Array.isArray(log)) return stamp < ts; // legacy dump: commit unknown
+    let last = 0n;
+    for (const entry of log) {
+      const commit = bigint(entry);
+      if (commit !== null && commit < ts && commit > last) last = commit;
+    }
+    return last > stamp;
+  }
+  function progressTable(tree, tsInput, maxWorker, simulatedCommits = []) {
+    const ts = bigint(tsInput);
+    if (ts === null || ts < 0n) throw new Error("Snapshot time must be a nonnegative integer.");
+    const count = Math.max(0, Number(maxWorker ?? clockInfo(tree).maxWorker));
+    const complete = Array.isArray(tree.commit_logs) && tree.historical_visibility_complete === true;
+    const entries = [];
+    for (let worker = 0; worker <= count; worker++) {
+      let last = 0n;
+      for (const value of tree.commit_logs?.[worker] || []) {
+        const commit = bigint(value);
+        if (commit !== null && commit < ts && commit > last) last = commit;
+      }
+      for (const entry of simulatedCommits) {
+        if (Number(entry.worker) !== worker) continue;
+        const commit = bigint(entry.commit);
+        if (commit !== null && commit < ts && commit > last) last = commit;
+      }
+      entries.push({worker, lcb:complete || last > 0n ? String(last) : null, exact:complete});
+    }
+    return {ts:String(ts),entries,exact:complete};
+  }
+  function workerActivity(tree) {
+    const clock = clockInfo(tree), workers = Array.from({length:clock.maxWorker+1}, (_,worker) => ({
+      worker,commits:clock.exact ? (tree.commit_logs?.[worker]?.length || 0) : null,
+      writes:0,deletes:0
+    }));
+    const writes = new Set(), deletes = new Set();
+    for (const node of Object.values(tree.nodes || {})) {
+      if (node.type !== "leaf") continue;
+      for (const record of node.records || []) {
+        if (!record.insert_invalid) {
+          const id=[record.key,record.insert_worker,record.insert_ts].join("\u0000");
+          if (!writes.has(id)) {writes.add(id);if(workers[record.insert_worker])workers[record.insert_worker].writes++;}
+        }
+        if (record.deleted && !record.delete_invalid) {
+          const id=[record.key,record.delete_worker,record.delete_ts].join("\u0000");
+          if (!deletes.has(id)) {deletes.add(id);if(workers[record.delete_worker])workers[record.delete_worker].deletes++;}
+        }
+      }
+    }
+    return {exactCommits:clock.exact,workers};
+  }
+  function snapshot(tree, tsInput, readerWorker, bundleRows, rowsVersion) {
+    const ts = bigint(tsInput);
+    if (ts === null || ts < 0n) throw new Error("Snapshot time must be a nonnegative integer.");
+    const root = rootAt(tree, ts), found = new Map(), phantoms = new Map(), visited = new Set();
+    if (!root) return {rows:[], phantoms:[], root:null, truncated:false};
+    let truncated = ts > 0n && ts < bigint(root.version);
+    function walk(id) {
+      if (visited.has(id)) return;
+      visited.add(id);
+      const node = tree.nodes?.[id]; if (!node) {truncated=true;return;}
+      if (node.type === "internal_truncated") {truncated=true;return;}
+      if (node.type === "internal") {for (const child of activeChildren(node, ts)) walk(child.node_id);return;}
+      for (const record of node.records || []) {
+        const key = String(record.key);
+        const metadata = {key,insert_ts:String(record.insert_ts),insert_worker:record.insert_worker,
+          delete_ts:record.deleted ? String(record.delete_ts) : null,
+          delete_worker:record.deleted ? record.delete_worker : null,
+          status:record.insert_invalid ? "PHANTOM" : record.delete_invalid ? "ABORTED DELETE" : "VISIBLE"};
+        if (record.insert_invalid) {
+          const stamp = bigint(record.insert_ts);
+          if (stamp !== null && stamp <= ts) phantoms.set(key+":"+record.insert_worker+":"+record.insert_ts,metadata);
+          continue;
+        }
+        if (!stampVisible(tree, ts, readerWorker, record.insert_worker, record.insert_ts, record.insert_invalid)) continue;
+        if (record.deleted && stampVisible(tree, ts, readerWorker, record.delete_worker, record.delete_ts, record.delete_invalid)) continue;
+        const previous = found.get(key);
+        if (!previous || bigint(record.insert_ts) > bigint(previous.insert_ts)) found.set(key,metadata);
+      }
+    }
+    walk(root.node_id);
+    const valuesAvailable = bundleRows && rowsVersion != null && ts >= bigint(rowsVersion)
+      && ts <= clockInfo(tree).last + 1n;
+    const values = valuesAvailable ? new Map(bundleRows.map(row => [String(row.key), row])) : null;
+    const rows = [...found.values()].map(row => values?.has(row.key) ? {...values.get(row.key),...row} : row)
+      .sort((a,b) => compareKeys(a.key,b.key));
+    return {rows,phantoms:[...phantoms.values()].sort((a,b)=>compareKeys(a.key,b.key)),root,truncated,valuesAvailable:!!valuesAvailable};
+  }
+  function select(rows, {key, lower, upper, field="key", operator="contains", value=""}={}) {
+    return rows.filter(row => {
+      if (key != null && String(row.key) !== String(key)) return false;
+      if (lower != null && compareKeys(row.key,lower) < 0) return false;
+      if (upper != null && compareKeys(row.key,upper) > 0) return false;
+      if (value === "") return true;
+      const actual = row[field] == null ? "" : String(row[field]);
+      const cmp = compareKeys(actual,value);
+      return operator === "eq" ? cmp === 0 : operator === "gte" ? cmp >= 0
+        : operator === "lte" ? cmp <= 0 : actual.toLowerCase().includes(String(value).toLowerCase());
+    });
+  }
+  function execute(tables, operations, ts, worker, rowsVersion) {
+    const state = tables.map(table => new Map(snapshot(table.tree,ts,worker,table.rows,table.snapshot_version ?? rowsVersion).rows.map(row => [String(row.key),{...row}])));
+    const steps = [];
+    let aborted = false;
+    for (const op of operations) {
+      const map = state[op.tableIndex];
+      if (!map) throw new Error("Unknown table in transaction.");
+      const before = map.get(String(op.key));
+      let result;
+      if (op.kind === "read") result = before ? {status:"found",rows:[{...before}]} : {status:"missing",rows:[]};
+      else if (op.kind === "scan") {
+        const rows = [...map.values()].filter(row => compareKeys(row.key,op.lower)>=0 && compareKeys(row.key,op.upper)<=0).sort((a,b)=>compareKeys(a.key,b.key));
+        result = {status:"matched",rows};
+      } else if (op.kind === "insert") {
+        if (before) { result={status:"conflict",rows:[{...before}]};aborted=true; }
+        else {const row={key:String(op.key),...(op.values||{})};map.set(String(op.key),row);result={status:"inserted",rows:[{...row}]};}
+      } else if (op.kind === "update") {
+        if (!before) {result={status:"missing",rows:[]};aborted=true;}
+        else {const row={...before,...(op.values||{})};map.set(String(op.key),row);result={status:"updated",rows:[{...row}]};}
+      } else if (op.kind === "delete") {
+        if (!before) {result={status:"missing",rows:[]};aborted=true;}
+        else {map.delete(String(op.key));result={status:"deleted",rows:[{...before}]};}
+      } else throw new Error("Unknown operation: "+op.kind);
+      steps.push({operation:op,result});
+      if (aborted) break;
+    }
+    return {steps,aborted};
+  }
+  const api = {clockInfo,progressTable,workerActivity,snapshot,select,execute,compareKeys};
+  scope.BatStoreSnapshot = api;
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+})(typeof window !== "undefined" ? window : globalThis);
+</script>
 <script>
 (function () {
   "use strict";
@@ -1547,6 +1858,18 @@
   // State
   // ---------------------------------------------------------------------
   let dump = null;              // parsed JSON: { fan_out, num_records, root_index_type, roots[], nodes{} }
+  let explorerBundle = null;
+  let bundleFileName = "";
+  let activeTableIndex = 0;
+  let overviewPage = 0;
+  let animationOps = [];
+  let transactionCreated = false;
+  let animationTimer = null;
+  let simulationGlcLast = null;
+  let simulatedMaxWorkerId = null;
+  let simulationCommits = [];
+  let simulationRuns = [];
+  let animationMode = "auto";
   let currentRootId = null;     // node_id of the root currently rendered
   const expanded = new Set();  // node ids currently expanded
   const checked = new Set();   // node ids currently "marked" via checkbox
@@ -1625,6 +1948,8 @@
   let dashboardSourceNavController = null;
   let currentDashboardSourceSection = null;
   let dashboardAdvanced = false;
+  let dashboardRenderedDump = null;
+  const dashboardWorkerFactsCache = new WeakMap();
   let dashboardShowAllRoots = false;
   let dashboardShowAllHotRoots = false;
   let dashboardShowAllEvolutionRoots = false;
@@ -1828,6 +2153,36 @@
   document.getElementById("chooseFileBtn").addEventListener("click", () => fileInput.click());
 
   function onDumpLoaded(name) {
+    if (dump?.format === "batstore-explorer-bundle-v1") {
+      if (!Array.isArray(dump.tables) || !dump.tables.length || dump.tables.some(t => !t.tree?.roots || !t.tree?.nodes)) {
+        alert("The bundle needs at least one table with a tree dump.");
+        return;
+      }
+      explorerBundle = dump;
+      animationOps = [];
+      transactionCreated = false;
+      simulationGlcLast = null;
+      simulatedMaxWorkerId = null;
+      simulationCommits = [];
+      simulationRuns = [];
+      animationMode = "auto";
+      dashboardRenderedDump = null;
+      bundleFileName = name;
+      activeTableIndex = 0;
+      dump = explorerBundle.tables[0].tree;
+    } else if (!explorerBundle || !explorerBundle.tables.some(t => t.tree === dump)) {
+      explorerBundle = null;
+      animationOps = [];
+      transactionCreated = false;
+      simulationGlcLast = null;
+      simulatedMaxWorkerId = null;
+      simulationCommits = [];
+      simulationRuns = [];
+      animationMode = "auto";
+      dashboardRenderedDump = null;
+    }
+    if (!dump?.roots || !dump?.nodes) { alert("This is not a BatStore tree dump."); return; }
+    clearTimeout(animationTimer);
     document.body.classList.add("dump-loaded");
     currentFileName = name.replace(/\.json$/i, "") || "tree";
     stopPlayback();
@@ -1867,6 +2222,7 @@
     rangeHits.clear(); rangeCropMode = false; rangeCropBounds = null; heatmapMetric = null; anomalyTour = []; anomalyTourIndex = -1;
 
     const nodeCount = Object.keys(dump.nodes).length;
+    renderTableList();
     if(nodeCount>5000&&!performanceMode){performanceMode=true;localStorage.setItem("batstore-viz-performance","1");document.getElementById("performanceModeBtn").classList.add("primary");updateTreeActionStatus();showToast("Large dump detected: viewport performance mode enabled automatically.",4800);}
     fileLabel.textContent = name;
     fileLabel.title = name;
@@ -1961,6 +2317,13 @@
   fileInput.addEventListener("change", (e) => {
     if (e.target.files[0]) loadFile(e.target.files[0]);
   });
+  const tableFileInput = document.getElementById("tableFileInput");
+  tableFileInput.addEventListener("change", async e => {
+    const files = [...e.target.files];
+    tableFileInput.value = "";
+    if (files.length) await addTablesFromFiles(files);
+  });
+  document.getElementById("addTableSidebar").onclick = () => tableFileInput.click();
 
   document.getElementById("loadedFileButton").addEventListener("click", () => {
     fileInput.value = "";
@@ -3868,8 +4231,10 @@
   /// A record's ts_start/worker_id summary in a clearly-labeled compact
   /// form - deliberately not the old cryptic "w0@123" shorthand.
   function recordCompactLabel(r) {
-    let s = "ts " + r.insert_ts;
-    if (r.deleted) s += " · del ts " + r.delete_ts;
+    let s = "created by worker " + r.insert_worker + " at ts_start " + r.insert_ts;
+    if (r.deleted) s += " · deleted by worker " + r.delete_worker + " at ts_start " + r.delete_ts;
+    if (r.insert_invalid) s += " · PHANTOM";
+    else if (r.delete_invalid) s += " · aborted delete";
     return s;
   }
 
@@ -3878,11 +4243,11 @@
   /// a dump never includes in the first place (see the empty-state note).
   function recordDetailFields(r) {
     let html =
-      '<div class="record-field"><span class="rf-label">Created at</span><span class="rf-value">Version ' + escapeHtml(String(r.insert_ts)) + '</span></div>' +
+      '<div class="record-field"><span class="rf-label">Created ts_start</span><span class="rf-value">' + escapeHtml(String(r.insert_ts)) + '</span></div>' +
       '<div class="record-field"><span class="rf-label">Created by</span><span class="rf-value">Worker ' + escapeHtml(String(r.insert_worker)) + '</span></div>';
     if (r.deleted) {
       html +=
-        '<div class="record-field del"><span class="rf-label">Deleted at</span><span class="rf-value">Version ' + escapeHtml(String(r.delete_ts)) + '</span></div>' +
+        '<div class="record-field del"><span class="rf-label">Deleted ts_start</span><span class="rf-value">' + escapeHtml(String(r.delete_ts)) + '</span></div>' +
         '<div class="record-field del"><span class="rf-label">Deleted by</span><span class="rf-value">Worker ' + escapeHtml(String(r.delete_worker)) + '</span></div>';
     }
     return html;
@@ -3895,23 +4260,24 @@
   function recordsHtml(liveRecords) {
     if (recordLayoutMode === "grid") {
       return '<div class="records records-grid">' + liveRecords.map(r => {
-        const stateClass = r.deleted ? " r-dead" : " r-live";
+        const stateClass = r.insert_invalid ? " r-phantom" : r.deleted ? " r-dead" : " r-live";
         const title = "key " + r.key + " · ts_start " + r.insert_ts + " · worker " + r.insert_worker +
-          (r.deleted ? (" · deleted ts " + r.delete_ts + " by worker " + r.delete_worker) : "") +
+          (r.deleted ? (" · deleted ts_start " + r.delete_ts + " by worker " + r.delete_worker) : "") +
+          (r.insert_invalid ? " · PHANTOM: aborted insert" : r.delete_invalid ? " · aborted delete" : "") +
           " · click for full trace";
         return '<div class="record-chip' + stateClass + '" data-record-key="' + escapeHtml(String(r.key)) +
           '" data-record-insert-ts="' + escapeHtml(String(r.insert_ts)) + '" title="' +
-          escapeHtml(title) + '">' + escapeHtml(String(r.key)) + '</div>';
+          escapeHtml(title) + '">' + escapeHtml(String(r.key)) + (r.insert_invalid?' · PHANTOM':'') + '</div>';
       }).join("") + '</div>';
     }
 
     return '<div class="records">' + liveRecords.map(r => {
-      const rowClass = (r.deleted ? " deleted" : (liveViewMode ? " live" : "")) + (recordDetailMode ? " record-row-detailed" : "");
+      const rowClass = (r.insert_invalid ? " phantom" : r.deleted ? " deleted" : (liveViewMode ? " live" : "")) + (recordDetailMode ? " record-row-detailed" : "");
       const keyAttrs = ' data-record-key="' + escapeHtml(String(r.key)) + '" data-record-insert-ts="' +
         escapeHtml(String(r.insert_ts)) + '" title="Click for this record\'s full created/deleted/re-inserted trace"';
       if (recordDetailMode) {
         return '<div class="record-row' + rowClass + '"' + keyAttrs + '>' +
-          '<div class="record-detail-head"><span class="record-key-label">Key</span><span class="record-row-key">' + escapeHtml(String(r.key)) + '</span><span class="record-state-badge">'+(r.deleted?'Deleted':'Live')+'</span></div>' +
+          '<div class="record-detail-head"><span class="record-key-label">Key</span><span class="record-row-key">' + escapeHtml(String(r.key)) + '</span><span class="record-state-badge">'+(r.insert_invalid?'PHANTOM':r.deleted?'Deleted':'Live')+'</span></div>' +
           '<div class="record-detail-grid">'+recordDetailFields(r)+'</div>' +
           '</div>';
       }
@@ -5145,6 +5511,8 @@
   }
   function renderDashboard() {
     if (!dump || !dump.roots.length) { dashboardBody.innerHTML = ""; return; }
+    const dumpClock=dashboardAdvanced?BatStoreSnapshot.clockInfo(dump,explorerBundle):null;
+    const dashboardClockSection=dashboardAdvanced?'<div class="dashboard-section dashboard-clock-panel" id="dashboard-clock"><h2>Global clock & worker activity</h2><p>'+ (dumpClock.inferredClock?'Clock value inferred from record stamps. ':'') +'Worker activity combines recorded commits with transactions run in this session.</p><div class="dashboard-clock-metrics"><div class="dashboard-clock-metric"><span>GLC</span><b id="dashboardSimulationGlc"></b></div><div class="dashboard-clock-metric"><span>Workers</span><b id="dashboardWorkerCount"></b></div><div class="dashboard-clock-metric"><span>Known write commits</span><b id="dashboardKnownWrites"></b></div><div class="dashboard-clock-metric"><span>Avg operations / replay</span><b id="dashboardAvgOps"></b></div></div><div id="dashboardWorkerActivity"></div><p class="dashboard-worker-note">Commit counts come from the shared worker logs; index changes are observed in this table’s retained entries. Historical read-only transactions and exact operation counts are not recorded. Read counts and average operation size come from replays in this session.</p></div>':'';
     const roots=sortedRootsAsc(), latest=roots[roots.length-1], first=roots[0], s=activeTreeStats(latest), current=dashboardRootStats(latest,true);
     const totalNodes=Object.keys(dump.nodes).length;
     const totalRecords=Object.values(dump.nodes).reduce((sum,n)=>sum+(n?.type==="leaf"?(n.records||[]).length:0),0);
@@ -5226,6 +5594,7 @@
     const hotRecordsSection=dashboardAdvanced?'<div class="dashboard-section"><div class="dashboard-head"><div><h2>Hot records</h2><p>Keys with repeated updates or deletions, grouped by the root interval in which that activity occurred.</p></div><div class="hot-record-controls"><label class="hot-record-limit">Keys per root <input type="number" id="dashboardHotKeyLimit" min="1" max="1000" step="1" list="dashboardHotKeyPresets" value="'+dashboardHotKeyLimit+'"><datalist id="dashboardHotKeyPresets">'+[25,50,100,250,500,1000].map(limit=>'<option value="'+limit+'"></option>').join("")+'</datalist></label><button class="btn" id="dashboardHotRootsToggle">'+(dashboardShowAllHotRoots?'Show latest 3':'Show all roots horizontally')+'</button></div></div><div class="hot-record-group"><div class="evolution-group-head"><div><h3>Hot records</h3><p>Most active keys appear first. Counts represent logical events, with duplicate physical copies from page splits removed.</p></div></div><div class="hot-record-strip">'+hotRoots.map(root=>{const allRanked=[...(hotRecords.get(String(root.version))||new Map()).entries()].map(([key,counts])=>({key,...counts,total:counts.updates+counts.deletes})).sort((a,b)=>b.total-a.total||String(a.key).localeCompare(String(b.key),undefined,{numeric:true})),ranked=allRanked.slice(0,dashboardHotKeyLimit),rootUpdates=allRanked.reduce((sum,item)=>sum+item.updates,0),rootDeletes=allRanked.reduce((sum,item)=>sum+item.deletes,0);return '<div class="hot-record-card"><div class="hot-record-card-head"><h3>Root version '+escapeHtml(root.version)+'</h3><span>'+(root===latest?'<span class="latest-badge">latest</span> ':'')+'<small>'+ranked.length+' of '+allRanked.length+' keys</small></span></div><div class="hot-record-root-summary"><div class="updates"><b>'+rootUpdates+'</b>logical updates</div><div class="deletes"><b>'+rootDeletes+'</b>logical deletes</div></div><div class="hot-record-list">'+(ranked.map((item,index)=>'<button class="hot-record-row" data-hot-key="'+escapeHtml(item.key)+'" title="Open the complete lifecycle for key '+escapeHtml(item.key)+'"><span class="hot-record-rank">'+(index+1)+'</span><span class="hot-record-key">Key '+escapeHtml(item.key)+'</span><span class="hot-record-counts"><span class="hot-record-updates">↻ '+item.updates+'</span><span class="hot-record-deletes">× '+item.deletes+'</span></span></button>').join("")||'<div class="hot-record-empty">Quiet interval — no logical updates or deletions were recorded for this root.</div>')+'</div></div>';}).join("")+'</div><div class="sub">Select a key to open its full record lifecycle in the node details panel.</div></div></div>':'';
     dashboardBody.innerHTML=
       '<div class="dashboard-head"><div><h1>BatStore: Dashboard</h1><p>'+escapeHtml(currentFileName)+' · latest version '+escapeHtml(latest.version)+'</p></div><div><span class="mode-switch"><button class="btn'+(!dashboardAdvanced?' active':'')+'" data-dashboard-mode="standard">Standard</button><button class="btn'+(dashboardAdvanced?' active':'')+'" data-dashboard-mode="advanced">Advanced</button></span> <button class="btn primary" data-dashboard-action="tree">Open current tree →</button></div></div>'+
+      dashboardClockSection+
       '<div class="dashboard-section"><h2>Health at a glance</h2><div class="health-at-glance-group"><div class="dashboard-card-grid dashboard-health-grid'+(dashboardAdvanced?' advanced':'')+'">'+
         '<div class="dashboard-card"><h3>Page fill and debris</h3><div class="fill-stat-list"><div class="fill-stat-row '+nonRootFillStatus+'"><span>Latest reachable tree</span><b>'+averageDistributionFill+'% average</b></div><div class="fill-stat-row '+currentRootFillStatus+'"><span>Current root page</span><b>'+currentRootFill+'% filled</b></div><div class="fill-stat-row '+averageRootFillStatus+'"><span>All root pages</span><b>'+averageRootFill+'% average</b></div><div class="fill-stat-row '+debrisStatus+'"><span>Historical debris</span><b>'+deadPct+'% obsolete</b></div></div><div class="capacity-summary"><div><span>Internal-page fan-out</span><b>'+escapeHtml(dump.fan_out ?? "Unknown")+'</b></div><div><span>Leaf-page capacity</span><b>'+escapeHtml(dump.num_records ?? "Unknown")+' records</b></div></div><div class="sub">Green marks the preferred fill range. Debris is green below 20%, yellow below 40%, and red from 40%. The fill distribution includes only the latest live-reachable tree.</div>'+(dashboardAdvanced?'<div class="health-subsection"><h3>Root fill over time</h3>'+trendSvg+'</div>':'')+'</div>'+
         fillDistribution+
@@ -5264,6 +5633,7 @@
     const dashboardJumpTargets=[
       ["Health at a glance","dashboard-health",".health-at-glance-group",false,"health"],
       ["Root*","dashboard-roots",".recent-root-group",false,"roots"],
+      ["Global clock & workers","dashboard-clock",".dashboard-clock-panel",true,"health"],
       ["Workload summary","dashboard-workload",".evolution-group.workload",true,"workload"],
       ["Hot records","dashboard-hot-records",".hot-record-group",true,"hot"],
       ["Key-space activity heatmap","dashboard-keyspace",".keyspace-activity-group",true,"keyspace"],
@@ -5329,6 +5699,43 @@
       selectRoot(latest.node_id,latest);
       requestAnimationFrame(()=>{locateNodeInTree(id);openNodeInspector(id,"diagnostics");});
     });
+    refreshDashboardClock();
+    dashboardRenderedDump=dump;
+  }
+  function refreshDashboardClock() {
+    const current=dashboardBody.querySelector("#dashboardSimulationGlc");
+    if(!current)return;
+    const clock=transactionClock();
+    current.textContent=String(clock.last);
+    refreshDashboardWorkerActivity(clock);
+  }
+  function refreshDashboardWorkerActivity(clock) {
+    const target=dashboardBody.querySelector("#dashboardWorkerActivity");if(!target)return;
+    let facts=dashboardWorkerFactsCache.get(dump);
+    if(!facts){facts=BatStoreSnapshot.workerActivity(dump);dashboardWorkerFactsCache.set(dump,facts);}
+    const groups={writer:[],reader:[],idle:[]};
+    let knownWrites=0;
+    for(let id=0;id<=clock.maxWorker;id++){
+      const fact=facts.workers[id]||{worker:id,commits:facts.exactCommits?0:null,writes:0,deletes:0};
+      const runs=simulationRuns.filter(run=>run.worker===id);
+      const reads=runs.filter(run=>!run.writing).length,writes=runs.filter(run=>run.writing).length;
+      const successfulWrites=runs.filter(run=>run.writing&&!run.aborted).length;
+      const avg=runs.length?(runs.reduce((sum,run)=>sum+run.operations,0)/runs.length).toFixed(1):"—";
+      const committed=fact.commits===null?null:fact.commits+successfulWrites;
+      knownWrites+=committed??successfulWrites;
+      const role=(fact.commits||0)+fact.writes+fact.deletes+writes>0?"writer":reads>0?"reader":"idle";
+      const committedLabel=committed===null?(successfulWrites?successfulWrites+" replayed":"Unknown"):String(committed);
+      const card='<div class="dashboard-worker-card '+role+'"><div class="dashboard-worker-card-head"><b>w'+id+'</b><small>'+({writer:"Writer",reader:"Reader replay",idle:"No observed activity"}[role])+'</small></div><div class="dashboard-worker-facts">'+
+        '<span><strong>'+committedLabel+'</strong>write commits</span><span><strong>'+reads+'</strong>read replays</span>'+
+        '<span><strong>'+fact.writes+' / '+fact.deletes+'</strong>index writes / deletes</span><span><strong>'+avg+'</strong>ops / replay</span></div></div>';
+      groups[role].push(card);
+    }
+    const headings={writer:"Workers with writes",reader:"Read-only replay workers",idle:"Other configured workers"};
+    target.innerHTML='<div class="dashboard-worker-groups">'+["writer","reader","idle"].filter(role=>groups[role].length).map(role=>'<section class="dashboard-worker-group"><h3>'+headings[role]+' · '+groups[role].length+'</h3><div class="dashboard-worker-grid">'+groups[role].join("")+'</div></section>').join("")+'</div>';
+    dashboardBody.querySelector("#dashboardWorkerCount").textContent=String(clock.maxWorker+1);
+    dashboardBody.querySelector("#dashboardKnownWrites").textContent=facts.exactCommits?String(knownWrites):(knownWrites?knownWrites+"+":"Unknown");
+    const average=simulationRuns.length?(simulationRuns.reduce((sum,run)=>sum+run.operations,0)/simulationRuns.length).toFixed(1):"—";
+    dashboardBody.querySelector("#dashboardAvgOps").textContent=average;
   }
   function switchWorkspace(name) {
     if(name==="tree")name="snapshots";
@@ -5337,11 +5744,13 @@
     document.querySelectorAll(".workspace-tab").forEach(el=>el.classList.toggle("active",el.dataset.workspace===name));
     document.querySelectorAll(".workspace-tab-panel").forEach(el=>el.classList.toggle("active",el.dataset.panel===name));
     const dashboard=name==="dashboard";
-    document.body.classList.toggle("tree-workspace",!dashboard);
+    const dataPage=name==="overview"||name==="animation";
+    document.body.classList.toggle("tree-workspace",!dashboard&&!dataPage);
     document.body.classList.remove("plain-tree-workspace");
     dashboardView.classList.toggle("hidden",!dashboard);
+    document.getElementById("dataView").classList.toggle("hidden",!dataPage);
     utilityPanel.classList.add("hidden"); tracePanel.classList.add("hidden"); keyTracerPanel.classList.add("hidden"); map2dPanel.classList.add("hidden");
-    if(dashboard) renderDashboard(); else { render(); requestAnimationFrame(()=>{if(name==="tree"||name==="snapshots")fitToView();}); }
+    if(dashboard) { if(dashboardRenderedDump!==dump || !dashboardBody.hasChildNodes())renderDashboard();else refreshDashboardClock(); } else if(dataPage) { if(name==="overview")renderTableOverview();else renderTransactionAnimation(); } else { render(); requestAnimationFrame(()=>{if(name==="tree"||name==="snapshots")fitToView();}); }
     renderStatsOverlay();
     updateTreeToolbarState();
     scheduleBrowserState();
@@ -6140,7 +6549,7 @@
   // nothing in it visibly responds to a real mouse click (a synthetic `.click()`
   // call skips this whole pointerdown/capture path, which is why this doesn't show
   // up in automated testing that only ever dispatches synthetic clicks).
-  const OVERLAY_SELECTOR = ".node-box, .side-panel, #empty, #dashboardView, #snapshotBanner, #map2dPanel, #loadingOverlay, #minimap";
+  const OVERLAY_SELECTOR = ".node-box, .side-panel, #empty, #dashboardView, #dataView, #snapshotBanner, #map2dPanel, #loadingOverlay, #minimap";
   let performanceRenderFrame = null;
   function openInspectorKind() {
     if (!map2dPanel.classList.contains("hidden")) return "map2d";
@@ -6388,6 +6797,354 @@
   window.addEventListener("resize", () => { /* svg is 100%/100%, no-op */ });
 
   applyTransform();
+
+  function bundleTables() {
+    return explorerBundle ? explorerBundle.tables : [{name: currentFileName || "Tree", tree: dump, columns:[{name:"key",data_type:"key"}], rows:[]}];
+  }
+  async function addTablesFromFiles(files) {
+    if(!dump) return;
+    const additions=[];
+    for(const file of files){
+      try{
+        const parsed=await parseJsonOffThread(await file.text());
+        if(parsed?.format==="batstore-explorer-bundle-v1" && Array.isArray(parsed.tables)) {
+          for(const table of parsed.tables) if(table.tree?.roots && table.tree?.nodes) additions.push({...table,snapshot_version:parsed.snapshot_version});
+        } else if(parsed?.roots && parsed?.nodes) {
+          additions.push({name:file.name.replace(/\.json$/i,""),columns:[{name:"key",data_type:"key"}],rows:[],tree:parsed});
+        } else alert(file.name+" is not a BatStore tree or database bundle.");
+      }catch(error){alert("Could not read "+file.name+": "+error.message);}
+    }
+    if(!additions.length)return;
+    if(!explorerBundle){
+      explorerBundle={format:"batstore-explorer-bundle-v1",tables:[{name:currentFileName||"First table",columns:[{name:"key",data_type:"key"}],rows:[],tree:dump}]};
+      bundleFileName=currentFileName||"Table workspace";
+    }
+    for(const table of additions){
+      const base=String(table.name||"Table");let name=base,suffix=2;
+      while(explorerBundle.tables.some(existing=>existing.name===name))name=base+" ("+(suffix++)+")";
+      explorerBundle.tables.push({...table,name,id:explorerBundle.tables.length});
+    }
+    renderTableList();
+    if(activeWorkspace==="overview")renderTableOverview();
+    else if(activeWorkspace==="animation")renderTransactionAnimation();
+    showToast(additions.length+" table"+(additions.length===1?"":"s")+" added to the workspace.");
+  }
+  function tableColumns(table) {
+    const columns = Array.isArray(table.columns) ? table.columns.filter(c=>c && c.name) : [];
+    return columns.some(c=>c.name==="key") ? columns : [{name:"key",data_type:"key"},...columns];
+  }
+  function tableOptions(selected) {
+    return bundleTables().map((t,i)=>'<option value="'+i+'" '+(i===selected?'selected':'')+'>'+escapeHtml(t.name||('Table '+i))+'</option>').join("");
+  }
+  function selectBundleTable(index, workspace) {
+    if(!explorerBundle){switchWorkspace(workspace||"snapshots");return;}
+    if(!explorerBundle.tables[index])return;
+    activeTableIndex=index;
+    dump=explorerBundle.tables[index].tree;
+    onDumpLoaded(bundleFileName+" · "+explorerBundle.tables[index].name);
+    activeTableIndex=index;
+    switchWorkspace(workspace||"overview");
+  }
+  function renderTableList() {
+    for(const id of ["overviewTableList","treeTableList"]){
+      const list=document.getElementById(id);if(!list)continue;
+      list.innerHTML=bundleTables().map((t,i)=>'<button class="workspace-link" data-table-index="'+i+'" '+(i===activeTableIndex?'aria-current="true"':'')+'>'+escapeHtml(t.name||('Table '+i))+'<small>'+((t.rows||[]).length)+' snapshot rows · '+(t.tree?.roots?.length||0)+' roots</small></button>').join("");
+      list.querySelectorAll("[data-table-index]").forEach(button=>button.onclick=()=>selectBundleTable(+button.dataset.tableIndex,"snapshots"));
+    }
+  }
+  function cellText(value) {
+    return value==null ? "NULL" : typeof value==="object" ? JSON.stringify(value) : String(value);
+  }
+  function explorerClock(table) {
+    return BatStoreSnapshot.clockInfo(table.tree, explorerBundle);
+  }
+  function transactionClock() {
+    const clocks=bundleTables().map(explorerClock);
+    const dumpLast=clocks.reduce((max,clock)=>clock.last>max?clock.last:max,0n);
+    if(simulationGlcLast===null||simulationGlcLast<dumpLast)simulationGlcLast=dumpLast;
+    return {last:simulationGlcLast,dumpLast,
+      maxWorker:Math.max(simulatedMaxWorkerId??0,...clocks.map(clock=>clock.maxWorker)),
+      exact:clocks.every(clock=>clock.exact),
+      shared:clocks.every(clock=>clock.last===clocks[0].last)};
+  }
+  function explorerColumns(table) {
+    const declared = tableColumns(table);
+    const columns=explorerBundle?[...declared]:[{name:"key",data_type:"key"}];
+    for(const column of [
+      {name:"insert_worker",data_type:"creator worker ID"},
+      {name:"insert_ts",data_type:"creator ts_start"},
+      {name:"delete_worker",data_type:"deletion worker ID"},
+      {name:"delete_ts",data_type:"deletion ts_start"},
+      {name:"status",data_type:"record state"}
+    ])if(!columns.some(existing=>existing.name===column.name))columns.push(column);
+    return columns;
+  }
+  function snapshotNotice(clock, result) {
+    const notes=[];
+    if (clock.inferredClock) notes.push("GLC bound inferred from the largest stamp in this older dump.");
+    if (!clock.exact) notes.push("Historical visibility is approximate: this dump has no complete commit history.");
+    if (result.truncated) notes.push("This dump has truncated or missing pages; results may be incomplete.");
+    if (!explorerBundle || !bundleTables()[activeTableIndex]?.rows?.length) notes.push("This table dump contains keys and stamps, not payload values.");
+    else if (!result.valuesAvailable) notes.push("Payload values are available only for the exported snapshot; other times show keys and stamps.");
+    return notes.join(" ");
+  }
+  function renderDataRows(rows, columns, emptyMessage) {
+    return rows.length ? rows.map(row=>'<tr'+(row.status==="PHANTOM"?' class="phantom"':'')+'>'+columns.map(column=>'<td>'+(column.name==="status"&&row.status==="PHANTOM"?'<span class="phantom-badge">PHANTOM</span>':escapeHtml(cellText(row[column.name])))+'</td>').join("")+'</tr>').join("")
+      : '<tr><td colspan="'+columns.length+'">'+escapeHtml(emptyMessage)+'</td></tr>';
+  }
+  function typedOperationValue(table, column, raw) {
+    const type=explorerColumns(table).find(c=>c.name===column)?.data_type?.toLowerCase()||"";
+    if(/^(bool|boolean)/.test(type))return raw.toLowerCase()==="true";
+    if(/^(u\d+|i\d+|int|smallint|bigint|number|float|double)/.test(type)&&raw.trim()!==""){
+      const number=Number(raw);if(Number.isFinite(number)&&(Number.isSafeInteger(number)||/^(float|double)/.test(type)))return number;
+    }
+    return raw;
+  }
+  function renderTableOverview() {
+    renderTableList();
+    const target=document.getElementById("dataView"), tables=bundleTables(), table=tables[activeTableIndex]||tables[0];
+    const clock=explorerClock(table), columns=explorerColumns(table);
+    const previous={time:target.querySelector("#overviewTime")?.value,worker:target.querySelector("#overviewWorker")?.value,
+      field:target.querySelector("#overviewField")?.value,operator:target.querySelector("#overviewOperator")?.value,
+      value:target.querySelector("#overviewValue")?.value,limit:target.querySelector("#overviewLimit")?.value,
+      phantoms:target.querySelector("#overviewPhantoms")?.checked};
+    const columnOptions=columns.map(c=>'<option value="'+escapeHtml(c.name)+'">'+escapeHtml(c.name)+'</option>').join("");
+    target.innerHTML='<div class="data-shell"><h1>Table overview</h1><p>Query keys at a snapshot from 0 through GLC '+clock.last+'. '+(clock.inferredClock?'This older dump has no stored GLC; the bound is inferred. ':"")+(clock.exact?'Worker commit history is included.':'Historical visibility is approximate for this dump.')+'</p>'+
+      '<section class="data-card"><div class="table-library-head"><h2>Tables · '+tables.length+' loaded</h2><button class="btn" id="addTableOverview">+ Add table dumps</button></div><div class="table-card-list">'+tables.map((entry,index)=>'<button class="table-card '+(index===activeTableIndex?'selected':'')+'" data-main-table="'+index+'"><strong>'+escapeHtml(entry.name||('Table '+index))+'</strong><small>'+((entry.rows||[]).length)+' payload rows · '+(entry.tree?.roots?.length||0)+' root versions</small></button>').join("")+'</div></section>'+
+      '<div class="data-controls"><label>Table<select id="overviewTable">'+tableOptions(activeTableIndex)+'</select></label>'+
+      '<label>Snapshot ts_start<input id="overviewTime" inputmode="numeric" value="'+clock.last+'"></label>'+
+      '<label>Reader worker<input id="overviewWorker" type="number" min="0" max="'+clock.maxWorker+'" value="0"></label>'+
+      '<label>Column<select id="overviewField">'+columnOptions+'</select></label>'+
+      '<label>Match<select id="overviewOperator"><option value="contains">contains</option><option value="eq">equals</option><option value="gte">≥</option><option value="lte">≤</option></select></label>'+
+      '<label>Value<input id="overviewValue" placeholder="All rows"></label>'+
+      '<label>Rows per page<input id="overviewLimit" type="number" min="1" max="1000" value="10"></label>'+
+      '<label><span>Aborted records</span><span><input id="overviewPhantoms" type="checkbox" checked> Show phantoms</span></label>'+
+      '<button class="btn primary" id="overviewRun">Select</button><button class="btn" id="overviewTree">View index</button></div>'+
+      '<div class="data-card"><div id="overviewSummary"></div><div class="data-scroll"><table class="data-table"><thead><tr>'+columns.map(c=>'<th>'+escapeHtml(c.name)+'<small>'+escapeHtml(c.data_type||"value")+'</small></th>').join("")+'</tr></thead><tbody id="overviewRows"></tbody></table></div>'+
+      '<div class="data-pager"><button class="btn" id="overviewPrev">← Previous</button><span id="overviewPageLabel"></span><button class="btn" id="overviewNext">Next →</button></div></div></div>';
+    if(previous.time)target.querySelector("#overviewTime").value=previous.time;
+    if(previous.worker)target.querySelector("#overviewWorker").value=previous.worker;
+    if(previous.field&&columns.some(c=>c.name===previous.field))target.querySelector("#overviewField").value=previous.field;
+    if(previous.operator)target.querySelector("#overviewOperator").value=previous.operator;
+    if(previous.value)target.querySelector("#overviewValue").value=previous.value;
+    if(previous.limit)target.querySelector("#overviewLimit").value=previous.limit;
+    if(previous.phantoms!==undefined)target.querySelector("#overviewPhantoms").checked=previous.phantoms;
+    target.querySelector("#overviewTable").onchange=e=>{overviewPage=0;selectBundleTable(+e.target.value,"overview");};
+    target.querySelector("#addTableOverview").onclick=()=>document.getElementById("tableFileInput").click();
+    target.querySelectorAll("[data-main-table]").forEach(button=>button.onclick=()=>{overviewPage=0;selectBundleTable(+button.dataset.mainTable,"overview");});
+    target.querySelector("#overviewTree").onclick=()=>selectBundleTable(activeTableIndex,"snapshots");
+    target.querySelector("#overviewRun").onclick=()=>{overviewPage=0;updateOverviewRows();};
+    target.querySelector("#overviewPhantoms").onchange=()=>{overviewPage=0;updateOverviewRows();};
+    target.querySelector("#overviewPrev").onclick=()=>{overviewPage=Math.max(0,overviewPage-1);updateOverviewRows();};
+    target.querySelector("#overviewNext").onclick=()=>{overviewPage++;updateOverviewRows();};
+    updateOverviewRows();
+  }
+  function updateOverviewRows() {
+    const target=document.getElementById("dataView"), table=bundleTables()[activeTableIndex], clock=explorerClock(table);
+    const ts=tryBigInt(target.querySelector("#overviewTime").value.trim());
+    const worker=Number(target.querySelector("#overviewWorker").value);
+    if(ts===null||ts<0n||ts>clock.last){alert("Choose a snapshot ts_start from 0 through "+clock.last+".");return;}
+    if(!Number.isInteger(worker)||worker<0||worker>clock.maxWorker){alert("Choose a worker ID from 0 through "+clock.maxWorker+".");return;}
+    const result=BatStoreSnapshot.snapshot(table.tree,ts,worker,table.rows,table.snapshot_version??explorerBundle?.snapshot_version);
+    const field=target.querySelector("#overviewField").value,operator=target.querySelector("#overviewOperator").value,value=target.querySelector("#overviewValue").value.trim();
+    const showPhantoms=target.querySelector("#overviewPhantoms").checked;
+    const candidates=showPhantoms?result.rows.concat(result.phantoms||[]):result.rows;
+    const matched=BatStoreSnapshot.select(candidates,{field,operator,value});
+    const limit=Math.min(1000,Math.max(1,Number(target.querySelector("#overviewLimit").value)||10));
+    const pages=Math.max(1,Math.ceil(matched.length/limit));overviewPage=Math.min(overviewPage,pages-1);
+    const rows=matched.slice(overviewPage*limit,(overviewPage+1)*limit),columns=explorerColumns(table);
+    target.querySelector("#overviewSummary").textContent=matched.length+" matching records ("+matched.filter(row=>row.status==="PHANTOM").length+" phantoms) · root "+(result.root?.version??"none")+" · "+snapshotNotice(clock,result);
+    target.querySelector("#overviewRows").innerHTML=renderDataRows(rows,columns,"No matching records at this snapshot.");
+    target.querySelector("#overviewPageLabel").textContent='Page '+(overviewPage+1)+' of '+pages;
+    target.querySelector("#overviewPrev").disabled=overviewPage===0;
+    target.querySelector("#overviewNext").disabled=overviewPage>=pages-1;
+  }
+  function transactionHasWrite() { return animationOps.some(op=>["insert","update","delete"].includes(op.kind)); }
+  function transactionClockHtml(clock) {
+    const angle=Number(clock.last%12n)*30;
+    const ticks=Array.from({length:12},(_,i)=>'<i style="transform:rotate('+(i*30)+'deg)"></i>').join("");
+    return '<div class="txn-clock-face" style="--clock-angle:'+angle+'deg" aria-hidden="true">'+ticks+'</div><div class="txn-clock-info"><small>GLOBAL LOGICAL CLOCK</small><strong>'+clock.last+'</strong><small>Starting value: '+clock.dumpLast+'</small></div><div class="txn-clock-next">Next write ts_start <b>'+(clock.last+1n)+'</b></div>';
+  }
+  function updateTransactionClock() {
+    const target=document.getElementById("dataView"), input=target.querySelector("#animationTime");if(!input)return;
+    const clock=transactionClock();
+    const writing=transactionHasWrite();
+    if(writing) input.value=String(clock.last+1n);
+    else if(tryBigInt(input.value)===null || tryBigInt(input.value)>clock.last) input.value=String(clock.last);
+    input.readOnly=writing;
+    input.setAttribute("aria-readonly",String(writing));
+    target.querySelector("#animationClockNote").textContent=writing
+      ? "🔒 Write ts_start is fixed at current GLC + 1. Commit uses one more tick."
+      : "Pure reads can use any ts_start from 0 through "+clock.last+".";
+    target.querySelector("#transactionClockDisplay").innerHTML=transactionClockHtml(clock);
+    updateTransactionStory();
+  }
+  function renderTransactionAnimation() {
+    const target=document.getElementById("dataView"),clock=transactionClock();
+    const oldTime=target.querySelector("#animationTime")?.value||String(clock.last);
+    const oldWorker=target.querySelector("#animationWorker")?.value??"";
+    const oldOffset=target.querySelector("#animationWorkerOffset")?.value||"1";
+    if(!transactionCreated){
+      target.innerHTML='<div class="data-shell"><h1>Transaction animation</h1><div class="txn-clock">'+transactionClockHtml(clock)+'</div><div class="data-card txn-empty"><h2>Create a transaction</h2><p>Start with one operation in auto-commit mode, or add more blocks to build an explicit transaction.</p><button class="btn primary" id="newTransaction">+ New transaction</button></div></div>';
+      target.querySelector("#newTransaction").onclick=()=>{transactionCreated=true;animationOps=[];renderTransactionAnimation();};
+      return;
+    }
+    target.innerHTML='<div class="data-shell"><div class="table-library-head"><div><h1>Transaction animation</h1><p>Build and run an isolated transaction against the loaded dump.'+(clock.shared?'':' Separate table files have different clock bounds; cross-table timing is illustrative.')+'</p></div><button class="btn" id="newTransaction">+ New transaction</button></div>'+
+      '<div class="txn-mode-bar"><button class="btn" id="animationAutoMode" type="button">⚡ Auto-commit · 1 operation</button><button class="btn" id="animationExplicitMode" type="button">⇢ Explicit transaction · chain</button><span class="mode-hint" id="animationModeHint"></span></div>'+
+      '<div class="txn-canvas"><div class="txn-clock" id="transactionClockDisplay"></div><details class="txn-outline"><summary>Transaction outline · <span id="transactionOutlineCount">0 operations</span></summary><div class="txn-chain" id="transactionStory"></div></details>'+
+      '<div class="txn-stage-label">1 · Worker and snapshot</div><div class="txn-node txn-begin"><h2 id="transactionBeginLabel">BEGIN TRANSACTION</h2><div class="data-controls"><label>Worker ID<select id="animationWorker"><option value="">Choose worker</option>'+Array.from({length:clock.maxWorker+1},(_,i)=>'<option value="'+i+'" '+(oldWorker===String(i)?'selected':'')+'>Worker '+i+'</option>').join("")+'<option value="new" '+(oldWorker==='new'?'selected':'')+'>New worker (last + x)</option></select></label>'+
+      '<label id="animationWorkerOffsetLabel" style="display:'+(oldWorker==='new'?'grid':'none')+'">Worker ID = '+clock.maxWorker+' + x<input id="animationWorkerOffset" type="number" min="1" step="1" value="'+escapeHtml(oldOffset)+'"></label>'+
+      '<label>ts_start<input id="animationTime" inputmode="numeric" value="'+escapeHtml(oldTime)+'"></label><span id="animationClockNote"></span></div></div>'+
+      '<div class="txn-connector"></div><div class="txn-stage-label">2 · Operations</div><div class="lego-palette txn-node" id="animationPalette">'+["read","scan","insert","update","delete"].map(kind=>'<button class="btn op-'+kind+'" data-add-kind="'+kind+'">+ '+kind[0].toUpperCase()+kind.slice(1)+'</button>').join("")+'</div><div class="lego-list" id="animationOperations"></div>'+
+      '<div class="txn-connector"></div><div class="txn-stage-label">3 · Run</div><div class="txn-node txn-end"><h2 id="transactionEndLabel">END TRANSACTION</h2><p id="transactionEndHint">The operation blocks execute from top to bottom.</p><button class="btn primary" id="animationRun">▶ Run transaction</button><button class="btn" id="animationClear">Clear blocks</button></div></div>'+
+      '<div class="data-card"><h2>Execution</h2><div id="animationResult">Add operation blocks, then run the transaction.</div></div></div>';
+    target.querySelector("#newTransaction").onclick=()=>{clearTimeout(animationTimer);animationOps=[];animationMode="auto";transactionCreated=true;renderTransactionAnimation();};
+    target.querySelector("#animationAutoMode").onclick=()=>{if(animationOps.length>1)return;animationMode="auto";updateTransactionStory();};
+    target.querySelector("#animationExplicitMode").onclick=()=>{animationMode="explicit";updateTransactionStory();};
+    target.querySelectorAll("[data-add-kind]").forEach(button=>button.onclick=()=>{
+      animationOps.push({kind:button.dataset.addKind,tableIndex:activeTableIndex,key:"",lower:"",upper:"",column:"",value:"",limit:10});
+      if(animationOps.length>1)animationMode="explicit";
+      renderAnimationOps();updateTransactionClock();
+    });
+    target.querySelector("#animationWorker").onchange=()=>{clearTimeout(animationTimer);target.querySelector("#animationWorkerOffsetLabel").style.display=target.querySelector("#animationWorker").value==='new'?'grid':'none';updateTransactionStory();};
+    target.querySelector("#animationWorkerOffset").oninput=()=>{clearTimeout(animationTimer);updateTransactionStory();};
+    target.querySelector("#animationTime").oninput=()=>{clearTimeout(animationTimer);updateTransactionStory();};
+    target.querySelector("#animationRun").onclick=runAnimation;
+    target.querySelector("#animationClear").onclick=()=>{clearTimeout(animationTimer);animationOps=[];renderAnimationOps();updateTransactionClock();target.querySelector("#animationResult").textContent="Blocks cleared.";};
+    renderAnimationOps();updateTransactionClock();
+  }
+  function updateTransactionStory() {
+    const target=document.getElementById("dataView"),story=target.querySelector("#transactionStory");if(!story)return;
+    const workerChoice=target.querySelector("#animationWorker")?.value||"";
+    const offset=Number(target.querySelector("#animationWorkerOffset")?.value);
+    const worker=workerChoice==='new'?(Number.isSafeInteger(offset)&&offset>0?String(transactionClock().maxWorker+offset):"choose x"):(workerChoice||"choose worker");
+    const ts=target.querySelector("#animationTime")?.value||"?";
+    const auto=animationMode==="auto"&&animationOps.length===1;
+    const parts=[(auto?'Auto-commit':'Begin Transaction')+' (worker='+worker+', ts_start='+ts+')'];
+    animationOps.forEach(op=>{
+      const table=bundleTables()[op.tableIndex]?.name||"?";
+      const args=op.kind==="scan"?'table='+table+', from='+String(op.lower||'?')+', through='+String(op.upper||'?')
+        :'table='+table+', key='+String(op.key||'?')+(op.column?', '+op.column+'='+String(op.value||'?'):'');
+      parts.push(op.kind[0].toUpperCase()+op.kind.slice(1)+'('+args+')');
+    });
+    parts.push(auto?(transactionHasWrite()?'Auto-commit':'Complete read-only'):transactionHasWrite()?'Commit':'End read-only');
+    story.innerHTML=parts.map((part,index)=>'<span>'+escapeHtml(part)+'</span>'+(index<parts.length-1?'<i>→</i>':'')).join("");
+    target.querySelectorAll("[data-progress-table]").forEach(button=>button.textContent='Snapshot ts_start '+ts+' · progress →');
+    const begin=target.querySelector("#transactionBeginLabel");if(begin)begin.textContent=auto?(transactionHasWrite()?"AUTO-COMMIT SETUP":"AUTO READ SETUP"):"BEGIN TRANSACTION";
+    const end=target.querySelector("#transactionEndLabel");if(end)end.textContent=auto?(transactionHasWrite()?"AUTO-COMMIT":"AUTO READ"):transactionHasWrite()?"COMMIT TRANSACTION":"END READ-ONLY TRANSACTION";
+    const hint=target.querySelector("#transactionEndHint");if(hint)hint.textContent=auto?"The single operation runs and completes automatically.":"Blocks execute in order inside one transaction.";
+    const count=target.querySelector("#transactionOutlineCount");if(count)count.textContent=animationOps.length+" operation"+(animationOps.length===1?"":"s");
+    const autoButton=target.querySelector("#animationAutoMode"),explicitButton=target.querySelector("#animationExplicitMode"),modeHint=target.querySelector("#animationModeHint");
+    if(autoButton&&explicitButton&&modeHint){
+      autoButton.disabled=animationOps.length>1;
+      autoButton.classList.toggle("active",animationMode==="auto");
+      explicitButton.classList.toggle("active",animationMode==="explicit");
+      modeHint.textContent=animationOps.length===0?"Add one operation to use auto-commit.":auto?"One operation: it completes automatically. Add another block to switch to an explicit transaction.":animationOps.length===1?"This single operation is in explicit mode. Auto-commit is available above.":"Multiple operations run together as one explicit transaction.";
+    }
+  }
+  function showTransactionProgress(index) {
+    const target=document.getElementById("dataView"),op=animationOps[index],table=bundleTables()[op?.tableIndex];
+    if(!op||!table)return;
+    const ts=tryBigInt(target.querySelector("#animationTime")?.value.trim());
+    if(ts===null||ts<0n){alert("Enter a valid snapshot ts_start first.");return;}
+    const choice=target.querySelector("#animationWorker")?.value||"";
+    const offset=Number(target.querySelector("#animationWorkerOffset")?.value);
+    const clock=transactionClock();
+    const proposedReader=choice==='new'?clock.maxWorker+offset:choice===""?null:Number(choice);
+    const reader=Number.isSafeInteger(proposedReader)&&proposedReader>=0&&proposedReader<=65535?proposedReader:null;
+    const maxWorker=Math.max(clock.maxWorker,Number.isSafeInteger(reader)?reader:0);
+    const progress=BatStoreSnapshot.progressTable(table.tree,ts,maxWorker,simulationCommits);
+    const rows=progress.entries.map(entry=>'<tr'+(entry.worker===reader?' class="own-worker"':'')+'><td>w'+entry.worker+'</td><td>'+(entry.lcb===null?'Unknown':escapeHtml(entry.lcb))+'</td><td>'+(entry.worker===reader?'Reader’s own worker':entry.exact?'From commit history':'History incomplete')+'</td></tr>').join("");
+    showUtilityPanel("Progress table · "+table.name,
+      '<div class="analysis-card"><h3>Snapshot ts_start '+ts+'</h3><p>For each worker, LCB is its latest commit strictly before this snapshot timestamp. A foreign write stamped at s is visible when LCB &gt; s. The reader sees its own valid writes up to ts_start.</p><p>Successful replay commits are included as simulated log entries; replayed record values are not added to the dump.</p>'+
+      (reader===null?'<p>Select a worker to highlight the reader’s own row.</p>':'<p>Reader worker: w'+reader+'</p>')+
+      (!progress.exact?'<p>Historical commit entries are incomplete in this dump. Unknown and partial values cannot establish exact visibility.</p>':'')+
+      '<table class="progress-table"><thead><tr><th>Worker</th><th>LCB before '+ts+'</th><th>Meaning</th></tr></thead><tbody>'+rows+'</tbody></table></div>');
+  }
+  function renderAnimationOps() {
+    const target=document.getElementById("animationOperations");if(!target)return;
+    clearTimeout(animationTimer);
+    target.innerHTML=animationOps.map((op,i)=>{
+      const table=bundleTables()[op.tableIndex]||bundleTables()[0];
+      const editable=explorerColumns(table).filter(c=>!["key","insert_ts","insert_worker","delete_ts","delete_worker","status"].includes(c.name));
+      if(!editable.length)editable.push({name:"value",data_type:"text"});
+      const isScan=op.kind==="scan",isWrite=["insert","update"].includes(op.kind),reader=op.kind==="read"||isScan;
+      const kinds=["read","scan","insert","update","delete"];
+      return (i?'<div class="txn-connector"></div>':'')+'<div class="lego-block txn-node op-'+op.kind+'" data-op-index="'+i+'"><div class="lego-head"><b>'+(i+1)+'.</b><select data-kind aria-label="Operation type">'+kinds.map(kind=>'<option value="'+kind+'" '+(kind===op.kind?'selected':'')+'>'+kind.toUpperCase()+'</option>').join("")+'</select><span class="lego-kind '+(reader?'reader':'writer')+'">'+(reader?'READ':'WRITE')+'</span><span class="spacer"></span>'+(reader?'<button class="txn-snapshot-badge" data-progress-table type="button" title="Show the per-worker progress table"></button>':'')+'<button class="btn" data-move="up" '+(i===0?'disabled':'')+'>↑</button><button class="btn" data-move="down" '+(i===animationOps.length-1?'disabled':'')+'>↓</button><button class="btn" data-remove>Remove</button></div>'+
+        '<div class="data-controls"><label>Table<select data-field="tableIndex">'+tableOptions(op.tableIndex)+'</select></label>'+
+        (isScan?'<label>From key<input data-field="lower" value="'+escapeHtml(op.lower||"")+'"></label><label>Through key<input data-field="upper" value="'+escapeHtml(op.upper||"")+'"></label><label>Max shown<input type="number" min="1" max="1000" data-field="limit" value="'+escapeHtml(op.limit||10)+'"></label>'
+          :'<label>Key<input data-field="key" value="'+escapeHtml(op.key||"")+'"></label>')+
+        (isWrite&&editable.length?'<label>Column<select data-field="column"><option value="">Choose column</option>'+editable.map(c=>'<option value="'+escapeHtml(c.name)+'" '+(op.column===c.name?'selected':'')+'>'+escapeHtml(c.name)+'</option>').join("")+'</select></label><label>Value<input data-field="value" value="'+escapeHtml(op.value||"")+'"></label>':'')+
+        '</div></div>';
+    }).join("")||'<p style="text-align:center">Choose an operation below to connect the first block.</p>';
+    target.querySelectorAll(".lego-block").forEach(block=>{
+      const index=+block.dataset.opIndex;
+      block.querySelector("[data-kind]").onchange=event=>{clearTimeout(animationTimer);animationOps[index].kind=event.target.value;renderAnimationOps();updateTransactionClock();};
+      const progressButton=block.querySelector("[data-progress-table]");if(progressButton)progressButton.onclick=()=>showTransactionProgress(index);
+      block.querySelectorAll("[data-field]").forEach(input=>input.oninput=()=>{
+        clearTimeout(animationTimer);
+        animationOps[index][input.dataset.field]=input.dataset.field==="tableIndex"?Number(input.value):input.value;
+        if(input.dataset.field==="tableIndex"){animationOps[index].column="";renderAnimationOps();}
+        else updateTransactionStory();
+      });
+      block.querySelector("[data-remove]").onclick=()=>{animationOps.splice(index,1);renderAnimationOps();updateTransactionClock();};
+      block.querySelectorAll("[data-move]").forEach(button=>button.onclick=()=>{
+        const other=index+(button.dataset.move==="up"?-1:1);
+        [animationOps[index],animationOps[other]]=[animationOps[other],animationOps[index]];renderAnimationOps();
+      });
+    });
+    updateTransactionStory();
+  }
+  function runAnimation() {
+    clearTimeout(animationTimer);
+    const target=document.getElementById("dataView"),tables=bundleTables(),clock=transactionClock();
+    target.querySelectorAll(".lego-block").forEach(block=>block.querySelectorAll("[data-field]").forEach(input=>{
+      animationOps[+block.dataset.opIndex][input.dataset.field]=input.dataset.field==="tableIndex"?Number(input.value):input.value;
+    }));
+    const workerChoice=target.querySelector("#animationWorker").value;
+    const offset=Number(target.querySelector("#animationWorkerOffset").value);
+    const worker=workerChoice==='new'?clock.maxWorker+offset:Number(workerChoice);
+    if(!workerChoice||!Number.isSafeInteger(worker)||worker<0||worker>65535||(workerChoice==='new'&&(!Number.isSafeInteger(offset)||offset<1))||(workerChoice!=='new'&&worker>clock.maxWorker)){alert("Choose an existing worker or a valid new worker offset (worker IDs end at 65535).");return;}
+    if(!animationOps.length){alert("Add at least one operation.");return;}
+    const writing=transactionHasWrite(), ts=writing?clock.last+1n:tryBigInt(target.querySelector("#animationTime").value.trim());
+    if(ts===null||ts<0n||(!writing&&ts>clock.last)){alert("Choose a read ts_start from 0 through "+clock.last+".");return;}
+    const operations=[];
+    for(const op of animationOps){
+      if(op.kind==="scan"){
+        if(op.lower===""||op.upper===""||BatStoreSnapshot.compareKeys(op.lower,op.upper)>0){alert("Each scan needs a valid from and through key.");return;}
+      }else if(op.key===""){alert("Each "+op.kind+" block needs a key.");return;}
+      const values=op.column?{[op.column]:typedOperationValue(tables[op.tableIndex],op.column,op.value)}:{};
+      operations.push({...op,values,limit:Math.min(1000,Math.max(1,Number(op.limit)||10))});
+    }
+    const execution=BatStoreSnapshot.execute(tables,operations,ts,worker,explorerBundle?.snapshot_version);
+    simulationRuns.push({worker,writing,operations:execution.steps.length,aborted:execution.aborted});
+    if(workerChoice==='new')simulatedMaxWorkerId=Math.max(simulatedMaxWorkerId??0,worker);
+    if(writing){
+      simulationGlcLast=execution.aborted?ts:ts+1n;
+      if(!execution.aborted)simulationCommits.push({worker,commit:String(ts+1n)});
+    }
+    const result=target.querySelector("#animationResult");
+    result.innerHTML='<p><b>'+(animationMode==="auto"&&operations.length===1?(writing?'Auto-commit':'Auto read'):'Explicit transaction')+'</b> · Worker '+worker+' · ts_start '+ts+' · '+(clock.exact?'commit-log visibility':'approximate historical visibility')+' · GLC '+simulationGlcLast+'</p><div id="animationSteps"></div>';
+    let index=0;
+    const step=()=>{
+      const item=execution.steps[index],op=item.operation,answer=item.result;
+      const rows=answer.rows||[],columns=explorerColumns(tables[op.tableIndex]);
+      if(rows.some(row=>Object.hasOwn(row,"value"))&&!columns.some(column=>column.name==="value"))columns.push({name:"value",data_type:"text"});
+      const shown=rows.slice(0,op.kind==="scan"?op.limit:10);
+      const content='<div class="animation-step active"><b>Step '+(index+1)+' · '+escapeHtml(op.kind.toUpperCase())+' · '+escapeHtml(tables[op.tableIndex].name)+' · '+escapeHtml(answer.status)+'</b>'+
+        (rows.length?'<p>'+rows.length+' matched row'+(rows.length===1?'':'s')+'.</p><div class="data-scroll"><table class="data-table"><thead><tr>'+columns.map(c=>'<th>'+escapeHtml(c.name)+'</th>').join("")+'</tr></thead><tbody>'+renderDataRows(shown,columns,"")+'</tbody></table></div>'+(shown.length<rows.length?'<p>Showing '+shown.length+' of '+rows.length+'. Increase the scan limit to see more.</p>':''):'')+'</div>';
+      result.querySelector("#animationSteps").insertAdjacentHTML("beforeend",content);
+      const block=target.querySelector('.lego-block[data-op-index="'+index+'"]');
+      if(block){block.classList.add(execution.aborted && index===execution.steps.length-1?"failed":"completed");block.querySelector(".lego-head").insertAdjacentHTML("beforeend",'<small>'+escapeHtml(answer.status)+'</small>');}
+      index++;
+      if(index<execution.steps.length)animationTimer=setTimeout(step,500);
+      else {
+        result.insertAdjacentHTML("beforeend",'<p><b>'+(execution.aborted?'Transaction aborted in replay.':'Transaction replay complete.')+'</b>'+(writing&&!execution.aborted?' Simulated commit timestamp '+(ts+1n)+'.':'')+' No database state was changed.</p>');
+        updateTransactionClock();
+      }
+    };
+    step();
+  }
 
   // Escape hatch for embedding/automation: load an already-parsed dump object
   // directly, bypassing the <input type=file> dialog (which e.g. headless

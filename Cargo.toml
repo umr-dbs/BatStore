@@ -1,6 +1,6 @@
 [package]
 name = "BatStore"
-version = "0.0.137"
+version = "0.0.138"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
 description = "BatStore Research Implementation"
@@ -81,9 +81,9 @@ path = "src/main.rs"
 
 [dependencies]
 CCBPlusTree = { git = "https://github.com/umr-dbs/CC-BPlusTree.git", version = "0.0.122" }
-crossbeam-channel = "0.5.16"
+crossbeam-channel = "0.5.17"
 crossbeam-skiplist = "0.1.3"
-crossbeam-utils = "0.8.22"
+crossbeam-utils = "0.8.23"
 chrono = "0.4.45"
 rand_distr = "0.6.0"
 rand = "0.10.2"
