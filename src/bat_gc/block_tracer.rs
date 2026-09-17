@@ -5,9 +5,21 @@ use crossbeam_utils::CachePadded;
 use parking_lot::Mutex;
 
 /// Number of blocks obtained on an allocator miss, including the requested block.
-pub const ALLOC_BATCH_SIZE: usize = 16;
+pub const ALLOC_BATCH_SIZE: usize = 4;
 /// Maximum fraction of worker queues probed on a reclaim miss.
 pub const SCAN_PERCENT: usize = 25;
+
+fn setting(name: &str, default: usize, max: usize) -> usize {
+    match std::env::var(name) {
+        Ok(value) => {
+            let parsed = value.parse::<usize>().unwrap_or_else(|_| panic!("{name} must be an integer from 1 to {max}"));
+            assert!((1..=max).contains(&parsed), "{name} must be an integer from 1 to {max}");
+            parsed
+        }
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => panic!("{name}: {error}"),
+    }
+}
 
 use crate::bat_page_model::BlockRef;
 use crate::bat_record_model::tx_stamp::WorkerId;
@@ -38,6 +50,8 @@ pub(crate) struct BlockTrace<
     Payload: Clone + Default + 'static,
 > {
     shards: Vec<CachePadded<Mutex<VecDeque<DeadPageEntry<P_F, P_N, Key, Payload>>>>>,
+    batch_size: usize,
+    scan_percent: usize,
 }
 
 impl<
@@ -53,8 +67,13 @@ impl<
             shards: (0..shard_count)
                 .map(|_| CachePadded::new(Mutex::new(VecDeque::new())))
                 .collect(),
+            batch_size: setting("BATSTORE_GC_BATCH_SIZE", ALLOC_BATCH_SIZE, 1024),
+            scan_percent: setting("BATSTORE_GC_SCAN_PERCENT", SCAN_PERCENT, 100),
         }
     }
+
+    #[inline(always)]
+    pub(crate) fn batch_size(&self) -> usize { self.batch_size }
 
     #[inline(always)]
     fn shard_for(&self, worker_id: WorkerId) -> usize {
@@ -158,7 +177,7 @@ impl<
         let local_count = out.len();
         let mut checked = 1;
         if out.is_empty() && self.shards.len() > 1 {
-            let max_checked = self.shards.len().saturating_mul(SCAN_PERCENT).div_ceil(100).max(1);
+            let max_checked = self.shards.len().saturating_mul(self.scan_percent).div_ceil(100).max(1);
             let start = fastrand::usize(..self.shards.len());
             for offset in 0..self.shards.len() {
                 if checked >= max_checked { break; }

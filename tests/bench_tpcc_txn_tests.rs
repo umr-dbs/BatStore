@@ -1,8 +1,9 @@
 use crate::bat_bench::tpcc_schema::TpccRow;
 use crate::bat_bench::tpcc_schema::{
-    District, Table, TpccDatabase, Warehouse, k_district, k_warehouse,
+    District, Item, Table, TpccDatabase, Warehouse, k_district, k_item, k_warehouse,
 };
 use crate::bat_bench::tpcc_txn::TpccTxn;
+use crate::bat_db::IsolationLevel;
 use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
 use crate::bat_crud_model::crud_operation::CRUDOperation;
 use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
@@ -33,6 +34,74 @@ fn sample_district() -> TpccRow {
         d_ytd: 30_000.0,
         d_next_o_id: 1,
     }))
+}
+
+fn sample_item(price: f64) -> TpccRow {
+    TpccRow::Item(Box::new(Item {
+        i_im_id: 1,
+        i_name: "item".into(),
+        i_price: price,
+        i_data: "data".into(),
+    }))
+}
+
+#[test]
+fn tpcc_read_committed_refreshes_across_statements() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    let key = k_warehouse(1);
+    let mut setup = TpccTxn::begin(&db);
+    assert!(matches!(setup.insert(Table::Warehouse, key, sample_warehouse()), CRUDOperationResult::Inserted(_)));
+    setup.commit();
+
+    let mut reader = TpccTxn::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
+    reader.begin_statement();
+    let first = reader.read_ts();
+    assert!(matches!(reader.point(Table::Warehouse, key), CRUDOperationResult::MatchedRecords(r) if r.len() == 1));
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut writer = TpccTxn::begin(&db);
+            assert!(matches!(writer.update(Table::Warehouse, key, sample_warehouse()), CRUDOperationResult::Updated(_)));
+            writer.commit();
+        }).join().unwrap();
+    });
+
+    assert_eq!(reader.read_ts(), first);
+    reader.begin_statement();
+    assert!(reader.read_ts() > first);
+    assert!(matches!(reader.update(Table::Warehouse, key, sample_warehouse()), CRUDOperationResult::Updated(_)));
+    reader.commit();
+}
+
+#[test]
+fn tpcc_read_committed_statement_is_consistent_across_tree_classes() {
+    let db = TpccDatabase::new(RootIndexType::default());
+    let warehouse = k_warehouse(1);
+    let item = k_item(1);
+    let mut setup = TpccTxn::begin(&db);
+    assert!(matches!(setup.insert(Table::Warehouse, warehouse, sample_warehouse()), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(setup.insert(Table::Item, item, sample_item(1.0)), CRUDOperationResult::Inserted(_)));
+    setup.commit();
+
+    let mut reader = TpccTxn::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
+    reader.begin_statement();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut writer = TpccTxn::begin(&db);
+            let mut new_warehouse = sample_warehouse();
+            if let TpccRow::Warehouse(row) = &mut new_warehouse { row.w_ytd = 400_000.0; }
+            assert!(matches!(writer.update(Table::Warehouse, warehouse, new_warehouse), CRUDOperationResult::Updated(_)));
+            assert!(matches!(writer.update(Table::Item, item, sample_item(2.0)), CRUDOperationResult::Updated(_)));
+            writer.commit();
+        }).join().unwrap();
+    });
+
+    assert!(matches!(reader.point(Table::Warehouse, warehouse), CRUDOperationResult::MatchedRecords(r) if r[0].payload.as_warehouse().w_ytd == 300_000.0));
+    assert!(matches!(reader.point(Table::Item, item), CRUDOperationResult::MatchedRecords(r) if r[0].payload.as_item().i_price == 1.0));
+    reader.begin_statement();
+    assert!(matches!(reader.point(Table::Warehouse, warehouse), CRUDOperationResult::MatchedRecords(r) if r[0].payload.as_warehouse().w_ytd == 400_000.0));
+    assert!(matches!(reader.point(Table::Item, item), CRUDOperationResult::MatchedRecords(r) if r[0].payload.as_item().i_price == 2.0));
+    reader.commit();
 }
 
 /// The cross-table analogue of `bat_test::query_transaction_tests::

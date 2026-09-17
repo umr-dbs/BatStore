@@ -242,7 +242,7 @@ impl<const FAN_OUT: usize,
             None => {
                 self.tracker.record_fresh_alloc(ctx.worker_id());
                 if self.tracker.block_reclaim_enabled() {
-                    let spare = (1..crate::bat_gc::block_tracer::ALLOC_BATCH_SIZE).map(|_| Block {
+                    let spare = (1..self.tracker.alloc_batch_size()).map(|_| Block {
                         node_data: SafeCell::new(Node::new_leaf()),
                     }.into_cell());
                     self.tracker.queue_fresh_blocks(ctx.worker_id(), spare);

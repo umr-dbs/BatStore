@@ -1,4 +1,4 @@
-use crate::bat_gc::block_tracer::{BlockTrace, DeadPageValue, ALLOC_BATCH_SIZE};
+use crate::bat_gc::block_tracer::{BlockTrace, DeadPageValue};
 use crate::bat_page_model::BlockRef;
 use crate::bat_page_model::time_matcher::TimeMatcher;
 use crate::bat_record_model::tx_stamp::WorkerId;
@@ -157,6 +157,8 @@ impl<
         self.dead_blocks.register_fresh_batch(worker_id, pages);
     }
 
+    pub(crate) fn alloc_batch_size(&self) -> usize { self.dead_blocks.batch_size() }
+
     #[cfg(feature = "gc-stats")]
     pub(crate) fn record_request_latency(&self, worker_id: WorkerId, nanos: u64) {
         let i = worker_id as usize % self.request_count.len();
@@ -290,7 +292,7 @@ impl<
             self.dead_blocks
                 .reclaim_batch(
                     worker_id,
-                    ALLOC_BATCH_SIZE,
+                    self.dead_blocks.batch_size(),
                     |(dead_v, _)| match live_min_snapshot {
             _ if dead_v == 0 => true,
             None => true,
