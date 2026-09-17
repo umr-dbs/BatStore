@@ -111,6 +111,17 @@ python3 scripts/run_htap_analytical_sweep.py \
 This produces OLTP throughput, aggregate OLAP throughput, and query-latency
 curves under `htap_analytical_results/`.
 
+### GC allocation metrics
+
+With `--features gc-stats`, YCSB writes `gc_stats_after_load.csv` and
+`gc_stats.csv`. Subtract the former from the latter for timed-phase totals.
+`request_count` counts block requests; `latency_ns / request_count` is mean
+request-to-return latency. `scan_count` counts GC-list searches and
+`lists_checked / scan_count` is the mean number of worker lists probed per
+search, including failed `try_lock` attempts. The maximum columns cover the
+whole run, including loading. Tune `ALLOC_BATCH_SIZE` and `SCAN_PERCENT` in
+`src/bat_gc/block_tracer.rs`.
+
 ### YCSB skew sweep
 
 Use the skew runner to vary Zipfian theta across YCSB workloads and thread

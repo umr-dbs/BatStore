@@ -208,8 +208,10 @@ impl<const FAN_OUT: usize,
 
     #[inline(always)]
     fn alloc_block(&self, ctx: &TxContext, leaf: bool) -> BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload> {
+        #[cfg(feature = "gc-stats")]
+        let requested_at = std::time::Instant::now();
         // NODES_REQUEST.fetch_add(1, Relaxed);
-        match self.tracker.free_block(ctx) {
+        let result = match self.tracker.free_block(ctx) {
             Some(block) => {
                 // self.reuse_count.fetch_add(1, Relaxed);
 
@@ -239,12 +241,21 @@ impl<const FAN_OUT: usize,
             }
             None => {
                 self.tracker.record_fresh_alloc(ctx.worker_id());
+                if self.tracker.block_reclaim_enabled() {
+                    let spare = (1..crate::bat_gc::block_tracer::ALLOC_BATCH_SIZE).map(|_| Block {
+                        node_data: SafeCell::new(Node::new_leaf()),
+                    }.into_cell());
+                    self.tracker.queue_fresh_blocks(ctx.worker_id(), spare);
+                }
                 Block {
                     // block_id: self.next_block_id(),
                     node_data: SafeCell::new(if leaf { Node::new_leaf() } else { Node::new_internal() })
                 }.into_cell()
             }
-        }
+        };
+        #[cfg(feature = "gc-stats")]
+        self.tracker.record_request_latency(ctx.worker_id(), requested_at.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+        result
     }
 
 
