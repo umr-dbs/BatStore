@@ -17,9 +17,9 @@ use std::fmt::Display;
 use crate::bat_bench::tpcc_random::*;
 use crate::bat_bench::tpcc_schema::*;
 use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::bat_db::TransactionState;
+use crate::bat_db::{IsolationLevel, TransactionState};
 use crate::bat_db::transaction::{
-    delete_on_tree, insert_on_tree, point_on_tree, range_min_on_tree, range_on_tree, update_on_tree,
+    delete_on_tree_at, insert_on_tree_at, point_on_tree, range_min_on_tree, range_on_tree, update_on_tree_at,
 };
 use crate::bat_query::interval::Interval;
 use crate::bat_query::iter_query::RangeQueryIter;
@@ -29,9 +29,9 @@ use crate::bat_record_model::version_info::Version;
 
 type Res<'a> = CRUDOperationResult<'a, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 
-/// A multi-table OSIC transaction over a [`TpccDatabase`], one fixed
-/// snapshot shared by every read/write it issues across any of its 14
-/// tables, committed exactly once at the end.
+/// A multi-table OSIC transaction over a [`TpccDatabase`]. Its write stamp
+/// stays fixed; read committed transactions can refresh the read snapshot at
+/// each explicit statement boundary. It commits once across all 14 tables.
 ///
 /// Unlike the pre-size-class-dispatch design, this does *not* wrap
 /// `bat_db::DbTransaction`: `Table::Warehouse`/`Table::District` resolve to a
@@ -62,6 +62,8 @@ pub struct TpccTxn<'a> {
     db: &'a TpccDatabase,
     worker_id: WorkerId,
     ts_start: Version,
+    read_ts: Version,
+    isolation: IsolationLevel,
     committed: TransactionState,
     written: SmallVec<[(Table, TpccKey); 24]>,
 }
@@ -148,6 +150,7 @@ impl BigTreeOp for RangeVisitOp<'_> {
 struct InsertOp {
     worker_id: WorkerId,
     ts_start: Version,
+    read_ts: Version,
     key: TpccKey,
     payload: TpccRow,
 }
@@ -158,7 +161,7 @@ impl BigTreeOp for InsertOp {
         tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) -> Self::Output {
         let (r, track) =
-            insert_on_tree(tree, self.worker_id, self.ts_start, self.key, self.payload);
+            insert_on_tree_at(tree, self.worker_id, self.ts_start, self.read_ts, self.key, self.payload);
         (normalize(r), track)
     }
 }
@@ -166,6 +169,7 @@ impl BigTreeOp for InsertOp {
 struct UpdateOp {
     worker_id: WorkerId,
     ts_start: Version,
+    read_ts: Version,
     key: TpccKey,
     payload: TpccRow,
 }
@@ -176,7 +180,7 @@ impl BigTreeOp for UpdateOp {
         tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) -> Self::Output {
         let (r, track) =
-            update_on_tree(tree, self.worker_id, self.ts_start, self.key, self.payload);
+            update_on_tree_at(tree, self.worker_id, self.ts_start, self.read_ts, self.key, self.payload);
         (normalize(r), track)
     }
 }
@@ -184,6 +188,7 @@ impl BigTreeOp for UpdateOp {
 struct DeleteOp {
     worker_id: WorkerId,
     ts_start: Version,
+    read_ts: Version,
     key: TpccKey,
 }
 impl BigTreeOp for DeleteOp {
@@ -192,7 +197,7 @@ impl BigTreeOp for DeleteOp {
         self,
         tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) -> Self::Output {
-        let (r, track) = delete_on_tree(tree, self.worker_id, self.ts_start, self.key);
+        let (r, track) = delete_on_tree_at(tree, self.worker_id, self.ts_start, self.read_ts, self.key);
         (normalize(r), track)
     }
 }
@@ -232,12 +237,21 @@ impl<'a> TpccTxn<'a> {
     /// transaction may go on to touch, standard- or big-class alike (both
     /// share the same `ctx` — see `TpccDatabase::make_big_trees`).
     pub fn begin(db: &'a TpccDatabase) -> Self {
+        Self::begin_with_isolation(db, IsolationLevel::SnapshotIsolation)
+    }
+
+    pub fn begin_with_isolation(
+        db: &'a TpccDatabase,
+        isolation: IsolationLevel,
+    ) -> Self {
         let worker_id = db.db.worker_id();
         let ts_start = db.db.begin_snapshot();
         Self {
             db,
             worker_id,
             ts_start,
+            read_ts: ts_start,
+            isolation,
             committed: TransactionState::InFlight,
             written: SmallVec::new(),
         }
@@ -246,6 +260,17 @@ impl<'a> TpccTxn<'a> {
     #[inline(always)]
     pub const fn ts_start(&self) -> Version {
         self.ts_start
+    }
+
+    pub const fn read_ts(&self) -> Version {
+        self.read_ts
+    }
+
+    /// Advance the read snapshot for the next statement in read committed mode.
+    pub fn begin_statement(&mut self) {
+        if self.isolation == IsolationLevel::ReadCommitted {
+            self.read_ts = self.db.db.ctx.begin_statement_snapshot();
+        }
     }
 
     #[inline(always)]
@@ -257,13 +282,13 @@ impl<'a> TpccTxn<'a> {
     pub fn point(&mut self, table: Table, key: TpccKey) -> Res<'static> {
         match table.class() {
             TreeClass::Standard => {
-                point_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key)
+                point_on_tree(&self.db.tree_for(table), self.worker_id, self.read_ts, key)
             }
             TreeClass::Big => self.db.dispatch_big(
                 table,
                 PointOp {
                     worker_id: self.worker_id,
-                    ts_start: self.ts_start,
+                    ts_start: self.read_ts,
                     key,
                 },
             ),
@@ -289,7 +314,7 @@ impl<'a> TpccTxn<'a> {
             TreeClass::Standard => range_on_tree(
                 &self.db.tree_for(table),
                 self.worker_id,
-                self.ts_start,
+                self.read_ts,
                 range,
                 self.db.scan_pool(table).as_deref(),
             ),
@@ -297,7 +322,7 @@ impl<'a> TpccTxn<'a> {
                 table,
                 RangeOp {
                     worker_id: self.worker_id,
-                    ts_start: self.ts_start,
+                    ts_start: self.read_ts,
                     range,
                 },
             ),
@@ -317,14 +342,14 @@ impl<'a> TpccTxn<'a> {
             TreeClass::Standard => range_min_on_tree(
                 &self.db.tree_for(table),
                 self.worker_id,
-                self.ts_start,
+                self.read_ts,
                 range,
             ),
             TreeClass::Big => self.db.dispatch_big(
                 table,
                 RangeMinOp {
                     worker_id: self.worker_id,
-                    ts_start: self.ts_start,
+                    ts_start: self.read_ts,
                     range,
                 },
             ),
@@ -342,7 +367,7 @@ impl<'a> TpccTxn<'a> {
         match table.class() {
             TreeClass::Standard => RangeQueryIter::new(
                 &self.db.tree_for(table),
-                self.ts_start,
+                self.read_ts,
                 range,
                 false,
                 self.worker_id,
@@ -352,7 +377,7 @@ impl<'a> TpccTxn<'a> {
                 table,
                 RangeVisitOp {
                 worker_id: self.worker_id,
-                ts_start: self.ts_start,
+                ts_start: self.read_ts,
                 range,
                 visit: &mut visit,
                 },
@@ -383,7 +408,7 @@ impl<'a> TpccTxn<'a> {
         );
         RangeQueryIter::new(
             &self.db.tree_for(table),
-            self.ts_start,
+            self.read_ts,
             range,
             false,
             self.worker_id,
@@ -415,7 +440,7 @@ impl<'a> TpccTxn<'a> {
         match table.class() {
             TreeClass::Standard => RangeQueryIter::new(
                 &self.db.tree_for(table),
-                self.ts_start,
+                self.read_ts,
                 range,
                 false,
                 self.worker_id,
@@ -427,10 +452,11 @@ impl<'a> TpccTxn<'a> {
 
     pub fn insert(&mut self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'static> {
         let (result, track) = match table.class() {
-            TreeClass::Standard => insert_on_tree(
+            TreeClass::Standard => insert_on_tree_at(
                 &self.db.tree_for(table),
                 self.worker_id,
                 self.ts_start,
+                self.read_ts,
                 key,
                 payload,
             ),
@@ -439,6 +465,7 @@ impl<'a> TpccTxn<'a> {
                 InsertOp {
                     worker_id: self.worker_id,
                     ts_start: self.ts_start,
+                    read_ts: self.read_ts,
                     key,
                     payload,
                 },
@@ -452,10 +479,11 @@ impl<'a> TpccTxn<'a> {
 
     pub fn update(&mut self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'static> {
         let (result, track) = match table.class() {
-            TreeClass::Standard => update_on_tree(
+            TreeClass::Standard => update_on_tree_at(
                 &self.db.tree_for(table),
                 self.worker_id,
                 self.ts_start,
+                self.read_ts,
                 key,
                 payload,
             ),
@@ -464,6 +492,7 @@ impl<'a> TpccTxn<'a> {
                 UpdateOp {
                     worker_id: self.worker_id,
                     ts_start: self.ts_start,
+                    read_ts: self.read_ts,
                     key,
                     payload,
                 },
@@ -478,13 +507,14 @@ impl<'a> TpccTxn<'a> {
     pub fn delete(&mut self, table: Table, key: TpccKey) -> Res<'static> {
         let (result, track) = match table.class() {
             TreeClass::Standard => {
-                delete_on_tree(&self.db.tree_for(table), self.worker_id, self.ts_start, key)
+                delete_on_tree_at(&self.db.tree_for(table), self.worker_id, self.ts_start, self.read_ts, key)
             }
             TreeClass::Big => self.db.dispatch_big(
                 table,
                 DeleteOp {
                     worker_id: self.worker_id,
                     ts_start: self.ts_start,
+                    read_ts: self.read_ts,
                     key,
                 },
             ),
@@ -493,6 +523,13 @@ impl<'a> TpccTxn<'a> {
             self.written.push((table, key));
         }
         result
+    }
+
+    fn finish_snapshots(&self) {
+        if self.read_ts != self.ts_start {
+            self.db.db.ctx.end_statement_snapshot();
+        }
+        self.db.db.end_snapshot(self.ts_start);
     }
 
     /// Instant commit: appends `ts_commit` to this worker's (shared)
@@ -508,7 +545,7 @@ impl<'a> TpccTxn<'a> {
             self.committed = TransactionState::Committed;
 
             if self.written.is_empty() {
-                self.db.db.end_snapshot(self.ts_start);
+                self.finish_snapshots();
                 return None;
             }
 
@@ -524,7 +561,7 @@ impl<'a> TpccTxn<'a> {
                 }
             }
 
-            self.db.db.end_snapshot(self.ts_start);
+            self.finish_snapshots();
             Some(ts_commit)
         } else {
             None
@@ -568,7 +605,7 @@ impl<'a> Drop for TpccTxn<'a> {
         // `end_snapshot` this transaction's `ts_start`.
         if let TransactionState::InFlight = self.committed {
             self.revert_all();
-            self.db.db.end_snapshot(self.ts_start);
+            self.finish_snapshots();
         }
     }
 }

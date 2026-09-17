@@ -1,214 +1,67 @@
 # BatStore
 
-BatStore is a storage engine built around a concurrent multiversion B-tree
-(cMVBT) with Ordered Snapshot Instant Commit.
+BatStore is a storage engine built around a concurrent multiversion B-tree (cMVBT) with Ordered Snapshot Instant Commit.
 
-Run the following commands from the repository root.
+## Transaction isolation
+
+BatStore supports **Snapshot Isolation (SI)** and **Read Committed** for multi-operation database and TPC-C transactions. SI is the default: every read in a transaction uses the snapshot taken at `begin`. Read Committed takes a fresh snapshot at each logical statement boundary, so later statements can see transactions that committed in the meantime. Operations within one statement share the same snapshot.
+
+Select Read Committed with `DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted)` (or `TpccTxn::begin_with_isolation` for TPC-C). Call `begin_statement()` before each logical statement; this API leaves statement boundaries to the caller. The transaction's write stamp remains fixed across statements for atomic commit, rollback, and WAL recovery. Existing `begin(&db)` calls continue to use SI.
+
+Run commands from the repository root.
 
 ## Setup
-
-Prepare BatStore and the comparison engines, then activate the plotting
-environment:
 
 ```bash
 python3 scripts/setup_environment.py
 source scripts/.venv/bin/activate
 ```
 
-The setup may request `sudo` access to install system packages and configure
-PostgreSQL. By default it installs the BenchBase distribution at
-`tx_tests/benchbase/target/benchbase-postgres/benchbase.jar`. To reuse existing engine
-checkouts instead of cloning them again:
+Setup may request `sudo` for system packages and PostgreSQL. Use `--reuse-checkouts` to keep existing engine checkouts; see `--help` for other options.
+
+## Benchmarks
+
+Smoke test:
 
 ```bash
-python3 scripts/setup_environment.py --reuse-checkouts
+python3 scripts/compare_engines.py --tiny --engines batstore,leanstore --workloads tpcc,ycsb_a,htap_q1,s_htap --threads 2,4
 ```
 
-See all setup options with:
+Run the full cross-engine matrix with `python3 scripts/compare_engines.py`, or select comma-separated `--engines`, `--workloads`, `--threads`, and `--gc on,off`. Results go to `comparison_results/`.
 
-```bash
-python3 scripts/setup_environment.py --help
-```
-
-## Workloads
-
-The Python harness uses the following workload keys:
-
-| Key | Workload |
+| Workload key | Description |
 | --- | --- |
-| `tpcc` | TPC-C OLTP: New-Order, Payment, Order-Status, Delivery, and Stock-Level transactions. The primary metric is committed New-Order transactions per second. |
-| `ycsb_a` | YCSB A, update-heavy: 50% reads and 50% updates. |
-| `ycsb_b` | YCSB B, read-mostly: 95% reads and 5% updates. |
-| `ycsb_c` | YCSB C, read-only: 100% reads. |
-| `ycsb_d` | YCSB D, read-latest: 95% reads and 5% inserts, biased toward recent keys. |
-| `ycsb_e` | YCSB E, short ranges: 95% scans and 5% inserts. Scan latency is also recorded. |
-| `ycsb_f` | YCSB F: 50% reads and 50% read-modify-write operations. |
-| `htap_q1` | TPC-C OLTP plus concurrent canonical CH-benCHmark Q1 pricing-summary queries. Measures OLTP interference and analytical throughput/latency. |
-| `htap_q6` | TPC-C OLTP plus concurrent canonical CH-benCHmark Q6 revenue-change queries. Measures the same HTAP trade-off with a selective query. |
-| `htap_q1_variant` | Q1 using each engine's former custom predicate. Kept for compatibility; not intended for cross-engine comparison. |
-| `htap_q6_variant` | Q6 using each engine's former custom predicate. Kept for compatibility; not intended for cross-engine comparison. |
-| `s_htap` | **S-YCSB**: a cold YCSB corpus with concurrent near-sorted arrivals, hot-tail updates, and long OLAP scans across the cold/hot boundary. The Python manifest key remains `s_htap`; the skew option is `--s-ycsb-theta`, and the Rust subcommands are `s_ycsb` and `mdbx_s_ycsb`. |
+| `tpcc` | TPC-C OLTP; committed New-Order transactions per second |
+| `ycsb_a`–`ycsb_f` | YCSB: update-heavy, read-mostly, read-only, read-latest, short scans, and read-modify-write |
+| `htap_q1`, `htap_q6` | TPC-C with concurrent CH-benCHmark analytical queries |
+| `htap_q1_variant`, `htap_q6_variant` | Legacy engine-specific predicates; unsuitable for cross-engine comparison |
+| `s_htap` | S-YCSB: cold corpus, near-sorted arrivals, hot-tail updates, and long scans |
 
-YCSB uses Zipfian access by default, except workload D's latest-key pattern;
-engine adapters without a latest-key generator approximate D with Zipfian
-sampling. The comparison harness sweeps the requested thread counts and GC
-modes. Engines without a working GC toggle run once and report `gc=n/a`.
+YCSB uses Zipfian access by default, except D's latest-key pattern. The comparison runner sweeps requested thread counts and GC modes; engines without a GC toggle report `gc=n/a`.
 
-## Run benchmarks
+Specialized runners:
 
-All commands below are run from the repository root. Start with a small smoke
-test covering every benchmark family:
+| Purpose | Command | Results |
+| --- | --- | --- |
+| Fixed OLTP load, varied analytical threads | `python3 scripts/run_htap_analytical_sweep.py --oltp-terminals 4 --olap-threads 1,2,4,8,16` | `htap_analytical_results/` |
+| YCSB Zipfian skew | `python3 scripts/run_skew_sweep.py --skews uniform,0.4,0.8,0.99,1.4` | `skew_sweep_results/` |
+| S-YCSB hot-update skew | `python3 scripts/run_s_ycsb_sweep.py --skews uniform,0.1,0.4,0.8,0.99,1.4 --threads 2,4,8,16,32,64,128` | `s_ycsb_sweep_results/` |
+| YCSB A GC parameters | `python3 scripts/run_gc_sweep.py` | Timed-phase measurements and plots |
 
-```bash
-python3 scripts/compare_engines.py \
-  --tiny \
-  --engines batstore,leanstore \
-  --workloads tpcc,ycsb_a,htap_q1,s_htap \
-  --threads 2,4
-```
+Each runner supports `--help`; the comparison and skew runners also support `--tiny` for a quick run. S-YCSB uses `--s-ycsb-theta` for one skew value (`--s-htap-theta` remains an alias) and `--workspace-root` for external dependency checkouts.
 
-### Cross-engine comparison
-
-`compare_engines.py` is the general runner. With no arguments it runs TPC-C,
-YCSB A-F, canonical HTAP Q1/Q6, and S-YCSB across all configured engines,
-thread counts, and GC modes:
-
-```bash
-python3 scripts/compare_engines.py
-```
-
-Select a smaller matrix with comma-separated lists:
-
-```bash
-python3 scripts/compare_engines.py \
-  --engines batstore,leanstore,libmdbx \
-  --workloads tpcc,ycsb_a,ycsb_e,htap_q1,s_htap \
-  --threads 2,8,32 \
-  --gc on,off
-```
-
-Useful workload-specific controls include `--warehouses`, `--tpcc-duration`,
-`--ycsb-records`, `--ycsb-duration`, `--theta`, `--htap-olap-threads`, and
-the `--s-htap-*` options. The S-YCSB skew option uses the clearer
-`--s-ycsb-theta` spelling (`--s-htap-theta` remains a compatibility alias).
-Results are written to a timestamped directory under
-`comparison_results/`.
-
-### HTAP analytical-thread sweep
-
-Use the dedicated HTAP runner when the OLTP population should remain fixed
-while the number of analytical threads changes:
-
-```bash
-python3 scripts/run_htap_analytical_sweep.py \
-  --engines batstore,leanstore,libmdbx \
-  --workloads htap_q1,htap_q6 \
-  --oltp-terminals 4 \
-  --olap-threads 1,2,4,8,16 \
-  --warehouses 8
-```
-
-This produces OLTP throughput, aggregate OLAP throughput, and query-latency
-curves under `htap_analytical_results/`.
-
-### GC allocation metrics
-
-With `--features gc-stats`, YCSB writes `gc_stats_after_load.csv` and
-`gc_stats.csv`. Subtract the former from the latter for timed-phase totals.
-`request_count` counts block requests; `latency_ns / request_count` is mean
-request-to-return latency. `scan_count` counts GC-list searches and
-`lists_checked / scan_count` is the mean number of worker lists probed per
-search, including failed `try_lock` attempts. The maximum columns cover the
-whole run, including loading. Tune `ALLOC_BATCH_SIZE` and `SCAN_PERCENT` in
-`src/bat_gc/block_tracer.rs`.
-
-### YCSB skew sweep
-
-Use the skew runner to vary Zipfian theta across YCSB workloads and thread
-counts:
-
-```bash
-python3 scripts/run_skew_sweep.py \
-  --engines batstore,leanstore,libmdbx \
-  --workloads ycsb_a,ycsb_e \
-  --threads 4,16,64 \
-  --skews uniform,0.4,0.8,0.99,1.4
-```
-
-Results are written under `skew_sweep_results/`.
-
-### S-YCSB skew sweep
-
-The dedicated S-YCSB runner crosses hot-update skew with total thread count and
-writes every point into one manifest. Its defaults select BatStore, LeanStore,
-WiredTiger, PostgreSQL, and libmdbx; GC is on unless `--gc on,off` is requested.
-
-```bash
-python3 scripts/run_s_ycsb_sweep.py \
-  --skews uniform,0.1,0.4,0.8,0.99,1.4 \
-  --threads 2,4,8,16,32,64,128
-```
-
-If the dependency checkouts were set up outside the current directory, point the
-runner at the directory containing `benchbase/`, `leanstore/`, and `wiredtiger/`:
-
-```bash
-python3 scripts/run_s_ycsb_sweep.py --workspace-root /data/tx_tests
-```
-
-The general comparison runner calls the same parameter `--s-ycsb-theta` when
-running one theta value. The old `--s-htap-theta` spelling remains accepted.
-S-YCSB retains the internal workload key `s_htap` so older manifests and engine
-wrappers remain compatible.
-
-For a quick validation run, add `--tiny`; for all available options, use the
-runner's `--help`:
-
-```bash
-python3 scripts/compare_engines.py --help
-python3 scripts/run_htap_analytical_sweep.py --help
-python3 scripts/run_skew_sweep.py --help
-python3 scripts/run_s_ycsb_sweep.py --help
-```
+For GC allocation metrics, build with `--features gc-stats`. YCSB writes `gc_stats_after_load.csv` and `gc_stats.csv`; subtract the former from the latter for timed-phase totals. Tune `ALLOC_BATCH_SIZE` and `SCAN_PERCENT` in `src/bat_gc/block_tracer.rs`, or set `BATSTORE_GC_BATCH_SIZE` and `BATSTORE_GC_SCAN_PERCENT` for a run.
 
 ## Plot results
 
-Pass the completed run directory to the unified plotter:
-
 ```bash
 python3 scripts/plot.py comparison_results/run_YYYYMMDD_HHMMSS
-python3 scripts/plot.py htap_analytical_results/run_YYYYMMDD_HHMMSS
-python3 scripts/plot.py skew_sweep_results/run_YYYYMMDD_HHMMSS
-python3 scripts/plot.py s_ycsb_sweep_results/run_YYYYMMDD_HHMMSS
 ```
 
-The plotter detects the run type automatically. For compact, paper-oriented
-figures without overall titles and with a shared top legend:
-
-```bash
-python3 scripts/plot.py --compact comparison_results/run_YYYYMMDD_HHMMSS
-```
-
-Use `--engine batstore` for a single-engine comparison overview and
-`--ref-threads N` to choose the cross-engine reference point in skew plots.
-Figures are written below `plots/` in the run directory, with format
-subdirectories where applicable. Skew runs include scan-latency-versus-skew
-figures when latency samples exist: YCSB-E for regular YCSB and every S-YCSB
-run for the streaming workload.
-
-See plotting options with:
-
-```bash
-python3 scripts/plot.py --help
-```
+The plotter also accepts run directories from the specialized sweeps and writes figures under that run's `plots/` directory. Use `--compact` for paper figures, or `--help` for all options.
 
 ## Papers
 
-- B. Becker et al., *An Asymptotically Optimal Multiversion B-Tree*, The
-  VLDB Journal 5(4), 1996.
-- A. Tonta, B. Seeger, and E. Soisalon-Soininen, *Multiversion Concurrency
-  Control for Multiversion B-Trees*, [arXiv:2606.09133](https://arxiv.org/abs/2606.09133),
-  2026.
-- A. Alhomssi and V. Leis, *Scalable and Robust Snapshot Isolation for
-  High-Performance Storage Engines*, PVLDB 16(6), 2023,
-  [doi:10.14778/3583140.3583157](https://doi.org/10.14778/3583140.3583157).
+- B. Becker et al., *An Asymptotically Optimal Multiversion B-Tree*, The VLDB Journal 5(4), 1996.
+- A. Tonta et al., *Multiversion Concurrency Control for Multiversion B-Trees*, [arXiv:2606.09133](https://arxiv.org/abs/2606.09133), 2026.
+- A. Alhomssi and V. Leis, *Scalable and Robust Snapshot Isolation for High-Performance Storage Engines*, [PVLDB 16(6)](https://doi.org/10.14778/3583140.3583157), 2023.

@@ -94,7 +94,10 @@ pub(crate) struct TxContext {
     /// slot: since one worker's `ts_start`s are drawn from a single
     /// strictly-increasing clock, an outer (earlier, lower) registration's
     /// protection already covers everything any later, nested (higher) one
-    /// could need, so nested calls have nothing to publish.
+    /// could need for page reclamation, so nested traversal calls have
+    /// nothing to publish. Read committed statement snapshots use the
+    /// separate `live_statement` slot below because commit-log pruning also
+    /// needs their exact newer timestamp.
     /// `CachePadded`: without it, up to 8 adjacent workers' `AtomicU64`
     /// slots share one 64-byte cache line, so one worker's `Release` store
     /// here (every `on_tx_start`/`on_tx_completed`) invalidates the line for
@@ -109,6 +112,10 @@ pub(crate) struct TxContext {
     /// where cross-CCD cache-coherence traffic costs considerably more than
     /// on a small single-CCX box.
     live_tx: Box<[CachePadded<AtomicVersion>]>,
+    /// Current read-committed statement snapshot, when it differs from the
+    /// transaction's fixed write stamp. Kept separately so both timestamps
+    /// remain visible to commit-log pruning and reclamation.
+    live_statement: Box<[CachePadded<AtomicVersion>]>,
     /// Reentrancy depth per worker for `on_tx_start`/`on_tx_completed`, same
     /// indexing as `live_tx` — see that field's doc for why nesting exists.
     /// `Relaxed` throughout: each slot is written only by the one worker it
@@ -187,6 +194,9 @@ impl TxContext {
             commit_logs: (0..max_workers).map(|_| CommitLog::new()).collect(),
             worker_registry: WorkerRegistry::new(max_workers),
             live_tx: (0..max_workers)
+                .map(|_| CachePadded::new(AtomicVersion::new(NOT_IN_FLIGHT)))
+                .collect(),
+            live_statement: (0..max_workers)
                 .map(|_| CachePadded::new(AtomicVersion::new(NOT_IN_FLIGHT)))
                 .collect(),
             live_tx_depth: (0..max_workers)
@@ -373,6 +383,22 @@ impl TxContext {
         self.on_tx_completed(ts_start);
     }
 
+    /// Advance a transaction's read snapshot while preserving its original
+    /// write stamp. The registration bound covers the interval between the
+    /// clock draw and publication of the new statement snapshot.
+    pub(crate) fn begin_statement_snapshot(&self) -> Version {
+        self.draw_snapshot_version_with(|ts| {
+            let worker = self.worker_id() as usize;
+            self.live_statement[worker].store(ts, Release);
+            ts
+        })
+    }
+
+    pub(crate) fn end_statement_snapshot(&self) {
+        let worker = self.worker_id() as usize;
+        self.live_statement[worker].store(NOT_IN_FLIGHT, Release);
+    }
+
     #[inline(always)]
     pub(crate) fn current_version(&self) -> Version {
         self.global_clock.current_version()
@@ -422,13 +448,13 @@ impl TxContext {
         })
     }
 
-    /// Every worker's currently-published (i.e. outermost, see `live_tx`'s
-    /// doc) live `ts_start`. `O(max_workers)`, each slot read independently
+    /// Every worker's currently-published transaction and statement
+    /// snapshots. `O(max_workers)`, each slot read independently
     /// with no cross-slot synchronization needed — same reasoning as
     /// `live_min_snapshot` below.
     #[inline]
     fn live_snapshots(&self) -> impl Iterator<Item = SnapShot> + '_ {
-        self.live_tx.iter().filter_map(|slot| {
+        self.live_tx.iter().chain(self.live_statement.iter()).filter_map(|slot| {
             let v = slot.load(Acquire);
             (v != NOT_IN_FLIGHT).then_some(v)
         })
@@ -525,7 +551,8 @@ impl TxContext {
     /// consult this *shared* bound, not a per-table one, since a snapshot
     /// registered once here may later read any table). Combines two sources:
     /// `live_tx` (fully-registered, possibly long-lived active transactions)
-    /// and `in_flight_bound` (workers mid-registration right now — see that
+    /// `live_statement` (read committed statement snapshots), and
+    /// `in_flight_bound` (workers mid-registration right now — see that
     /// field's doc for why an `Acquire` load per slot is sufficient, no
     /// further cross-slot synchronization needed).
     ///
@@ -552,6 +579,12 @@ impl TxContext {
         }
 
         for slot in &self.live_tx {
+            let bound = slot.load(Acquire);
+            if bound != NOT_IN_FLIGHT {
+                min = Some(min.map_or(bound, |m| m.min(bound)));
+            }
+        }
+        for slot in &self.live_statement {
             let bound = slot.load(Acquire);
             if bound != NOT_IN_FLIGHT {
                 min = Some(min.map_or(bound, |m| m.min(bound)));

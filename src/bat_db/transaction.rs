@@ -1,10 +1,10 @@
 //! Generalization of `bat_bench::tpcc_txn::TpccTxn` for a `bat_db::Database`:
 //! a multi-table OSIC transaction (paper §3.5, "Putting Everything
-//! Together") — one fixed snapshot (`ts_start`), drawn once from the
-//! database's shared `TxContext` at `begin` and reused by every read/write
-//! this transaction issues against any of its tables, committed exactly
-//! once at the end. Writes are stamped with `(worker_id, ts_start)` as they
-//! happen — never revisited at commit — so `commit` is just a single append
+//! Together") — one fixed transaction stamp (`ts_start`), drawn from the
+//! database's shared `TxContext` at `begin`. Snapshot isolation reads use
+//! that timestamp; read committed transactions can advance `read_ts` at each
+//! explicit statement boundary. Writes retain `(worker_id, ts_start)` and
+//! are never revisited at commit, so `commit` is just a single append
 //! to this worker's `CommitLog`, i.e. OSIC's "instant commit".
 //!
 //! Each write is also logged to the WAL (if attached) as it happens, under
@@ -79,6 +79,13 @@ pub enum TransactionState {
     Aborted,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IsolationLevel {
+    #[default]
+    SnapshotIsolation,
+    ReadCommitted,
+}
+
 /// Shared by `DbTransaction::insert` and any other per-table-tree write path
 /// that needs the exact same insert semantics against a tree it holds
 /// directly, without a `DbTransaction` wrapping it — e.g.
@@ -89,7 +96,7 @@ pub enum TransactionState {
 /// caller should record a `written` entry for this write — always `true`
 /// here (unlike `update_on_tree`, insert has no self-overwrite short-circuit
 /// that needs zero new entries).
-pub(crate) fn insert_on_tree<
+pub(crate) fn insert_on_tree_at<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
@@ -98,6 +105,7 @@ pub(crate) fn insert_on_tree<
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     ts_start: Version,
+    read_ts: Version,
     key: Key,
     payload: Payload,
 ) -> (
@@ -117,6 +125,17 @@ pub(crate) fn insert_on_tree<
                 CRUDOperationResult::ZeroAffected(KeyAlreadyExists)
             };
             return (crud_error, false);
+        }
+
+        // A tombstone made by another transaction cannot free the key for
+        // insertion until that delete committed before this statement's
+        // snapshot. Otherwise its abort could resurrect a second live row.
+        if let Some(deletion) = leaf_page.version_at(position).deletion_stamp() {
+            if deletion.worker_id() != worker_id
+                && !tree.is_visible_stamp(worker_id, read_ts, deletion)
+            {
+                return (CRUDOperationResult::Conflict, false);
+            }
         }
 
         // A delete followed by an insert in this same transaction creates
@@ -150,13 +169,7 @@ pub(crate) fn insert_on_tree<
     (CRUDOperationResult::Inserted(stamp.ts_start()), true)
 }
 
-/// See `insert_on_tree`'s doc. Returns `false` (no new `written` entry
-/// needed) for the self-overwrite fast path — mutating an already-open
-/// transaction's own uncommitted record in place mints no new physical
-/// version, so the `written` entry an earlier write in the same transaction
-/// already pushed for this key still covers it (see the inline comment
-/// below, carried over from the pre-extraction code).
-pub(crate) fn update_on_tree<
+pub(crate) fn insert_on_tree<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
@@ -165,6 +178,28 @@ pub(crate) fn update_on_tree<
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     ts_start: Version,
+    key: Key,
+    payload: Payload,
+) -> (CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>, bool) {
+    insert_on_tree_at(tree, worker_id, ts_start, ts_start, key, payload)
+}
+
+/// See `insert_on_tree`'s doc. Returns `false` (no new `written` entry
+/// needed) for the self-overwrite fast path — mutating an already-open
+/// transaction's own uncommitted record in place mints no new physical
+/// version, so the `written` entry an earlier write in the same transaction
+/// already pushed for this key still covers it (see the inline comment
+/// below, carried over from the pre-extraction code).
+pub(crate) fn update_on_tree_at<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + WalPayload,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    ts_start: Version,
+    read_ts: Version,
     key: Key,
     payload: Payload,
 ) -> (
@@ -182,7 +217,14 @@ pub(crate) fn update_on_tree<
     // key.
     match leaf_page.latest_position(key, true) {
         Some(position) => {
-            if tree.is_visible_stamp(worker_id, ts_start, leaf_page.version_at(position).insertion_stamp()) {
+            if let Some(deletion) = leaf_page.version_at(position).deletion_stamp() {
+                if deletion.worker_id() != worker_id
+                    && !tree.is_visible_stamp(worker_id, read_ts, deletion)
+                {
+                    return (CRUDOperationResult::Conflict, false);
+                }
+            }
+            if tree.is_visible_stamp(worker_id, read_ts, leaf_page.version_at(position).insertion_stamp()) {
                 let stamp = TxStamp::new(worker_id, ts_start);
 
                 tree.wal_log_write(stamp, |_| CRUDOperation::Update(key, payload.clone()));
@@ -216,7 +258,7 @@ pub(crate) fn update_on_tree<
 }
 
 /// See `insert_on_tree`'s doc.
-pub(crate) fn delete_on_tree<
+pub(crate) fn delete_on_tree_at<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
@@ -225,6 +267,7 @@ pub(crate) fn delete_on_tree<
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     ts_start: Version,
+    read_ts: Version,
     key: Key,
 ) -> (
     CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>,
@@ -236,7 +279,14 @@ pub(crate) fn delete_on_tree<
 
     match leaf_page.latest_position(key, true) {
         Some(position) => {
-            if tree.is_visible_stamp(worker_id, ts_start, leaf_page.version_at(position).insertion_stamp()) {
+            if let Some(deletion) = leaf_page.version_at(position).deletion_stamp() {
+                if deletion.worker_id() != worker_id
+                    && !tree.is_visible_stamp(worker_id, read_ts, deletion)
+                {
+                    return (CRUDOperationResult::Conflict, false);
+                }
+            }
+            if tree.is_visible_stamp(worker_id, read_ts, leaf_page.version_at(position).insertion_stamp()) {
                 let stamp = TxStamp::new(worker_id, ts_start);
                 tree.wal_log_write(stamp, |_| CRUDOperation::Delete(key));
 
@@ -252,6 +302,36 @@ pub(crate) fn delete_on_tree<
         }
         None => (CRUDOperationResult::ZeroAffected(KeyDoesNotExist), false),
     }
+}
+
+/// Existing fixed-snapshot write path used by single-operation callers.
+pub(crate) fn update_on_tree<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + WalPayload,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    ts_start: Version,
+    key: Key,
+    payload: Payload,
+) -> (CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>, bool) {
+    update_on_tree_at(tree, worker_id, ts_start, ts_start, key, payload)
+}
+
+pub(crate) fn delete_on_tree<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + Send + 'static,
+    Payload: Display + Clone + Default + Sync + 'static + WalPayload,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    ts_start: Version,
+    key: Key,
+) -> (CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>, bool) {
+    delete_on_tree_at(tree, worker_id, ts_start, ts_start, key)
 }
 
 /// See `insert_on_tree`'s doc — the read-side counterpart. Always eager
@@ -336,6 +416,8 @@ pub struct DbTransaction<
     db: &'a Database<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     ts_start: Version,
+    read_ts: Version,
+    isolation: IsolationLevel,
     committed: TransactionState,
     /// `(table-cache slot, key)` pairs this transaction has actually written (on a
     /// successful `Inserted`/`Updated`/`Deleted` outcome only — never on
@@ -343,10 +425,9 @@ pub struct DbTransaction<
     /// revert). Walked by `Drop` to abort every one of them if `commit()`
     /// was never called.
     written: SmallVec<[(usize, Key); 16]>,
-    /// Trees touched by this transaction and roots resolved for its immutable snapshot. Root
-    /// histories are append-only, so once `root_for(ts_start)` selects a
-    /// table root, newer publications cannot change that answer. Eight
-    /// inline entries cover the common multi-table OLTP transaction without
+    /// Trees touched by this transaction and roots resolved for its current
+    /// statement snapshot. Cleared when a read committed statement advances.
+    /// Eight inline entries cover the common multi-table OLTP transaction without
     /// allocating; unusually wide transactions spill to the heap.
     tables: SmallVec<[TxTableState<FAN_OUT, NUM_RECORDS, Key, Payload>; 8]>,
 }
@@ -364,6 +445,13 @@ impl<
     /// transaction may go on to touch — not just whichever table happens to
     /// be read/written first (see `TpccTxn::begin`'s identical reasoning).
     pub fn begin(db: &'a Database<FAN_OUT, NUM_RECORDS, Key, Payload>) -> Self {
+        Self::begin_with_isolation(db, IsolationLevel::SnapshotIsolation)
+    }
+
+    pub fn begin_with_isolation(
+        db: &'a Database<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        isolation: IsolationLevel,
+    ) -> Self {
         let worker_id = db.worker_id();
         let ts_start = db.begin_snapshot();
 
@@ -371,6 +459,8 @@ impl<
             db,
             worker_id,
             ts_start,
+            read_ts: ts_start,
+            isolation,
             committed: TransactionState::InFlight,
             written: SmallVec::new(),
             tables: SmallVec::new(),
@@ -380,6 +470,22 @@ impl<
     #[inline(always)]
     pub const fn ts_start(&self) -> Version {
         self.ts_start
+    }
+
+    pub const fn read_ts(&self) -> Version {
+        self.read_ts
+    }
+
+    /// Start the next logical statement. Every operation until the next call
+    /// shares this snapshot; callers must place boundaries around operations
+    /// that belong to the same statement.
+    pub fn begin_statement(&mut self) {
+        if self.isolation == IsolationLevel::ReadCommitted {
+            for table in &mut self.tables {
+                table.read_root = None;
+            }
+            self.read_ts = self.db.ctx.begin_statement_snapshot();
+        }
     }
 
     #[inline(always)]
@@ -417,7 +523,7 @@ impl<
         }
 
         let tree = self.tables[slot].tree.clone();
-        let root = tree.retrieve_root_for(self.ts_start);
+        let root = tree.retrieve_root_for(self.read_ts);
         self.tables[slot].read_root = Some(root.clone());
         (tree, root)
     }
@@ -430,7 +536,7 @@ impl<
             .count()
     }
 
-    /// Point read against this transaction's fixed snapshot, on `table`.
+    /// Point read against this statement's snapshot, on `table`.
     /// Always eager (`MatchedRecords`) — a point read never produces the
     /// lazy iterator variant, but the return type is pinned to `'static`
     /// (rather than elided to `&self`) since the underlying tree is a
@@ -442,10 +548,10 @@ impl<
         key: Key,
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let (tree, root) = self.read_tree_and_root(table);
-        tree.key_point_read_from_root(root, key, self.worker_id, self.ts_start)
+        tree.key_point_read_from_root(root, key, self.worker_id, self.read_ts)
     }
 
-    /// Range read against this transaction's fixed snapshot, on `table` —
+    /// Range read against this statement's snapshot, on `table` —
     /// always eager, see the module doc for why.
     pub fn range(
         &mut self,
@@ -454,7 +560,7 @@ impl<
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let (tree, root) = self.read_tree_and_root(table);
         CRUDOperationResult::MatchedRecords(
-            RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
+            RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
                 .collect(),
         )
     }
@@ -475,11 +581,11 @@ impl<
         range: Interval<Key>,
     ) -> Option<RecordPointResult<Key, Payload>> {
         let (tree, root) = self.read_tree_and_root(table);
-        RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
+        RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
             .min_by_key()
     }
 
-    /// Fallible zero-copy range visitor against this transaction's fixed
+    /// Fallible zero-copy range visitor against this statement's
     /// snapshot. An error stops the scan immediately.
     pub fn try_range_for_each<E>(
         &mut self,
@@ -488,7 +594,7 @@ impl<
         visit: impl FnMut(Key, &Payload) -> Result<(), E>,
     ) -> Result<(), E> {
         let (tree, root) = self.read_tree_and_root(table);
-        RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
+        RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
             .try_for_each_ref(visit)
     }
 
@@ -500,7 +606,7 @@ impl<
         visit: impl FnMut(Key, &Payload),
     ) {
         let (tree, root) = self.read_tree_and_root(table);
-        RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
+        RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
             .for_each_ref(visit)
     }
 
@@ -513,14 +619,14 @@ impl<
         fold: impl FnMut(Acc, Key, &Payload) -> Acc,
     ) -> Acc {
         let (tree, root) = self.read_tree_and_root(table);
-        RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
+        RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
             .fold_ref(initial, fold)
     }
 
     /// Counts visible range records without constructing result objects.
     pub fn range_count(&mut self, table: TableId, range: Interval<Key>) -> usize {
         let (tree, root) = self.read_tree_and_root(table);
-        RangeQueryIter::new_with_root(&tree, self.ts_start, range, false, self.worker_id, root)
+        RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
             .count_ref()
     }
 
@@ -551,7 +657,7 @@ impl<
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let slot = self.table_slot(table);
         let tree = self.tables[slot].tree.clone();
-        let (result, track) = insert_on_tree(&tree, self.worker_id, self.ts_start, key, payload);
+        let (result, track) = insert_on_tree_at(&tree, self.worker_id, self.ts_start, self.read_ts, key, payload);
         if track {
             self.written.push((slot, key));
         }
@@ -566,7 +672,7 @@ impl<
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let slot = self.table_slot(table);
         let tree = self.tables[slot].tree.clone();
-        let (result, track) = update_on_tree(&tree, self.worker_id, self.ts_start, key, payload);
+        let (result, track) = update_on_tree_at(&tree, self.worker_id, self.ts_start, self.read_ts, key, payload);
         if track {
             self.written.push((slot, key));
         }
@@ -580,7 +686,7 @@ impl<
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let slot = self.table_slot(table);
         let tree = self.tables[slot].tree.clone();
-        let (result, track) = delete_on_tree(&tree, self.worker_id, self.ts_start, key);
+        let (result, track) = delete_on_tree_at(&tree, self.worker_id, self.ts_start, self.read_ts, key);
         if track {
             self.written.push((slot, key));
         }
@@ -593,6 +699,13 @@ impl<
 
     pub const fn is_aborted(&self) -> bool {
         matches!(self.committed, TransactionState::Aborted)
+    }
+
+    fn finish_snapshots(&self) {
+        if self.read_ts != self.ts_start {
+            self.db.ctx.end_statement_snapshot();
+        }
+        self.db.end_snapshot(self.ts_start);
     }
 
     /// Instant commit: appends `ts_commit` to this worker's (shared)
@@ -609,7 +722,7 @@ impl<
             self.committed = TransactionState::Committed;
 
             if self.written.is_empty() {
-                self.db.end_snapshot(self.ts_start);
+                self.finish_snapshots();
                 return None;
             }
 
@@ -620,7 +733,7 @@ impl<
                 self.tables[slot].tree.wal_log_commit(stamp, ts_commit);
             }
 
-            self.db.end_snapshot(self.ts_start);
+            self.finish_snapshots();
             Some(ts_commit)
         } else {
             None
@@ -631,7 +744,7 @@ impl<
         if let TransactionState::InFlight = self.committed {
             self.committed = TransactionState::Aborted;
             self.unwind_writes();
-            self.db.end_snapshot(self.ts_start);
+            self.finish_snapshots();
             true
         } else {
             false
@@ -697,7 +810,7 @@ impl<
             // See `unwind_writes`'s doc for why this must run in reverse
             // (LIFO) order.
             self.unwind_writes();
-            self.db.end_snapshot(self.ts_start);
+            self.finish_snapshots();
         }
     }
 }
