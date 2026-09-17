@@ -1,5 +1,58 @@
 use super::*;
 
+#[test]
+fn pruning_preserves_commit_while_snapshot_registration_is_in_flight() {
+    let ctx = TxContext::new(2);
+    let writer = ctx.worker_id();
+    assert_eq!(ctx.global_clock.next_timestamp(), 1);
+    assert_eq!(ctx.commit_tx(writer), 2);
+
+    let (bound_tx, bound_rx) = std::sync::mpsc::channel();
+    let (draw_tx, draw_rx) = std::sync::mpsc::channel();
+    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+    let (publish_tx, publish_rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let ctx_ref = &ctx;
+        let reader = scope.spawn(move || {
+            let reader_worker = ctx_ref.begin_snapshot_registration();
+            bound_tx
+                .send(ctx_ref.in_flight_bound[reader_worker as usize].load(Acquire))
+                .unwrap();
+            draw_rx.recv().unwrap();
+            let snapshot = ctx_ref.global_clock.next_timestamp();
+            snapshot_tx.send(snapshot).unwrap();
+            publish_rx.recv().unwrap();
+            ctx_ref.on_tx_start(snapshot);
+            ctx_ref.end_snapshot_registration(reader_worker);
+            ctx_ref.end_snapshot(snapshot);
+        });
+
+        assert_eq!(bound_rx.recv().unwrap(), 3);
+        assert_eq!(ctx.global_clock.next_timestamp(), 3);
+        assert_eq!(ctx.commit_tx(writer), 4);
+        draw_tx.send(()).unwrap();
+        let snapshot = snapshot_rx.recv().unwrap();
+        assert_eq!(snapshot, 5);
+        assert_eq!(ctx.global_clock.next_timestamp(), 6);
+        assert_eq!(ctx.commit_tx(writer), 7);
+        assert_eq!(ctx.commit_logs[writer as usize].lcb(snapshot), 4);
+
+        for _ in 0..512 {
+            ctx.global_clock.next_timestamp();
+            ctx.commit_tx(writer);
+            assert_eq!(ctx.commit_logs[writer as usize].lcb(snapshot), 4);
+        }
+
+        publish_tx.send(()).unwrap();
+        reader.join().unwrap();
+
+        ctx.global_clock.next_timestamp();
+        ctx.commit_tx(writer);
+        assert_eq!(ctx.commit_logs[writer as usize].len(), 1);
+    });
+}
+
 /// Regression test for the per-worker `in_flight_bound`/`live_tx` pairing
 /// (see `begin_snapshot_registration`/`end_snapshot_registration`/
 /// `in_flight_bound`'s docs above, and `TrackerHandleSt::free_block`): once a

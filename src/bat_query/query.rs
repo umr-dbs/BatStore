@@ -116,15 +116,13 @@ impl<const FAN_OUT: usize,
     /// where the `SmartCell` it was produced from lives — this class of bug
     /// is now categorically ruled out, not just avoided by call-site care.
     #[inline]
-    fn traverse_read_key<'a>(
-        root: &'a BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    fn traverse_read_key(
+        root: &BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
         key: Key,
         lookup_version: Version)
-        -> BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+        -> BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>
     {
-        let mut attempts: Attempts = 0;
-
-        'restart: loop {
+        loop {
             let mut curr = root.borrow_read();
 
             while let PageType::IndexRef(internal_page) = curr.as_page_ref()
@@ -132,24 +130,17 @@ impl<const FAN_OUT: usize,
                 let (keys_page, versions_page) = internal_page
                     .keys_versions();
 
-                curr = match versions_page
+                curr = versions_page
                     .iter()
                     .zip(keys_page)
                     .enumerate()
                     .rfind(|(_, (v, range))|
                         v.matched(lookup_version) && range.contains(key))
                     .map(|(pos, _)| internal_page.get_pointer(pos).borrow_read())
-                {
-                    Some(c) => c,
-                    None => {
-                        attempts += 1;
-                        sched_yield(attempts);
-                        continue 'restart;
-                    }
-                }
+                    .unwrap();
             }
 
-            break curr;
+            break curr
         }
     }
 

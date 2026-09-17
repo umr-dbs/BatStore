@@ -53,14 +53,14 @@ fn repeated_commit_log_pruning_reuses_its_scratch_allocation_and_preserves_lcb()
     let log = CommitLog::new();
 
     for _ in 0..8 {
-        log.commit_pruned(&clock, 4, [1, 2, 3].into_iter());
+        log.commit_pruned(&clock, 4, std::iter::empty(), [1, 2, 3].into_iter());
     }
     let warmed_capacity = log.prune_scratch_capacity();
     assert!(warmed_capacity >= 4);
 
     for _ in 0..1_000 {
         let before = clock.current_version();
-        let committed = log.commit_pruned(&clock, 4, [before].into_iter());
+        let committed = log.commit_pruned(&clock, 4, std::iter::empty(), [before].into_iter());
         assert_eq!(log.lcb(committed + 1), committed);
     }
 

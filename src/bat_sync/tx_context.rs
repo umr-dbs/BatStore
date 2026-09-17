@@ -434,12 +434,11 @@ impl TxContext {
         })
     }
 
-    /// Snapshots whose LCB commit-log entries must survive pruning. Besides
-    /// fully-published transactions, include workers currently between
-    /// drawing and publishing a snapshot; otherwise a concurrent commit can
-    /// prune the boundary that the just-starting transaction will need.
+    /// Lower bounds for snapshots being registered. Their exact timestamps
+    /// are not yet published, so pruning must retain every commit from each
+    /// bound onward, as well as the LCB immediately before it.
     #[inline]
-    fn pruning_snapshots(&self) -> impl Iterator<Item = SnapShot> + '_ {
+    fn in_flight_pruning_bounds(&self) -> impl Iterator<Item = SnapShot> + '_ {
         // Read the in-flight registration bounds before the published
         // snapshots. A registering worker publishes its bound first, then
         // its live snapshot, and only then clears the bound. Reading these
@@ -449,13 +448,10 @@ impl TxContext {
         // consequently drop the LCB required by the newly active snapshot.
         // This is the same ordering requirement documented by
         // `live_min_snapshot` below.
-        self.in_flight_bound
-            .iter()
-            .filter_map(|slot| {
-                let v = slot.load(Acquire);
-                (v != NOT_IN_FLIGHT).then_some(v)
-            })
-            .chain(self.live_snapshots())
+        self.in_flight_bound.iter().filter_map(|slot| {
+            let v = slot.load(Acquire);
+            (v != NOT_IN_FLIGHT).then_some(v)
+        })
     }
 
     #[inline(always)]
@@ -466,7 +462,8 @@ impl TxContext {
             self.commit_logs[worker_id as usize].commit_pruned(
                 &self.global_clock,
                 self.commit_logs.len(),
-                self.pruning_snapshots(),
+                self.in_flight_pruning_bounds(),
+                self.live_snapshots(),
             )
         } else {
             self.commit_logs[worker_id as usize].commit(&self.global_clock)
@@ -569,6 +566,18 @@ impl TxContext {
     #[cfg(test)]
     pub(crate) fn commit_log_len(&self, worker_id: WorkerId) -> usize {
         self.commit_logs[worker_id as usize].len()
+    }
+
+    #[cfg(feature = "tree-viz")]
+    pub(crate) fn max_worker_id(&self) -> usize {
+        self.commit_logs.len().saturating_sub(1)
+    }
+
+    #[cfg(feature = "tree-viz")]
+    pub(crate) fn dump_commit_logs(&self) -> (Vec<Vec<String>>, bool) {
+        let snapshots: Vec<_> = self.commit_logs.iter().map(|log| log.dump_entries()).collect();
+        let complete = snapshots.iter().all(|(_, complete)| *complete);
+        (snapshots.into_iter().map(|(entries, _)| entries).collect(), complete)
     }
 }
 

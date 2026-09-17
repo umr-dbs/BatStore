@@ -34,6 +34,12 @@ use std::path::Path;
 
 #[derive(Serialize)]
 pub struct TreeDump {
+    /// Next timestamp the GLC will hand out, serialized as text for JS BigInt.
+    pub glc_next: String,
+    pub glc_last: String,
+    pub max_worker_id: usize,
+    pub commit_logs: Vec<Vec<String>>,
+    pub historical_visibility_complete: bool,
     pub fan_out: usize,
     pub num_records: usize,
     pub root_index_type: String,
@@ -101,9 +107,11 @@ pub struct RecordDump {
     pub key: String,
     pub insert_worker: u16,
     pub insert_ts: u64,
+    pub insert_invalid: bool,
     pub deleted: bool,
     pub delete_worker: Option<u16>,
     pub delete_ts: Option<u64>,
+    pub delete_invalid: bool,
 }
 
 /// Dumps `tree`'s full root* list and the (de-duplicated) block graph they
@@ -122,6 +130,21 @@ pub fn dump_tree_to_file<
     path: impl AsRef<Path>,
     max_depth: Option<usize>,
 ) -> io::Result<()> {
+    let dump = build_tree_dump(tree, max_depth);
+    let file = std::fs::File::create(path)?;
+    serde_json::to_writer_pretty(file, &dump)?;
+    Ok(())
+}
+
+pub(crate) fn build_tree_dump<
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Default + Clone + Display + Sync + 'static,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    max_depth: Option<usize>,
+) -> TreeDump {
     let mut nodes = BTreeMap::new();
     let mut visited = std::collections::HashSet::new();
 
@@ -134,18 +157,20 @@ pub fn dump_tree_to_file<
         })
         .collect();
 
-    let dump = TreeDump {
+    let (commit_logs, historical_visibility_complete) = tree.ctx.dump_commit_logs();
+    let glc_next = tree.ctx.current_version();
+    TreeDump {
+        glc_next: glc_next.to_string(),
+        glc_last: glc_next.saturating_sub(1).to_string(),
+        max_worker_id: tree.ctx.max_worker_id(),
+        commit_logs,
+        historical_visibility_complete,
         fan_out: FAN_OUT,
         num_records: NUM_RECORDS,
         root_index_type: tree.root_star_index().to_string(),
         roots,
         nodes,
-    };
-
-    let file = std::fs::File::create(path)?;
-    serde_json::to_writer_pretty(file, &dump)?;
-
-    Ok(())
+    }
 }
 
 /// Enumerates every `(version, height, root block)` this root* index has
@@ -235,9 +260,11 @@ fn dump_node<
                         key: r.key().to_string(),
                         insert_worker: insert.worker_id(),
                         insert_ts: insert.ts_start(),
+                        insert_invalid: insert.is_invalid(),
                         deleted: r.version().is_deleted(),
                         delete_worker: delete.map(|s| s.worker_id()),
                         delete_ts: delete.map(|s| s.ts_start()),
+                        delete_invalid: delete.is_some_and(|s| s.is_invalid()),
                     }
                 })
                 .collect();

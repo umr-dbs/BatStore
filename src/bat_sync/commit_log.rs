@@ -27,6 +27,10 @@ pub struct CommitLog {
 
 struct CommitLogState {
     entries: Vec<Version>,
+    /// Debug-only archive for exact historical Explorer visibility after the
+    /// runtime LCB log has pruned entries that active readers no longer need.
+    #[cfg(feature = "tree-viz")]
+    history: Vec<Version>,
     /// Reused by every prune instead of allocating a fresh bitmap on the
     /// commit path. Capacity follows the largest observed log size.
     keep: Vec<bool>,
@@ -37,6 +41,8 @@ impl CommitLog {
         Self {
             state: Mutex::new(CommitLogState {
                 entries: Vec::new(),
+                #[cfg(feature = "tree-viz")]
+                history: Vec::new(),
                 keep: Vec::new(),
             }),
         }
@@ -68,35 +74,55 @@ impl CommitLog {
         let mut state = self.state.lock();
         let ts_commit = glc.next_timestamp();
         state.entries.push(ts_commit);
+        #[cfg(feature = "tree-viz")]
+        state.history.push(ts_commit);
         ts_commit
     }
 
     /// Same as `commit`, but once the log reaches `max_workers` entries (the
-    /// paper's size bound), prunes down to just the entries that are still
-    /// the `LCB` of some snapshot in `active_snapshots` — safe only because
-    /// the caller guarantees `active_snapshots` enumerates *every* currently
-    /// open snapshot (see `TrackerHandleSt::active_snapshots`).
+    /// paper's size bound), retains the LCB of every published snapshot.
+    /// An in-flight registration has only a lower bound on its eventual
+    /// snapshot timestamp, so every commit from that bound onward must also
+    /// survive until the exact snapshot is published.
     pub fn commit_pruned(
         &self,
         glc: &GlobalClock,
         max_workers: usize,
+        in_flight_bounds: impl Iterator<Item = Version>,
         active_snapshots: impl Iterator<Item = Version>,
     ) -> Version {
         let mut state = self.state.lock();
         let ts_commit = glc.next_timestamp();
         state.entries.push(ts_commit);
+        #[cfg(feature = "tree-viz")]
+        state.history.push(ts_commit);
 
         if state.entries.len() >= max_workers {
-            Self::prune(&mut state, active_snapshots);
+            Self::prune(&mut state, in_flight_bounds, active_snapshots);
         }
 
         ts_commit
     }
 
-    fn prune(state: &mut CommitLogState, active_snapshots: impl Iterator<Item = Version>) {
+    fn prune(
+        state: &mut CommitLogState,
+        in_flight_bounds: impl Iterator<Item = Version>,
+        active_snapshots: impl Iterator<Item = Version>,
+    ) {
         let len = state.entries.len();
         state.keep.resize(len, false);
         state.keep.fill(false);
+
+        // A bound can precede the real snapshot by intervening commits.
+        // Keeping only its LCB would lose the real snapshot's LCB if the
+        // registering worker pauses after drawing its timestamp.
+        for bound in in_flight_bounds {
+            let first_at_or_after = state.entries.partition_point(|&e| e < bound);
+            if let Some(previous) = first_at_or_after.checked_sub(1) {
+                state.keep[previous] = true;
+            }
+            state.keep[first_at_or_after..].fill(true);
+        }
 
         for ts_start in active_snapshots {
             if let Some(i) = Self::lcb_index(&state.entries, ts_start) {
@@ -134,6 +160,12 @@ impl CommitLog {
         Self::lcb_index(&state.entries, ts)
             .map(|i| state.entries[i])
             .unwrap_or(0)
+    }
+
+    #[cfg(feature = "tree-viz")]
+    pub(crate) fn dump_entries(&self) -> (Vec<String>, bool) {
+        let state = self.state.lock();
+        (state.history.iter().map(Version::to_string).collect(), true)
     }
 
     /// Current entry count — for tests/diagnostics confirming pruning keeps
