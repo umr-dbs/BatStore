@@ -145,9 +145,9 @@ BEGIN
     scan_start := clock_timestamp();
     SELECT {count_expr} INTO n;
     ns := (extract(epoch FROM clock_timestamp() - scan_start) * 1000000000)::bigint;
-    RETURN QUERY SELECT extract(epoch FROM scan_start - run_start),
+    RETURN QUERY SELECT extract(epoch FROM scan_start - run_start)::double precision,
       txid_current_snapshot()::text, n, ns,
-      CASE WHEN ns = 0 THEN 0.0 ELSE n * 1000000000.0 / ns END;
+      (CASE WHEN ns = 0 THEN 0.0 ELSE n * 1000000000.0 / ns END)::double precision;
   END LOOP;
 END $$;
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
@@ -222,8 +222,11 @@ def read_historic_scan_rows(scan_csv: Path) -> list:
                     snapshot = int(snapshot_text)
                 except ValueError:
                     snapshot = snapshot_text
+                delay_secs = float(row["delay_secs"])
                 rows.append({
-                    "elapsed_secs": float(row["delay_secs"]),
+                    # libmdbx historically wrote zero in delay_secs even though
+                    # elapsed_secs recorded the scan's actual snapshot age.
+                    "elapsed_secs": delay_secs if delay_secs > 0 else float(row["elapsed_secs"]),
                     "snapshot": snapshot,
                     "scanned_tuples": int(row["scanned_tuples"]),
                     "latency_ns": int(row["latency_ns"]),
@@ -417,7 +420,8 @@ def plot(rows_by_engine: dict, summaries_by_engine: dict, out_dir: Path) -> None
             )
 
     ax_lat.set_xlabel("Snapshot age at scan start (s)")
-    ax_lat.set_ylabel("Full-scan latency (ms)")
+    ax_lat.set_ylabel("Full-scan latency (ms, log scale)")
+    ax_lat.set_yscale("log")
     ax_lat.grid(axis="y", alpha=0.25)
     ax_lat.legend(frameon=False, fontsize=8)
     if ax_tup is not None:

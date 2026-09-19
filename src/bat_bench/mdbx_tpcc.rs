@@ -1080,7 +1080,8 @@ fn write_results(stats: &[TerminalStats], scan_results: &[MdbxScanResult], reque
             let tuples_per_sec = if r.latency_ns == 0 { 0.0 } else { r.scanned_tuples as f64 / (r.latency_ns as f64 / 1e9) };
             scan_file.write_all(format!(
                 "{},{:.3},{},{},{},{},{:.2},{},{}\n",
-                r.mode, r.elapsed_secs, 0.0, r.snapshot, r.scanned_tuples, r.latency_ns, tuples_per_sec,
+                r.mode, r.elapsed_secs, if r.mode == "historic_full_scan" { r.elapsed_secs } else { 0.0 },
+                r.snapshot, r.scanned_tuples, r.latency_ns, tuples_per_sec,
                 r.summary.map(|s| format!("{s:.2}")).unwrap_or_default(),
                 r.staleness_versions,
             ).as_bytes()).unwrap();
