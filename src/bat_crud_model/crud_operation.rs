@@ -1,4 +1,6 @@
-use crate::bat_crud_model::crud_operation::CRUDOperation::{Delete, Empty, Insert, Point, PointSi, Range, RangeIter, RangeIterSi, RangeSi, Update};
+use crate::bat_crud_model::crud_operation::CRUDOperation::{
+    Delete, Empty, Insert, Point, PointSi, Range, RangeIter, RangeIterSi, RangeSi, Update,
+};
 use crate::bat_query::interval::Interval;
 use crate::bat_record_model::version_info::Version;
 use std::fmt::{Display, Formatter};
@@ -30,7 +32,7 @@ pub enum CRUDOperation<Key: Ord + Copy + Hash + Display, Payload: Clone> {
     // Rand Writers
     UpdateRand,
     DeleteRand,
-    InsertRand
+    InsertRand,
 }
 
 /// Explicitly support move-semantics for Transaction.
@@ -40,31 +42,41 @@ unsafe impl<Key: Ord + Copy + Hash + Display, Payload: Clone> Sync for CRUDOpera
 impl<Key: Display + Ord + Copy + Hash, Payload: Clone> Display for CRUDOperation<Key, Payload> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Insert(key, payload) =>
-                write!(f, "Insert(Key: {})", key),
-            Update(key, payload) =>
-                write!(f, "Update(key: {})", key),
-            Delete(key) =>
-                write!(f, "Delete(Key: {})", key),
-            Point(key, version) =>
-                write!(f, "Point(Key: {}, version: {})", key, version),
-            PointSi(key) =>
-                write!(f, "Point(Key: {}, version: Si)", key),
-            Range(key, version) =>
-                write!(f, "Range(Keys: [{}, {}], version: {})", key.lower(), key.upper(), version),
-            RangeSi(key) =>
-                write!(f, "Range(Keys: [{}, {}], version: Si)", key.lower(), key.upper()),
-            RangeIter(key, version) =>
-                write!(f, "Range(Keys: [{}, {}], version: {})", key.lower(), key.upper(), version),
-            RangeIterSi(key) =>
-                write!(f, "RangeIterSi(Keys: [{}, {}], version: Si)", key.lower(), key.upper()),
+            Insert(key, payload) => write!(f, "Insert(Key: {})", key),
+            Update(key, payload) => write!(f, "Update(key: {})", key),
+            Delete(key) => write!(f, "Delete(Key: {})", key),
+            Point(key, version) => write!(f, "Point(Key: {}, version: {})", key, version),
+            PointSi(key) => write!(f, "Point(Key: {}, version: Si)", key),
+            Range(key, version) => write!(
+                f,
+                "Range(Keys: [{}, {}], version: {})",
+                key.lower(),
+                key.upper(),
+                version
+            ),
+            RangeSi(key) => write!(
+                f,
+                "Range(Keys: [{}, {}], version: Si)",
+                key.lower(),
+                key.upper()
+            ),
+            RangeIter(key, version) => write!(
+                f,
+                "Range(Keys: [{}, {}], version: {})",
+                key.lower(),
+                key.upper(),
+                version
+            ),
+            RangeIterSi(key) => write!(
+                f,
+                "RangeIterSi(Keys: [{}, {}], version: Si)",
+                key.lower(),
+                key.upper()
+            ),
             Empty => write!(f, "Empty"),
-            CRUDOperation::UpdateRand =>
-                write!(f, "UpdateRand"),
-            CRUDOperation::DeleteRand =>
-                write!(f, "DeleteRand"),
-            CRUDOperation::InsertRand =>
-                write!(f, "InsertRand"),
+            CRUDOperation::UpdateRand => write!(f, "UpdateRand"),
+            CRUDOperation::DeleteRand => write!(f, "DeleteRand"),
+            CRUDOperation::InsertRand => write!(f, "InsertRand"),
         }
     }
 }
@@ -76,10 +88,8 @@ impl<Key: Ord + Hash + Copy + Display, Payload: Clone> CRUDOperation<Key, Payloa
     #[inline(always)]
     pub const fn is_read(&self) -> Option<Version> {
         match self {
-            Point(.., version) |
-            RangeIter(.., version) |
-            Range(.., version) => Some(*version),
-            _ => None
+            Point(.., version) | RangeIter(.., version) | Range(.., version) => Some(*version),
+            _ => None,
         }
     }
 

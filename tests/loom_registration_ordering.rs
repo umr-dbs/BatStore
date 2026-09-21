@@ -77,10 +77,6 @@ fn relaxed_ordering_is_unsound() {
     check(Relaxed, Relaxed, Relaxed);
 }
 
-/// The actual fix: `Release` on the store that clears the flag, `Acquire` on
-/// the load that checks it (mirrors `end_snapshot_registration`'s `fetch_sub`
-/// and `registrations_in_flight()`'s `load` in tx_context.rs). Regression
-/// test — if this starts failing, the ordering is no longer sufficient.
 #[test]
 fn release_acquire_ordering_is_sound() {
     check(Relaxed, Release, Acquire);

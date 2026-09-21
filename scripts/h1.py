@@ -33,6 +33,7 @@ configure_checkout()
 from engines import batstore, common
 from plot_styles import (compact_enabled, finalize_layout, measurement_positions,
                          measurement_values, set_compact, set_measurement_axis)
+from plot_h1_read_p50_vs_updates import plot as plot_read_p50_vs_updates
 
 DEFAULT_THREADS = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
 WORKLOADS = ["ycsb_a", "ycsb_c"]
@@ -147,6 +148,9 @@ def main() -> None:
     print(f"\nmanifest         : {manifest_path}")
     print(f"op latency table : {op_latency_path}")
     plot(results, threads_list, run_dir / "plots")
+    if "ycsb_a" in workloads:
+        plot_read_p50_vs_updates(run_dir)
+        plot_read_p50_vs_updates(run_dir, "total_ops")
 
 
 def plot(results: dict, threads_list: list, out_dir: Path) -> None:

@@ -17,10 +17,11 @@ use std::fmt::Display;
 use crate::bat_bench::tpcc_random::*;
 use crate::bat_bench::tpcc_schema::*;
 use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
-use crate::bat_db::{IsolationLevel, TransactionState};
 use crate::bat_db::transaction::{
-    delete_on_tree_at, insert_on_tree_at, point_on_tree, range_min_on_tree, range_on_tree, update_on_tree_at,
+    delete_on_tree_at, insert_on_tree_at, point_on_tree, range_min_on_tree, range_on_tree,
+    update_on_tree_at,
 };
+use crate::bat_db::{IsolationLevel, TransactionState};
 use crate::bat_query::interval::Interval;
 use crate::bat_query::iter_query::RangeQueryIter;
 use crate::bat_record_model::record_point::RecordPointResult;
@@ -30,8 +31,9 @@ use crate::bat_record_model::version_info::Version;
 type Res<'a> = CRUDOperationResult<'a, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 
 /// A multi-table OSIC transaction over a [`TpccDatabase`]. Its write stamp
-/// stays fixed; read committed transactions can refresh the read snapshot at
-/// each explicit statement boundary. It commits once across all 14 tables.
+/// stays fixed; read committed transactions refresh the read snapshot
+/// automatically before each public read/write operation. It commits once
+/// across all 14 tables.
 ///
 /// Unlike the pre-size-class-dispatch design, this does *not* wrap
 /// `bat_db::DbTransaction`: `Table::Warehouse`/`Table::District` resolve to a
@@ -160,8 +162,14 @@ impl BigTreeOp for InsertOp {
         self,
         tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) -> Self::Output {
-        let (r, track) =
-            insert_on_tree_at(tree, self.worker_id, self.ts_start, self.read_ts, self.key, self.payload);
+        let (r, track) = insert_on_tree_at(
+            tree,
+            self.worker_id,
+            self.ts_start,
+            self.read_ts,
+            self.key,
+            self.payload,
+        );
         (normalize(r), track)
     }
 }
@@ -179,8 +187,14 @@ impl BigTreeOp for UpdateOp {
         self,
         tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) -> Self::Output {
-        let (r, track) =
-            update_on_tree_at(tree, self.worker_id, self.ts_start, self.read_ts, self.key, self.payload);
+        let (r, track) = update_on_tree_at(
+            tree,
+            self.worker_id,
+            self.ts_start,
+            self.read_ts,
+            self.key,
+            self.payload,
+        );
         (normalize(r), track)
     }
 }
@@ -197,7 +211,8 @@ impl BigTreeOp for DeleteOp {
         self,
         tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) -> Self::Output {
-        let (r, track) = delete_on_tree_at(tree, self.worker_id, self.ts_start, self.read_ts, self.key);
+        let (r, track) =
+            delete_on_tree_at(tree, self.worker_id, self.ts_start, self.read_ts, self.key);
         (normalize(r), track)
     }
 }
@@ -232,18 +247,11 @@ impl BigTreeOp for AbortWriteOp {
 }
 
 impl<'a> TpccTxn<'a> {
-    /// Draws `ts_start` from the database's shared `TxContext` and
-    /// registers it as an active snapshot once, covering every table this
-    /// transaction may go on to touch, standard- or big-class alike (both
-    /// share the same `ctx` — see `TpccDatabase::make_big_trees`).
     pub fn begin(db: &'a TpccDatabase) -> Self {
         Self::begin_with_isolation(db, IsolationLevel::SnapshotIsolation)
     }
 
-    pub fn begin_with_isolation(
-        db: &'a TpccDatabase,
-        isolation: IsolationLevel,
-    ) -> Self {
+    pub fn begin_with_isolation(db: &'a TpccDatabase, isolation: IsolationLevel) -> Self {
         let worker_id = db.db.worker_id();
         let ts_start = db.db.begin_snapshot();
         Self {
@@ -266,8 +274,8 @@ impl<'a> TpccTxn<'a> {
         self.read_ts
     }
 
-    /// Advance the read snapshot for the next statement in read committed mode.
-    pub fn begin_statement(&mut self) {
+    #[inline]
+    fn refresh_read_snapshot(&mut self) {
         if self.isolation == IsolationLevel::ReadCommitted {
             self.read_ts = self.db.db.ctx.begin_statement_snapshot();
         }
@@ -278,8 +286,9 @@ impl<'a> TpccTxn<'a> {
         self.worker_id
     }
 
-    /// Point read against this transaction's fixed snapshot, on `table`.
+    /// Point read against this operation's snapshot, on `table`.
     pub fn point(&mut self, table: Table, key: TpccKey) -> Res<'static> {
+        self.refresh_read_snapshot();
         match table.class() {
             TreeClass::Standard => {
                 point_on_tree(&self.db.tree_for(table), self.worker_id, self.read_ts, key)
@@ -295,21 +304,13 @@ impl<'a> TpccTxn<'a> {
         }
     }
 
-    /// Range read against this transaction's fixed snapshot, on `table`.
-    /// `force_read_all` is kept only for call-site compatibility — the
-    /// underlying `range_on_tree` is always eager; every real call site in
-    /// this crate already passes `true`. Transparently fans out across
-    /// `table`'s scan pool (`TpccDatabase::scan_pool`) when one is assigned
-    /// and `range` is large enough to be worth splitting — see
-    /// `range_on_tree`'s and `iter_query::RangeQueryIter`'s `*_parallel`
-    /// methods' doc for where that decision actually happens; this call
-    /// site only has to look the pool up, not decide anything about it.
     pub fn range(
         &mut self,
         table: Table,
         range: Interval<TpccKey>,
         _force_read_all: bool,
     ) -> Res<'static> {
+        self.refresh_read_snapshot();
         match table.class() {
             TreeClass::Standard => range_on_tree(
                 &self.db.tree_for(table),
@@ -329,15 +330,12 @@ impl<'a> TpccTxn<'a> {
         }
     }
 
-    /// Like `range`, but only the smallest-key match — see
-    /// `bat_db::transaction::range_min_on_tree`'s doc. No normalization
-    /// needed: unlike `Res`, `Option<RecordPointResult<..>>` carries no
-    /// `NUM_RECORDS`/`FAN_OUT` at all.
     pub fn range_min(
         &mut self,
         table: Table,
         range: Interval<TpccKey>,
     ) -> Option<RecordPointResult<TpccKey, TpccRow>> {
+        self.refresh_read_snapshot();
         match table.class() {
             TreeClass::Standard => range_min_on_tree(
                 &self.db.tree_for(table),
@@ -364,6 +362,7 @@ impl<'a> TpccTxn<'a> {
         range: Interval<TpccKey>,
         mut visit: impl FnMut(TpccKey, &TpccRow),
     ) {
+        self.refresh_read_snapshot();
         match table.class() {
             TreeClass::Standard => RangeQueryIter::new(
                 &self.db.tree_for(table),
@@ -372,27 +371,19 @@ impl<'a> TpccTxn<'a> {
                 false,
                 self.worker_id,
             )
-                .for_each_ref(&mut visit),
+            .for_each_ref(&mut visit),
             TreeClass::Big => self.db.dispatch_big(
                 table,
                 RangeVisitOp {
-                worker_id: self.worker_id,
-                ts_start: self.read_ts,
-                range,
-                visit: &mut visit,
+                    worker_id: self.worker_id,
+                    ts_start: self.read_ts,
+                    range,
+                    visit: &mut visit,
                 },
             ),
         }
     }
 
-    /// Like `range_for_each`, but additionally opts the scan into leaf-level
-    /// zone-map pruning (`RangeQueryIter::with_zone_predicate`) over
-    /// `[zone_lo, zone_hi]` — see that method's doc for the encoding
-    /// contract, and `bat_bench::tpcc_schema::encode_signed_zone_value` for
-    /// `ORDER_LINE`'s specific one. `table` must be `TreeClass::Standard`
-    /// (the only class `MVBTSt::set_zone_map_projection` can be configured
-    /// on) — `Big`-class tables (`Warehouse`/`District`) never need this,
-    /// they're not scanned by CH-benCHmark's date-filtered queries.
     pub fn range_for_each_zone_pruned(
         &mut self,
         table: Table,
@@ -401,6 +392,7 @@ impl<'a> TpccTxn<'a> {
         zone_hi: u64,
         mut visit: impl FnMut(TpccKey, &TpccRow),
     ) {
+        self.refresh_read_snapshot();
         assert_eq!(
             table.class(),
             TreeClass::Standard,
@@ -425,18 +417,8 @@ impl<'a> TpccTxn<'a> {
         initial: Acc,
         mut fold: impl FnMut(Acc, TpccKey, &TpccRow) -> Acc,
     ) -> Acc {
+        self.refresh_read_snapshot();
         let mut acc = Some(initial);
-        self.range_for_each(table, range, |key, row| {
-            acc = Some(fold(acc.take().unwrap(), key, row));
-        });
-        acc.unwrap()
-    }
-
-    /// Counts visible rows without constructing result objects. Standard-
-    /// class tables fan out across `table`'s scan pool the same way `range`
-    /// does, for the same reason (see that method's doc) — `Big`-class
-    /// tables (which can never have one) keep going through `range_fold`.
-    pub fn range_count(&mut self, table: Table, range: Interval<TpccKey>) -> usize {
         match table.class() {
             TreeClass::Standard => RangeQueryIter::new(
                 &self.db.tree_for(table),
@@ -445,12 +427,53 @@ impl<'a> TpccTxn<'a> {
                 false,
                 self.worker_id,
             )
-                .count_ref_parallel(self.db.scan_pool(table).as_deref()),
-            TreeClass::Big => self.range_fold(table, range, 0usize, |count, _, _| count + 1),
+            .for_each_ref(|key, row| {
+                acc = Some(fold(acc.take().unwrap(), key, row));
+            }),
+            TreeClass::Big => self.db.dispatch_big(
+                table,
+                RangeVisitOp {
+                    worker_id: self.worker_id,
+                    ts_start: self.read_ts,
+                    range,
+                    visit: &mut |key, row| {
+                        acc = Some(fold(acc.take().unwrap(), key, row));
+                    },
+                },
+            ),
+        }
+        acc.unwrap()
+    }
+
+    pub fn range_count(&mut self, table: Table, range: Interval<TpccKey>) -> usize {
+        self.refresh_read_snapshot();
+        match table.class() {
+            TreeClass::Standard => RangeQueryIter::new(
+                &self.db.tree_for(table),
+                self.read_ts,
+                range,
+                false,
+                self.worker_id,
+            )
+            .count_ref_parallel(self.db.scan_pool(table).as_deref()),
+            TreeClass::Big => {
+                let mut count = 0;
+                self.db.dispatch_big(
+                    table,
+                    RangeVisitOp {
+                        worker_id: self.worker_id,
+                        ts_start: self.read_ts,
+                        range,
+                        visit: &mut |_, _| count += 1,
+                    },
+                );
+                count
+            }
         }
     }
 
     pub fn insert(&mut self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'static> {
+        self.refresh_read_snapshot();
         let (result, track) = match table.class() {
             TreeClass::Standard => insert_on_tree_at(
                 &self.db.tree_for(table),
@@ -478,6 +501,7 @@ impl<'a> TpccTxn<'a> {
     }
 
     pub fn update(&mut self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'static> {
+        self.refresh_read_snapshot();
         let (result, track) = match table.class() {
             TreeClass::Standard => update_on_tree_at(
                 &self.db.tree_for(table),
@@ -505,10 +529,15 @@ impl<'a> TpccTxn<'a> {
     }
 
     pub fn delete(&mut self, table: Table, key: TpccKey) -> Res<'static> {
+        self.refresh_read_snapshot();
         let (result, track) = match table.class() {
-            TreeClass::Standard => {
-                delete_on_tree_at(&self.db.tree_for(table), self.worker_id, self.ts_start, self.read_ts, key)
-            }
+            TreeClass::Standard => delete_on_tree_at(
+                &self.db.tree_for(table),
+                self.worker_id,
+                self.ts_start,
+                self.read_ts,
+                key,
+            ),
             TreeClass::Big => self.db.dispatch_big(
                 table,
                 DeleteOp {
@@ -532,14 +561,6 @@ impl<'a> TpccTxn<'a> {
         self.db.db.end_snapshot(self.ts_start);
     }
 
-    /// Instant commit: appends `ts_commit` to this worker's (shared)
-    /// `CommitLog` — making every write this transaction made, across every
-    /// table and both tree classes, visible at once — then logs exactly
-    /// **one** WAL Commit marker, through whichever table this transaction
-    /// happened to write first (every table on this database, big-class
-    /// included, shares the same `Arc<WalWriter>` — see
-    /// `TpccDatabase::enable_wal`/`make_big_trees`). No-op if this
-    /// transaction never wrote anything.
     pub fn commit(mut self) -> Option<Version> {
         if let TransactionState::InFlight = self.committed {
             self.committed = TransactionState::Committed;
@@ -568,14 +589,6 @@ impl<'a> TpccTxn<'a> {
         }
     }
 
-    /// Reverts every write this transaction made, in true chronological
-    /// reverse (LIFO) order across both tree classes — see this type's own
-    /// doc for why that combined ordering (not two independently-reversed
-    /// per-class lists) is the one that matters. Shared by `Drop` (the
-    /// normal path: dropping an in-flight `TpccTxn` without `commit()`) and
-    /// nothing else today, since `TpccTxn` — like the pre-size-class-dispatch
-    /// design — exposes no separate public `abort()`; every real call site
-    /// just lets an unwanted transaction fall out of scope.
     fn revert_all(&mut self) {
         let stamp = TxStamp::new(self.worker_id, self.ts_start);
         let mut end = self.written.len();
@@ -599,10 +612,6 @@ impl<'a> TpccTxn<'a> {
 
 impl<'a> Drop for TpccTxn<'a> {
     fn drop(&mut self) {
-        // An explicit `commit()` already reverted-or-not and released the
-        // snapshot itself (see `commit`'s `TransactionState` guard) — skip
-        // here, not just belt-and-suspenders: re-running would double
-        // `end_snapshot` this transaction's `ts_start`.
         if let TransactionState::InFlight = self.committed {
             self.revert_all();
             self.finish_snapshots();
@@ -671,11 +680,6 @@ fn pick_remote_warehouse(cfg: &TpccConfig, home: u32) -> u32 {
     }
 }
 
-/// Picks the `(n+1)/2`-th (1-based, rounding up) entry of a list already
-/// sorted by the tie-break key (here: the customer-name-index key, which
-/// sorts by `first_code` then `c_id` within a fixed last-name prefix) — the
-/// spec's rule for "the customer near the middle of the list, ordered by
-/// first name".
 fn pick_middle_by_name(matches: &[RecordPointResult<TpccKey, TpccRow>]) -> u32 {
     let mid = (matches.len() + 1) / 2 - 1;
     decode_customer_name_idx_c_id(matches[mid].key)
@@ -722,7 +726,7 @@ pub fn new_order(
             } else {
                 home_w_id
             };
-        let qty = with_fast_rng(|rng| rng.u8(1..=10));
+            let qty = with_fast_rng(|rng| rng.u8(1..=10));
             Line {
                 i_id,
                 supply_w_id,
@@ -802,12 +806,12 @@ pub fn new_order(
             Table::OrderLine,
             k_order_line(home_w_id, d_id, o_id, ol_number),
             TpccRow::OrderLine(Box::new(OrderLine {
-            ol_i_id: line.i_id,
-            ol_supply_w_id: line.supply_w_id,
-            ol_delivery_d: None,
-            ol_quantity: line.qty,
-            ol_amount,
-            ol_dist_info: rnd_astring_exact::<24>(),
+                ol_i_id: line.i_id,
+                ol_supply_w_id: line.supply_w_id,
+                ol_delivery_d: None,
+                ol_quantity: line.qty,
+                ol_amount,
+                ol_dist_info: rnd_astring_exact::<24>(),
             }))
         ));
     }
@@ -816,11 +820,11 @@ pub fn new_order(
         Table::Orders,
         k_order(home_w_id, d_id, o_id),
         TpccRow::Order(Box::new(Order {
-        o_c_id: c_id,
-        o_entry_d: now_millis(),
-        o_carrier_id: None,
-        o_ol_cnt: ol_cnt,
-        o_all_local: all_local,
+            o_c_id: c_id,
+            o_entry_d: now_millis(),
+            o_carrier_id: None,
+            o_ol_cnt: ol_cnt,
+            o_all_local: all_local,
         }))
     ));
     wtry!(tx.insert(
@@ -836,11 +840,6 @@ pub fn new_order(
     ) {
         CRUDOperationResult::Updated(_) => {}
         CRUDOperationResult::Conflict => return TxnOutcome::Conflict,
-        // This customer has never had an order before: whenever
-        // customers_per_district > initial_orders_per_district, load time
-        // only seeds a CustLastOrder row for the (shuffled) subset of
-        // customers who received one of the initial orders — everyone else
-        // gets their row created here, on their actual first order.
         CRUDOperationResult::ZeroAffected(_) => {
             wtry!(tx.insert(
                 Table::CustLastOrder,
@@ -865,13 +864,6 @@ pub fn new_order(
     TxnOutcome::Committed
 }
 
-// Diagnostic (2026-08-15): records every (w_id, d_id, o_id) a New-Order
-// transaction actually committed, so a test can cross-check the final
-// observed `d_next_o_id` against the true max assigned o_id — see
-// `tests/bench_tpcc_stress_tests.rs`'s no-gc/GC-on comparison. debug-only:
-// the lookup on every commit above is otherwise a mutex lock + hashset
-// probe on the hot transactional path, so this must not exist in release
-// builds.
 #[cfg(any(test, debug_assertions))]
 pub static NO_DIAG_LOG: std::sync::Mutex<Vec<(usize, u32, u8, u32)>> =
     std::sync::Mutex::new(Vec::new());
@@ -881,10 +873,6 @@ static TPCC_DIAG_DATABASES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<usize>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
-/// Enables or disables transaction diagnostics for one database. Keeping the
-/// registration database-scoped prevents parallel tests from mixing
-/// otherwise-identical warehouse/district identifiers. debug-only (see
-/// `NO_DIAG_LOG`'s doc) — a no-op in release builds.
 #[cfg(any(test, debug_assertions))]
 pub fn set_diagnostics_enabled(db: &TpccDatabase, enabled: bool) {
     let db_id = db as *const TpccDatabase as usize;
@@ -1002,14 +990,14 @@ pub fn payment(
         Table::History,
         h_key,
         TpccRow::History(Box::new(History {
-        h_c_id: c_id,
-        h_c_d_id: c_d_id,
-        h_c_w_id: c_w_id,
-        h_d_id: d_id,
-        h_w_id: home_w_id,
-        h_date: now_millis(),
-        h_amount: amount,
-        h_data,
+            h_c_id: c_id,
+            h_c_d_id: c_d_id,
+            h_c_w_id: c_w_id,
+            h_d_id: d_id,
+            h_w_id: home_w_id,
+            h_date: now_millis(),
+            h_amount: amount,
+            h_data,
         }))
     ));
 
@@ -1018,17 +1006,15 @@ pub fn payment(
     {
         let db_id = db as *const TpccDatabase as usize;
         if TPCC_DIAG_DATABASES.lock().unwrap().contains(&db_id) {
-            PAY_DIAG_LOG.lock().unwrap().push((db_id, home_w_id, d_id, amount));
+            PAY_DIAG_LOG
+                .lock()
+                .unwrap()
+                .push((db_id, home_w_id, d_id, amount));
         }
     }
     TxnOutcome::Committed
 }
 
-// Diagnostic (2026-08-15): records every committed Payment's (home_w_id,
-// d_id, amount), so a test can independently recompute the expected
-// warehouse/district ytd growth and cross-check it against what a table
-// scan actually observes — see `tests/bench_tpcc_stress_tests.rs`.
-// debug-only, same reasoning as `NO_DIAG_LOG`.
 #[cfg(any(test, debug_assertions))]
 pub static PAY_DIAG_LOG: std::sync::Mutex<Vec<(usize, u32, u8, f64)>> =
     std::sync::Mutex::new(Vec::new());
@@ -1077,11 +1063,6 @@ pub fn order_status(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32) -> TxnO
     TxnOutcome::Committed
 }
 
-// ---------------------------------------------------------------------
-// Delivery (spec §2.7): ~4% of the mix. All districts are processed by one
-// transaction and commit atomically, as required by TPC-C.
-// ---------------------------------------------------------------------
-
 pub struct DeliveryOutcome {
     pub delivered_districts: u32,
     pub empty_districts: u32,
@@ -1116,10 +1097,6 @@ pub fn delivery(db: &TpccDatabase, cfg: &TpccConfig, home_w_id: u32) -> Delivery
 
 fn deliver_one_district(tx: &mut TpccTxn<'_>, w_id: u32, d_id: u8, carrier_id: u32) -> TxnOutcome {
     let (lo, hi) = k_new_order_district_bounds(w_id, d_id);
-    // `range_min`, not `range` + sort + take the smallest: ascending o_id
-    // within a fixed (w_id,d_id) prefix means the *oldest* queued new-order
-    // is exactly the smallest key in this range, so there's no need to
-    // collect every currently-queued row just to read off its minimum.
     let Some(oldest) = tx.range_min(Table::NewOrder, Interval::new(lo, hi)) else {
         return TxnOutcome::UserAbort;
     };
@@ -1128,15 +1105,6 @@ fn deliver_one_district(tx: &mut TpccTxn<'_>, w_id: u32, d_id: u8, carrier_id: u
         _ => unreachable!("NEW_ORDER-range scan returned a non-NewOrder row"),
     };
 
-    // Unlike every other write in this module, this one has no first-writer-
-    // wins protection to race against: New-Order's district-counter update
-    // is what serializes concurrent New-Order transactions, but Delivery's
-    // "find the oldest queued new-order" is a plain range scan with no
-    // equivalent guard, so two concurrent Delivery calls can both pick the
-    // very same queued row before either deletes it. Whichever loses that
-    // race sees the row already gone — a real outcome of this queue
-    // pattern (the one the referenced benchmarks stress deliberately), not
-    // a bug — so it's treated the same as losing an OSIC conflict.
     match tx.delete(Table::NewOrder, oldest.key) {
         CRUDOperationResult::Deleted(_) => {}
         CRUDOperationResult::Conflict | CRUDOperationResult::ZeroAffected(_) => {

@@ -23,11 +23,6 @@ impl TimeMatcher for Version {
         self & !OBSOLETE_VERSION_MARK
     }
 
-    // #[inline(always)]
-    // fn le_other_any(self, other: Version) -> bool {
-    //     self & !OBSOLETE_VERSION_MARK <= other // & !OBSOLETE_VERSION_MARK
-    // }
-
     #[inline(always)]
     fn match_version_active(self, other: Version) -> bool {
         self <= other

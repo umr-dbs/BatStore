@@ -71,17 +71,6 @@ impl<Payload> PayloadSlot<Payload> {
         }
     }
 
-    /// Installs `payload` as this slot's new value, dropping (releasing, for
-    /// the refcounted case) whatever was here before. There is deliberately
-    /// no `get_mut`/in-place mutation: the non-inline case is a
-    /// `triomphe::Arc` that other `PayloadSlot`s may be concurrently
-    /// sharing (see this type's doc), so handing out `&mut Payload` into it
-    /// would let a mutation through one slot corrupt every other slot still
-    /// reading the same allocation. `set` sidesteps that entirely by always
-    /// allocating a fresh, uniquely-owned value rather than writing through
-    /// the old one — exactly what both of its callers already do (a whole-
-    /// value overwrite in the `update_in_place` fast path), so this changes
-    /// no observable behavior, just how the replaced value is disposed of.
     #[inline(always)]
     pub(crate) fn set(&mut self, payload: Payload) {
         *self = Self::new(payload);
@@ -89,12 +78,6 @@ impl<Payload> PayloadSlot<Payload> {
 }
 
 impl<Payload> Drop for PayloadSlot<Payload> {
-    /// Frees the inlined payload directly, or releases this slot's strong
-    /// reference to the shared allocation (freeing it only if this was the
-    /// last one) for the non-inline case — sound as long as every live
-    /// `PayloadSlot` was produced by `new`/`clone`/`set`, per this type's
-    /// doc, so `raw` always corresponds to a strong reference this slot
-    /// genuinely holds.
     #[inline(always)]
     fn drop(&mut self) {
         unsafe {
@@ -115,13 +98,6 @@ impl<Payload: Clone> Clone for PayloadSlot<Payload> {
             unsafe { (&mut raw as *mut usize as *mut Payload).write(self.get().clone()) };
             raw
         } else {
-            // Bump the shared allocation's strong count instead of deep-
-            // cloning the referenced `Payload` — `peek` reconstructs an
-            // `Arc` view of the allocation this slot already (genuinely)
-            // holds a strong reference to, purely to call `Arc::clone` on
-            // it; wrapping it in `ManuallyDrop` stops that temporary's own
-            // destructor from releasing the very reference `self` still
-            // owns once this function returns.
             let peek = ManuallyDrop::new(unsafe { Arc::from_raw(self.raw as *const Payload) });
             Arc::into_raw(Arc::clone(&peek)) as usize
         };

@@ -17,28 +17,13 @@ impl GlobalClock {
         GlobalClock(AtomicVersion::new(version_handle::START_VERSION))
     }
 
-    /// The clock's current position, without drawing a new tick. Used for
-    /// structural/root-chain versioning (`bat_tree::smo`, `bat_wal::recovery`),
-    /// which stays on this flat, worker-agnostic `Version` scheme — SMOs are
-    /// physical maintenance, not user transactions, so they don't need an
-    /// OSIC `TxStamp`.
     #[inline(always)]
     pub(crate) fn current_version(&self) -> Version {
         self.0.load(Relaxed)
     }
 
-    /// Draws the next unique, totally-ordered timestamp — used for both
-    /// `ts_start` (transaction begin) and `ts_commit` (transaction commit),
-    /// per the paper ("every transaction draws two timestamps from the same
-    /// GLC"), as well as for plain structural version stamps.
     #[inline(always)]
     pub(crate) fn next_timestamp(&self) -> Version {
-        // Atomic modification order alone gives every fetch_add a unique,
-        // globally ordered value. The clock does not publish any page or
-        // transaction data: those happens-before edges are supplied by the
-        // commit-log mutex and the snapshot slots' Release/Acquire pairs.
-        // SeqCst therefore added a global fence/order constraint without
-        // contributing to the OSIC timestamp order.
         self.0.fetch_add(1, Relaxed)
     }
 }

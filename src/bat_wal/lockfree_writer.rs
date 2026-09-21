@@ -1,3 +1,9 @@
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_record_model::tx_stamp::{TxStamp, WorkerId};
+use crate::bat_record_model::version_info::{AtomicVersion, Version};
+use crate::bat_sync::clock::GlobalClock;
+use crate::bat_wal::record::{self, WalEntry, WalRecord};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use std::cmp::Ord;
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
@@ -6,17 +12,11 @@ use std::io;
 use std::marker::PhantomData;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender};
 use triomphe::Arc;
-use crate::bat_crud_model::crud_operation::CRUDOperation;
-use crate::bat_record_model::tx_stamp::{TxStamp, WorkerId};
-use crate::bat_record_model::version_info::{AtomicVersion, Version};
-use crate::bat_sync::clock::GlobalClock;
-use crate::bat_wal::record::{self, WalEntry, WalRecord};
 
 /// How long the fsync thread waits, between short polls, for every writer
 /// that had already reserved a byte range (via `tail.fetch_add`) at the
@@ -123,32 +123,12 @@ pub struct LockFreeWalWriter<Key, Payload> {
     /// since actual records never travel through a channel in this writer.
     _stop: Option<Sender<()>>,
     thread: Option<JoinHandle<()>>,
-    /// `fn(Key, Payload)`, not `(Key, Payload)`: this type never actually
-    /// stores a `Key`/`Payload` value (every field above is plain
-    /// bytes/atomics/handles) — only the `fn`-pointer marker form is
-    /// unconditionally `Send + Sync` regardless of `Key`/`Payload`, which
-    /// matters because `LockFreeWalBackend`'s sweep thread shares this
-    /// type across threads via `Arc`. The tuple form would instead make
-    /// `Send`/`Sync` conditional on `Key: Send`/`Payload: Send`, which
-    /// would ripple that requirement through every generic caller
-    /// (`MVBTSt`, `Database`, `DbTransaction`, ...) for no real reason —
-    /// every concrete instantiation (`u64`, `TpccRow`, `YcsbRow`) is
-    /// already trivially `Send` anyway.
     _marker: PhantomData<fn(Key, Payload)>,
 }
 
 impl<Key: Ord + Copy + Hash + Display, Payload: Clone> LockFreeWalWriter<Key, Payload> {
-    /// Opens (creating if needed) the log file at `path` and starts the
-    /// background fsync thread. Unlike `WalWriter::open`, the file is *not*
-    /// opened with `O_APPEND` — every write is explicitly positioned via
-    /// `pwrite`/`write_at`, and mixing `O_APPEND` with positioned writes is
-    /// unnecessary at best (the kernel-maintained append cursor this writer
-    /// never uses) and platform-dependent at worst.
     pub fn open(path: &Path, flush_interval: Duration) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).write(true).open(path)?;
         let start_tail = file.metadata()?.len();
 
         let file = Arc::new(file);
@@ -171,8 +151,15 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> LockFreeWalWriter<Key, Pa
             let flushed_any = flushed_any.clone();
             thread::spawn(move || {
                 Self::fsync_loop(
-                    file, stop_rx, flush_interval, tail, completed,
-                    applied_commit_max, hardened, applied_any_max, flushed_any,
+                    file,
+                    stop_rx,
+                    flush_interval,
+                    tail,
+                    completed,
+                    applied_commit_max,
+                    hardened,
+                    applied_any_max,
+                    flushed_any,
                 )
             })
         };
@@ -210,22 +197,31 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> LockFreeWalWriter<Key, Pa
                 // nothing enqueued just before shutdown is left unflushed,
                 // then exit.
                 Err(RecvTimeoutError::Disconnected) => {
-                    Self::quiesce_and_publish(&file, &tail, &completed, &applied_commit_max, &hardened, &applied_any_max, &flushed_any);
+                    Self::quiesce_and_publish(
+                        &file,
+                        &tail,
+                        &completed,
+                        &applied_commit_max,
+                        &hardened,
+                        &applied_any_max,
+                        &flushed_any,
+                    );
                     return;
                 }
             }
 
-            Self::quiesce_and_publish(&file, &tail, &completed, &applied_commit_max, &hardened, &applied_any_max, &flushed_any);
+            Self::quiesce_and_publish(
+                &file,
+                &tail,
+                &completed,
+                &applied_commit_max,
+                &hardened,
+                &applied_any_max,
+                &flushed_any,
+            );
         }
     }
 
-    /// Waits (bounded) for every byte range reserved as of this call to be
-    /// actually written, then `fsync`s and publishes `hardened`/`flushed_any`.
-    /// Skips publishing (not the whole cycle's fsync — see below) if
-    /// quiescence doesn't happen within `QUIESCE_MAX_WAIT`: a writer that
-    /// stalled past its `fetch_add` just defers credit to the next cycle
-    /// rather than blocking this one indefinitely or, worse, fsyncing/
-    /// publishing past a range that might still contain a hole.
     fn quiesce_and_publish(
         file: &File,
         tail: &AtomicU64,
@@ -248,11 +244,6 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> LockFreeWalWriter<Key, Pa
             }
         }
 
-        // Read *after* quiescence is confirmed: every write/commit whose
-        // bytes are within `[0, target)` has, by the release-sequence on
-        // `completed` (each writer bumps `applied_commit_max`/
-        // `applied_any_max` before `completed`, all with `Release`),
-        // already published its update by the time this `Acquire` load runs.
         let commit_max = applied_commit_max.load(Acquire);
         let any_max = applied_any_max.load(Acquire);
 
@@ -271,23 +262,6 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> LockFreeWalWriter<Key, Pa
         }
     }
 
-    /// Same contract as `WalWriter::wait_flushed`, with one caveat that
-    /// writer doesn't share: `WalWriter::wait_flushed` takes a per-call
-    /// ticket, so it unblocks only when *that specific call's* record
-    /// flushes. This writer has no per-record ticket (see the struct doc),
-    /// so it matches on `ts_start` alone — indistinguishable between a
-    /// `Write` and its later `Commit`, which always share one `ts_start`.
-    /// Calling this with a stamp that already had *any* record (`Write` or
-    /// `Commit`) flushed for it returns immediately, even if the specific
-    /// record the caller actually cares about (typically the `Commit`, to
-    /// mirror `hardened_version`) hasn't gone through a fsync cycle yet —
-    /// poll `hardened_version()` directly instead when that distinction
-    /// matters (see `tests/wal_lockfree_writer_tests.rs`'s
-    /// `hardened_version_starts_unset_and_only_advances_on_commit`, which
-    /// does exactly that). Polls rather than blocking on a wakeup (no
-    /// per-record channel ack exists to block on); not on any production
-    /// dispatch path, kept for tests that want to block on one specific
-    /// record.
     pub fn wait_flushed(&self, ts: Version) {
         while self.flushed_any.load(Relaxed) < ts {
             thread::sleep(QUIESCE_POLL);
@@ -299,7 +273,9 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone> LockFreeWalWriter<Key, Pa
     }
 }
 
-impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> LockFreeWalWriter<Key, Payload> {
+impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload>
+    LockFreeWalWriter<Key, Payload>
+{
     /// Lock-free counterpart to `WalWriter::start_commit_logged`.
     pub fn start_commit_logged(
         &self,
@@ -318,14 +294,11 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> Lock
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) {
-        let entry = WalEntry::Write(WalRecord { stamp, op: build(stamp.ts_start()) });
+        let entry = WalEntry::Write(WalRecord {
+            stamp,
+            op: build(stamp.ts_start()),
+        });
 
-        // Pre-sized via `entry_size_hint` (an exact-or-close estimate of the
-        // real encoded size — see that function's doc) rather than a small
-        // fixed guess, so this doesn't pay for repeated grow-and-copy
-        // reallocations on anything bigger than a `u64` payload (real
-        // payloads like `TpccRow`/`YcsbRow` routinely run into the hundreds
-        // of bytes).
         let mut framed = Vec::with_capacity(record::entry_size_hint(&entry));
         record::encode_entry_framed(&entry, &mut framed);
 
@@ -361,7 +334,10 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> Lock
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) {
-        let entry = WalEntry::Write(WalRecord { stamp, op: build(stamp.ts_start()) });
+        let entry = WalEntry::Write(WalRecord {
+            stamp,
+            op: build(stamp.ts_start()),
+        });
         // +4: the table id this framing adds on top of `encode_entry_framed`'s
         // plain shape — see `record::encode_entry_for_table_framed`'s doc.
         let mut framed = Vec::with_capacity(record::entry_size_hint(&entry) + 4);
@@ -390,26 +366,25 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> Lock
         self.enqueue_bytes(ts_start, commit_ts, framed);
     }
 
-    /// Reserves `bytes.len()` at the current `tail` and writes it there via
-    /// positioned `pwrite` — the entire lock-free hot path: one
-    /// `fetch_add`, one syscall, two more `fetch_add`/`fetch_max` bumps for
-    /// bookkeeping. No mutex, no channel send, no background thread on this
-    /// call's critical path at all. `bytes` may be a single framed record
-    /// (`enqueue`) or several concatenated ones (`LocalBatch::flush_into` —
-    /// see that type's doc for why grouping several of *one thread's own*
-    /// records into one `pwrite` this way is worth doing) — either way this
-    /// method has no notion of "one record", only "some framed bytes ending
-    /// at `max_ts_start`, possibly containing a Commit up to
-    /// `max_commit_ts_start`".
-    fn enqueue_bytes(&self, max_ts_start: Version, max_commit_ts_start: Option<Version>, bytes: &[u8]) {
-        let _ = self.hardened.compare_exchange(Version::MAX, 0, Relaxed, Relaxed);
+    fn enqueue_bytes(
+        &self,
+        max_ts_start: Version,
+        max_commit_ts_start: Option<Version>,
+        bytes: &[u8],
+    ) {
+        let _ = self
+            .hardened
+            .compare_exchange(Version::MAX, 0, Relaxed, Relaxed);
 
         let len = bytes.len() as u64;
         let offset = self.tail.fetch_add(len, Relaxed);
 
         let mut written = 0usize;
         while written < bytes.len() {
-            match self.file.write_at(&bytes[written..], offset + written as u64) {
+            match self
+                .file
+                .write_at(&bytes[written..], offset + written as u64)
+            {
                 Ok(0) => thread::sleep(Duration::from_millis(50)), // no progress - treat like an error, see below
                 Ok(n) => written += n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -430,10 +405,6 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> Lock
         self.completed.fetch_add(len, Release);
     }
 
-    /// Flushes `batch` (see `LocalBatch`'s doc) in one `enqueue_bytes` call
-    /// — one `fetch_add`/`pwrite` for however many records `batch`
-    /// accumulated, instead of one each. No-op on an empty batch. Leaves
-    /// `batch` empty and ready to accumulate the next group.
     pub fn flush_batch(&self, batch: &mut LocalBatch<Key, Payload>) {
         if batch.bytes.is_empty() {
             return;
@@ -477,20 +448,24 @@ pub struct LocalBatch<Key, Payload> {
     records: usize,
     max_ts_start: Version,
     max_commit_ts_start: Option<Version>,
-    /// `fn(Key, Payload)`, not `(Key, Payload)` — see `LockFreeWalWriter::_marker`'s
-    /// doc for why: this type is shared across threads (`LockFreeWalBackend`'s
-    /// per-worker `Vec<Mutex<LocalBatch<..>>>`) and never actually owns a
-    /// `Key`/`Payload` value.
     _marker: PhantomData<fn(Key, Payload)>,
 }
 
 impl<Key, Payload> Default for LocalBatch<Key, Payload> {
     fn default() -> Self {
-        Self { bytes: Vec::new(), records: 0, max_ts_start: 0, max_commit_ts_start: None, _marker: PhantomData }
+        Self {
+            bytes: Vec::new(),
+            records: 0,
+            max_ts_start: 0,
+            max_commit_ts_start: None,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> LocalBatch<Key, Payload> {
+impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload>
+    LocalBatch<Key, Payload>
+{
     pub fn new() -> Self {
         Self::default()
     }
@@ -506,11 +481,11 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> Loca
         self.records == 0
     }
 
-    /// Appends one `Write` entry to this batch — same encoding `enqueue`
-    /// gives a lone record, just accumulated instead of immediately
-    /// written. Does not itself touch the file; call `flush_batch` (on
-    /// whatever cadence the caller chooses) to actually write it out.
-    pub fn push_write(&mut self, stamp: TxStamp, build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>) {
+    pub fn push_write(
+        &mut self,
+        stamp: TxStamp,
+        build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
+    ) {
         let op = build(stamp.ts_start());
         record::encode_entry_framed(&WalEntry::Write(WalRecord { stamp, op }), &mut self.bytes);
         self.max_ts_start = self.max_ts_start.max(stamp.ts_start());
@@ -519,9 +494,15 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> Loca
 
     /// Appends one `Commit` marker to this batch — see `push_write`'s doc.
     pub fn push_commit(&mut self, stamp: TxStamp, ts_commit: Version) {
-        record::encode_entry_framed::<Key, Payload>(&WalEntry::Commit { stamp, ts_commit }, &mut self.bytes);
+        record::encode_entry_framed::<Key, Payload>(
+            &WalEntry::Commit { stamp, ts_commit },
+            &mut self.bytes,
+        );
         self.max_ts_start = self.max_ts_start.max(stamp.ts_start());
-        self.max_commit_ts_start = Some(self.max_commit_ts_start.map_or(stamp.ts_start(), |m| m.max(stamp.ts_start())));
+        self.max_commit_ts_start = Some(
+            self.max_commit_ts_start
+                .map_or(stamp.ts_start(), |m| m.max(stamp.ts_start())),
+        );
         self.records += 1;
     }
 
@@ -533,7 +514,11 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> Loca
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) {
         let op = build(stamp.ts_start());
-        record::encode_entry_for_table_framed(table_id, &WalEntry::Write(WalRecord { stamp, op }), &mut self.bytes);
+        record::encode_entry_for_table_framed(
+            table_id,
+            &WalEntry::Write(WalRecord { stamp, op }),
+            &mut self.bytes,
+        );
         self.max_ts_start = self.max_ts_start.max(stamp.ts_start());
         self.records += 1;
     }
@@ -547,7 +532,10 @@ impl<Key: Ord + Copy + Hash + Display, Payload: Clone + record::WalPayload> Loca
             &mut self.bytes,
         );
         self.max_ts_start = self.max_ts_start.max(stamp.ts_start());
-        self.max_commit_ts_start = Some(self.max_commit_ts_start.map_or(stamp.ts_start(), |m| m.max(stamp.ts_start())));
+        self.max_commit_ts_start = Some(
+            self.max_commit_ts_start
+                .map_or(stamp.ts_start(), |m| m.max(stamp.ts_start())),
+        );
         self.records += 1;
     }
 }

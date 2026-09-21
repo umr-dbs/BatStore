@@ -12,8 +12,8 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Barrier;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,8 +21,7 @@ use triomphe::Arc;
 
 use crate::bat_bench::mem_stats::{DEFAULT_SAMPLE_INTERVAL, MemSampler};
 use crate::bat_bench::s_ycsb_random::{
-    HotTailSampler, SYcsbMix, SYcsbWriteOp, mint_arrival_key, olap_scan_bounds,
-    pick_write_op,
+    HotTailSampler, SYcsbMix, SYcsbWriteOp, mint_arrival_key, olap_scan_bounds, pick_write_op,
 };
 use crate::bat_bench::s_ycsb_txn;
 use crate::bat_bench::ycsb_load::populate;
@@ -143,7 +142,10 @@ fn write_worker_thread(
         ops_per_sec[idx] += 1;
     }
 
-    WriteWorkerStats { ops_per_sec, totals }
+    WriteWorkerStats {
+        ops_per_sec,
+        totals,
+    }
 }
 
 struct OlapWorkerStats {
@@ -200,14 +202,11 @@ pub fn run_s_ycsb(cfg: DriverConfig) -> SYcsbRunSummary {
     let max_threads = crate::bat_tree::mvbt::default_max_workers().max(1);
     let mut num_write_threads = cfg.num_write_threads.max(1);
     let mut num_olap_threads = cfg.num_olap_threads.max(1);
-    // One more permanent WorkerId if idle compaction is enabled — see
-    // `ycsb_driver::run_ycsb`'s identical `idle_compaction_cost`: the
-    // vacuum thread `spawn_vacuum_thread` starts below calls
-    // `compact_idle_pass`, which acquires its own `WorkerId` via
-    // `self.worker_id()` just like any writer/OLAP thread, so it has to be
-    // budgeted here too or its first sweep panics the registry once the
-    // loader + writers + OLAP threads have already filled every other slot.
-    let idle_compaction_cost = if cfg.gc && cfg.idle_compaction.is_some() { 1 } else { 0 };
+    let idle_compaction_cost = if cfg.gc && cfg.idle_compaction.is_some() {
+        1
+    } else {
+        0
+    };
     // +1: the main thread also acquires a WorkerId, for the sequential
     // population phase before any worker thread is spawned (see ycsb_driver).
     let fixed_cost = 1 + idle_compaction_cost;
@@ -238,8 +237,7 @@ pub fn run_s_ycsb(cfg: DriverConfig) -> SYcsbRunSummary {
     let tree = match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);
-            let base =
-                YcsbTree::make_standard_with_max_workers(cfg.root_star_index, total_workers);
+            let base = YcsbTree::make_standard_with_max_workers(cfg.root_star_index, total_workers);
             Arc::new(
                 match cfg.wal_lockfree_batch_size {
                     Some(batch_size) => {
@@ -268,13 +266,10 @@ pub fn run_s_ycsb(cfg: DriverConfig) -> SYcsbRunSummary {
         );
     }
 
-    // See `DriverConfig::scan_pool_workers`'s doc: never counted against
-    // `max_threads`/`total_workers` above — a pool worker thread never
-    // calls `tree.worker_id()` (see `ycsb_driver::run_ycsb`'s identical
-    // pool setup for the same reasoning).
-    let scan_pool: Option<Arc<YcsbScanPool>> = cfg.scan_pool_workers.filter(|&n| n > 0).map(|n| {
-        Arc::new(YcsbScanPool::spawn(tree.clone(), n, Some(num_olap_threads)))
-    });
+    let scan_pool: Option<Arc<YcsbScanPool>> = cfg
+        .scan_pool_workers
+        .filter(|&n| n > 0)
+        .map(|n| Arc::new(YcsbScanPool::spawn(tree.clone(), n, Some(num_olap_threads))));
 
     println!(
         "S-YCSB benchmark\n\
@@ -408,15 +403,25 @@ pub fn run_s_ycsb(cfg: DriverConfig) -> SYcsbRunSummary {
     stop.store(true, Relaxed);
     vacuum_stop.store(true, Relaxed);
 
-    let write_stats: Vec<WriteWorkerStats> =
-        write_handles.into_iter().map(|h| h.join().unwrap()).collect();
-    let olap_stats: Vec<OlapWorkerStats> =
-        olap_handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let write_stats: Vec<WriteWorkerStats> = write_handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect();
+    let olap_stats: Vec<OlapWorkerStats> = olap_handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect();
     let actual_wall = run_start.elapsed();
 
     mem_sampler.stop();
 
-    write_results(&write_stats, &olap_stats, duration, actual_wall, &cfg.output_dir)
+    write_results(
+        &write_stats,
+        &olap_stats,
+        duration,
+        actual_wall,
+        &cfg.output_dir,
+    )
 }
 
 fn write_results(
@@ -463,11 +468,6 @@ fn write_results(
             .unwrap();
     }
 
-    // Same nearest-rank-percentile summary format as
-    // ycsb_driver::write_results's `ycsb_scan_latency_summary.csv` (see that
-    // function's comment) - every OLAP scan is sampled here (unlike YCSB-E's
-    // throttled sampling), since this workload's scans are deliberately few
-    // and slow rather than many and tiny.
     scan_latencies_ns.sort_unstable();
     let scan_latency_path = out_dir.join("s_ycsb_scan_latency_summary.csv");
     let _ = fs::remove_file(&scan_latency_path);
@@ -506,10 +506,6 @@ fn write_results(
         )
         .unwrap();
 
-    // Version-chain staleness a scan observed by the time it finished
-    // (`ScanResult::staleness_versions` in olap_scan.rs is the same
-    // concept) - a direct signal of how far behind GC/coldpages let the
-    // OLAP-visible snapshot fall while writers kept revising the hot tail.
     let staleness_path = out_dir.join("s_ycsb_staleness_summary.csv");
     let _ = fs::remove_file(&staleness_path);
     let mut staleness_file = OpenOptions::new()
@@ -548,7 +544,10 @@ fn write_results(
         println!("{:<20} {}", WRITE_COUNTER_NAMES[i], totals[i]);
     }
     println!("{:<20} {}", "total_write_ops", total_write_ops);
-    println!("{:<20} {:.2}", "write throughput (ops/sec)", write_throughput);
+    println!(
+        "{:<20} {:.2}",
+        "write throughput (ops/sec)", write_throughput
+    );
     println!("{:<20} {}", "olap_scans", scans_completed);
     println!("{:<20} {}", "olap_scanned_tuples", scanned_tuples);
     println!(
@@ -613,27 +612,33 @@ pub fn main_s_ycsb(parms: Vec<String>) {
     let idle_compaction_dead_ratio: f64 = arg(
         &parms,
         23,
-        if gc { crate::bat_tree::idle_compaction::DEFAULT_VACUUM_DEAD_RATIO } else { 0.0 },
+        if gc {
+            crate::bat_tree::idle_compaction::DEFAULT_VACUUM_DEAD_RATIO
+        } else {
+            0.0
+        },
     );
     let idle_compaction_sweep_secs: f64 = arg(
         &parms,
         24,
         crate::bat_tree::idle_compaction::DEFAULT_VACUUM_SWEEP_INTERVAL.as_secs_f64(),
     );
-    let idle_compaction = (idle_compaction_dead_ratio > 0.0)
-        .then(|| (idle_compaction_dead_ratio, Duration::from_secs_f64(idle_compaction_sweep_secs)));
+    let idle_compaction = (idle_compaction_dead_ratio > 0.0).then(|| {
+        (
+            idle_compaction_dead_ratio,
+            Duration::from_secs_f64(idle_compaction_sweep_secs),
+        )
+    });
 
-    // Same 3-way convention as `tpcc_driver::main_tpcc`'s `scan_pool_workers`
-    // arg: omitted entirely -> on by default, sized to
-    // `num_cpus.max(DEFAULT_QUERY_FANOUT * num_olap_threads)`, whenever the
-    // cold corpus clears `MIN_ROWS_FOR_SCAN_POOL`; explicit "0" -> off;
-    // explicit "N" -> exactly N workers. Every OLAP thread here always
-    // scans (unlike YCSB's mixed workload), so `num_olap_threads` itself is
-    // the right `expected_concurrent_queries` — no op-mix weighting needed.
     let scan_pool_workers: Option<usize> = match parms.get(25).map(|s| s.as_str()) {
         None if record_count >= crate::bat_bench::parallel_scan::MIN_ROWS_FOR_SCAN_POOL => {
-            let fair_share_floor = crate::bat_tree::scan_pool::DEFAULT_QUERY_FANOUT * num_olap_threads;
-            Some(crate::bat_tree::mvbt::default_max_workers().max(fair_share_floor).max(2))
+            let fair_share_floor =
+                crate::bat_tree::scan_pool::DEFAULT_QUERY_FANOUT * num_olap_threads;
+            Some(
+                crate::bat_tree::mvbt::default_max_workers()
+                    .max(fair_share_floor)
+                    .max(2),
+            )
         }
         None => None,
         Some(s) => match s.parse::<usize>() {
@@ -666,12 +671,7 @@ pub fn main_s_ycsb(parms: Vec<String>) {
         gc,
         update_in_place,
         root_star_index,
-        wal: wal_enabled.then(|| {
-            (
-                PathBuf::from(wal_path),
-                Duration::from_millis(wal_flush_ms),
-            )
-        }),
+        wal: wal_enabled.then(|| (PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
         wal_lockfree_batch_size: None,
         output_dir: PathBuf::from("."),
         scan_pool_workers,

@@ -195,29 +195,6 @@ fn insert_then_delete_same_keys_leaves_tree_empty() {
 /// tests elsewhere in this file cover.
 const SPLIT_MERGE_KEY_COUNT: u64 = 5_000;
 
-/// Root/leaf underflow classification (`bat_tree::smo::unsafe_degree`) is
-/// checked reactively, at the *start* of a write's own traversal - it can
-/// never react to that same write's own consequences (a leaf's last record
-/// going dead, a parent's child count dropping to 1) until some *later*
-/// write revisits the same path. A transaction that deletes every key in
-/// one batch and then commits therefore cannot observe full convergence
-/// immediately: right up to that commit, every one of its own deletions'
-/// dead records is still snapshot-protected by that same open transaction,
-/// so `unsafe_degree`'s "is this leaf's dead weight still protected by
-/// someone" check correctly refuses to merge it (merging while genuinely
-/// protected garbage exists is exactly the shape of the pre-fix livelock -
-/// see `has_protected_garbage`'s doc in `smo.rs`). The instant that
-/// transaction commits, every one of those dead records stops being
-/// protected - but nothing re-checks until a *later* write happens to
-/// traverse the same leaf.
-///
-/// This performs exactly one such write (insert then delete a throwaway key
-/// that both land on the tree's rightmost path): harmless on its own, and
-/// - now that dead-but-unprotected leaves are correctly classified as
-/// `ActiveUnderflow` again - enough to cascade the whole tree's pending
-/// collapse to completion in one shot (confirmed empirically: before this
-/// fix, the equivalent probe needed ~7 rounds for a 5-level tree to
-/// converge; with it, one).
 fn settle_pending_collapse<const FAN_OUT: usize, const NUM_RECORDS: usize>(
     db: &Database<FAN_OUT, NUM_RECORDS, u64, u64>,
     table: crate::bat_wal::record::TableId,
@@ -231,14 +208,6 @@ fn settle_pending_collapse<const FAN_OUT: usize, const NUM_RECORDS: usize>(
     tx.commit();
 }
 
-/// Ascending insertion order (unlike `shuffled_insert_then_shuffled_delete_
-/// of_same_keys_leaves_tree_logically_empty`'s shuffled insert), deleted in
-/// an independent random shuffle - regression coverage, at a different
-/// deletion order and at a scale that genuinely exercises multi-level root
-/// splits and merges, for the single-threaded delete livelock fixed in
-/// `bat_tree::smo::unsafe_degree()` (originally found via `insert_then_
-/// delete_same_keys_leaves_tree_empty` below, whose delete order is plain
-/// ascending too, at a one-leaf scale).
 #[test]
 fn ascending_insert_then_random_order_delete_leaves_tree_empty() {
     let db = new_db();
@@ -256,7 +225,10 @@ fn ascending_insert_then_random_order_delete_leaves_tree_empty() {
     insert_tx.commit();
 
     let mut check = DbTransaction::begin(&db);
-    assert_eq!(check.range_count(table, all), SPLIT_MERGE_KEY_COUNT as usize);
+    assert_eq!(
+        check.range_count(table, all),
+        SPLIT_MERGE_KEY_COUNT as usize
+    );
     check.commit();
     assert!(
         tree.root.height() > INIT_TREE_HEIGHT,
@@ -314,7 +286,10 @@ fn descending_insert_then_random_order_delete_leaves_tree_empty() {
     insert_tx.commit();
 
     let mut check = DbTransaction::begin(&db);
-    assert_eq!(check.range_count(table, all), SPLIT_MERGE_KEY_COUNT as usize);
+    assert_eq!(
+        check.range_count(table, all),
+        SPLIT_MERGE_KEY_COUNT as usize
+    );
     check.commit();
     assert!(
         tree.root.height() > INIT_TREE_HEIGHT,
@@ -361,10 +336,6 @@ fn keys_for_thread(t: u64) -> std::ops::Range<u64> {
 
 #[test]
 fn concurrent_insert_update_delete_lands_in_tree() {
-    // Workers are handed out once per (tree, thread) and never returned (see
-    // `bat_sync::worker::WorkerRegistry`'s doc), and each of the 3 phases below
-    // spawns a fresh batch of `CONCURRENT_THREADS` threads plus the checking
-    // thread in between - budget generously so registration never runs out.
     let db = Arc::new(TestDb::new_with_max_workers(
         RootIndexType::default(),
         inc,

@@ -33,19 +33,15 @@
 //! Run with: RUSTFLAGS="--cfg loom" cargo test --test loom_read_validation --release
 
 use loom::cell::UnsafeCell;
-use loom::sync::atomic::Ordering::{AcqRel, Acquire, Release};
-use loom::sync::atomic::AtomicUsize;
 use loom::sync::Arc;
+use loom::sync::atomic::AtomicUsize;
+use loom::sync::atomic::Ordering::{AcqRel, Acquire, Release};
 use loom::thread;
 
 const WRITE_FLAG: usize = 0x1;
 
 struct Model {
     cell_version: AtomicUsize,
-    // Stand-ins for `key_interval_region`/`version_region`: plain,
-    // genuinely non-atomic fields a writer updates in sequence while
-    // holding the write lock, exactly like `push_uncommitted`'s two calls
-    // before `commit_delta` bumps `len` — never atomics in the real code.
     part_a: UnsafeCell<usize>,
     part_b: UnsafeCell<usize>,
 }
@@ -59,7 +55,8 @@ impl Model {
     }
 
     fn unlock(&self, write_version: usize) {
-        self.cell_version.store((write_version + 1) & !WRITE_FLAG, Release);
+        self.cell_version
+            .store((write_version + 1) & !WRITE_FLAG, Release);
     }
 
     fn live_version(&self) -> usize {
@@ -73,11 +70,9 @@ impl Model {
 
 fn writer(model: &Model) {
     let start = model.live_version() & !WRITE_FLAG;
-    let write_version = model.write_lock(start).expect("sole writer, CAS must succeed");
-    // Two separate, unsynchronized writes — a reader interposed between
-    // them would see a torn (part_a=new, part_b=old) or (old, new) pair,
-    // and loom's `UnsafeCell` flags the race itself if a concurrent `with`
-    // from the reader isn't provably ordered against these.
+    let write_version = model
+        .write_lock(start)
+        .expect("sole writer, CAS must succeed");
     model.part_a.with_mut(|ptr| unsafe { *ptr = 1 });
     model.part_b.with_mut(|ptr| unsafe { *ptr = 1 });
     model.unlock(write_version);
@@ -132,47 +127,12 @@ fn check(with_upfront_check: bool) {
     });
 }
 
-/// Demonstrates the blind spot this project found by hand: without the
-/// upfront `is_write_locked` check, `cell_version` is pinned at one
-/// constant (flag-set) value for the writer's *entire* critical section, so
-/// a before/after comparison alone can't tell "no writer ever touched this"
-/// apart from "a writer is mid-flight the whole time I'm reading" — loom
-/// finds the interleaving where the reader's two field-reads straddle the
-/// writer's two stores while both version samples land inside the same
-/// still-locked window.
 #[test]
 #[should_panic]
 fn before_after_only_is_unsound() {
     check(false);
 }
 
-/// The real fix (`traversal_write_internal_olc`'s `is_reader`/
-/// `is_write_locked`/`live_version` bracket, `Acquire`/`Release`-ordered)
-/// closes the blind spot above — but loom still flags a "Concurrent read
-/// and write accesses to `UnsafeCell`" causality violation here, because
-/// `part_a`/`part_b` are genuinely non-atomic (matching the real
-/// `key_interval_region`/`version_region`/`pointer_region`, never atomics),
-/// and no *version-check* protocol, however carefully ordered, is a
-/// substitute for real exclusion or a fully-fenced atomic handoff: nothing
-/// stops the compiler/hardware from interleaving a plain read with a plain
-/// concurrent write to the same memory, full stop, under the strict Rust/
-/// C++ memory model.
-///
-/// This is the well-known "seqlock problem" — Linux kernel seqlocks, RCU,
-/// and most lock-free B-trees have exactly this same formal gap, and it's
-/// a widely accepted trade-off in systems code precisely because no real
-/// compiler performs the pathological reordering the abstract model
-/// technically permits (confirmed here too: 260+ clean concurrent stress
-/// runs of the real fix in `tests/tree_wal_consistency_tests.rs`, on real
-/// hardware, with zero reproductions). Contrast this with `simba`/
-/// `root_guard` in `on_overflow_node`/`on_underflow_node`/`split_root`/
-/// `merge_root` (`src/bat_tree/smo.rs`): those got genuine exclusive
-/// locking (`upgrade_write_lock`), not a version check, so there's no
-/// equivalent gap for them — real mutual exclusion, not an optimistic
-/// read, is what actually closes a race like this. `#[should_panic]`
-/// records this as a known, accepted limitation rather than silently
-/// passing or being deleted — if it ever stops panicking, loom has found a
-/// *stronger* guarantee than expected, worth investigating.
 #[test]
 #[should_panic]
 fn upfront_lock_check_reduces_but_does_not_eliminate_the_race() {

@@ -1,5 +1,5 @@
-use std::fmt::{Display, Formatter};
 use crate::bat_record_model::version_info::Version;
+use std::fmt::{Display, Formatter};
 
 /// Identifies one of a tree's fixed, bounded set of workers (OSIC, §3.1).
 /// Kept here (not in `bat_sync`) so `VersionInfo`/`RecordPoint` can be stamped
@@ -43,11 +43,6 @@ impl TxStamp {
 
     #[inline(always)]
     pub const fn new(worker_id: WorkerId, ts_start: Version) -> Self {
-        // Masking (rather than asserting) `ts_start` here is a deliberate
-        // choice: with `TS_START_BITS` = 47, this clock would need to tick
-        // over 140 trillion times before silently wrapping — asserting would
-        // add a branch to every single write's hot path to guard against a
-        // scenario no realistic run reaches.
         Self(((worker_id as u64) << Self::TS_START_BITS) | (ts_start & Self::TS_START_MASK))
     }
 
@@ -69,12 +64,6 @@ impl TxStamp {
         self.0 & Self::INVALID_FLAG != 0
     }
 
-    /// Returns a copy of this stamp with the invalid flag set. Note this
-    /// changes the stamp's raw bits, so `TxStamp`'s derived `PartialEq`/`Eq`
-    /// (which compare those raw bits) treat an invalidated stamp as no
-    /// longer equal to its pre-invalidation self — relied on by
-    /// `LeafPage::abort_write` to make re-processing the same key's abort a
-    /// safe no-op.
     #[inline(always)]
     pub const fn mark_invalid(&self) -> Self {
         Self(self.0 | Self::INVALID_FLAG)

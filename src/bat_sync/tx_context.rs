@@ -60,7 +60,11 @@ const NOT_IN_FLIGHT: Version = Version::MAX;
 /// for the one place block reclaim still needs to *read* (not own) this
 /// shared state.
 pub(crate) struct TxContext {
-    global_clock: GlobalClock,
+    /// Isolate the globally-written timestamp counter from read-mostly
+    /// `TxContext` metadata. Without this, workers that read neighboring
+    /// fields can pull the clock's cache line into Shared state immediately
+    /// before `next_timestamp` needs it Exclusive for its `fetch_add`.
+    global_clock: CachePadded<GlobalClock>,
     commit_logs: Box<[CommitLog]>,
     worker_registry: WorkerRegistry,
     /// Active-snapshot tracking: one slot per worker, holding that worker's
@@ -190,7 +194,7 @@ pub(crate) struct TxContext {
 impl TxContext {
     pub(crate) fn new(max_workers: usize) -> Self {
         Self {
-            global_clock: GlobalClock::new(),
+            global_clock: CachePadded::new(GlobalClock::new()),
             commit_logs: (0..max_workers).map(|_| CommitLog::new()).collect(),
             worker_registry: WorkerRegistry::new(max_workers),
             live_tx: (0..max_workers)
@@ -242,12 +246,6 @@ impl TxContext {
         crate::bat_sync::worker::worker_id_for(&self.worker_registry)
     }
 
-    /// Publishes this worker's conservative lower bound — see
-    /// `in_flight_bound`'s field doc for why a plain `Release` store to this
-    /// worker's own slot is sufficient (no counter, no cross-worker
-    /// contention). Returns the `WorkerId` used, so the matching
-    /// `end_snapshot_registration` call touches the same slot without a
-    /// second thread-local lookup.
     #[inline]
     fn begin_snapshot_registration(&self) -> WorkerId {
         let worker_id = self.worker_id();
@@ -259,21 +257,11 @@ impl TxContext {
         worker_id
     }
 
-    /// `Release`: pairs with the `Acquire` load `live_min_snapshot` does on
-    /// this exact slot. Clearing back to `NOT_IN_FLIGHT` here (after
-    /// `draw_snapshot_version_with`'s `register` closure — which performs
-    /// the `live_tx` insert — has already run) means this worker's
-    /// protection has already handed off to `live_tx` by the time this call
-    /// returns; there's no gap between the two mechanisms.
     #[inline]
     fn end_snapshot_registration(&self, worker_id: WorkerId) {
         self.in_flight_bound[worker_id as usize].store(NOT_IN_FLIGHT, Release);
     }
 
-    /// Runs `f` while page reclaim is conservatively pinned at the clock's
-    /// current position, without drawing a timestamp or registering a real
-    /// OSIC snapshot. An already-live transaction is itself an older (and
-    /// therefore sufficient) pin, so the nested case performs no stores.
     #[inline(always)]
     pub(crate) fn with_reclamation_pin<R>(&self, f: impl FnOnce() -> R) -> R {
         if !self.block_reclaim_enabled.load(Relaxed) {
@@ -293,10 +281,6 @@ impl TxContext {
         f()
     }
 
-    /// Draws a fresh `ts_start` and hands it to `register` before releasing
-    /// the in-flight-registration guard — see `begin_snapshot`'s doc (this
-    /// project's `bat_sync::version_handle` used to carry this same doc
-    /// before the gap-closing logic moved here).
     #[inline(always)]
     pub(crate) fn draw_snapshot_version_with<R>(&self, register: impl FnOnce(Version) -> R) -> R {
         let worker_id = self.begin_snapshot_registration();
@@ -309,26 +293,6 @@ impl TxContext {
         result
     }
 
-    /// Used to be a no-op while block reclaim was disabled, on the theory
-    /// that "nothing downstream (`CommitLog` pruning, `free_block`) is
-    /// gated on the result" then — wrong: `MVBTSt::record_survives_gc`
-    /// (via `is_snapshot_live`) also depends on `live_tx` being populated,
-    /// to keep a record a still-in-flight transaction deleted physically
-    /// present in case that transaction aborts and needs to reverse the
-    /// delete. That protection is needed unconditionally, because the SMO
-    /// compaction it guards (`MVBTSt::split`'s version-split path) runs
-    /// unconditionally too — it's driven by `active`/`dead` counts, not by
-    /// the GC/block-reclaim toggle. Gating this on `block_reclaim_enabled`
-    /// left every deleted-but-still-reversible record unprotected whenever
-    /// GC was off, so a compaction could discard the one physical entry an
-    /// in-flight transaction's own later `abort()` needed to restore —
-    /// confirmed as a real, repeatable crash (`DbTransaction::update`
-    /// returning `ZeroAffected(KeyDoesNotExist)` for a row that a moment
-    /// earlier `point()` had just read live) under sustained TPC-C load
-    /// with GC disabled. `pub(crate)`: also called directly by
-    /// `MVBTSt::on_acquire_reader_snapshot`/`on_release_reader_snapshot`
-    /// (registering an already-known version as a reader, as opposed to
-    /// `begin_snapshot`/`end_snapshot`, which draw a fresh one).
     #[inline]
     pub(crate) fn on_tx_start(&self, snapshot: SnapShot) {
         let worker_id = self.worker_id();
@@ -427,17 +391,6 @@ impl TxContext {
         })
     }
 
-    /// Same TLS `SnapshotCache` access `is_visible_stamp` uses, but hands
-    /// back the raw `(cache, commit_logs)` pair instead of checking one
-    /// stamp itself — so a caller that needs to check many stamps in one
-    /// call (a scanned leaf page, a point/range query's candidate versions)
-    /// can build its *own* `is_visible` closure directly in its own function
-    /// body, ending up with a concrete, `Sized` closure type the compiler
-    /// can inline, rather than paying for a `dyn FnMut` built on one side of
-    /// a generic callback and invoked across it. Used by
-    /// `bat_query::iter_query::RangeQueryIter::refill`'s leaf-scan hot loop
-    /// and `bat_query::query`'s point/range reads (both can call `is_visible`
-    /// once per physical record in a leaf, not just once per call).
     #[inline(always)]
     pub(crate) fn with_snapshot_cache_and_logs<R>(
         &self,
@@ -448,16 +401,15 @@ impl TxContext {
         })
     }
 
-    /// Every worker's currently-published transaction and statement
-    /// snapshots. `O(max_workers)`, each slot read independently
-    /// with no cross-slot synchronization needed — same reasoning as
-    /// `live_min_snapshot` below.
     #[inline]
     fn live_snapshots(&self) -> impl Iterator<Item = SnapShot> + '_ {
-        self.live_tx.iter().chain(self.live_statement.iter()).filter_map(|slot| {
-            let v = slot.load(Acquire);
-            (v != NOT_IN_FLIGHT).then_some(v)
-        })
+        self.live_tx
+            .iter()
+            .chain(self.live_statement.iter())
+            .filter_map(|slot| {
+                let v = slot.load(Acquire);
+                (v != NOT_IN_FLIGHT).then_some(v)
+            })
     }
 
     /// Lower bounds for snapshots being registered. Their exact timestamps
@@ -465,15 +417,6 @@ impl TxContext {
     /// bound onward, as well as the LCB immediately before it.
     #[inline]
     fn in_flight_pruning_bounds(&self) -> impl Iterator<Item = SnapShot> + '_ {
-        // Read the in-flight registration bounds before the published
-        // snapshots. A registering worker publishes its bound first, then
-        // its live snapshot, and only then clears the bound. Reading these
-        // collections in the opposite order can miss both sides of that
-        // handoff: observe an empty live slot, let the worker publish and
-        // clear its bound, then observe the cleared bound. Pruning would
-        // consequently drop the LCB required by the newly active snapshot.
-        // This is the same ordering requirement documented by
-        // `live_min_snapshot` below.
         self.in_flight_bound.iter().filter_map(|slot| {
             let v = slot.load(Acquire);
             (v != NOT_IN_FLIGHT).then_some(v)
@@ -501,20 +444,6 @@ impl TxContext {
         self.live_snapshots().max()
     }
 
-    /// Whether any worker is currently between `begin_snapshot_registration`
-    /// and `end_snapshot_registration` right now — i.e. has already drawn
-    /// its real `ts_start` from `global_clock` (or is about to) but hasn't
-    /// published it to `live_tx` yet. `MVBTSt::decide_update_in_place_record`
-    /// uses this as an additional, conservative veto alongside
-    /// `newest_live_si`: a registering worker's real `ts_start` is only
-    /// known to be *at least* `in_flight_bound`'s published value (see that
-    /// field's doc — the bound is read *before* the real timestamp is
-    /// drawn), never bounded from above. So a low bound here doesn't rule
-    /// out a real `ts_start` that's already past some version's own
-    /// insertion timestamp; the only sound response to "a registration is
-    /// in flight at all" is to skip the in-place fast path for this call
-    /// and fall back to the always-safe versioned path, not to reason
-    /// further about the specific bound value.
     #[inline]
     pub(crate) fn has_in_flight_registration(&self) -> bool {
         self.in_flight_bound
@@ -522,14 +451,6 @@ impl TxContext {
             .any(|slot| slot.load(Acquire) != NOT_IN_FLIGHT)
     }
 
-    /// Is `ts_start` a currently-registered (not yet committed/aborted)
-    /// transaction? `MVBTSt::record_survives_gc` uses it to keep a *deleted*
-    /// record physically present while its deleting transaction might
-    /// still abort and need to reverse that delete — needed unconditionally,
-    /// not just while `block_reclaim_enabled`, since it's protecting against
-    /// SMO compaction (`MVBTSt::split`'s version-split path), which runs
-    /// regardless of the GC toggle. See `on_tx_start`'s doc for the crash
-    /// this being gated on the GC flag used to cause.
     #[inline]
     pub(crate) fn is_snapshot_live(&self, ts_start: Version) -> bool {
         self.live_tx
@@ -544,30 +465,6 @@ impl TxContext {
         self.live_snapshots().collect()
     }
 
-    /// The oldest currently-active-or-in-flight snapshot across every table
-    /// sharing this context, or `None` if there are none — the "safe to
-    /// reclaim anything dead strictly before this" bound
-    /// `TrackerHandleSt::free_block` needs (see that method's doc: it must
-    /// consult this *shared* bound, not a per-table one, since a snapshot
-    /// registered once here may later read any table). Combines two sources:
-    /// `live_tx` (fully-registered, possibly long-lived active transactions)
-    /// `live_statement` (read committed statement snapshots), and
-    /// `in_flight_bound` (workers mid-registration right now — see that
-    /// field's doc for why an `Acquire` load per slot is sufficient, no
-    /// further cross-slot synchronization needed).
-    ///
-    /// Order matters: `in_flight_bound` MUST be read before `live_tx`, not
-    /// after. A worker's slot only clears (back to `NOT_IN_FLIGHT`) *after*
-    /// its `live_tx` insert has already happened (see
-    /// `end_snapshot_registration`'s doc) — so observing a cleared slot via
-    /// `Acquire` establishes happens-before with everything that preceded
-    /// that clear on the writer, *including* its `live_tx` insert, making a
-    /// *subsequent* `live_tx` read on this thread guaranteed to see it.
-    /// Reading `live_tx` first has no such guarantee: it can race ahead of
-    /// the writer and observe neither the insert (too early) nor the slot
-    /// still holding its bound (already cleared by then) — a real gap this
-    /// implementation hit under `tx_context_registration_tests.rs`'s
-    /// regression test before the ordering was fixed here.
     #[inline]
     pub(crate) fn live_min_snapshot(&self) -> Option<SnapShot> {
         let mut min: Option<SnapShot> = None;
@@ -608,9 +505,16 @@ impl TxContext {
 
     #[cfg(feature = "tree-viz")]
     pub(crate) fn dump_commit_logs(&self) -> (Vec<Vec<String>>, bool) {
-        let snapshots: Vec<_> = self.commit_logs.iter().map(|log| log.dump_entries()).collect();
+        let snapshots: Vec<_> = self
+            .commit_logs
+            .iter()
+            .map(|log| log.dump_entries())
+            .collect();
         let complete = snapshots.iter().all(|(_, complete)| *complete);
-        (snapshots.into_iter().map(|(entries, _)| entries).collect(), complete)
+        (
+            snapshots.into_iter().map(|(entries, _)| entries).collect(),
+            complete,
+        )
     }
 }
 

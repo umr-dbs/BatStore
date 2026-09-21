@@ -39,10 +39,6 @@ pub type MVBT = MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>;
 
 pub const INIT_TREE_HEIGHT: Height = 1;
 
-/// Default size of a tree's fixed OSIC worker pool (§3.1: commit log size =
-/// #workers). This is a runtime machine property, deliberately separate from
-/// `SnapshotCache`'s representation: the cache is sized to this value rather
-/// than imposing a compile-time worker cap.
 pub fn default_max_workers() -> usize {
     num_cpus::get().max(1)
 }
@@ -59,22 +55,6 @@ pub(crate) struct MVBTCold<Key, Payload> {
     pub(crate) max_key: Key,
     pub(crate) wal: Arc<WalBackend<Key, Payload>>,
     pub(crate) table_id: Option<crate::bat_wal::record::TableId>,
-    /// Optional, caller-supplied projection used to maintain each leaf's
-    /// inline `LeafZoneMap` (see that type's doc) — unset (the default) is
-    /// a complete no-op: no leaf ever mutates or consults its zone map, and
-    /// `try_for_each_ref`'s pruning check is unreachable without a matching
-    /// `RangeQueryIter::with_zone_predicate` call, which nothing sets up
-    /// unless this is set. One projection per tree, matching how each table
-    /// here already is one physically homogeneous `Payload` variant (see
-    /// `set_zone_map_projection`'s doc for the encoding contract).
-    ///
-    /// `OnceLock`, not a plain field: `Database::create_table_unpublished`
-    /// configures a tree through a shared `Arc<MVBTSt<..>>` (mirroring
-    /// `enable_gc`'s `&self`-based setters), by which point there's no
-    /// exclusive `&mut MVBTSt` to hand out any more — `OnceLock::set` is the
-    /// same "write once, read many, no lock on the read path" shape as
-    /// those atomic flags, just for a `Copy` function pointer instead of a
-    /// `bool`.
     pub(crate) zone_map_projection: std::sync::OnceLock<fn(&Payload) -> Option<u64>>,
 }
 
@@ -224,15 +204,6 @@ impl<
     Payload: Display + Clone + Default + Sync + 'static + crate::bat_wal::record::WalPayload,
 > MVBTSt<FAN_OUT, NUM_RECORDS, u64, Payload>
 {
-    /// Builds a fresh tree, replays any existing WAL found at `wal_path`
-    /// into it (see `bat_wal::recovery::replay`), truncates the file to its
-    /// own valid prefix (dropping any torn tail left by a crash
-    /// mid-fsync), then attaches a live writer so subsequent mutations keep
-    /// appending to that same file. Call this instead of `make_standard` +
-    /// `enable_wal` whenever the log might already contain data from a
-    /// prior run. No separate clock bump is needed: replaying each op
-    /// already mints it a fresh version through the normal path, so the
-    /// clock is already correctly positioned by the time `replay` returns.
     pub fn open_recovered(
         root_index_type: RootIndexType,
         wal_path: &std::path::Path,
@@ -249,11 +220,6 @@ impl<
         tree.with_wal(wal_path, flush_interval)
     }
 
-    /// Same as `open_recovered`, but reattaches via `enable_wal_lockfree`
-    /// instead of `enable_wal` — recovery itself (`bat_wal::recovery::replay`,
-    /// via `record::resync_next`) doesn't care which writer produced the
-    /// file, since both share the same on-disk wire format; only which
-    /// writer picks up *afterwards* differs.
     pub fn open_recovered_lockfree(
         root_index_type: RootIndexType,
         wal_path: &std::path::Path,
@@ -309,19 +275,6 @@ impl<
     Payload: Display + Clone + Default + Sync + 'static,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
-    /// Turns on this table's own block reclaim
-    /// (`TrackerHandleSt::block_reclaim_enabled`, gates dead-page reuse for
-    /// this tree specifically) *and* this tree's `ctx`'s copy of the same
-    /// flag (gates whether `commit_tx` prunes `ctx`'s shared `CommitLog`s
-    /// and whether active-snapshot tracking runs at all — see `TxContext`'s
-    /// doc). When `ctx` is shared by several tables (see
-    /// `make_with_shared_ctx`), calling this on just one of them still only
-    /// flips *that table's* dead-page reclaim, but flips the *shared*
-    /// pruning flag for every table sharing `ctx` — callers responsible for
-    /// a whole multi-table database must toggle GC uniformly across all of
-    /// its tables (see `bat_bench::tpcc_schema::TpccDatabase::enable_gc`), not
-    /// call this per table, or pruning becomes unsound for tables whose own
-    /// reclaim never got turned on.
     pub fn enable_gc(&self, update_in_place: bool) {
         self.block_manager.tracker().set_block_reclaim_enabled(true);
         self.block_manager.set_update_in_place(update_in_place);
@@ -345,10 +298,6 @@ impl<
         self.root.index_type()
     }
 
-    /// `Some(id)` if this tree is one table of a `bat_db::Database` — the
-    /// index `Database::create_table` assigned it, i.e. its position in
-    /// that database's table list — `None` for every standalone/single-tree
-    /// caller. See this struct's `table_id` field doc.
     pub fn table_id(&self) -> Option<crate::bat_wal::record::TableId> {
         self.cold.table_id
     }
@@ -384,19 +333,6 @@ impl<
         )
     }
 
-    /// Same as `make`, but takes a pre-built `ctx` instead of creating a
-    /// private one — the entry point for several per-table trees that must
-    /// share one transactional core (see `TxContext`'s doc and
-    /// `bat_bench::tpcc_schema::TpccDatabase`). Every single-tree constructor
-    /// (`make_standard`, `Default::default`, `open_recovered`) still funnels
-    /// through plain `make` above, so they're unaffected by this existing.
-    /// `table_id`: `Some(id)` for a table belonging to a `bat_db::Database`
-    /// (see this struct's `table_id` field doc); `None` for every other
-    /// caller, including `TpccDatabase`, which keeps its own
-    /// one-`WalWriter`-per-table design. `pub(crate)`: callers outside
-    /// `bat_tree` construct trees through wrappers (`TpccDatabase::new`,
-    /// `bat_db::Database::create_table`) that build the shared `ctx` once and
-    /// pass it to every table.
     #[inline]
     pub(crate) fn make_with_shared_ctx(
         root_index_type: RootIndexType,
@@ -425,25 +361,6 @@ impl<
         }
     }
 
-    /// Opts this tree into maintaining a small inline min/max synopsis
-    /// (`LeafZoneMap`) per leaf, over one caller-chosen scalar column of
-    /// `Payload`. Off by default (unset) — call this once, right after
-    /// construction, to turn it on; a second call is a silent no-op (see
-    /// `OnceLock::set`), not an error, since every real call site only ever
-    /// wants "configure once at setup time."
-    ///
-    /// `projection` must return an order-preserving `u64` encoding of the
-    /// real column value, or `None` if this record has no value for it
-    /// (e.g. a nullable field that's currently unset) — the zone map treats
-    /// `None` as "doesn't widen the range," not as a value of `0`. A signed
-    /// column (e.g. an `i64` timestamp) should flip its sign bit to stay
-    /// correctly ordered as `u64`: `(v as u64) ^ (1u64 << 63)`.
-    ///
-    /// Once enabled, every leaf's zone map only ever widens (see
-    /// `LeafZoneMap`'s doc) — it's a safe-but-possibly-loose superset of
-    /// every value ever inserted into that leaf, never a precise one, and
-    /// pruning against it (`RangeQueryIter::with_zone_predicate`) can only
-    /// skip a leaf it's certain can't match, never one that might.
     pub fn set_zone_map_projection(&self, projection: fn(&Payload) -> Option<u64>) {
         let _ = self.cold.zone_map_projection.set(projection);
     }
@@ -461,10 +378,6 @@ impl<
     Payload: Display + Clone + Default + Sync + 'static,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
-    /// Dumps this tree's full root* list and the (de-duplicated) block graph
-    /// they reach to a JSON file at `path` for `tools/tree_visualizer.html` —
-    /// see `bat_viz::dump::dump_tree_to_file`'s doc for the format and the
-    /// quiescent-read-only caveat.
     pub fn dump_to_file(
         &self,
         path: impl AsRef<std::path::Path>,

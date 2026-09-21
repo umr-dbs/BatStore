@@ -7,24 +7,9 @@
 use std::cell::RefCell;
 
 thread_local! {
-    // Plain `rand::rng()` (used throughout this module, `tpcc_txn.rs`, and
-    // `tpcc_load.rs` previously) is a cryptographically secure generator
-    // (ChaCha-backed) - overkill for load-generator/transaction-parameter
-    // data that never needs to be unpredictable, and expensive enough that
-    // it showed up as a double-digit percentage of whole-benchmark `perf`
-    // profiles (see `ycsb_random.rs`'s identical fix, which found the same
-    // thing for YCSB's key-picking - up to ~14% of all cycles there).
-    // `fastrand`'s `Rng` (WyRand) is seeded once per thread here, paying
-    // any setup cost exactly once, not once per op - every draw after that
-    // is a handful of integer ops, no block-cipher rounds.
     static FAST_RNG: RefCell<fastrand::Rng> = RefCell::new(fastrand::Rng::new());
 }
 
-/// Thread-local fast (non-cryptographic) RNG for TPC-C benchmark data
-/// generation - see this module's doc for why not `rand::rng()`. Exposed
-/// (not just used internally) so `tpcc_txn.rs`/`tpcc_load.rs` can draw from
-/// the same thread-local instance for their own random transaction
-/// parameters/load data, for the same reason.
 #[inline]
 pub fn with_fast_rng<R>(f: impl FnOnce(&mut fastrand::Rng) -> R) -> R {
     FAST_RNG.with(|rng| f(&mut rng.borrow_mut()))
@@ -73,14 +58,20 @@ pub fn c_last_code_for_run() -> u16 {
     nurand(255, 0, 999, C_LAST_RUN) as u16
 }
 
-const SYLLABLES: [&str; 10] =
-    ["BAR", "OUGHT", "ABLE", "PRI", "PRES", "ESE", "ANTI", "CALLY", "ATION", "EING"];
+const SYLLABLES: [&str; 10] = [
+    "BAR", "OUGHT", "ABLE", "PRI", "PRES", "ESE", "ANTI", "CALLY", "ATION", "EING",
+];
 
 /// Deterministically expands a 0..=999 code into the TPC-C C_LAST name
 /// (3 syllables chosen by the code's hundreds/tens/units digits).
 pub fn gen_last_name(code: u16) -> String {
     let code = code as usize;
-    format!("{}{}{}", SYLLABLES[code / 100], SYLLABLES[(code / 10) % 10], SYLLABLES[code % 10])
+    format!(
+        "{}{}{}",
+        SYLLABLES[code / 100],
+        SYLLABLES[(code / 10) % 10],
+        SYLLABLES[code % 10]
+    )
 }
 
 /// Order-preserving-ish 16-bit surrogate for a first name, used only to
@@ -109,10 +100,6 @@ pub fn rnd_astring(min: usize, max: usize) -> String {
     })
 }
 
-/// TPC-C a-string generated directly into a `[u8; N]`, no heap allocation -
-/// for schema fields whose length the spec fixes exactly (e.g. `Stock::s_dist`'s
-/// ten 24-byte entries), equivalent to `rnd_astring(N, N)` but without the
-/// `String` indirection every clone of the owning row would otherwise pay for.
 pub fn rnd_astring_exact<const N: usize>() -> [u8; N] {
     with_fast_rng(|rng| std::array::from_fn(|_| rng.alphanumeric() as u8))
 }

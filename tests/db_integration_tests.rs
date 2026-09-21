@@ -31,28 +31,59 @@ fn explorer_bundle_exports_two_tables_at_one_snapshot() {
     let a = db.create_table("accounts").table_id().unwrap();
     let b = db.create_table("orders").table_id().unwrap();
     let mut tx = DbTransaction::begin(&db);
-    assert!(matches!(tx.insert(a, 7, 70), CRUDOperationResult::Inserted(_)));
-    assert!(matches!(tx.insert(b, 9, 90), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        tx.insert(a, 7, 70),
+        CRUDOperationResult::Inserted(_)
+    ));
+    assert!(matches!(
+        tx.insert(b, 9, 90),
+        CRUDOperationResult::Inserted(_)
+    ));
     tx.commit();
 
     let path = std::env::temp_dir().join(format!("batstore-explorer-{}.json", std::process::id()));
-    let schemas = vec!["balance", "amount"].into_iter().map(|name| vec![
-        DumpColumn { name: "key".into(), data_type: "integer".into() },
-        DumpColumn { name: name.into(), data_type: "integer".into() },
-    ]).collect::<Vec<_>>();
+    let schemas = vec!["balance", "amount"]
+        .into_iter()
+        .map(|name| {
+            vec![
+                DumpColumn {
+                    name: "key".into(),
+                    data_type: "integer".into(),
+                },
+                DumpColumn {
+                    name: name.into(),
+                    data_type: "integer".into(),
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
     db.dump_explorer_bundle(&path, &schemas, |table, payload| {
         let field = if table == a { "balance" } else { "amount" };
         serde_json::Map::from_iter([(field.into(), serde_json::json!(payload))])
-    }).unwrap();
-    let bundle: serde_json::Value = serde_json::from_reader(std::fs::File::open(&path).unwrap()).unwrap();
+    })
+    .unwrap();
+    let bundle: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(&path).unwrap()).unwrap();
     std::fs::remove_file(path).unwrap();
     assert_eq!(bundle["format"], "batstore-explorer-bundle-v1");
     assert_eq!(bundle["tables"][0]["name"], "accounts");
     assert_eq!(bundle["tables"][1]["name"], "orders");
     assert_eq!(bundle["tables"][0]["rows"][0]["balance"], 70);
     assert_eq!(bundle["tables"][1]["rows"][0]["amount"], 90);
-    assert!(bundle["tables"][0]["tree"]["roots"].as_array().unwrap().len() > 0);
-    assert!(bundle["tables"][1]["tree"]["roots"].as_array().unwrap().len() > 0);
+    assert!(
+        bundle["tables"][0]["tree"]["roots"]
+            .as_array()
+            .unwrap()
+            .len()
+            > 0
+    );
+    assert!(
+        bundle["tables"][1]["tree"]["roots"]
+            .as_array()
+            .unwrap()
+            .len()
+            > 0
+    );
     assert!(bundle["glc_last"].as_str().unwrap().parse::<u64>().unwrap() > 0);
     assert_eq!(bundle["tables"][0]["tree"]["glc_last"], bundle["glc_last"]);
     assert!(bundle["tables"][0]["tree"]["commit_logs"].is_array());
@@ -249,10 +280,6 @@ fn repeated_delete_reinsert_round_trips_through_wal_recovery() {
     let _ = std::fs::remove_file(format!("{}.meta", path.display()));
 }
 
-/// The cross-table analogue of `bat_bench::tpcc_txn::tests::
-/// cross_table_transaction_is_atomic_across_tables`: one `DbTransaction`
-/// writes to two different tables, and both writes must become visible to
-/// other transactions atomically, as one unit, not one table at a time.
 #[test]
 fn db_cross_table_transaction_is_atomic_across_tables() {
     let db = new_db();
@@ -299,11 +326,6 @@ fn db_cross_table_transaction_is_atomic_across_tables() {
     });
 }
 
-/// The cross-table analogue of `bat_bench::tpcc_txn::tests::
-/// dropped_tpcc_txn_reverts_writes_across_tables_on_conflict`: one
-/// `DbTransaction` writes two different tables, then loses a
-/// first-writer-wins race on a later op and drops without `commit()` — both
-/// of its earlier writes, across both tables, must be reverted.
 #[test]
 fn db_dropped_transaction_reverts_writes_across_tables_on_conflict() {
     let db = new_db();
@@ -359,14 +381,10 @@ fn db_dropped_transaction_reverts_writes_across_tables_on_conflict() {
     tx3.commit();
 }
 
-/// The `Database` counterpart to `bat_bench::tpcc_wal_codec::tests::
-/// tpcc_database_crash_recovery_round_trip_across_tables`, but additionally
-/// asserting only **one** file exists on disk — the concrete proof of "one
-/// shared log," not per-table siblings (unlike `TpccDatabase`, whose
-/// `enable_wal` creates one file per table via `table_wal_path`).
 #[test]
 fn db_crash_recovery_round_trip_across_tables() {
-    let path = std::env::temp_dir().join(format!("batstore_db_crash_test_{}.log", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("batstore_db_crash_test_{}.log", std::process::id()));
     let _ = std::fs::remove_file(&path);
 
     {
@@ -388,10 +406,6 @@ fn db_crash_recovery_round_trip_across_tables() {
             CRUDOperationResult::Inserted(_)
         ));
         tx.commit();
-        // `wal_hardened_version` tracks the highest flushed *ts_start*, not
-        // ts_commit (see `WalWriter::hardened`'s doc) — waiting on ts_commit
-        // here would spin forever, since nothing ever logs an entry stamped
-        // with that later value.
         db.table_named("a").unwrap().wait_wal_hardened(ts_start);
     } // db drops here: every table's tree is dropped normally, exactly like a real crash would leave nothing behind but the WAL file.
 
@@ -432,12 +446,6 @@ fn db_crash_recovery_round_trip_across_tables() {
     let _ = std::fs::remove_file(format!("{}.meta", path.display()));
 }
 
-/// Proof that the "N commit markers per cross-table transaction" problem
-/// `TpccTxn::commit` has (one marker per touched table, since each has its
-/// own file) is actually gone with a single shared WAL: after a
-/// `DbTransaction` writes 3 different tables and commits, the raw file must
-/// contain **exactly one** `WalEntry::Commit` for that transaction's
-/// `(worker_id, ts_start)`.
 #[test]
 fn db_single_commit_marker_per_cross_table_transaction() {
     let path = std::env::temp_dir().join(format!(
@@ -497,10 +505,6 @@ fn db_single_commit_marker_per_cross_table_transaction() {
     let _ = std::fs::remove_file(format!("{}.meta", path.display()));
 }
 
-/// A table created *after* `enable_wal`/`enable_gc` are already on must
-/// still inherit both — the gap `TpccDatabase` never has to close, since its
-/// 14 tables are all built before anything is toggled (see
-/// `Database::create_table`'s doc).
 #[test]
 fn dynamic_table_created_after_wal_and_gc_enabled_inherits_both() {
     let path = std::env::temp_dir().join(format!(
@@ -517,10 +521,6 @@ fn dynamic_table_created_after_wal_and_gc_enabled_inherits_both() {
     let late = db.create_table("late");
     let t_late = late.table_id().unwrap();
 
-    // GC inheritance: many single-op writes through "late" must keep its
-    // (shared) commit log pruned near max_workers — same property
-    // `bat_query::dispatch::tests::commit_log_stays_bounded_with_gc_enabled`
-    // proves for a tree that had GC on from construction.
     for k in 0..10_000u64 {
         assert!(matches!(
             db.dispatch_crud(t_late, CRUDOperation::Insert(k, k)),
@@ -596,16 +596,12 @@ fn table_ids_are_assigned_sequentially_by_creation_order() {
     );
 }
 
-/// The concrete proof of the catalog-file mechanism `create_table`/
-/// `open_recovered` are built on: enabling WAL persists every table that
-/// already exists, in order; each subsequent `create_table` appends one
-/// more line; and `open_recovered` reads it back to reconstruct the exact
-/// same name order (and therefore the exact same `TableId`s) with no
-/// per-name resolution of its own.
 #[test]
 fn catalog_file_records_tables_in_creation_order_and_survives_recovery() {
-    let path =
-        std::env::temp_dir().join(format!("batstore_db_catalog_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "batstore_db_catalog_test_{}.log",
+        std::process::id()
+    ));
     let meta_path = format!("{}.meta", path.display());
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&meta_path);

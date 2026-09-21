@@ -4,9 +4,9 @@ BatStore is a storage engine built around a concurrent multiversion B-tree (cMVB
 
 ## Transaction isolation
 
-BatStore supports **Snapshot Isolation (SI)** and **Read Committed** for multi-operation database and TPC-C transactions. SI is the default: every read in a transaction uses the snapshot taken at `begin`. Read Committed takes a fresh snapshot at each logical statement boundary, so later statements can see transactions that committed in the meantime. Operations within one statement share the same snapshot.
+BatStore supports **Snapshot Isolation (SI)** and **Read Committed** for multi-operation database and TPC-C transactions. SI is the default: every read in a transaction uses the snapshot taken at `begin`. Read Committed takes a fresh snapshot before each public read/write operation, so later operations can see transactions that committed in the meantime.
 
-Select Read Committed with `DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted)` (or `TpccTxn::begin_with_isolation` for TPC-C). Call `begin_statement()` before each logical statement; this API leaves statement boundaries to the caller. The transaction's write stamp remains fixed across statements for atomic commit, rollback, and WAL recovery. Existing `begin(&db)` calls continue to use SI.
+Select Read Committed with `DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted)` (or `TpccTxn::begin_with_isolation` for TPC-C). Each transaction operation refreshes the read snapshot automatically. The transaction's write stamp remains fixed across operations for atomic commit, rollback, and WAL recovery. Existing `begin(&db)` calls continue to use SI.
 
 Run commands from the repository root.
 

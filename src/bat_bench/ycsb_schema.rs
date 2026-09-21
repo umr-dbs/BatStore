@@ -44,7 +44,8 @@ pub type YcsbTree = MVBTSt<YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow>;
 /// bit-packed fields) is exactly the case `bat_query::interval::
 /// RangeSplit`'s numeric-bisection `u64` impl is safe for out of the box —
 /// see that trait's doc.
-pub type YcsbScanPool = crate::bat_tree::scan_pool::ScanWorkerPool<YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow>;
+pub type YcsbScanPool =
+    crate::bat_tree::scan_pool::ScanWorkerPool<YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow>;
 
 /// Database scale/shape, mirroring YCSB's `recordcount`/`fieldcount`/
 /// `fieldlength` workload properties.
@@ -110,12 +111,6 @@ pub struct YcsbRow {
     ptr: NonNull<u8>,
 }
 
-// Sound exactly like `triomphe::Arc<[u8]>`: every live `YcsbRow` (from
-// `from_bytes`/`clone`) holds a genuine strong reference to this
-// allocation - shared, but the shared bytes are never mutated after
-// construction (see this type's doc) - so concurrent readers across
-// threads never race, the same argument that makes any plain `Arc<T: Sync>`
-// `Send + Sync`.
 unsafe impl Send for YcsbRow {}
 unsafe impl Sync for YcsbRow {}
 
@@ -188,21 +183,12 @@ impl YcsbRow {
         unsafe { self.ptr.as_ptr().add(REFCOUNT_LEN).cast::<u32>().read() as usize }
     }
 
-    /// Aligned to `REFCOUNT_LEN` (4B, same as `AtomicU32`/`u32`'s own
-    /// alignment) so neither header field is ever a misaligned read/write -
-    /// the allocator hands back a suitably-aligned pointer for whatever
-    /// `Layout` we ask for.
     fn layout_for(data_len: usize) -> Layout {
         Layout::from_size_align(HEADER_LEN + data_len, REFCOUNT_LEN)
             .expect("YcsbRow: row too large to allocate")
     }
 }
 
-// The entire point of this type's shape: if a future edit adds a field and
-// pushes `YcsbRow` past one `usize` in size (or past `usize`'s alignment),
-// `PayloadSlot<YcsbRow>` (`record_point.rs`) silently falls back to boxing
-// it - still correct, but quietly reintroducing the extra allocation this
-// type exists to avoid. Fail the build instead of failing silently.
 const _: () = assert!(
     size_of::<YcsbRow>() == size_of::<usize>()
         && std::mem::align_of::<YcsbRow>() <= std::mem::align_of::<usize>(),
@@ -210,14 +196,6 @@ const _: () = assert!(
 );
 
 impl Drop for YcsbRow {
-    /// Same `Release`-decrement + `Acquire`-fence-before-free pattern as
-    /// `std`/`triomphe`'s own `Arc`: the `Release` on the count that takes it
-    /// to zero ensures every other clone's prior reads of the shared buffer
-    /// are ordered-before this thread's `dealloc`, and the fence ensures
-    /// this thread in turn sees every one of those other clones' writes (none,
-    /// in practice, since the buffer is never mutated post-construction - but
-    /// the pattern is what makes that "never" a proven guarantee rather than
-    /// an assumption).
     fn drop(&mut self) {
         if self.refcount().fetch_sub(1, Release) != 1 {
             return;
@@ -230,11 +208,6 @@ impl Drop for YcsbRow {
 }
 
 impl Clone for YcsbRow {
-    /// `Relaxed` suffices for the increment (same as `Arc::clone`): every
-    /// ordering guarantee that matters is enforced on the *decrement* side in
-    /// `Drop`, not here - this thread already holds a valid strong reference
-    /// it's merely duplicating, not synchronizing with anyone's else's view
-    /// of the buffer's contents.
     fn clone(&self) -> Self {
         self.refcount().fetch_add(1, Relaxed);
         Self { ptr: self.ptr }
@@ -281,13 +254,6 @@ impl WalPayload for YcsbRow {
         Some(Self::from_bytes(data))
     }
 
-    /// Exact, not just an estimate: `wal_encode` above writes precisely
-    /// `4 + self.len()` bytes, and `self.len()` is already known up front
-    /// (no encoding work needed to compute it) — the trait default (`8`,
-    /// tuned for a bare `u64` payload) would otherwise be off by roughly
-    /// `field_count * field_length` bytes (e.g. 996 bytes short at this
-    /// benchmark's usual 10x100 fields), forcing several grow-and-copy
-    /// reallocations per WAL write.
     #[inline]
     fn wal_encode_size_hint(&self) -> usize {
         4 + self.len()
@@ -312,10 +278,6 @@ mod tests {
 
     #[test]
     fn clone_shares_the_same_allocation() {
-        // Refcounted, not deep-copying (see the type's doc) - matching
-        // `PayloadSlot`'s "share, don't duplicate" contract for every other
-        // payload type, now honored here too instead of paying a fresh
-        // alloc+memcpy on every read/scan/split that clones a row.
         let a = YcsbRow::from_bytes(b"field0field1field2");
         let b = a.clone();
         assert_eq!(a, b);

@@ -19,15 +19,13 @@ use std::time::{Duration, Instant};
 use triomphe::Arc;
 
 fn tiny_cfg() -> YcsbConfig {
-    YcsbConfig { record_count: 300, field_count: 3, field_length: 8 }
+    YcsbConfig {
+        record_count: 300,
+        field_count: 3,
+        field_length: 8,
+    }
 }
 
-/// `scan_parallel` must agree with the sequential `scan_with_mode` for a
-/// range wide enough to clear `bat_tree::scan_pool::
-/// MIN_LEN_FOR_SPLIT_DISPATCH` (65,536) — deliberately scanning far past
-/// the populated `record_count` (300) so this test stays cheap to set up
-/// while the *range itself* is still large enough to exercise the real
-/// split-and-dispatch path, not just its own size gate's fallback.
 #[test]
 fn scan_parallel_matches_sequential_scan_for_a_large_range() {
     let cfg = tiny_cfg();
@@ -39,16 +37,16 @@ fn scan_parallel_matches_sequential_scan_for_a_large_range() {
 
     let expected = scan_with_mode(&tree, 1, len, true);
     let actual = scan_parallel(Some(&pool), &tree, 1, len, true);
-    assert_eq!(actual, expected, "scan_parallel must find exactly the same rows as scan_with_mode");
-    assert_eq!(expected, cfg.record_count as usize, "sanity: every populated row should be within [1, len]");
+    assert_eq!(
+        actual, expected,
+        "scan_parallel must find exactly the same rows as scan_with_mode"
+    );
+    assert_eq!(
+        expected, cfg.record_count as usize,
+        "sanity: every populated row should be within [1, len]"
+    );
 }
 
-/// Confirms `scan_parallel`'s large-range case genuinely takes
-/// `dispatch_evenly`'s split-and-dispatch branch rather than happening to
-/// match the sequential answer via its own fallback: the same range/pool
-/// combination `scan_parallel_matches_sequential_scan_for_a_large_range`
-/// uses must both (a) clear `RangeSplit::approx_len`'s size gate and (b)
-/// have `dispatch_evenly` itself report `Some`, not `None`.
 #[test]
 fn large_range_actually_uses_dispatch_evenly_not_the_fallback() {
     let tree = Arc::new(YcsbTree::make_standard(RootIndexType::default()));
@@ -66,14 +64,13 @@ fn large_range_actually_uses_dispatch_evenly_not_the_fallback() {
     );
 }
 
-/// Same as the large-range test above, but densely populated across the
-/// *whole* scanned range (not just its first sliver) — so every one of
-/// the pool's sub-ranges actually has real matching rows to find and sum,
-/// not just the first one, which is what would actually catch a bug in
-/// how `dispatch_evenly`'s per-sub-range results get aggregated.
 #[test]
 fn scan_parallel_matches_sequential_scan_with_dense_data_across_every_sub_range() {
-    let cfg = YcsbConfig { record_count: 80_000, field_count: 3, field_length: 8 };
+    let cfg = YcsbConfig {
+        record_count: 80_000,
+        field_count: 3,
+        field_length: 8,
+    };
     let tree = Arc::new(YcsbTree::make_standard(RootIndexType::default()));
     populate(&tree, &cfg);
 
@@ -83,14 +80,13 @@ fn scan_parallel_matches_sequential_scan_with_dense_data_across_every_sub_range(
     let len = cfg.record_count;
     let expected = scan_with_mode(&tree, 1, len, true);
     let actual = scan_parallel(Some(&pool), &tree, 1, len, true);
-    assert_eq!(expected, cfg.record_count as usize, "sanity: every populated row is within [1, len]");
+    assert_eq!(
+        expected, cfg.record_count as usize,
+        "sanity: every populated row is within [1, len]"
+    );
     assert_eq!(actual, expected);
 }
 
-/// Same correctness check for a range below the size gate (so
-/// `scan_parallel` falls straight back to `scan_with_mode` internally) —
-/// the fallback path itself must still be correct, not just "doesn't
-/// crash".
 #[test]
 fn scan_parallel_matches_sequential_scan_for_a_small_range() {
     let cfg = tiny_cfg();
@@ -106,15 +102,6 @@ fn scan_parallel_matches_sequential_scan_for_a_small_range() {
     assert_eq!(expected, 100, "all 100 keys in [1, 100] were populated");
 }
 
-/// Proves the size gate actually bypasses the pool for a small range,
-/// rather than merely happening to return the right answer: occupies
-/// every worker with an artificially slow filler job first, then confirms
-/// a small-range `scan_parallel` call still returns almost immediately
-/// instead of waiting behind (or being queued alongside) that filler —
-/// which it could only do by never touching the pool at all, since
-/// `try_dispatch` itself (used once past the size gate) would otherwise
-/// either queue behind the busy workers or run inline no faster than the
-/// filler's own `hold`.
 #[test]
 fn scan_parallel_skips_the_pool_entirely_for_a_small_range() {
     let cfg = tiny_cfg();
@@ -135,7 +122,10 @@ fn scan_parallel_skips_the_pool_entirely_for_a_small_range() {
             });
         }
         std::thread::sleep(hold / 4);
-        assert!(!pool.has_spare_capacity(), "both workers should be busy with the slow filler jobs");
+        assert!(
+            !pool.has_spare_capacity(),
+            "both workers should be busy with the slow filler jobs"
+        );
 
         let start = Instant::now();
         let count = scan_parallel(Some(&pool), &tree, 1, 100, true);
@@ -149,12 +139,6 @@ fn scan_parallel_skips_the_pool_entirely_for_a_small_range() {
     });
 }
 
-/// `pool: None` is a real, explicit "no parallel workers" mode, not just an
-/// incidental fallback for "there happens to be no pool" — it must still
-/// produce the exact right answer for a range that, with a pool, would
-/// otherwise take the split-and-dispatch path. Also a template for how a
-/// test that wants a guaranteed-sequential baseline (or one that doesn't
-/// want to spawn a pool at all) should call this.
 #[test]
 fn scan_parallel_with_no_pool_matches_sequential_scan_for_a_large_range() {
     let cfg = tiny_cfg();
@@ -164,20 +148,23 @@ fn scan_parallel_with_no_pool_matches_sequential_scan_for_a_large_range() {
 
     let expected = scan_with_mode(&tree, 1, len, true);
     let actual = scan_parallel(None, &tree, 1, len, true);
-    assert_eq!(actual, expected, "pool: None must still scan exactly the same rows as scan_with_mode");
-    assert_eq!(expected, cfg.record_count as usize, "sanity: every populated row should be within [1, len]");
+    assert_eq!(
+        actual, expected,
+        "pool: None must still scan exactly the same rows as scan_with_mode"
+    );
+    assert_eq!(
+        expected, cfg.record_count as usize,
+        "sanity: every populated row should be within [1, len]"
+    );
 }
 
-/// Direct correctness check of `RangeQueryIter`'s own `*_parallel` methods
-/// (`collect_parallel`/`for_each_ref_parallel`/`count_ref_parallel`) against
-/// their plain sequential counterparts — `scan_parallel` above only
-/// exercises `fold_ref_parallel`, so this covers the other three the same
-/// generic mechanism offers to any caller (e.g. `bat_db::transaction::
-/// range_on_tree`/`bat_bench::tpcc_txn::TpccTxn::range_count`) directly,
-/// without going through a workload-specific wrapper at all.
 #[test]
 fn range_query_iter_parallel_methods_agree_with_their_sequential_counterparts() {
-    let cfg = YcsbConfig { record_count: 80_000, field_count: 3, field_length: 8 };
+    let cfg = YcsbConfig {
+        record_count: 80_000,
+        field_count: 3,
+        field_length: 8,
+    };
     let tree = Arc::new(YcsbTree::make_standard(RootIndexType::default()));
     populate(&tree, &cfg);
 
@@ -185,19 +172,27 @@ fn range_query_iter_parallel_methods_agree_with_their_sequential_counterparts() 
     let range = Interval::new(1u64, cfg.record_count);
 
     let ts_collect = tree.begin_snapshot();
-    let expected_rows = RangeQueryIter::new(&tree, ts_collect, range, false, READ_ONLY_SCAN_WORKER_ID).collect_parallel(None);
+    let expected_rows =
+        RangeQueryIter::new(&tree, ts_collect, range, false, READ_ONLY_SCAN_WORKER_ID)
+            .collect_parallel(None);
     tree.on_release_reader_snapshot(ts_collect);
     let ts_collect_p = tree.begin_snapshot();
-    let actual_rows = RangeQueryIter::new(&tree, ts_collect_p, range, false, READ_ONLY_SCAN_WORKER_ID).collect_parallel(Some(&pool));
+    let actual_rows =
+        RangeQueryIter::new(&tree, ts_collect_p, range, false, READ_ONLY_SCAN_WORKER_ID)
+            .collect_parallel(Some(&pool));
     tree.on_release_reader_snapshot(ts_collect_p);
     assert_eq!(actual_rows.len(), expected_rows.len());
     assert_eq!(actual_rows.len(), cfg.record_count as usize);
 
     let ts_count = tree.begin_snapshot();
-    let expected_count = RangeQueryIter::new(&tree, ts_count, range, false, READ_ONLY_SCAN_WORKER_ID).count_ref_parallel(None);
+    let expected_count =
+        RangeQueryIter::new(&tree, ts_count, range, false, READ_ONLY_SCAN_WORKER_ID)
+            .count_ref_parallel(None);
     tree.on_release_reader_snapshot(ts_count);
     let ts_count_p = tree.begin_snapshot();
-    let actual_count = RangeQueryIter::new(&tree, ts_count_p, range, false, READ_ONLY_SCAN_WORKER_ID).count_ref_parallel(Some(&pool));
+    let actual_count =
+        RangeQueryIter::new(&tree, ts_count_p, range, false, READ_ONLY_SCAN_WORKER_ID)
+            .count_ref_parallel(Some(&pool));
     tree.on_release_reader_snapshot(ts_count_p);
     assert_eq!(actual_count, expected_count);
     assert_eq!(actual_count, cfg.record_count as usize);
@@ -205,25 +200,27 @@ fn range_query_iter_parallel_methods_agree_with_their_sequential_counterparts() 
     let visited_sequential = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let visited_sequential_clone = visited_sequential.clone();
     let ts_visit = tree.begin_snapshot();
-    RangeQueryIter::new(&tree, ts_visit, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref_parallel(
-        None,
-        move |_, _| {
+    RangeQueryIter::new(&tree, ts_visit, range, false, READ_ONLY_SCAN_WORKER_ID)
+        .for_each_ref_parallel(None, move |_, _| {
             visited_sequential_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        },
-    );
+        });
     tree.on_release_reader_snapshot(ts_visit);
 
     let visited_parallel = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let visited_parallel_clone = visited_parallel.clone();
     let ts_visit_p = tree.begin_snapshot();
-    RangeQueryIter::new(&tree, ts_visit_p, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref_parallel(
-        Some(&pool),
-        move |_, _| {
+    RangeQueryIter::new(&tree, ts_visit_p, range, false, READ_ONLY_SCAN_WORKER_ID)
+        .for_each_ref_parallel(Some(&pool), move |_, _| {
             visited_parallel_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        },
-    );
+        });
     tree.on_release_reader_snapshot(ts_visit_p);
 
-    assert_eq!(visited_sequential.load(std::sync::atomic::Ordering::Relaxed), cfg.record_count as usize);
-    assert_eq!(visited_parallel.load(std::sync::atomic::Ordering::Relaxed), cfg.record_count as usize);
+    assert_eq!(
+        visited_sequential.load(std::sync::atomic::Ordering::Relaxed),
+        cfg.record_count as usize
+    );
+    assert_eq!(
+        visited_parallel.load(std::sync::atomic::Ordering::Relaxed),
+        cfg.record_count as usize
+    );
 }

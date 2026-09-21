@@ -137,11 +137,6 @@ fn concurrent_read_modify_write_across_a_small_shared_key_set_never_loses_an_upd
 
 const MISC_KEYS_PER_THREAD: u64 = 5;
 
-/// Escalation: same small shared-key contention as above, but each
-/// transaction now also does a few reads/writes on its *own private* "misc"
-/// keys before and after touching the shared key - mimicking New-Order's
-/// shape (Warehouse/District/Customer/Item touches, then Stock, then
-/// Orders/NewOrder/CustLastOrder) instead of a bare read-modify-write loop.
 fn run_multi_step(num_threads: usize, duration: Duration) {
     let db: Arc<TestDb> = Arc::new(Database::new(
         RootIndexType::default(),

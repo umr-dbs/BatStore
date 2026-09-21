@@ -23,10 +23,6 @@ use crate::bat_bench::ycsb_random::{KeySampler, RequestDistribution};
 use crate::bat_bench::ycsb_schema::YcsbKey;
 
 thread_local! {
-    // Same rationale as `ycsb_random::FAST_RNG`: a non-cryptographic PRNG,
-    // seeded once per thread, for load-generator draws that are never on
-    // the benchmark's correctness-sensitive path. Not reused from
-    // `ycsb_random` because that module's thread-local is private to it.
     static FAST_RNG: RefCell<SmallRng> = RefCell::new(rand::make_rng());
 }
 
@@ -35,18 +31,6 @@ fn with_fast_rng<R>(f: impl FnOnce(&mut SmallRng) -> R) -> R {
     FAST_RNG.with(|rng| f(&mut rng.borrow_mut()))
 }
 
-/// Mints the next key for the arrival stream: a monotonic ticket counter
-/// (guaranteeing every minted key is unique, so concurrent arrival threads
-/// never mint the same key twice) with an optional bounded backward jitter
-/// applied on top, modeling a stream's *allowed lateness* — real events
-/// mostly arrive in timestamp order, but a bounded fraction arrive slightly
-/// out of order relative to strictly increasing sequence numbers.
-///
-/// A jittered key can collide with one already emitted by an earlier
-/// ticket; the caller (`s_ycsb_txn::arrival_upsert`) treats that as a
-/// legitimate late-arriving upsert of an already-materialized row, not an
-/// error — exactly how real stream processors handle out-of-order/
-/// duplicate events under an idempotent upsert model.
 pub fn mint_arrival_key(next_seq: &AtomicU64, max_lateness: u64) -> YcsbKey {
     let ticket = next_seq.fetch_add(1, Relaxed) + 1;
     if max_lateness == 0 {
@@ -96,10 +80,6 @@ pub struct SYcsbMix {
 }
 
 impl Default for SYcsbMix {
-    /// Mostly hot updates over a trickle of new arrivals — a dashboard-style
-    /// "many small revisions to the last few minutes of data, occasionally
-    /// appending a genuinely new row" pattern, rather than a pure insert
-    /// firehose.
     fn default() -> Self {
         Self {
             arrival: 0.2,
@@ -127,17 +107,6 @@ pub fn pick_write_op(mix: &SYcsbMix) -> SYcsbWriteOp {
     }
 }
 
-/// Computes an OLAP scan's `[lo, hi]` key interval relative to the current
-/// tail, letting the same two knobs express all three region shapes this
-/// workload cares about:
-/// - Pure hot-tail scan: `lag = 0`, `span <= hot_window`.
-/// - Pure cold-historical scan: `lag >= hot_window` (scan never reaches the
-///   still-mutating tail).
-/// - Straddling scan (the interesting default): `lag = 0`,
-///   `span > hot_window` — starts at the current tail and reads backward
-///   through the hot window into settled cold history in one snapshot,
-///   exactly the "dashboard query over the last N rows" shape that forces a
-///   single scan to cross the cold/hot boundary.
 pub fn olap_scan_bounds(current_max_key: u64, lag: u64, span: u64) -> (YcsbKey, u64) {
     let hi = current_max_key.saturating_sub(lag).max(1);
     let lo = hi.saturating_sub(span.saturating_sub(1)).max(1);

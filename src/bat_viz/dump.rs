@@ -20,8 +20,8 @@
 //! tolerate concurrent structural modification (splits/merges) while the
 //! dump runs.
 
-use crate::bat_page_model::node::PageType;
 use crate::bat_page_model::BlockRef;
+use crate::bat_page_model::node::PageType;
 use crate::bat_root::index_root::RootIndex;
 use crate::bat_root::tree_root::{TREE_ROOT_MAX_KEY, TREE_ROOT_MIN_KEY};
 use crate::bat_tree::mvbt::MVBTSt;
@@ -114,12 +114,6 @@ pub struct RecordDump {
     pub delete_invalid: bool,
 }
 
-/// Dumps `tree`'s full root* list and the (de-duplicated) block graph they
-/// reach to a pretty-printed JSON file at `path`. `max_depth` bounds how many
-/// internal-page hops (from whichever root a given block is first reached
-/// through) get walked before a subtree is recorded as
-/// `NodeDump::InternalTruncated` instead of being recursed into - `None`
-/// walks every reachable block regardless of depth.
 pub fn dump_tree_to_file<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
@@ -188,7 +182,13 @@ fn all_roots<
         RootIndex::FrugalList(fg) => fg
             .unsafe_borrow()
             .iter()
-            .map(|node| (node.insert_version, node.payload.height(), node.payload.block()))
+            .map(|node| {
+                (
+                    node.insert_version,
+                    node.payload.height(),
+                    node.payload.block(),
+                )
+            })
             .collect(),
         RootIndex::LinkedList(ll) => ll
             .unsafe_borrow()
@@ -221,11 +221,6 @@ fn all_roots<
     }
 }
 
-/// Depth-first, de-duplicating dump of `block` and everything below it into
-/// `nodes`. Returns `block`'s node id (its raw pointer address, hex-encoded)
-/// whether or not this call actually performed the dump - a node already
-/// present in `visited` is a shared, already-dumped subtree and is not
-/// walked or recorded again.
 fn dump_node<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
@@ -272,17 +267,35 @@ fn dump_node<
             let min_key = records.first().map(|r| r.key.clone()).unwrap_or_default();
             let max_key = records.last().map(|r| r.key.clone()).unwrap_or_default();
 
-            NodeDump::Leaf { active, dead, min_key, max_key, records }
+            NodeDump::Leaf {
+                active,
+                dead,
+                min_key,
+                max_key,
+                records,
+            }
         }
         PageType::IndexRef(internal) => {
             let (active, dead) = internal.active_dead_count();
             let (keys, versions, children) = internal.keys_versions_pointers();
 
-            let min_key = keys.first().map(|k| k.lower().to_string()).unwrap_or_default();
-            let max_key = keys.last().map(|k| k.upper().to_string()).unwrap_or_default();
+            let min_key = keys
+                .first()
+                .map(|k| k.lower().to_string())
+                .unwrap_or_default();
+            let max_key = keys
+                .last()
+                .map(|k| k.upper().to_string())
+                .unwrap_or_default();
 
             if max_depth.is_some_and(|max| depth >= max) {
-                NodeDump::InternalTruncated { active, dead, min_key, max_key, child_count: children.len() }
+                NodeDump::InternalTruncated {
+                    active,
+                    dead,
+                    min_key,
+                    max_key,
+                    child_count: children.len(),
+                }
             } else {
                 let children = keys
                     .iter()
@@ -298,7 +311,13 @@ fn dump_node<
                     })
                     .collect();
 
-                NodeDump::Internal { active, dead, min_key, max_key, children }
+                NodeDump::Internal {
+                    active,
+                    dead,
+                    min_key,
+                    max_key,
+                    children,
+                }
             }
         }
         _ => unreachable!("BlockRef always resolves to a Leaf or Internal page"),

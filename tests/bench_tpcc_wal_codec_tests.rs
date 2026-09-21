@@ -19,10 +19,6 @@ fn round_trip(row: TpccRow) {
         format!("{decoded}"),
         "Display mismatch after round-trip"
     );
-    // Re-encoding the decoded value must reproduce the exact same bytes
-    // — the strongest available equality check given TpccRow has no
-    // PartialEq (its rows carry no natural key to compare on) and
-    // catches any field silently dropped/misordered by wal_decode.
     let mut re_encoded = Vec::new();
     decoded.wal_encode(&mut re_encoded);
     assert_eq!(bytes, re_encoded, "byte mismatch after round-trip");
@@ -182,15 +178,6 @@ fn decode_rejects_truncated_bytes() {
     }
 }
 
-/// The real end-to-end check: before `WalPayload` existed, a `TpccRow`
-/// carrying a `Box`'d struct (e.g. `Customer`) would log its *pointer*
-/// bytes, not its data — reading it back (here, via a genuine crash +
-/// `open_recovered`, not just `wal_decode` in isolation) would reconstruct
-/// a `Box` wrapping a dangling/foreign-process pointer, which is
-/// undefined behavior the instant it's read, cloned, or dropped. This
-/// drops the tree (releasing every `Box` normally) and recovers into a
-/// *new* tree from *only* the WAL bytes, so any such corruption would
-/// manifest as wrong data, a panic, or a crash here.
 #[test]
 fn crash_recovery_round_trip_for_boxed_rows() {
     use crate::bat_bench::tpcc_schema::TpccTree;
@@ -199,7 +186,8 @@ fn crash_recovery_round_trip_for_boxed_rows() {
     use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
     use crate::bat_root::index_root::RootIndexType;
 
-    let path = std::env::temp_dir().join(format!("batstore_tpcc_wal_test_{}.log", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("batstore_tpcc_wal_test_{}.log", std::process::id()));
     let _ = std::fs::remove_file(&path);
 
     let warehouse_key = k_warehouse(1);
@@ -312,13 +300,6 @@ fn crash_recovery_round_trip_for_boxed_rows() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// `TpccDatabase` counterpart to `crash_recovery_round_trip_for_boxed_rows`:
-/// every table now shares one `WalWriter`/one file (see
-/// `bat_db::Database`'s doc) as well as one `TxContext` — this confirms
-/// `TpccDatabase::open_recovered` correctly replays that single shared
-/// file back into the right tables and that a write to one table
-/// (Warehouse) survives recovery alongside a write to a different table
-/// (Customer), even though they're still physically separate trees.
 #[test]
 fn tpcc_database_crash_recovery_round_trip_across_tables() {
     use crate::bat_bench::tpcc_schema::{Table, TpccDatabase};
@@ -327,8 +308,10 @@ fn tpcc_database_crash_recovery_round_trip_across_tables() {
     use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
     use crate::bat_root::index_root::RootIndexType;
 
-    let base_path =
-        std::env::temp_dir().join(format!("batstore_tpcc_db_wal_test_{}.log", std::process::id()));
+    let base_path = std::env::temp_dir().join(format!(
+        "batstore_tpcc_db_wal_test_{}.log",
+        std::process::id()
+    ));
     let meta_path = format!("{}.meta", base_path.display());
     let _ = std::fs::remove_file(&base_path);
     let _ = std::fs::remove_file(&meta_path);

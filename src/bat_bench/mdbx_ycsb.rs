@@ -89,10 +89,6 @@ const COUNTER_NAMES: [&str; NUM_COUNTERS] =
 fn open_db(path: &std::path::Path, num_threads: usize) -> Database<WriteMap> {
     fs::create_dir_all(path)
         .unwrap_or_else(|e| panic!("mdbx_ycsb: failed to create db dir {}: {e}", path.display()));
-    // libmdbx's reader-slot table defaults to 61 (MDBX_READERS_FULL beyond that) -
-    // below our own thread-count sweep (up to 128), which was silently aborting/
-    // hanging worker threads via the `.expect` calls below. Size it to the actual
-    // thread count plus headroom for the table-creation txn and any internal use.
     let options = DatabaseOptions {
         max_readers: Some((num_threads as std::ffi::c_uint).saturating_add(8)),
         mode: Mode::ReadWrite(ReadWriteOptions {
@@ -581,10 +577,6 @@ pub fn main_mdbx_ycsb(parms: Vec<String>) {
             .unwrap_or(default)
     }
 
-    // Positional order mirrors the existing `ycsb` subcommand (main_ycsb) wherever the
-    // concept overlaps, dropping MVBTree-internal knobs (root_star_index, gc,
-    // update_in_place, WAL) that have no libmdbx equivalent - see mdbx_tpcc.rs/
-    // scripts/engines/libmdbx.py for the same convention.
     let workload: String = parms.get(2).cloned().unwrap_or_else(|| "a".to_string());
     let mix = YcsbMix::workload(&workload).unwrap_or_else(|| {
         panic!("mdbx_ycsb: unknown workload '{workload}' (expected one of a, b, c, d, e, f)")

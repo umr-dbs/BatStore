@@ -144,11 +144,6 @@ fn reconstruct_from_table_wal(path: &std::path::Path) -> HashMap<(TableId, u64),
     state
 }
 
-/// Many threads insert disjoint keys concurrently through the plain
-/// single-op `dispatch_crud` path. Once every write is confirmed durable,
-/// both the live tree and an independent reconstruction of the raw WAL
-/// bytes must show *exactly* the same key/payload pairs — no more, no
-/// fewer, no wrong values.
 #[test]
 fn concurrent_inserts_are_present_in_tree_and_match_wal_exactly() {
     let path = temp_path("insert");
@@ -223,12 +218,6 @@ fn concurrent_inserts_are_present_in_tree_and_match_wal_exactly() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Each thread owns a disjoint key range (so outcomes stay deterministic
-/// despite real concurrency) and, per key, inserts then updates it, deleting
-/// even keys afterwards. Checked three independent ways once everything is
-/// durable: the live tree, a from-scratch reconstruction of the raw WAL
-/// bytes, and a genuine `open_recovered` replay into a fresh tree — all three
-/// must agree exactly on which keys exist and what they hold.
 #[test]
 fn concurrent_insert_update_delete_matches_wal_and_recovery() {
     let path = temp_path("mixed");
@@ -342,10 +331,6 @@ fn concurrent_insert_update_delete_matches_wal_and_recovery() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The `bat_db::Database` counterpart: many threads run concurrent
-/// `DbTransaction`s, each writing its own key to three different tables at
-/// once, against one shared WAL. Once durable, every table's live data and
-/// the shared WAL's table-demultiplexed reconstruction must agree exactly.
 #[test]
 fn concurrent_db_transactions_across_tables_match_shared_wal_exactly() {
     let path = temp_path("db_multi_table");
@@ -474,14 +459,6 @@ fn concurrent_db_transactions_across_tables_match_shared_wal_exactly() {
     let _ = std::fs::remove_file(&meta_path);
 }
 
-/// The adversarial case: many threads hammer the *same* small set of keys
-/// through full multi-op `DbTransaction`s, so most attempts lose a
-/// first-writer-wins race and abort. Regardless of which thread's write
-/// actually wins each key (nondeterministic — depends on scheduling), the
-/// live table's final state and an independent reconstruction of the raw WAL
-/// bytes must land on *exactly* the same values: proof that a losing/aborted
-/// attempt never leaks into the WAL's committed history, and that the WAL
-/// never disagrees with whichever write really did win.
 #[test]
 fn contended_concurrent_transactions_tree_and_wal_agree_despite_conflicts() {
     let path = temp_path("contended");
@@ -524,11 +501,6 @@ fn contended_concurrent_transactions_tree_and_wal_agree_despite_conflicts() {
                         let payload = thread_id * 1_000_000 + i; // uniquely identifies (thread, attempt)
 
                         let mut tx = DbTransaction::begin(db_ref);
-                        // Extract an owned result first: `tx.update(..)`
-                        // returns a `CRUDOperationResult<'static, ..>`, but
-                        // matching on it while `tx` is still borrowed would
-                        // otherwise keep it alive across the `commit()`/
-                        // `drop` below.
                         let update_ts = match tx.update(t, key, payload) {
                             CRUDOperationResult::Updated(ts) => Some(ts),
                             CRUDOperationResult::Conflict => None,
@@ -536,10 +508,6 @@ fn contended_concurrent_transactions_tree_and_wal_agree_despite_conflicts() {
                         };
                         match update_ts {
                             Some(ts) => {
-                                // `wait_wal_hardened` tracks the highest
-                                // flushed *ts_start*, not ts_commit — fold
-                                // only `ts` in here, or this spins forever
-                                // (see the note in the bat_db tests).
                                 tx.commit();
                                 local_max = local_max.max(ts);
                                 committed += 1;
@@ -590,22 +558,10 @@ fn contended_concurrent_transactions_tree_and_wal_agree_despite_conflicts() {
     let _ = std::fs::remove_file(&meta_path);
 }
 
-// --- TEMPORARY investigation reproductions for the intermittent SIGSEGV under
-// `concurrent_insert_update_delete_matches_wal_and_recovery`-style load ---
-// Mirrors smo_race_investigation_tests.rs's sequential-vs-concurrent method:
-// same workload, same volume, looped many times in one process so a gdb-
-// attached run has many chances to reproduce. No WAL (irrelevant to the
-// crash, which is a plain in-memory tree corruption) — kept minimal on
-// purpose.
 const REPRO_THREADS: u64 = 6;
 const REPRO_KEYS_PER_THREAD: u64 = 300;
 const REPRO_ITERATIONS: usize = 20;
 
-// TEMPORARY diagnostic: walks the whole tree from the root, printing every
-// internal page's fence intervals (active + obsolete) and every leaf's key
-// range + live record keys, to see whether a "missing" key's expected
-// position is covered by *some* leaf's fence (a lost-write-during-split) or
-// falls into a genuine gap between siblings' fences (an unreachable leaf).
 fn dump_tree(
     tree: &TestTree,
     version: crate::bat_record_model::version_info::Version,
@@ -620,16 +576,6 @@ fn dump_tree(
         let indent = "  ".repeat(depth);
         match node.as_page_ref() {
             PageType::IndexRef(internal_page) => {
-                // Capture `is_active()`/the range *once* per entry and reuse
-                // that same captured snapshot for both printing and the
-                // recursion decision below — `keys_versions()` returns live,
-                // unsynchronized slices into the page's own memory, not an
-                // owned copy, so two separate reads of the same slice can
-                // observe different values if a concurrent thread's
-                // `mark_version_obsolete` lands in between (confirmed in
-                // practice: this diagnostic itself used to show an entry as
-                // `active=true` in the listing pass, then skip it in the
-                // recursion pass moments later, on the exact same node).
                 let (keys, versions) = internal_page.keys_versions();
                 let entries: Vec<_> = keys
                     .iter()
@@ -776,18 +722,6 @@ fn repro_concurrent_insert_update_delete() {
     }
 }
 
-// Same workload as `repro_concurrent_insert_update_delete`, but with
-// GC/block-reclaim turned on — regression coverage for a real,
-// reproducible-under-gdb crash: `traversal_write_olc` never registered
-// itself as a live reader, so `live_min_snapshot` (and thus `free_block`)
-// was blind to in-flight write traversals. GC could reclaim and reset
-// (`Node::on_reuse`) a node a writer was still mid-descent through, and a
-// leaf-to-internal reuse cycle left `pointer_region` full of leftover
-// `RecordPoint` bytes reinterpreted as pointers on top of that. Fixed by
-// actually registering the traversal's snapshot (`MVBTSt::begin_snapshot`/
-// `end_snapshot` in `traversal_write_olc`) and by
-// `InternalPage::force_reinit_pointer_region` (now wired into
-// `Node::on_reuse`) — see both call sites' docs.
 #[test]
 fn repro_concurrent_insert_update_delete_with_gc() {
     for _ in 0..REPRO_ITERATIONS {
@@ -802,10 +736,6 @@ fn repro_concurrent_insert_update_delete_with_gc() {
     }
 }
 
-// Same workload, keys shuffled instead of ascending-per-thread, to test
-// whether this is the same "ascending sequential-key splits leave some
-// leaves unreachable from the root's fence intervals" bug documented in
-// query_dispatch_tests.rs's repeated_failed_updates_do_not_corrupt_later_state.
 fn repro_run_shuffled(tree: &TestTree, t: u64) {
     use rand::prelude::SliceRandom;
     let mut keys: Vec<u64> = (0..REPRO_KEYS_PER_THREAD)
@@ -843,16 +773,6 @@ fn repro_concurrent_insert_update_delete_shuffled_keys() {
     }
 }
 
-// Minimal, targeted repro for one specific mechanism: does a concurrent
-// Insert into a leaf that a *different* thread is simultaneously splitting
-// (as `simba`, read via an unlocked `Reader` in `split()`) ever get lost?
-// No Update/Delete/GC/WAL — just two threads inserting disjoint (even/odd)
-// keys from the same dense range, so they constantly target the same
-// leaves while those leaves are actively filling up and splitting. If
-// `simba` isn't excluded from other writers while its content is snapshotted
-// into the replacement page(s), a write landing in it after the snapshot but
-// before retirement is never in the snapshot and never reachable again —
-// this test finds out empirically rather than arguing about it.
 const RACE_KEY_COUNT: u64 = 4000;
 const RACE_ITERATIONS: usize = 30;
 
@@ -899,23 +819,6 @@ fn concurrent_inserts_into_splitting_leaf_are_not_lost() {
     }
 }
 
-// --- Isolation tests for `repro_concurrent_insert_update_delete`'s lost-write
-// bug. Mirrors `smo_race_investigation_tests.rs`'s sequential/serialized/
-// unsynchronized structure (that file's own condition 1/2 already exist here
-// as `repro_sequential_insert_update_delete`/`repro_concurrent_insert_update_delete`)
-// plus a few more angles to narrow down the mechanism: does it need genuine
-// physical overlap, or merely several workers? Is it `Update`-specific, or
-// does a plain read lose the key too? Does it need `Delete` or 6-way
-// contention, or does the simplest possible concurrent case reproduce it?
-
-/// Same workload as `repro_run_range`, but every individual `dispatch_crud`
-/// call is serialized through a shared mutex — six real threads, six real
-/// `WorkerId`s, but no two threads' tree mutations can ever be physically in
-/// flight at the same time. If this still fails, the bug isn't about actual
-/// time-overlap on shared memory — it would have to be something about
-/// merely having several concurrent workers (e.g. per-worker OSIC/version
-/// state), not a data race in the literal sense. If it passes reliably
-/// (expected), that's further confirmation the bug needs genuine overlap.
 fn repro_run_range_serialized(tree: &TestTree, t: u64, lock: &Mutex<()>) {
     for i in 0..REPRO_KEYS_PER_THREAD {
         let key = t * REPRO_KEYS_PER_THREAD + i;
@@ -963,13 +866,6 @@ fn repro_serialized_concurrent_insert_update_delete() {
     }
 }
 
-/// Same disjoint-key-range workload, but checks presence via a plain
-/// `Point` read immediately after each successful `Insert` — *before*
-/// `Update` (or anything else) ever runs. Isolates whether the lost-write
-/// symptom is specific to `Update`'s own traversal/heuristic path, or shows
-/// up on a pure read too — i.e. whether the record is genuinely gone from
-/// the tree moments after a successful insert, regardless of what looks
-/// for it next.
 fn repro_run_point_after_insert(tree: &TestTree, t: u64) {
     for i in 0..REPRO_KEYS_PER_THREAD {
         let key = t * REPRO_KEYS_PER_THREAD + i;
@@ -1007,11 +903,6 @@ fn repro_concurrent_point_immediately_after_insert() {
     }
 }
 
-/// Minimal reproduction: exactly 2 threads (not 6), `Insert`+`Update` only
-/// (no `Delete`). Isolates whether high thread-count contention or
-/// `Delete`'s involvement is *necessary* to trigger the bug, or whether the
-/// simplest possible concurrent workload — two threads, disjoint keys,
-/// insert-then-update-only — already reproduces it.
 fn repro_run_range_no_delete(tree: &TestTree, t: u64, keys_per_thread: u64) {
     for i in 0..keys_per_thread {
         let key = t * keys_per_thread + i;
@@ -1044,11 +935,6 @@ fn repro_two_threads_insert_update_no_delete() {
     }
 }
 
-/// Same workload as `repro_concurrent_insert_update_delete`, but instead of
-/// panicking at the first failing key, collects every failure across the
-/// whole run — gives a sense of how widespread the loss actually is per run
-/// (one stray key vs. dozens), which the panic-on-first-failure tests above
-/// can't show.
 fn repro_run_range_collect(tree: &TestTree, t: u64, failures: &Mutex<Vec<(u64, String)>>) {
     for i in 0..REPRO_KEYS_PER_THREAD {
         let key = t * REPRO_KEYS_PER_THREAD + i;

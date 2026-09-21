@@ -99,10 +99,6 @@ pub(crate) fn initial_order_timestamp(anchor_millis: i64, ordinal: u32, count: u
         .saturating_add(offset as i64)
 }
 
-/// Selective HTAP date predicates over the history produced above. Q1 includes the older
-/// half of initial orders; Q6 selects the quarter immediately before that cutoff. Both
-/// bounds align with `o_id`-ordered leaf ranges, allowing the delivery-date zone map to
-/// reject whole leaves instead of merely filtering records after visiting them.
 pub(crate) fn htap_query_date_bounds(anchor_millis: i64) -> (i64, i64, i64) {
     let q1_cutoff = anchor_millis.saturating_sub(INITIAL_ORDER_HISTORY_MILLIS / 2);
     let q6_lo = anchor_millis.saturating_sub(INITIAL_ORDER_HISTORY_MILLIS * 3 / 4);
@@ -113,7 +109,8 @@ pub type TpccTree = crate::bat_tree::mvbt::MVBTSt<TPCC_FAN_OUT, TPCC_NUM_RECORDS
 /// `TpccDatabase::enable_scan_pool`/`scan_pool`'s pool type — a
 /// `bat_tree::scan_pool::ScanWorkerPool` fixed to `TpccTree`'s own type
 /// parameters, so callers (`parallel_scan`) don't have to spell those out.
-pub type TpccScanWorkerPool = crate::bat_tree::scan_pool::ScanWorkerPool<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
+pub type TpccScanWorkerPool =
+    crate::bat_tree::scan_pool::ScanWorkerPool<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>;
 
 /// Deliberately much larger than `TPCC_NUM_RECORDS`: Warehouse and District
 /// are TPC-C's smallest tables by row count (one row per warehouse / ten per
@@ -326,10 +323,60 @@ pub(crate) enum BigTrees {
     },
 }
 
-/// Picks `warehouse` or `district` out of one `BigTrees` arm — generic over
-/// the arm's own concrete tree type, so this one function serves all 5
-/// variants. Panics for any other `Table`; only ever called from a
-/// `TreeClass::Big`-guarded path.
+fn replay_big_pair<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+    warehouse: &Arc<crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>>,
+    district: &Arc<crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>>,
+    table_id: TableId,
+    op: crate::bat_crud_model::crud_operation::CRUDOperation<TpccKey, TpccRow>,
+) {
+    if table_id == WAREHOUSE_BIG_TABLE_ID {
+        warehouse.replay_apply(op);
+    } else if table_id == DISTRICT_BIG_TABLE_ID {
+        district.replay_apply(op);
+    }
+}
+
+fn replay_big_write(
+    big_trees: &BigTrees,
+    table_id: TableId,
+    op: crate::bat_crud_model::crud_operation::CRUDOperation<TpccKey, TpccRow>,
+) {
+    match big_trees {
+        BigTrees::KiB1 {
+            warehouse,
+            district,
+        } => replay_big_pair(warehouse, district, table_id, op),
+        BigTrees::KiB2 {
+            warehouse,
+            district,
+        } => replay_big_pair(warehouse, district, table_id, op),
+        BigTrees::KiB4 {
+            warehouse,
+            district,
+        } => replay_big_pair(warehouse, district, table_id, op),
+        BigTrees::KiB8 {
+            warehouse,
+            district,
+        } => replay_big_pair(warehouse, district, table_id, op),
+        BigTrees::KiB16 {
+            warehouse,
+            district,
+        } => replay_big_pair(warehouse, district, table_id, op),
+        BigTrees::KiB32 {
+            warehouse,
+            district,
+        } => replay_big_pair(warehouse, district, table_id, op),
+        BigTrees::KiB64 {
+            warehouse,
+            district,
+        } => replay_big_pair(warehouse, district, table_id, op),
+        BigTrees::KiB512 {
+            warehouse,
+            district,
+        } => replay_big_pair(warehouse, district, table_id, op),
+    }
+}
+
 fn pick_big<'x, T>(table: Table, warehouse: &'x Arc<T>, district: &'x Arc<T>) -> &'x T {
     match table {
         Table::Warehouse => warehouse,
@@ -338,12 +385,6 @@ fn pick_big<'x, T>(table: Table, warehouse: &'x Arc<T>, district: &'x Arc<T>) ->
     }
 }
 
-/// Spawns `TpccDatabase::set_vacuum`'s big-tree sweep thread,
-/// generic over whichever concrete `FAN_OUT`/`NUM_RECORDS` the caller's
-/// `BigTrees` arm resolved to — one function serves all 8 variants, same
-/// rationale as `pick_big`. Loops `warehouse`/`district` directly (not
-/// `Table::ALL`/`dispatch_big`'s dynamic table lookup) since there are only
-/// ever exactly these two.
 fn spawn_big_idle_compaction_thread<const FAN_OUT: usize, const NUM_RECORDS: usize>(
     warehouse: &Arc<crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>>,
     district: &Arc<crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>>,
@@ -387,18 +428,6 @@ pub(crate) trait BigTreeOp {
     ) -> Self::Output;
 }
 
-/// Re-wraps a `CRUDOperationResult` produced against a `TreeClass::Big`
-/// tree (a different `NUM_RECORDS` than the database's standard tables)
-/// under the standard tree's own const generics, so callers that need to
-/// return/compare results across both classes (`TpccTxn`'s methods,
-/// `dispatch_crud_big` below) see one uniform type. Sound because nothing
-/// that goes through `BigTreeOp`/`dispatch_big` ever produces
-/// `MatchedRecordIter` — the one variant that actually carries
-/// `NUM_RECORDS`/`FAN_OUT`-shaped data (a live, zero-copy `RangeQueryIter`
-/// borrowing from the tree's own blocks — see `bat_db::transaction`'s module
-/// doc: "range is always eager"). Every other variant carries no such data,
-/// so re-wrapping it under different const generics changes nothing about
-/// its actual content.
 pub(crate) fn normalize<'a, const FAN_OUT_FROM: usize, const NUM_RECORDS_FROM: usize>(
     r: CRUDOperationResult<'a, FAN_OUT_FROM, NUM_RECORDS_FROM, TpccKey, TpccRow>,
 ) -> CRUDOperationResult<'static, TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow> {
@@ -419,14 +448,6 @@ pub(crate) fn normalize<'a, const FAN_OUT_FROM: usize, const NUM_RECORDS_FROM: u
     }
 }
 
-/// `MVBTSt::dispatch_crud`'s counterpart for `TreeClass::Big` tables — a
-/// single-op, auto-committing convenience for callers that don't need a
-/// full `TpccTxn` (population via `bat_bench::tpcc_load`, tests seeding a
-/// row directly). `bat_bench::tpcc_txn`'s own business-transaction logic
-/// never calls this — it always dispatches through `TpccDatabase::dispatch_big`
-/// via a purpose-built `BigTreeOp` impl instead, since a business
-/// transaction needs write-tracking/abort semantics this convenience
-/// doesn't provide.
 pub fn dispatch_crud_big(
     db: &TpccDatabase,
     table: Table,
@@ -649,10 +670,6 @@ fn dec_key(k: TpccKey) -> TpccKey {
 }
 
 impl TpccDatabase {
-    /// Same as `new_with_big_tree_size`, at `BigTreeSize::default()`
-    /// (`KiB32` — the measured sweet spot, see that enum's doc). Kept as
-    /// the default constructor so every pre-existing caller (tests, the
-    /// TPC-C driver's own default path) keeps working unchanged.
     pub fn new(root_index_type: RootIndexType) -> Self {
         Self::new_with_big_tree_size(root_index_type, BigTreeSize::default())
     }
@@ -747,20 +764,6 @@ impl TpccDatabase {
         })
     }
 
-    /// Creates every one of the 12 *standard-class* tables (see
-    /// `TreeClass`), in `Table::ALL`'s fixed order — or, for a database
-    /// recovered from an already-populated catalog, simply looks each one up
-    /// (`Database::create_table` is idempotent by name, see its doc) — and
-    /// returns the resulting `Table -> TableId` cache. Shared by `new`
-    /// (always actually creates) and `open_recovered` (recreates from the
-    /// catalog `Database::open_recovered` already read; this loop is then a
-    /// no-op lookup for every name already present, or a real create for a
-    /// genuinely fresh — no prior WAL — database). `Warehouse`/`District`
-    /// are deliberately skipped here — `db`'s own catalog only ever needs to
-    /// know about its own 12 tables; the big trees are built separately by
-    /// `make_big_trees` and never touch `db.create_table` at all, so their
-    /// existence can't shift any standard table's `TableId` regardless of
-    /// which order this loop visits `Table::ALL` in.
     fn create_all_tables(
         db: &Database<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>,
     ) -> [TableId; 14] {
@@ -771,22 +774,14 @@ impl TpccDatabase {
                 if t == Table::OrderLine {
                     tree.set_zone_map_projection(order_line_delivery_d_zone_map_projection);
                 }
-                table_ids[t as usize] = tree
-                    .table_id()
-                    .expect("bat_db::Database::create_table always assigns its new table a TableId");
+                table_ids[t as usize] = tree.table_id().expect(
+                    "bat_db::Database::create_table always assigns its new table a TableId",
+                );
             }
         }
         table_ids
     }
 
-    /// Builds the two `TreeClass::Big` trees at `size`, sharing `db`'s own
-    /// `Arc<TxContext>` (see `BigTreeSize`'s doc) so a `TpccTxn` spanning a
-    /// big and a standard table still commits/aborts atomically. Called by
-    /// both `new_with_big_tree_size` (fresh) and `open_recovered_with_big_tree_size`
-    /// (recovery then replays into the result separately — see
-    /// `TreeClass`'s doc — since these two trees aren't part of `db`'s own
-    /// catalog for `Database::open_recovered` to have already
-    /// recreated/replayed).
     fn make_big_trees(
         root_index_type: RootIndexType,
         db: &Database<TPCC_FAN_OUT, TPCC_NUM_RECORDS, TpccKey, TpccRow>,
@@ -881,14 +876,6 @@ impl TpccDatabase {
         }
     }
 
-    /// Runs a `TreeClass::Big`-only operation against whichever concrete
-    /// tree `table` resolves to, for whatever `BigTreeSize` this database
-    /// was built with — the one place that matches on `BigTrees`'s variant,
-    /// so `TpccTxn`'s operations don't each repeat a 5-way match. `op.run`
-    /// is generic over `NUM_RECORDS`, monomorphized once per variant at
-    /// compile time — still no dynamic dispatch, just one static dispatch
-    /// site instead of many. Panics (via `pick_big`) if `table` isn't
-    /// `Table::Warehouse`/`Table::District`.
     pub(crate) fn dispatch_big<Op: BigTreeOp>(&self, table: Table, op: Op) -> Op::Output {
         match &self.big_trees {
             BigTrees::KiB1 {
@@ -926,11 +913,6 @@ impl TpccDatabase {
         }
     }
 
-    /// Only for `TreeClass::Standard` tables — see `TreeClass`'s doc.
-    /// Panics (rather than silently indexing `table_ids`' meaningless `0`
-    /// default) if called with `Table::Warehouse`/`Table::District`, whose
-    /// trees live outside `db`'s table list entirely; use `dispatch_big`
-    /// for those instead.
     #[inline(always)]
     pub fn tree_for(&self, table: Table) -> Arc<TpccTree> {
         assert_eq!(
@@ -950,18 +932,7 @@ impl TpccDatabase {
         self.db.current_version()
     }
 
-    /// Toggles block reclaim uniformly across every table on this database
-    /// — see `MVBTSt::enable_gc`'s doc for why partial/per-table toggling
-    /// would make pruning the shared commit logs unsound. Includes the two
-    /// `TreeClass::Big` trees: they share `ctx`'s pruning flag with every
-    /// standard table (see `make_big_trees`), so leaving their own
-    /// `block_reclaim_enabled` out of step would be exactly the unsound
-    /// half-toggled state `MVBTSt::enable_gc`'s doc warns about.
     pub fn enable_gc(&self, update_in_place: bool, vacuum: Option<(f64, Duration)>) {
-        // `vacuum`'s own thread(s) are started separately, below, via
-        // `set_vacuum` — it has to cover both `db`'s standard tables and
-        // this struct's own `big_trees`, which `db.enable_gc` alone can't
-        // reach (see `set_vacuum`'s doc).
         self.db.enable_gc(update_in_place, None);
         match &self.big_trees {
             BigTrees::KiB1 {
@@ -1087,25 +1058,6 @@ impl TpccDatabase {
         self.set_vacuum(None);
     }
 
-    /// Starts or stops idle/proactive compaction across all 14 tables — GC's
-    /// background half (see `bat_db::Database::set_vacuum`'s doc), not a
-    /// separately toggled feature, so this is the single entry point
-    /// `enable_gc`/`disable_gc` themselves call as well as what a caller
-    /// reaches for when it needs the vacuum sweep's lifecycle to diverge
-    /// from GC's own (see `bat_db::Database::set_vacuum`'s doc for why that
-    /// comes up in practice). `Some((dead_ratio_threshold, sweep_interval))`
-    /// (re)starts both sweep threads with those parameters; `None` stops
-    /// whichever are running. `db.set_vacuum` alone only reaches the 12
-    /// standard tables; this additionally starts/stops its own sweep thread
-    /// for `Table::Warehouse`/`Table::District` specifically, since
-    /// `big_trees` lives outside `db`'s table list entirely (see
-    /// `TreeClass`'s doc). Snapshots the *current* `big_trees` set once, at
-    /// call time, the same "tables/trees are created once, at
-    /// database-init time" assumption `db.set_vacuum` itself relies on.
-    ///
-    /// Up to two background threads total when `Some`, each a permanent
-    /// `WorkerId` — this one plus `db.set_vacuum`'s own — see that method's
-    /// doc.
     pub fn set_vacuum(&self, vacuum: Option<(f64, Duration)>) {
         self.db.set_vacuum(vacuum);
         self.disable_big_idle_compaction();
@@ -1117,30 +1069,86 @@ impl TpccDatabase {
         *self.idle_compaction_stop.lock().unwrap() = Some(stop.clone());
 
         match &self.big_trees {
-            BigTrees::KiB1 { warehouse, district } => {
-                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
-            }
-            BigTrees::KiB2 { warehouse, district } => {
-                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
-            }
-            BigTrees::KiB4 { warehouse, district } => {
-                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
-            }
-            BigTrees::KiB8 { warehouse, district } => {
-                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
-            }
-            BigTrees::KiB16 { warehouse, district } => {
-                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
-            }
-            BigTrees::KiB32 { warehouse, district } => {
-                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
-            }
-            BigTrees::KiB64 { warehouse, district } => {
-                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
-            }
-            BigTrees::KiB512 { warehouse, district } => {
-                spawn_big_idle_compaction_thread(warehouse, district, dead_ratio_threshold, sweep_interval, stop)
-            }
+            BigTrees::KiB1 {
+                warehouse,
+                district,
+            } => spawn_big_idle_compaction_thread(
+                warehouse,
+                district,
+                dead_ratio_threshold,
+                sweep_interval,
+                stop,
+            ),
+            BigTrees::KiB2 {
+                warehouse,
+                district,
+            } => spawn_big_idle_compaction_thread(
+                warehouse,
+                district,
+                dead_ratio_threshold,
+                sweep_interval,
+                stop,
+            ),
+            BigTrees::KiB4 {
+                warehouse,
+                district,
+            } => spawn_big_idle_compaction_thread(
+                warehouse,
+                district,
+                dead_ratio_threshold,
+                sweep_interval,
+                stop,
+            ),
+            BigTrees::KiB8 {
+                warehouse,
+                district,
+            } => spawn_big_idle_compaction_thread(
+                warehouse,
+                district,
+                dead_ratio_threshold,
+                sweep_interval,
+                stop,
+            ),
+            BigTrees::KiB16 {
+                warehouse,
+                district,
+            } => spawn_big_idle_compaction_thread(
+                warehouse,
+                district,
+                dead_ratio_threshold,
+                sweep_interval,
+                stop,
+            ),
+            BigTrees::KiB32 {
+                warehouse,
+                district,
+            } => spawn_big_idle_compaction_thread(
+                warehouse,
+                district,
+                dead_ratio_threshold,
+                sweep_interval,
+                stop,
+            ),
+            BigTrees::KiB64 {
+                warehouse,
+                district,
+            } => spawn_big_idle_compaction_thread(
+                warehouse,
+                district,
+                dead_ratio_threshold,
+                sweep_interval,
+                stop,
+            ),
+            BigTrees::KiB512 {
+                warehouse,
+                district,
+            } => spawn_big_idle_compaction_thread(
+                warehouse,
+                district,
+                dead_ratio_threshold,
+                sweep_interval,
+                stop,
+            ),
         }
     }
 
@@ -1150,34 +1158,24 @@ impl TpccDatabase {
         }
     }
 
-    /// Assigns `table`'s tree a dedicated shared scan-worker pool — a thin,
-    /// `Table`-keyed wrapper over `bat_db::Database::enable_scan_pool`
-    /// (see that method's and `bat_tree::scan_pool::ScanWorkerPool`'s docs;
-    /// this is a `db`-wide feature, not something specific to
-    /// `TpccDatabase`). `expected_concurrent_queries` — typically the
-    /// caller's own OLAP thread count, since that's usually known by the
-    /// time a workload begins — feeds `ScanWorkerPool::fair_query_fanout`,
-    /// so each concurrently-querying caller asks for its fair share of
-    /// this pool instead of every query grabbing a fixed slice regardless
-    /// of how many others are sharing it; `None` if that count isn't
-    /// known. `table` must be `TreeClass::Standard` (see `tree_for`'s doc,
-    /// which this panics through for `Warehouse`/`District`, since those
-    /// two live outside `db`'s table list entirely).
-    pub fn enable_scan_pool(&self, table: Table, num_workers: usize, expected_concurrent_queries: Option<usize>) {
+    pub fn enable_scan_pool(
+        &self,
+        table: Table,
+        num_workers: usize,
+        expected_concurrent_queries: Option<usize>,
+    ) {
         assert_eq!(
             table.class(),
             TreeClass::Standard,
             "TpccDatabase::enable_scan_pool: {table:?} is a TreeClass::Big table"
         );
-        self.db.enable_scan_pool(self.table_ids[table as usize], num_workers, expected_concurrent_queries);
+        self.db.enable_scan_pool(
+            self.table_ids[table as usize],
+            num_workers,
+            expected_concurrent_queries,
+        );
     }
 
-    /// Drops the pool `enable_scan_pool` assigned to `table`, if any — a
-    /// no-op otherwise. See `bat_db::Database::disable_scan_pool`'s doc for
-    /// the (unwaited) worker thread shutdown this triggers. Panics for
-    /// `Warehouse`/`District` — see `enable_scan_pool`'s doc; without this,
-    /// `table_ids`' meaningless `0` for those two would silently disable
-    /// whichever real table happens to hold `TableId` 0.
     pub fn disable_scan_pool(&self, table: Table) {
         assert_eq!(
             table.class(),
@@ -1269,22 +1267,6 @@ impl TpccDatabase {
 }
 
 impl TpccDatabase {
-    /// Builds a fresh database, replays the *single* shared WAL file found
-    /// at `wal_path` — via `bat_db::Database::open_recovered`, which reads
-    /// its own table catalog to know which tables to recreate, in their
-    /// original order, with no per-table file/path bookkeeping needed here
-    /// — then attaches a live writer. The `TpccDatabase` counterpart to
-    /// `bat_db::Database::open_recovered`. Unlike the old one-file-per-table
-    /// design, a `TpccTxn` spanning several tables now logs exactly one
-    /// Commit marker for the whole transaction (see
-    /// `bat_db::DbTransaction::commit`'s doc), so recovery no longer has the
-    /// old "a crash between two tables' markers can leave one table's share
-    /// of a transaction replayed and another's not" gap.
-    /// Same as `open_recovered_with_big_tree_size`, at `BigTreeSize::default()`.
-    /// `NUM_RECORDS` never appears in the WAL wire format (see
-    /// `WAREHOUSE_BIG_TABLE_ID`'s doc), so recovering at a *different*
-    /// `BigTreeSize` than whatever originally wrote the log is completely
-    /// safe — every logged op just replays into a freshly-sized tree.
     pub fn open_recovered(
         root_index_type: RootIndexType,
         wal_path: &std::path::Path,
@@ -1304,7 +1286,7 @@ impl TpccDatabase {
         flush_interval: std::time::Duration,
         big_tree_size: BigTreeSize,
     ) -> std::io::Result<Self> {
-        let db = Database::open_recovered(
+        let (db, mut big_trees) = Database::open_recovered_with_extra(
             root_index_type,
             inc_key,
             dec_key,
@@ -1312,33 +1294,24 @@ impl TpccDatabase {
             TpccKey::MAX,
             wal_path,
             flush_interval,
+            |db| {
+                Self::make_big_trees(
+                    root_index_type,
+                    db,
+                    big_tree_size,
+                    Some(Arc::new(WalBackend::Off)),
+                )
+            },
+            |big_trees, table_id, op| replay_big_write(big_trees, table_id, op),
         )?;
         let table_ids = Self::create_all_tables(&db);
 
-        // `db`'s own `open_recovered` only knows about (and only replayed)
-        // its own 12-table catalog — the two `TreeClass::Big` trees live
-        // outside it entirely (see `TreeClass`'s doc) and need their own
-        // replay pass over the same shared log file, routed by their own
-        // reserved `TableId` tags. `db`'s replay already truncated the file
-        // to its valid prefix, so this second, independent scan of that same
-        // (now-stable) prefix finds the identical valid length — nothing
-        // left to truncate again here.
-        let mut big_trees = Self::make_big_trees(
-            root_index_type,
-            &db,
-            big_tree_size,
-            Some(Arc::new(WalBackend::Off)),
-        );
+        // Standard and big trees were populated from one shared WAL scan
+        // above. Recovery kept the big trees' WAL disabled so replay itself
+        // could not append; attach the database's live writer now.
         let writer = db.wal_writer();
-        macro_rules! replay_and_configure {
+        macro_rules! configure_recovered {
             ($warehouse:expr, $district:expr) => {{
-                crate::bat_wal::recovery::replay_two_tables(
-                    &$warehouse,
-                    WAREHOUSE_BIG_TABLE_ID,
-                    &$district,
-                    DISTRICT_BIG_TABLE_ID,
-                    wal_path,
-                )?;
                 Arc::get_mut($warehouse)
                     .expect("big tree must be unshared during recovery construction")
                     .set_wal_before_share(writer.clone());
@@ -1351,35 +1324,35 @@ impl TpccDatabase {
             BigTrees::KiB1 {
                 warehouse,
                 district,
-            } => replay_and_configure!(warehouse, district),
+            } => configure_recovered!(warehouse, district),
             BigTrees::KiB2 {
                 warehouse,
                 district,
-            } => replay_and_configure!(warehouse, district),
+            } => configure_recovered!(warehouse, district),
             BigTrees::KiB4 {
                 warehouse,
                 district,
-            } => replay_and_configure!(warehouse, district),
+            } => configure_recovered!(warehouse, district),
             BigTrees::KiB8 {
                 warehouse,
                 district,
-            } => replay_and_configure!(warehouse, district),
+            } => configure_recovered!(warehouse, district),
             BigTrees::KiB16 {
                 warehouse,
                 district,
-            } => replay_and_configure!(warehouse, district),
+            } => configure_recovered!(warehouse, district),
             BigTrees::KiB32 {
                 warehouse,
                 district,
-            } => replay_and_configure!(warehouse, district),
+            } => configure_recovered!(warehouse, district),
             BigTrees::KiB64 {
                 warehouse,
                 district,
-            } => replay_and_configure!(warehouse, district),
+            } => configure_recovered!(warehouse, district),
             BigTrees::KiB512 {
                 warehouse,
                 district,
-            } => replay_and_configure!(warehouse, district),
+            } => configure_recovered!(warehouse, district),
         }
 
         Ok(Self {
@@ -1390,16 +1363,6 @@ impl TpccDatabase {
         })
     }
 }
-
-// ---------------------------------------------------------------------
-// Table range helpers
-// ---------------------------------------------------------------------
-//
-// Table selection is now "which tree" (see `Table`/`TpccDatabase::tree_for`),
-// not "which key range", so every one of these is just the trivial
-// full-range scan of that table's own tree. Kept as thin named wrappers so
-// `olap_scan.rs`/`tpch_queries.rs` call sites don't change shape, just their
-// target tree.
 
 #[inline(always)]
 fn full_range() -> Interval<TpccKey> {
@@ -1546,16 +1509,6 @@ pub const fn k_order_line(w_id: u32, d_id: u8, o_id: u32, ol_number: u8) -> Tpcc
         | ol_number as u64
 }
 
-/// `[lower, upper]` bounds covering every `ol_number` (1..=15) of one order.
-///
-/// The upper sentinel must be masked to `OL_NO_BITS` (`u8::MAX` doesn't fit:
-/// `OL_NO_BITS` is 4 bits wide, not a full byte, unlike e.g. `FIRST_CODE_BITS`
-/// which *is* exactly `u16`-wide and so can use `u16::MAX` directly in
-/// `k_customer_name_idx_prefix_bounds`) - an unmasked 255 there OR's bits
-/// into `o_id`'s own low nibble (`k_order_line`'s `o_id << OL_NO_BITS`
-/// starts right where `ol_number`'s bits end), rounding the upper bound's
-/// `o_id` up to the next `o_id | 0b1111` and leaking into however many
-/// subsequent orders' order-lines happen to fall in that widened range.
 pub const fn k_order_line_bounds(w_id: u32, d_id: u8, o_id: u32) -> (TpccKey, TpccKey) {
     const MAX_OL_NUMBER: u8 = (1u8 << OL_NO_BITS) - 1;
     (
@@ -1703,26 +1656,14 @@ pub struct OrderLine {
     pub ol_dist_info: [u8; 24],
 }
 
-/// Order-preserving `i64 -> u64` encoding for `MVBTSt::set_zone_map_projection`
-/// / `RangeQueryIter::with_zone_predicate` (both require a `u64`-space
-/// bound): flips the sign bit so `i64::MIN..=i64::MAX`'s ordering survives
-/// the reinterpretation as `u64`, the standard trick for embedding a signed
-/// total order into an unsigned one. Shared between `order_line_delivery_d_
-/// zone_map_projection` (the write side, called from `create_all_tables`)
-/// and `bat_bench::tpch_queries`'s Q1/Q6 (the read side) — both *must* use
-/// this exact same encoding, or a leaf's zone map and a query's predicate
-/// would silently disagree about what a given bound means.
 pub(crate) fn encode_signed_zone_value(v: i64) -> u64 {
     (v as u64) ^ (1u64 << 63)
 }
 
-/// `ORDER_LINE`'s zone-map projection, tracking `ol_delivery_d` — the exact
-/// column CH-benCHmark Q1/Q6 filter on (see `bat_bench::parallel_scan`'s
-/// `q1_parallel`/`q6_parallel`). `None` (undelivered) doesn't widen the
-/// zone map at all, which is what lets an all-undelivered leaf be skipped
-/// outright for a delivered-date predicate — see `LeafZoneMap`'s doc.
 fn order_line_delivery_d_zone_map_projection(row: &TpccRow) -> Option<u64> {
-    row.as_order_line().ol_delivery_d.map(encode_signed_zone_value)
+    row.as_order_line()
+        .ol_delivery_d
+        .map(encode_signed_zone_value)
 }
 
 #[derive(Clone, Debug)]

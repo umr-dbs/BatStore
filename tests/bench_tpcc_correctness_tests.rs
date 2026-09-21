@@ -101,11 +101,6 @@ fn setup() -> (TpccConfig, TpccDatabase, AtomicU64) {
     (cfg, db, history_seq)
 }
 
-/// New-Order (spec §2.4) must, for every committed call: bump the district's
-/// `d_next_o_id` by exactly 1, add exactly one Orders/NewOrder row, and
-/// apply each order-line's quantity to its stock row's `s_ytd` (and bump
-/// `s_order_cnt` by 1) — checked in aggregate across every stock row so the
-/// check doesn't need to know which items a given call happened to order.
 #[test]
 fn new_order_keeps_district_counter_stock_and_order_lines_consistent() {
     let (cfg, db, _history_seq) = setup();
@@ -182,11 +177,6 @@ fn new_order_keeps_district_counter_stock_and_order_lines_consistent() {
     );
 }
 
-/// Payment (spec §2.5) must, for every committed call: debit `c_balance`
-/// and credit `c_ytd_payment` by exactly the same amount (opposite signs),
-/// insert exactly one History row, and grow `w_ytd` by exactly the total
-/// amount applied across customers — verified without ever reading the
-/// (internally chosen) amount directly, only via these cross-table deltas.
 #[test]
 fn payment_moves_matching_amounts_across_customer_history_and_warehouse() {
     let (cfg, db, history_seq) = setup();
@@ -197,13 +187,6 @@ fn payment_moves_matching_amounts_across_customer_history_and_warehouse() {
     let w_ytd_before = warehouse_ytd(&db);
     let history_before = scan_all(&db, Table::History).len();
 
-    // Single warehouse/district, single-threaded: every call finds its
-    // Warehouse/District/Customer rows and nothing can lose a first-writer-
-    // wins race, so `Conflict` here would be a bug. `UserAbort` (the by-name
-    // lookup drawing a surname with no matching customer) is still a
-    // legitimate, spec-defined outcome — and, since it returns before
-    // `commit()`, `Drop` reverts its earlier Warehouse/District writes
-    // entirely (see `TpccTxn`'s doc), so it must leave no trace below.
     let mut committed: u32 = 0;
     for i in 0..12 {
         match tpcc_txn::payment(&db, &cfg, 1, false, &history_seq) {
@@ -241,11 +224,6 @@ fn payment_moves_matching_amounts_across_customer_history_and_warehouse() {
     );
 }
 
-/// Delivery (spec §2.7) must dequeue the *oldest* queued new-order (smallest
-/// `o_id`) for the district, mark its Order as carrier-assigned, stamp every
-/// one of its order-lines as delivered, and credit its customer's balance by
-/// exactly the sum of those order-lines' amounts — computed independently
-/// here, from the still-queued order, before calling `delivery`.
 #[test]
 fn delivery_dequeues_oldest_new_order_and_credits_the_right_customer_by_the_right_amount() {
     let (cfg, db, _history_seq) = setup();

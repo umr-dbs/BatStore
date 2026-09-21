@@ -93,18 +93,6 @@ fn empty_groups() -> [OrderLineSummary; 16] {
     })
 }
 
-/// Splits `order_line_table_range()`'s full domain into exactly `fanout`
-/// contiguous, disjoint sub-ranges by warehouse id (1-indexed, see
-/// `tpcc_driver.rs`'s `1..=num_warehouses` population loop) — see this
-/// module's doc for why that's a safe, traversal-free split axis. The first
-/// and last blocks use the table's own `TpccKey::MIN`/`MAX` sentinels rather
-/// than a computed bound, so the partition can never leave out a
-/// differently-encoded edge row even if the key layout ever changes.
-///
-/// Requires `num_warehouses >= 1` (already asserted by `tpcc_driver::run_tpcc`
-/// for every real caller) — at `0` every block's `count` is `0`, so every
-/// worker would get the "no warehouses left" empty interval and the scan
-/// would wrongly see zero rows instead of falling back to the full range.
 fn partition_order_line_range(num_warehouses: u32, fanout: usize) -> Vec<Interval<TpccKey>> {
     let fanout = fanout.max(1);
     let n = num_warehouses as usize;
@@ -117,12 +105,6 @@ fn partition_order_line_range(num_warehouses: u32, fanout: usize) -> Vec<Interva
     for i in 0..fanout {
         let count = base + if i < rem { 1 } else { 0 };
         if count == 0 {
-            // No warehouses left for this worker — a genuinely empty,
-            // inverted interval (`lower > upper`) rather than skipping it,
-            // so every dispatch still sends/receives exactly `fanout` jobs.
-            // `RangeQueryIter`/`try_for_each_ref` both already treat
-            // `lower > upper` as "immediately exhausted" (see
-            // `iter_query.rs::refill`), so this costs nothing.
             ranges.push(Interval::new(full.upper, full.lower));
             continue;
         }
@@ -145,21 +127,6 @@ fn partition_order_line_range(num_warehouses: u32, fanout: usize) -> Vec<Interva
     ranges
 }
 
-/// Parallel drop-in replacement for `tpch_queries::q1`, splitting the scan
-/// across `pool` instead of running it on the calling thread alone. Opens
-/// its own `TpccTxn` exactly like the sequential version so `ts_start` stays
-/// registered (and therefore GC-protected) for the whole dispatch — each
-/// sub-range job scans with `register_reader_si: false`, relying entirely
-/// on this transaction's registration, exactly the same trust relationship
-/// `TpccTxn::range_for_each` already relies on for its own non-owning
-/// scans. Uses `READ_ONLY_SCAN_WORKER_ID` rather than this thread's real
-/// `WorkerId` for the same reason `ScanWorkerPool`'s worker threads do (see
-/// that constant's doc): a job here might run on one of the pool's own
-/// worker threads (which never register a `WorkerId` at all) or, via
-/// `try_dispatch`'s busy fallback (or `pool.fair_query_fanout()` returning
-/// `None`, below), inline on this call's own already-registered OLAP
-/// thread — either way the sentinel is correct, so the reducer doesn't
-/// need to know or care which.
 pub fn q1_parallel(
     db: &TpccDatabase,
     pool: &ScanWorkerPool,
@@ -171,11 +138,6 @@ pub fn q1_parallel(
 
     let reducer = move |tree: &TpccTree, range| {
         let mut groups = empty_groups();
-        // `delivered <= delivered_before` (and `ol_delivery_d.is_some()`)
-        // is exactly `RangeQueryIter`'s automatic zone-map filter below —
-        // see `RangeQueryIter::with_zone_predicate`'s doc — so this
-        // closure no longer re-checks it; every row `visit` sees here
-        // already satisfies it.
         RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID)
             .with_zone_predicate(
                 encode_signed_zone_value(i64::MIN),
@@ -227,15 +189,6 @@ pub fn q6_parallel(
 
     let reducer = move |tree: &TpccTree, range| {
         let mut revenue = 0.0;
-        // `date_hi - 1` makes the zone predicate's inclusive upper bound
-        // exactly equivalent to the original `delivered < date_hi` (dates
-        // are integer-valued) — `saturating_sub` only matters for the
-        // degenerate `date_hi == i64::MIN` case, where nothing can ever be
-        // `< date_hi` anyway, and the resulting `lo > hi` bound correctly
-        // matches nothing. With that, the zone-map filter (see
-        // `RangeQueryIter::with_zone_predicate`'s doc) already enforces the
-        // whole delivered-date range automatically; only `ol_quantity`
-        // (not a zone-mapped column) still needs a manual check here.
         RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID)
             .with_zone_predicate(
                 encode_signed_zone_value(date_lo),
@@ -262,12 +215,6 @@ pub fn q6_parallel(
     (revenue, ts_start)
 }
 
-/// Parallel drop-in replacement for `tpch_queries::q1_benchbase` — see
-/// [`q1_parallel`]'s doc for the dispatch/registration mechanics, which are
-/// identical here; only the (fixed, unparameterized) BenchBase predicate
-/// differs. `BENCHBASE_Q1_DELIVERY_AFTER_MILLIS + 1` reproduces
-/// `q1_benchbase`'s own strict `>` cutoff (ORDER_LINE timestamps are integer
-/// milliseconds), matching that function's identical comment.
 pub fn q1_benchbase_parallel(
     db: &TpccDatabase,
     pool: &ScanWorkerPool,

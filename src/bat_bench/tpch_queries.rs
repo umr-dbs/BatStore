@@ -31,15 +31,6 @@ use crate::bat_bench::tpcc_txn::{TpccTxn, many, one};
 use crate::bat_query::interval::Interval;
 use crate::bat_record_model::version_info::Version;
 
-// Every query below returns its result alongside the snapshot (`ts_start`)
-// it read under, letting a caller measure HTAP-style staleness: how many
-// logical-clock versions (`GlobalClock` advances on every transaction begin
-// *and* commit, so this counts logical ticks, not a raw commit count)
-// elapsed between this query's snapshot and whatever's freshest by the time
-// it's read the result — i.e. `tree.current_version() - ts_start` right
-// after a query returns is "how stale is this analytical answer, in
-// versions, the moment I have it."
-
 /// Per-`ol_number` group produced by [`q1`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OrderLineSummary {
@@ -67,12 +58,6 @@ impl OrderLineSummary {
     }
 }
 
-/// CH-benCHmark Q1 ("Pricing Summary Report", adapted from TPC-H Q1): groups
-/// every delivered order-line by its position within the order (`ol_number`,
-/// 1..=15 — this schema's stand-in for TPC-H `lineitem`'s
-/// `l_returnflag`/`l_linestatus`, since `order_line` has no such column),
-/// aggregating count/sum(quantity)/sum(amount). Logically scans the full `ORDER_LINE`
-/// key range, but its delivery-date zone predicate can reject nonmatching leaves.
 pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, Version) {
     let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
@@ -81,10 +66,6 @@ pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, V
         ..Default::default()
     });
 
-    // The `delivered <= delivered_before` (and non-`None`) check is exactly
-    // `RangeQueryIter`'s automatic zone-map filter — see
-    // `RangeQueryIter::with_zone_predicate`'s doc — so this closure doesn't
-    // re-check it; every row reaching it already satisfies it.
     tx.range_for_each_zone_pruned(
         Table::OrderLine,
         order_line_table_range(),
@@ -105,10 +86,6 @@ pub fn q1(db: &TpccDatabase, delivered_before: i64) -> (Vec<OrderLineSummary>, V
     (out, ts_start)
 }
 
-/// Exact predicate and aggregation used by BenchBase CH-benCHmark Q1. Unlike [`q1`]'s
-/// selective historical variant, this keeps delivered rows strictly newer than the fixed
-/// 2007-01-02 cutoff. The zone-map range starts one millisecond after that cutoff because
-/// ORDER_LINE timestamps are integer milliseconds and BenchBase uses a strict `>`.
 pub fn q1_benchbase(db: &TpccDatabase) -> (Vec<OrderLineSummary>, Version) {
     let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
@@ -137,18 +114,10 @@ pub fn q1_benchbase(db: &TpccDatabase) -> (Vec<OrderLineSummary>, Version) {
     (out, ts_start)
 }
 
-/// CH-benCHmark Q6 ("Forecasting Revenue Change", adapted from TPC-H Q6):
-/// total revenue (`sum(ol_amount)`) from order-lines delivered within
-/// `[date_lo, date_hi)` whose quantity is below `max_qty`. Logically scans the full
-/// `ORDER_LINE` key range, while the date interval prunes leaves through the zone map.
 pub fn q6(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, Version) {
     let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
     let mut revenue = 0.0;
-    // `date_hi - 1` (saturating) makes the zone predicate's inclusive upper
-    // bound exactly `delivered < date_hi` for integer-valued dates — see
-    // `parallel_scan::q6_parallel`'s identical comment. That leaves only
-    // `ol_quantity` (not a zone-mapped column) for this closure to check.
     tx.range_for_each_zone_pruned(
         Table::OrderLine,
         order_line_table_range(),
@@ -165,10 +134,6 @@ pub fn q6(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, V
     (revenue, ts_start)
 }
 
-/// Exact BenchBase CH-benCHmark Q6 predicate: delivery date in
-/// `[1999-01-01, 2020-01-01)` and quantity in the inclusive range `1..=100000`.
-/// `OrderLine::ol_quantity` is a `u8`, but the explicit comparison preserves the SQL
-/// semantics if that field is widened later. Delivery-date bounds use the zone map.
 pub fn q6_benchbase(db: &TpccDatabase) -> (f64, Version) {
     let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();
@@ -197,15 +162,6 @@ pub struct OrderPriorityCount {
     pub order_count: u64,
 }
 
-/// CH-benCHmark Q4 ("Order Priority Checking", adapted from TPC-H Q4): among
-/// orders entered within `[date_lo, date_hi)`, counts (grouped by
-/// `o_ol_cnt`) those with at least one order-line whose `ol_delivery_d` is
-/// later than `o_entry_d + late_slack_millis`, or never delivered at all —
-/// this schema's stand-in for TPC-H's `l_commitdate < l_receiptdate` check,
-/// since `order_line` has no separate commit-date column. One full `ORDERS`
-/// table scan, plus one `ORDER_LINE` range scan per order entered in range
-/// (a correlated semi-join / "exists" check, done as a nested loop since
-/// there's no join operator here — see module docs).
 pub fn q4(
     db: &TpccDatabase,
     date_lo: i64,
@@ -256,21 +212,6 @@ pub struct NationRevenue {
     pub revenue: f64,
 }
 
-/// CH-benCHmark Q5 ("Local Supplier Volume", adapted from TPC-H Q5): total
-/// revenue (`sum(ol_amount)`) fulfilled by suppliers in `region_name`, for
-/// orders entered within `[date_lo, date_hi)`, grouped by supplier nation
-/// and sorted by revenue descending. Joins ORDERS -> ORDER_LINE -> STOCK
-/// (via `ol_supply_w_id`/`ol_i_id`) -> SUPPLIER (via `Stock::s_su_suppkey`)
-/// -> NATION -> REGION.
-///
-/// Simplification vs. the published CH-benCHmark SQL: the original also
-/// requires the *customer's* nation (derived there via an
-/// `ascii(substr(c_state,1,1)) = su_nationkey` trick, since TPC-C's
-/// `CUSTOMER` has no nation column) to match the supplier's nation. This
-/// port drops that predicate and groups purely by supplying nation — it
-/// still exercises the same join shape and the same region/date filter +
-/// group-by + aggregate as the original, without bolting an obscure
-/// data-model hack onto this schema.
 pub fn q5(
     db: &TpccDatabase,
     region_name: &str,

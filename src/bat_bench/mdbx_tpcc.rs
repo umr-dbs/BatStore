@@ -45,10 +45,13 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use libmdbx::{Database, DatabaseOptions, Mode, ReadWriteOptions, SyncMode, Table as MdbxTable, TableFlags, Transaction, TransactionKind, WriteFlags, WriteMap, RO, RW};
+use libmdbx::{
+    Database, DatabaseOptions, Mode, RO, RW, ReadWriteOptions, SyncMode, Table as MdbxTable,
+    TableFlags, Transaction, TransactionKind, WriteFlags, WriteMap,
+};
 use rand::prelude::*;
 
-use crate::bat_bench::mem_stats::{MemSampler, DEFAULT_SAMPLE_INTERVAL};
+use crate::bat_bench::mem_stats::{DEFAULT_SAMPLE_INTERVAL, MemSampler};
 use crate::bat_bench::tpcc_random::*;
 use crate::bat_bench::tpcc_schema::*;
 use crate::bat_wal::record::WalPayload;
@@ -99,11 +102,20 @@ const NUM_COUNTERS: usize = 14;
 const MDBX_READER_HEADROOM: usize = 8;
 
 const COUNTER_NAMES: [&str; NUM_COUNTERS] = [
-    "new_order_committed", "new_order_conflict", "new_order_user_abort",
-    "payment_committed", "payment_conflict", "payment_user_abort",
-    "order_status_committed", "order_status_conflict", "order_status_user_abort",
-    "stock_level_committed", "stock_level_conflict", "stock_level_user_abort",
-    "delivery_districts_delivered", "delivery_conflicts",
+    "new_order_committed",
+    "new_order_conflict",
+    "new_order_user_abort",
+    "payment_committed",
+    "payment_conflict",
+    "payment_user_abort",
+    "order_status_committed",
+    "order_status_conflict",
+    "order_status_user_abort",
+    "stock_level_committed",
+    "stock_level_conflict",
+    "stock_level_user_abort",
+    "delivery_districts_delivered",
+    "delivery_conflicts",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,14 +134,6 @@ fn record(totals: &mut [u64; NUM_COUNTERS], base: usize, outcome: TxnOutcome) {
     }
 }
 
-// ---------------------------------------------------------------------
-// libmdbx plumbing: one named table per TPC-C table (Table::as_str()),
-// opened fresh in every transaction (a cheap DBI lookup, matching the
-// existing code's own per-call `db.tree_for(table)` style rather than
-// caching handles across transactions - Table<'txn> borrows from its own
-// transaction's lifetime, so it can't be cached across them anyway).
-// ---------------------------------------------------------------------
-
 fn configured_max_readers(num_terminals: usize, num_olap_threads: usize) -> std::ffi::c_uint {
     num_terminals
         .checked_add(num_olap_threads)
@@ -138,43 +142,65 @@ fn configured_max_readers(num_terminals: usize, num_olap_threads: usize) -> std:
         .expect("mdbx_tpcc: reader count exceeds the supported range")
 }
 
-fn open_db(path: &std::path::Path, num_terminals: usize, num_olap_threads: usize) -> Database<WriteMap> {
-    fs::create_dir_all(path).unwrap_or_else(|e| panic!("mdbx_tpcc: failed to create db dir {}: {e}", path.display()));
-    // libmdbx's reader-slot table defaults to 61 (MDBX_READERS_FULL beyond that) -
-    // below our own terminal-count sweep, which was silently aborting/hanging
-    // worker threads via the `.expect` calls below. Size it to the actual
-    // terminal and OLAP thread counts plus headroom for staleness probes and any
-    // internal use. Every OLAP thread holds a long-lived read transaction while
-    // scanning, so omitting them here causes MDBX_READERS_FULL under HTAP loads.
+fn open_db(
+    path: &std::path::Path,
+    num_terminals: usize,
+    num_olap_threads: usize,
+) -> Database<WriteMap> {
+    fs::create_dir_all(path)
+        .unwrap_or_else(|e| panic!("mdbx_tpcc: failed to create db dir {}: {e}", path.display()));
     let max_readers = configured_max_readers(num_terminals, num_olap_threads);
     let options = DatabaseOptions {
         max_tables: Some(Table::ALL.len() as u64),
         max_readers: Some(max_readers),
-        mode: Mode::ReadWrite(ReadWriteOptions { sync_mode: SyncMode::UtterlyNoSync, ..Default::default() }),
+        mode: Mode::ReadWrite(ReadWriteOptions {
+            sync_mode: SyncMode::UtterlyNoSync,
+            ..Default::default()
+        }),
         ..Default::default()
     };
-    let db = Database::<WriteMap>::open_with_options(path, options)
-        .unwrap_or_else(|e| panic!("mdbx_tpcc: failed to open database at {}: {e}", path.display()));
-    let actual_max_readers = db.info().expect("mdbx_tpcc: read database info").max_readers();
+    let db = Database::<WriteMap>::open_with_options(path, options).unwrap_or_else(|e| {
+        panic!(
+            "mdbx_tpcc: failed to open database at {}: {e}",
+            path.display()
+        )
+    });
+    let actual_max_readers = db
+        .info()
+        .expect("mdbx_tpcc: read database info")
+        .max_readers();
     assert!(
         actual_max_readers >= max_readers as usize,
         "mdbx_tpcc: requested {max_readers} reader slots but MDBX opened with only {actual_max_readers}"
     );
-    let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (table creation)");
+    let txn = db
+        .begin_rw_txn()
+        .expect("mdbx_tpcc: begin_rw_txn (table creation)");
     for t in Table::ALL {
-        txn.create_table(Some(t.as_str()), TableFlags::empty()).expect("mdbx_tpcc: create_table");
+        txn.create_table(Some(t.as_str()), TableFlags::empty())
+            .expect("mdbx_tpcc: create_table");
     }
     txn.commit().expect("mdbx_tpcc: commit (table creation)");
     db
 }
 
-fn tbl<'txn, K: TransactionKind>(txn: &'txn Transaction<'_, K, WriteMap>, table: Table) -> MdbxTable<'txn> {
-    txn.open_table(Some(table.as_str())).expect("mdbx_tpcc: open_table")
+fn tbl<'txn, K: TransactionKind>(
+    txn: &'txn Transaction<'_, K, WriteMap>,
+    table: Table,
+) -> MdbxTable<'txn> {
+    txn.open_table(Some(table.as_str()))
+        .expect("mdbx_tpcc: open_table")
 }
 
-fn get_row<K: TransactionKind>(txn: &Transaction<K, WriteMap>, table: Table, key: TpccKey) -> Option<TpccRow> {
+fn get_row<K: TransactionKind>(
+    txn: &Transaction<K, WriteMap>,
+    table: Table,
+    key: TpccKey,
+) -> Option<TpccRow> {
     let t = tbl(txn, table);
-    let bytes = txn.get::<Vec<u8>>(&t, &key.to_be_bytes()).expect("mdbx_tpcc: get")?;
+    let bytes = txn
+        .get::<Vec<u8>>(&t, &key.to_be_bytes())
+        .expect("mdbx_tpcc: get")?;
     TpccRow::wal_decode(&bytes)
 }
 
@@ -182,29 +208,41 @@ fn put_row(txn: &Transaction<RW, WriteMap>, table: Table, key: TpccKey, row: &Tp
     let t = tbl(txn, table);
     let mut buf = Vec::new();
     row.wal_encode(&mut buf);
-    txn.put(&t, key.to_be_bytes(), &buf, WriteFlags::UPSERT).expect("mdbx_tpcc: put");
+    txn.put(&t, key.to_be_bytes(), &buf, WriteFlags::UPSERT)
+        .expect("mdbx_tpcc: put");
 }
 
 fn delete_row(txn: &Transaction<RW, WriteMap>, table: Table, key: TpccKey) -> bool {
     let t = tbl(txn, table);
-    txn.del(&t, key.to_be_bytes(), None).expect("mdbx_tpcc: del")
+    txn.del(&t, key.to_be_bytes(), None)
+        .expect("mdbx_tpcc: del")
 }
 
 /// Range scan `[lo, hi]` inclusive - mirrors `TpccTxn::range`'s eager-collect contract.
-fn range_rows<K: TransactionKind>(txn: &Transaction<K, WriteMap>, table: Table, lo: TpccKey, hi: TpccKey) -> Vec<(TpccKey, TpccRow)> {
+fn range_rows<K: TransactionKind>(
+    txn: &Transaction<K, WriteMap>,
+    table: Table,
+    lo: TpccKey,
+    hi: TpccKey,
+) -> Vec<(TpccKey, TpccRow)> {
     let t = tbl(txn, table);
     let mut cursor = txn.cursor(&t).expect("mdbx_tpcc: cursor");
     let mut out = Vec::new();
-    let mut item = cursor.set_range::<Vec<u8>, Vec<u8>>(&lo.to_be_bytes()).expect("mdbx_tpcc: cursor.set_range");
+    let mut item = cursor
+        .set_range::<Vec<u8>, Vec<u8>>(&lo.to_be_bytes())
+        .expect("mdbx_tpcc: cursor.set_range");
     while let Some((k, v)) = item {
-        let key = TpccKey::from_be_bytes(k.as_slice().try_into().expect("mdbx_tpcc: malformed key"));
+        let key =
+            TpccKey::from_be_bytes(k.as_slice().try_into().expect("mdbx_tpcc: malformed key"));
         if key > hi {
             break;
         }
         if let Some(row) = TpccRow::wal_decode(&v) {
             out.push((key, row));
         }
-        item = cursor.next::<Vec<u8>, Vec<u8>>().expect("mdbx_tpcc: cursor.next");
+        item = cursor
+            .next::<Vec<u8>, Vec<u8>>()
+            .expect("mdbx_tpcc: cursor.next");
     }
     out
 }
@@ -213,12 +251,6 @@ fn pick_middle_by_name(matches: &[(TpccKey, TpccRow)]) -> u32 {
     let mid = (matches.len() + 1) / 2 - 1;
     decode_customer_name_idx_c_id(matches[mid].0)
 }
-
-// ---------------------------------------------------------------------
-// CH-benCHmark Q1/Q6 (mirrors `bat_bench::tpch_queries::q1`/`q6` function-for-
-// function, against libmdbx's `Transaction<RO>` instead of `TpccTxn` - see
-// module docs on why only these 2 queries are ported here).
-// ---------------------------------------------------------------------
 
 /// Per-`ol_number` group produced by [`mdbx_q1`] - mirrors
 /// `tpch_queries::OrderLineSummary`.
@@ -230,24 +262,21 @@ struct OrderLineSummary {
     sum_amount: f64,
 }
 
-/// CH-benCHmark Q1 ("Pricing Summary Report") - see
-/// `tpch_queries::q1`'s doc for the full rationale (groups every delivered
-/// order-line by `ol_number`, this schema's stand-in for `l_returnflag`/
-/// `l_linestatus`). One full `ORDER_LINE` table scan under a read-only
-/// snapshot; returns that snapshot's libmdbx transaction id alongside the
-/// result (this engine's analogue of `tpch_queries::q1`'s `Version`, used the
-/// same way - see `olap_thread`'s staleness computation).
 fn mdbx_q1(db: &Database<WriteMap>, delivered_before: i64) -> (Vec<OrderLineSummary>, u64) {
     let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (q1)");
     let ts_start = txn.id();
     let lines = range_rows(&txn, Table::OrderLine, TpccKey::MIN, TpccKey::MAX);
 
-    let mut groups: [OrderLineSummary; 16] =
-        std::array::from_fn(|i| OrderLineSummary { ol_number: i as u8, ..Default::default() });
+    let mut groups: [OrderLineSummary; 16] = std::array::from_fn(|i| OrderLineSummary {
+        ol_number: i as u8,
+        ..Default::default()
+    });
 
     for (key, row) in &lines {
         let ol = row.as_order_line();
-        let Some(delivered) = ol.ol_delivery_d else { continue };
+        let Some(delivered) = ol.ol_delivery_d else {
+            continue;
+        };
         if delivered > delivered_before {
             continue;
         }
@@ -270,82 +299,109 @@ fn mdbx_q6(db: &Database<WriteMap>, date_lo: i64, date_hi: i64, max_qty: u8) -> 
     let ts_start = txn.id();
     let lines = range_rows(&txn, Table::OrderLine, TpccKey::MIN, TpccKey::MAX);
 
-    let revenue = lines.iter()
+    let revenue = lines
+        .iter()
         .filter_map(|(_, row)| {
             let ol = row.as_order_line();
             let delivered = ol.ol_delivery_d?;
-            (delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty).then_some(ol.ol_amount)
+            (delivered >= date_lo && delivered < date_hi && ol.ol_quantity < max_qty)
+                .then_some(ol.ol_amount)
         })
         .sum();
     (revenue, ts_start)
 }
 
 fn mdbx_q1_benchbase(db: &Database<WriteMap>) -> (Vec<OrderLineSummary>, u64) {
-    let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (BenchBase q1)");
+    let txn = db
+        .begin_ro_txn()
+        .expect("mdbx_tpcc: begin_ro_txn (BenchBase q1)");
     let ts_start = txn.id();
     let lines = range_rows(&txn, Table::OrderLine, TpccKey::MIN, TpccKey::MAX);
-    let mut groups: [OrderLineSummary; 16] =
-        std::array::from_fn(|i| OrderLineSummary { ol_number: i as u8, ..Default::default() });
+    let mut groups: [OrderLineSummary; 16] = std::array::from_fn(|i| OrderLineSummary {
+        ol_number: i as u8,
+        ..Default::default()
+    });
     for (key, row) in &lines {
         let ol = row.as_order_line();
-        if ol.ol_delivery_d.is_some_and(|d| d > BENCHBASE_Q1_DELIVERY_AFTER_MILLIS) {
+        if ol
+            .ol_delivery_d
+            .is_some_and(|d| d > BENCHBASE_Q1_DELIVERY_AFTER_MILLIS)
+        {
             let g = &mut groups[decode_order_line_number(*key) as usize];
             g.count += 1;
             g.sum_qty += ol.ol_quantity as u64;
             g.sum_amount += ol.ol_amount;
         }
     }
-    (groups.into_iter().filter(|g| g.count > 0).collect(), ts_start)
+    (
+        groups.into_iter().filter(|g| g.count > 0).collect(),
+        ts_start,
+    )
 }
 
 fn mdbx_q6_benchbase(db: &Database<WriteMap>) -> (f64, u64) {
-    let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (BenchBase q6)");
+    let txn = db
+        .begin_ro_txn()
+        .expect("mdbx_tpcc: begin_ro_txn (BenchBase q6)");
     let ts_start = txn.id();
     let lines = range_rows(&txn, Table::OrderLine, TpccKey::MIN, TpccKey::MAX);
-    let revenue = lines.iter().filter_map(|(_, row)| {
-        let ol = row.as_order_line();
-        let delivered = ol.ol_delivery_d?;
-        let qty = ol.ol_quantity as u32;
-        (delivered >= BENCHBASE_Q6_DATE_LO_MILLIS
-            && delivered < BENCHBASE_Q6_DATE_HI_MILLIS
-            && (BENCHBASE_Q6_QUANTITY_LO..=BENCHBASE_Q6_QUANTITY_HI).contains(&qty))
+    let revenue = lines
+        .iter()
+        .filter_map(|(_, row)| {
+            let ol = row.as_order_line();
+            let delivered = ol.ol_delivery_d?;
+            let qty = ol.ol_quantity as u32;
+            (delivered >= BENCHBASE_Q6_DATE_LO_MILLIS
+                && delivered < BENCHBASE_Q6_DATE_HI_MILLIS
+                && (BENCHBASE_Q6_QUANTITY_LO..=BENCHBASE_Q6_QUANTITY_HI).contains(&qty))
             .then_some(ol.ol_amount)
-    }).sum();
+        })
+        .sum();
     (revenue, ts_start)
 }
 
-// ---------------------------------------------------------------------
-// Population (mirrors tpcc_load.rs, minus CH-benCHmark's SUPPLIER/NATION/
-// REGION - not needed here, see module docs).
-// ---------------------------------------------------------------------
-
-fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, history_seq: &AtomicU64) {
+fn populate_warehouse(
+    db: &Database<WriteMap>,
+    cfg: &TpccConfig,
+    w_id: u32,
+    history_seq: &AtomicU64,
+) {
     let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (load)");
     let history_anchor = now_millis();
 
-    put_row(&txn, Table::Warehouse, k_warehouse(w_id), &TpccRow::Warehouse(Box::new(Warehouse {
-        w_name: rnd_astring(6, 10),
-        w_street_1: rnd_astring(10, 20),
-        w_street_2: rnd_astring(10, 20),
-        w_city: rnd_astring(10, 20),
-        w_state: rnd_astring(2, 2),
-        w_zip: rnd_zip(),
-        w_tax: rand::rng().random_range(0..=2000) as f64 / 10000.0,
-        w_ytd: 300_000.0,
-    })));
+    put_row(
+        &txn,
+        Table::Warehouse,
+        k_warehouse(w_id),
+        &TpccRow::Warehouse(Box::new(Warehouse {
+            w_name: rnd_astring(6, 10),
+            w_street_1: rnd_astring(10, 20),
+            w_street_2: rnd_astring(10, 20),
+            w_city: rnd_astring(10, 20),
+            w_state: rnd_astring(2, 2),
+            w_zip: rnd_zip(),
+            w_tax: rand::rng().random_range(0..=2000) as f64 / 10000.0,
+            w_ytd: 300_000.0,
+        })),
+    );
 
     for d_id in 1..=cfg.districts_per_warehouse {
-        put_row(&txn, Table::District, k_district(w_id, d_id), &TpccRow::District(Box::new(District {
-            d_name: rnd_astring(6, 10),
-            d_street_1: rnd_astring(10, 20),
-            d_street_2: rnd_astring(10, 20),
-            d_city: rnd_astring(10, 20),
-            d_state: rnd_astring(2, 2),
-            d_zip: rnd_zip(),
-            d_tax: rand::rng().random_range(0..=2000) as f64 / 10000.0,
-            d_ytd: 30_000.0,
-            d_next_o_id: cfg.initial_orders_per_district + 1,
-        })));
+        put_row(
+            &txn,
+            Table::District,
+            k_district(w_id, d_id),
+            &TpccRow::District(Box::new(District {
+                d_name: rnd_astring(6, 10),
+                d_street_1: rnd_astring(10, 20),
+                d_street_2: rnd_astring(10, 20),
+                d_city: rnd_astring(10, 20),
+                d_state: rnd_astring(2, 2),
+                d_zip: rnd_zip(),
+                d_tax: rand::rng().random_range(0..=2000) as f64 / 10000.0,
+                d_ytd: 30_000.0,
+                d_next_o_id: cfg.initial_orders_per_district + 1,
+            })),
+        );
 
         for c_ord in 0..cfg.customers_per_district {
             let c_id = c_ord + 1;
@@ -355,64 +411,94 @@ fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, hist
             let first_code_v = first_code(&c_first);
             let c_credit_bad = rand::rng().random_range(0..10) == 0;
 
-            put_row(&txn, Table::Customer, k_customer(w_id, d_id, c_id), &TpccRow::Customer(Box::new(Customer {
-                c_first,
-                c_middle: "OE".to_string(),
-                c_last,
-                c_street_1: rnd_astring(10, 20),
-                c_street_2: rnd_astring(10, 20),
-                c_city: rnd_astring(10, 20),
-                c_state: rnd_astring(2, 2),
-                c_zip: rnd_zip(),
-                c_phone: rnd_phone(),
-                c_since: now_millis(),
-                c_credit_bad,
-                c_credit_lim: 50_000.0,
-                c_discount: rand::rng().random_range(0..=5000) as f64 / 10000.0,
-                c_balance: -10.0,
-                c_ytd_payment: 10.0,
-                c_payment_cnt: 1,
-                c_delivery_cnt: 0,
-                c_data: rnd_astring(300, 500),
-            })));
-            put_row(&txn, Table::CustomerNameIdx, k_customer_name_idx(w_id, d_id, last_code, first_code_v, c_id), &TpccRow::CustomerNameIdx);
+            put_row(
+                &txn,
+                Table::Customer,
+                k_customer(w_id, d_id, c_id),
+                &TpccRow::Customer(Box::new(Customer {
+                    c_first,
+                    c_middle: "OE".to_string(),
+                    c_last,
+                    c_street_1: rnd_astring(10, 20),
+                    c_street_2: rnd_astring(10, 20),
+                    c_city: rnd_astring(10, 20),
+                    c_state: rnd_astring(2, 2),
+                    c_zip: rnd_zip(),
+                    c_phone: rnd_phone(),
+                    c_since: now_millis(),
+                    c_credit_bad,
+                    c_credit_lim: 50_000.0,
+                    c_discount: rand::rng().random_range(0..=5000) as f64 / 10000.0,
+                    c_balance: -10.0,
+                    c_ytd_payment: 10.0,
+                    c_payment_cnt: 1,
+                    c_delivery_cnt: 0,
+                    c_data: rnd_astring(300, 500),
+                })),
+            );
+            put_row(
+                &txn,
+                Table::CustomerNameIdx,
+                k_customer_name_idx(w_id, d_id, last_code, first_code_v, c_id),
+                &TpccRow::CustomerNameIdx,
+            );
 
             let h_key = k_history(history_seq.fetch_add(1, Relaxed));
-            put_row(&txn, Table::History, h_key, &TpccRow::History(Box::new(History {
-                h_c_id: c_id,
-                h_c_d_id: d_id,
-                h_c_w_id: w_id,
-                h_d_id: d_id,
-                h_w_id: w_id,
-                h_date: now_millis(),
-                h_amount: 10.0,
-                h_data: rnd_astring(12, 24),
-            })));
+            put_row(
+                &txn,
+                Table::History,
+                h_key,
+                &TpccRow::History(Box::new(History {
+                    h_c_id: c_id,
+                    h_c_d_id: d_id,
+                    h_c_w_id: w_id,
+                    h_d_id: d_id,
+                    h_w_id: w_id,
+                    h_date: now_millis(),
+                    h_amount: 10.0,
+                    h_data: rnd_astring(12, 24),
+                })),
+            );
         }
 
         let mut c_ids: Vec<u32> = (1..=cfg.customers_per_district).collect();
         c_ids.shuffle(&mut rand::rng());
 
-        let new_order_floor = cfg.initial_orders_per_district.saturating_sub(cfg.initial_new_orders);
+        let new_order_floor = cfg
+            .initial_orders_per_district
+            .saturating_sub(cfg.initial_new_orders);
 
         for o_ord in 0..cfg.initial_orders_per_district {
             let o_id = o_ord + 1;
-            let order_timestamp = initial_order_timestamp(
-                history_anchor, o_ord, cfg.initial_orders_per_district,
-            );
+            let order_timestamp =
+                initial_order_timestamp(history_anchor, o_ord, cfg.initial_orders_per_district);
             let c_id = c_ids[o_ord as usize];
             let ol_cnt = rand::rng().random_range(5..=15u8);
             let is_new = o_id > new_order_floor;
-            let o_carrier_id = if is_new { None } else { Some(rand::rng().random_range(1..=10u32)) };
+            let o_carrier_id = if is_new {
+                None
+            } else {
+                Some(rand::rng().random_range(1..=10u32))
+            };
 
-            put_row(&txn, Table::Orders, k_order(w_id, d_id, o_id), &TpccRow::Order(Box::new(Order {
-                o_c_id: c_id,
-                o_entry_d: order_timestamp,
-                o_carrier_id,
-                o_ol_cnt: ol_cnt,
-                o_all_local: true,
-            })));
-            put_row(&txn, Table::CustLastOrder, k_cust_last_order(w_id, d_id, c_id), &TpccRow::CustLastOrder(o_id));
+            put_row(
+                &txn,
+                Table::Orders,
+                k_order(w_id, d_id, o_id),
+                &TpccRow::Order(Box::new(Order {
+                    o_c_id: c_id,
+                    o_entry_d: order_timestamp,
+                    o_carrier_id,
+                    o_ol_cnt: ol_cnt,
+                    o_all_local: true,
+                })),
+            );
+            put_row(
+                &txn,
+                Table::CustLastOrder,
+                k_cust_last_order(w_id, d_id, c_id),
+                &TpccRow::CustLastOrder(o_id),
+            );
 
             for ol_number in 1..=ol_cnt {
                 let i_id = rand::rng().random_range(1..=cfg.num_items);
@@ -422,58 +508,77 @@ fn populate_warehouse(db: &Database<WriteMap>, cfg: &TpccConfig, w_id: u32, hist
                 let (ol_delivery_d, ol_amount) = if is_new {
                     (None, 0.0)
                 } else {
-                    (Some(order_timestamp), rand::rng().random_range(100..=999_999) as f64 / 100.0)
+                    (
+                        Some(order_timestamp),
+                        rand::rng().random_range(100..=999_999) as f64 / 100.0,
+                    )
                 };
 
-                put_row(&txn, Table::OrderLine, k_order_line(w_id, d_id, o_id, ol_number), &TpccRow::OrderLine(Box::new(OrderLine {
-                    ol_i_id: i_id,
-                    ol_supply_w_id: w_id,
-                    ol_delivery_d,
-                    ol_quantity: 5,
-                    ol_amount,
-                    ol_dist_info: rnd_astring_exact::<24>(),
-                })));
+                put_row(
+                    &txn,
+                    Table::OrderLine,
+                    k_order_line(w_id, d_id, o_id, ol_number),
+                    &TpccRow::OrderLine(Box::new(OrderLine {
+                        ol_i_id: i_id,
+                        ol_supply_w_id: w_id,
+                        ol_delivery_d,
+                        ol_quantity: 5,
+                        ol_amount,
+                        ol_dist_info: rnd_astring_exact::<24>(),
+                    })),
+                );
             }
 
             if is_new {
-                put_row(&txn, Table::NewOrder, k_new_order(w_id, d_id, o_id), &TpccRow::NewOrder(NewOrderMarker { no_o_id: o_id }));
+                put_row(
+                    &txn,
+                    Table::NewOrder,
+                    k_new_order(w_id, d_id, o_id),
+                    &TpccRow::NewOrder(NewOrderMarker { no_o_id: o_id }),
+                );
             }
         }
     }
 
     for i_id in 1..=cfg.num_items {
-        put_row(&txn, Table::Stock, k_stock(w_id, i_id), &TpccRow::Stock(Box::new(Stock {
-            s_quantity: rand::rng().random_range(10..=100),
-            s_dist: std::array::from_fn(|_| rnd_astring_exact::<24>()),
-            s_ytd: 0.0,
-            s_order_cnt: 0,
-            s_remote_cnt: 0,
-            s_data: rnd_original_data(26, 50),
-            s_su_suppkey: 0,
-        })));
+        put_row(
+            &txn,
+            Table::Stock,
+            k_stock(w_id, i_id),
+            &TpccRow::Stock(Box::new(Stock {
+                s_quantity: rand::rng().random_range(10..=100),
+                s_dist: std::array::from_fn(|_| rnd_astring_exact::<24>()),
+                s_ytd: 0.0,
+                s_order_cnt: 0,
+                s_remote_cnt: 0,
+                s_data: rnd_original_data(26, 50),
+                s_su_suppkey: 0,
+            })),
+        );
     }
 
     txn.commit().expect("mdbx_tpcc: commit (load warehouse)");
 }
 
 fn populate_items(db: &Database<WriteMap>, cfg: &TpccConfig) {
-    let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (load items)");
+    let txn = db
+        .begin_rw_txn()
+        .expect("mdbx_tpcc: begin_rw_txn (load items)");
     for i_id in 1..=cfg.num_items {
-        put_row(&txn, Table::Item, k_item(i_id), &TpccRow::Item(Box::new(Item {
-            i_im_id: rand::rng().random_range(1..=10_000),
-            i_name: rnd_astring(14, 24),
-            i_price: rand::rng().random_range(100..=10_000) as f64 / 100.0,
-            i_data: rnd_original_data(26, 50),
-        })));
+        put_row(
+            &txn,
+            Table::Item,
+            k_item(i_id),
+            &TpccRow::Item(Box::new(Item {
+                i_im_id: rand::rng().random_range(1..=10_000),
+                i_name: rnd_astring(14, 24),
+                i_price: rand::rng().random_range(100..=10_000) as f64 / 100.0,
+                i_data: rnd_original_data(26, 50),
+            })),
+        );
     }
     txn.commit().expect("mdbx_tpcc: commit (load items)");
 }
-
-// ---------------------------------------------------------------------
-// Transactions (mirrors tpcc_txn.rs function-for-function - see module docs
-// on why Conflict can't actually happen here, kept only for defensive
-// missing-row checks).
-// ---------------------------------------------------------------------
 
 fn new_order(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> TxnOutcome {
     let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
@@ -485,14 +590,25 @@ fn new_order(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> TxnOu
         None
     };
 
-    struct Line { i_id: u32, qty: u8 }
-    let lines: Vec<Line> = (0..ol_cnt).map(|i| {
-        let i_id = if Some(i) == invalid_line { cfg.num_items + 1 } else { nu_rand_item_id(cfg.num_items) };
-        let qty = rand::rng().random_range(1..=10u8);
-        Line { i_id, qty }
-    }).collect();
+    struct Line {
+        i_id: u32,
+        qty: u8,
+    }
+    let lines: Vec<Line> = (0..ol_cnt)
+        .map(|i| {
+            let i_id = if Some(i) == invalid_line {
+                cfg.num_items + 1
+            } else {
+                nu_rand_item_id(cfg.num_items)
+            };
+            let qty = rand::rng().random_range(1..=10u8);
+            Line { i_id, qty }
+        })
+        .collect();
 
-    let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (new_order)");
+    let txn = db
+        .begin_rw_txn()
+        .expect("mdbx_tpcc: begin_rw_txn (new_order)");
 
     let Some(warehouse) = get_row(&txn, Table::Warehouse, k_warehouse(home_w_id)) else {
         return TxnOutcome::Conflict;
@@ -520,7 +636,12 @@ fn new_order(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> TxnOu
     }
 
     d_row.d_next_o_id = o_id + 1;
-    put_row(&txn, Table::District, k_district(home_w_id, d_id), &TpccRow::District(Box::new(d_row)));
+    put_row(
+        &txn,
+        Table::District,
+        k_district(home_w_id, d_id),
+        &TpccRow::District(Box::new(d_row)),
+    );
 
     for (ol_number, (line, i_price)) in priced.into_iter().enumerate() {
         let ol_number = (ol_number + 1) as u8;
@@ -536,39 +657,71 @@ fn new_order(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> TxnOu
         };
         s_row.s_ytd += line.qty as f64;
         s_row.s_order_cnt += 1;
-        put_row(&txn, Table::Stock, k_stock(home_w_id, line.i_id), &TpccRow::Stock(Box::new(s_row)));
+        put_row(
+            &txn,
+            Table::Stock,
+            k_stock(home_w_id, line.i_id),
+            &TpccRow::Stock(Box::new(s_row)),
+        );
 
         let ol_amount = line.qty as f64 * i_price * (1.0 - c_discount) * (1.0 + w_tax + d_tax);
-        put_row(&txn, Table::OrderLine, k_order_line(home_w_id, d_id, o_id, ol_number), &TpccRow::OrderLine(Box::new(OrderLine {
-            ol_i_id: line.i_id,
-            ol_supply_w_id: home_w_id,
-            ol_delivery_d: None,
-            ol_quantity: line.qty,
-            ol_amount,
-            ol_dist_info: rnd_astring_exact::<24>(),
-        })));
+        put_row(
+            &txn,
+            Table::OrderLine,
+            k_order_line(home_w_id, d_id, o_id, ol_number),
+            &TpccRow::OrderLine(Box::new(OrderLine {
+                ol_i_id: line.i_id,
+                ol_supply_w_id: home_w_id,
+                ol_delivery_d: None,
+                ol_quantity: line.qty,
+                ol_amount,
+                ol_dist_info: rnd_astring_exact::<24>(),
+            })),
+        );
     }
 
-    put_row(&txn, Table::Orders, k_order(home_w_id, d_id, o_id), &TpccRow::Order(Box::new(Order {
-        o_c_id: c_id,
-        o_entry_d: now_millis(),
-        o_carrier_id: None,
-        o_ol_cnt: ol_cnt,
-        o_all_local: true,
-    })));
-    put_row(&txn, Table::NewOrder, k_new_order(home_w_id, d_id, o_id), &TpccRow::NewOrder(NewOrderMarker { no_o_id: o_id }));
-    put_row(&txn, Table::CustLastOrder, k_cust_last_order(home_w_id, d_id, c_id), &TpccRow::CustLastOrder(o_id));
+    put_row(
+        &txn,
+        Table::Orders,
+        k_order(home_w_id, d_id, o_id),
+        &TpccRow::Order(Box::new(Order {
+            o_c_id: c_id,
+            o_entry_d: now_millis(),
+            o_carrier_id: None,
+            o_ol_cnt: ol_cnt,
+            o_all_local: true,
+        })),
+    );
+    put_row(
+        &txn,
+        Table::NewOrder,
+        k_new_order(home_w_id, d_id, o_id),
+        &TpccRow::NewOrder(NewOrderMarker { no_o_id: o_id }),
+    );
+    put_row(
+        &txn,
+        Table::CustLastOrder,
+        k_cust_last_order(home_w_id, d_id, c_id),
+        &TpccRow::CustLastOrder(o_id),
+    );
 
     txn.commit().expect("mdbx_tpcc: commit (new_order)");
     TxnOutcome::Committed
 }
 
-fn payment(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32, history_seq: &AtomicU64) -> TxnOutcome {
+fn payment(
+    db: &Database<WriteMap>,
+    cfg: &TpccConfig,
+    home_w_id: u32,
+    history_seq: &AtomicU64,
+) -> TxnOutcome {
     let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
     let amount = rand::rng().random_range(100..=500_000) as f64 / 100.0;
     let by_last_name = rand::rng().random_range(1..=100) <= 60;
 
-    let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (payment)");
+    let txn = db
+        .begin_rw_txn()
+        .expect("mdbx_tpcc: begin_rw_txn (payment)");
 
     let Some(warehouse) = get_row(&txn, Table::Warehouse, k_warehouse(home_w_id)) else {
         return TxnOutcome::Conflict;
@@ -576,7 +729,12 @@ fn payment(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32, history_se
     let mut w_row = warehouse.as_warehouse().clone();
     w_row.w_ytd += amount;
     let w_name = w_row.w_name.clone();
-    put_row(&txn, Table::Warehouse, k_warehouse(home_w_id), &TpccRow::Warehouse(Box::new(w_row)));
+    put_row(
+        &txn,
+        Table::Warehouse,
+        k_warehouse(home_w_id),
+        &TpccRow::Warehouse(Box::new(w_row)),
+    );
 
     let Some(district) = get_row(&txn, Table::District, k_district(home_w_id, d_id)) else {
         return TxnOutcome::Conflict;
@@ -584,7 +742,12 @@ fn payment(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32, history_se
     let mut d_row = district.as_district().clone();
     d_row.d_ytd += amount;
     let d_name = d_row.d_name.clone();
-    put_row(&txn, Table::District, k_district(home_w_id, d_id), &TpccRow::District(Box::new(d_row)));
+    put_row(
+        &txn,
+        Table::District,
+        k_district(home_w_id, d_id),
+        &TpccRow::District(Box::new(d_row)),
+    );
 
     let c_id = if by_last_name {
         let last_code = c_last_code_for_run();
@@ -607,23 +770,36 @@ fn payment(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32, history_se
     c_row.c_ytd_payment += amount;
     c_row.c_payment_cnt += 1;
     if c_row.c_credit_bad {
-        let note = format!("{c_id} {d_id} {home_w_id} {d_id} {home_w_id} {amount:.2} | {}", c_row.c_data);
+        let note = format!(
+            "{c_id} {d_id} {home_w_id} {d_id} {home_w_id} {amount:.2} | {}",
+            c_row.c_data
+        );
         c_row.c_data = note.chars().take(500).collect();
     }
-    put_row(&txn, Table::Customer, k_customer(home_w_id, d_id, c_id), &TpccRow::Customer(Box::new(c_row)));
+    put_row(
+        &txn,
+        Table::Customer,
+        k_customer(home_w_id, d_id, c_id),
+        &TpccRow::Customer(Box::new(c_row)),
+    );
 
     let h_data = format!("{w_name}    {d_name}");
     let h_key = k_history(history_seq.fetch_add(1, Relaxed));
-    put_row(&txn, Table::History, h_key, &TpccRow::History(Box::new(History {
-        h_c_id: c_id,
-        h_c_d_id: d_id,
-        h_c_w_id: home_w_id,
-        h_d_id: d_id,
-        h_w_id: home_w_id,
-        h_date: now_millis(),
-        h_amount: amount,
-        h_data,
-    })));
+    put_row(
+        &txn,
+        Table::History,
+        h_key,
+        &TpccRow::History(Box::new(History {
+            h_c_id: c_id,
+            h_c_d_id: d_id,
+            h_c_w_id: home_w_id,
+            h_d_id: d_id,
+            h_w_id: home_w_id,
+            h_date: now_millis(),
+            h_amount: amount,
+            h_data,
+        })),
+    );
 
     txn.commit().expect("mdbx_tpcc: commit (payment)");
     TxnOutcome::Committed
@@ -633,7 +809,9 @@ fn order_status(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> Tx
     let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
     let by_last_name = rand::rng().random_range(1..=100) <= 60;
 
-    let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (order_status)");
+    let txn = db
+        .begin_ro_txn()
+        .expect("mdbx_tpcc: begin_ro_txn (order_status)");
 
     let c_id = if by_last_name {
         let last_code = c_last_code_for_run();
@@ -652,7 +830,11 @@ fn order_status(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> Tx
         return TxnOutcome::Conflict;
     }
 
-    let Some(last_order) = get_row(&txn, Table::CustLastOrder, k_cust_last_order(home_w_id, d_id, c_id)) else {
+    let Some(last_order) = get_row(
+        &txn,
+        Table::CustLastOrder,
+        k_cust_last_order(home_w_id, d_id, c_id),
+    ) else {
         return TxnOutcome::Committed; // no order yet for this customer
     };
     let o_id = last_order.as_cust_last_order();
@@ -671,8 +853,13 @@ struct DeliveryOutcome {
 
 fn delivery(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> DeliveryOutcome {
     let carrier_id = rand::rng().random_range(1..=10u32);
-    let mut out = DeliveryOutcome { delivered_districts: 0, conflicts: 0 };
-    let txn = db.begin_rw_txn().expect("mdbx_tpcc: begin_rw_txn (delivery)");
+    let mut out = DeliveryOutcome {
+        delivered_districts: 0,
+        conflicts: 0,
+    };
+    let txn = db
+        .begin_rw_txn()
+        .expect("mdbx_tpcc: begin_rw_txn (delivery)");
 
     for d_id in 1..=cfg.districts_per_warehouse {
         match deliver_one_district(&txn, home_w_id, d_id, carrier_id) {
@@ -690,7 +877,12 @@ fn delivery(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32) -> Delive
     out
 }
 
-fn deliver_one_district(txn: &Transaction<RW, WriteMap>, w_id: u32, d_id: u8, carrier_id: u32) -> TxnOutcome {
+fn deliver_one_district(
+    txn: &Transaction<RW, WriteMap>,
+    w_id: u32,
+    d_id: u8,
+    carrier_id: u32,
+) -> TxnOutcome {
     let (lo, hi) = k_new_order_district_bounds(w_id, d_id);
     let mut queued = range_rows(&txn, Table::NewOrder, lo, hi);
     if queued.is_empty() {
@@ -714,7 +906,12 @@ fn deliver_one_district(txn: &Transaction<RW, WriteMap>, w_id: u32, d_id: u8, ca
     let mut order_row = order_row.as_order().clone();
     let c_id = order_row.o_c_id;
     order_row.o_carrier_id = Some(carrier_id);
-    put_row(&txn, Table::Orders, order_key, &TpccRow::Order(Box::new(order_row)));
+    put_row(
+        &txn,
+        Table::Orders,
+        order_key,
+        &TpccRow::Order(Box::new(order_row)),
+    );
 
     let (ol_lo, ol_hi) = k_order_line_bounds(w_id, d_id, o_id);
     let lines = range_rows(&txn, Table::OrderLine, ol_lo, ol_hi);
@@ -724,7 +921,12 @@ fn deliver_one_district(txn: &Transaction<RW, WriteMap>, w_id: u32, d_id: u8, ca
         let mut ol = row.as_order_line().clone();
         total += ol.ol_amount;
         ol.ol_delivery_d = Some(now);
-        put_row(&txn, Table::OrderLine, *key, &TpccRow::OrderLine(Box::new(ol)));
+        put_row(
+            &txn,
+            Table::OrderLine,
+            *key,
+            &TpccRow::OrderLine(Box::new(ol)),
+        );
     }
 
     let cust_key = k_customer(w_id, d_id, c_id);
@@ -734,14 +936,26 @@ fn deliver_one_district(txn: &Transaction<RW, WriteMap>, w_id: u32, d_id: u8, ca
     let mut c_row = cust_row.as_customer().clone();
     c_row.c_balance += total;
     c_row.c_delivery_cnt += 1;
-    put_row(&txn, Table::Customer, cust_key, &TpccRow::Customer(Box::new(c_row)));
+    put_row(
+        &txn,
+        Table::Customer,
+        cust_key,
+        &TpccRow::Customer(Box::new(c_row)),
+    );
 
     TxnOutcome::Committed
 }
 
-fn stock_level(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32, threshold: i32) -> TxnOutcome {
+fn stock_level(
+    db: &Database<WriteMap>,
+    cfg: &TpccConfig,
+    home_w_id: u32,
+    threshold: i32,
+) -> TxnOutcome {
     let d_id = rand::rng().random_range(1..=cfg.districts_per_warehouse);
-    let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (stock_level)");
+    let txn = db
+        .begin_ro_txn()
+        .expect("mdbx_tpcc: begin_ro_txn (stock_level)");
 
     let Some(district) = get_row(&txn, Table::District, k_district(home_w_id, d_id)) else {
         return TxnOutcome::Conflict;
@@ -771,12 +985,6 @@ fn stock_level(db: &Database<WriteMap>, cfg: &TpccConfig, home_w_id: u32, thresh
     TxnOutcome::Committed
 }
 
-// ---------------------------------------------------------------------
-// Driver (mirrors tpcc_driver.rs, minus WAL/affinity/the full multi-query
-// OlapMode sweep - see module docs on scope; htap_ch_benchmark is the one
-// piece of tpcc_driver.rs's OLAP/HTAP machinery this file does port).
-// ---------------------------------------------------------------------
-
 /// One row of `tpcc_scan.csv` - same column shape as `olap_scan::ScanResult`
 /// (see `tpcc_driver.rs::write_results`) so `scripts/engines/libmdbx.py`
 /// reads it exactly the way `scripts/engines/batstore.py` already reads
@@ -795,11 +1003,6 @@ struct MdbxScanResult {
     staleness_versions: u64,
 }
 
-/// Runs one selected analytical query and reports an [`MdbxScanResult`]. `staleness`
-/// is computed the same way `olap_scan.rs` computes it for BatStore: a fresh
-/// read-only transaction opened immediately after the query finishes, diffed
-/// against the query's own transaction id - "how many committed writer
-/// transactions happened while this analytical answer was being computed."
 fn ch_q1_once(
     db: &Database<WriteMap>,
     date_hi: i64,
@@ -807,7 +1010,9 @@ fn ch_q1_once(
     selective: bool,
 ) -> MdbxScanResult {
     let staleness = |ts_start: u64| {
-        let fresh = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (staleness probe)");
+        let fresh = db
+            .begin_ro_txn()
+            .expect("mdbx_tpcc: begin_ro_txn (staleness probe)");
         fresh.id().saturating_sub(ts_start)
     };
 
@@ -818,7 +1023,11 @@ fn ch_q1_once(
         mdbx_q1_benchbase(db)
     };
     MdbxScanResult {
-        mode: if selective { "ch_q1_variant" } else { "ch_q1_pricing_summary" },
+        mode: if selective {
+            "ch_q1_variant"
+        } else {
+            "ch_q1_pricing_summary"
+        },
         elapsed_secs: run_start.elapsed().as_secs_f64(),
         snapshot: ts_start,
         scanned_tuples: q1.len(),
@@ -836,7 +1045,9 @@ fn ch_q6_once(
     selective: bool,
 ) -> MdbxScanResult {
     let staleness = |ts_start: u64| {
-        let fresh = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (staleness probe)");
+        let fresh = db
+            .begin_ro_txn()
+            .expect("mdbx_tpcc: begin_ro_txn (staleness probe)");
         fresh.id().saturating_sub(ts_start)
     };
     let start = Instant::now();
@@ -846,7 +1057,11 @@ fn ch_q6_once(
         mdbx_q6_benchbase(db)
     };
     MdbxScanResult {
-        mode: if selective { "ch_q6_variant" } else { "ch_q6_forecast_revenue" },
+        mode: if selective {
+            "ch_q6_variant"
+        } else {
+            "ch_q6_forecast_revenue"
+        },
         elapsed_secs: run_start.elapsed().as_secs_f64(),
         snapshot: ts_start,
         scanned_tuples: 1,
@@ -856,10 +1071,6 @@ fn ch_q6_once(
     }
 }
 
-/// One HTAP OLAP thread's whole run - repeats the selected query until `stop`,
-/// streaming every completed query's result into the returned `Vec`
-/// (joined back in `run_mdbx_tpcc`, mirrors `terminal_thread`'s
-/// join-and-collect shape rather than `tpcc_driver.rs`'s channel-based fan-in.
 fn olap_thread(
     db: Arc<Database<WriteMap>>,
     date_lo: i64,
@@ -873,25 +1084,33 @@ fn olap_thread(
     let mut out = Vec::new();
 
     if mode == MdbxHtapMode::Historic {
-        // Keep one MDBX reader transaction registered for the whole timed phase.  MDBX
-        // consequently retains every page version needed by this snapshot while OLTP
-        // writers continue to commit, which is the direct analogue of BatStore H3's
-        // long-lived historic transaction.
-        let txn = db.begin_ro_txn().expect("mdbx_tpcc: begin_ro_txn (historic)");
+        let txn = db
+            .begin_ro_txn()
+            .expect("mdbx_tpcc: begin_ro_txn (historic)");
         let snapshot = txn.id();
         let mut expected = None;
         while !stop.load(Relaxed) {
             let elapsed_secs = run_start.elapsed().as_secs_f64();
             let started = Instant::now();
             let scanned_tuples: usize = [
-                Table::Warehouse, Table::District, Table::Customer, Table::History,
-                Table::NewOrder, Table::Orders, Table::OrderLine, Table::Item, Table::Stock,
+                Table::Warehouse,
+                Table::District,
+                Table::Customer,
+                Table::History,
+                Table::NewOrder,
+                Table::Orders,
+                Table::OrderLine,
+                Table::Item,
+                Table::Stock,
             ]
-                .iter()
-                .map(|table| range_rows(&txn, *table, TpccKey::MIN, TpccKey::MAX).len())
-                .sum();
+            .iter()
+            .map(|table| range_rows(&txn, *table, TpccKey::MIN, TpccKey::MAX).len())
+            .sum();
             if let Some(expected) = expected {
-                assert_eq!(scanned_tuples, expected, "historic snapshot cardinality changed");
+                assert_eq!(
+                    scanned_tuples, expected,
+                    "historic snapshot cardinality changed"
+                );
             } else {
                 expected = Some(scanned_tuples);
             }
@@ -949,7 +1168,8 @@ fn terminal_thread(
                 let outcome = new_order(&db, &cfg, home_w);
                 record(&mut totals, NO, outcome);
                 if outcome == TxnOutcome::Committed {
-                    let idx = (start.elapsed().as_secs() as usize).min(new_order_committed_per_sec.len() - 1);
+                    let idx = (start.elapsed().as_secs() as usize)
+                        .min(new_order_committed_per_sec.len() - 1);
                     new_order_committed_per_sec[idx] += 1;
                 }
             }
@@ -964,20 +1184,40 @@ fn terminal_thread(
         }
     }
 
-    TerminalStats { new_order_committed_per_sec, totals }
+    TerminalStats {
+        new_order_committed_per_sec,
+        totals,
+    }
 }
 
 pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
-    assert!(cfg.tpcc.num_warehouses >= 1, "mdbx_tpcc: num_warehouses must be >= 1");
+    assert!(
+        cfg.tpcc.num_warehouses >= 1,
+        "mdbx_tpcc: num_warehouses must be >= 1"
+    );
 
-    fs::create_dir_all(&cfg.output_dir)
-        .unwrap_or_else(|e| panic!("mdbx_tpcc: failed to create output_dir {}: {e}", cfg.output_dir.display()));
-    let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
+    fs::create_dir_all(&cfg.output_dir).unwrap_or_else(|e| {
+        panic!(
+            "mdbx_tpcc: failed to create output_dir {}: {e}",
+            cfg.output_dir.display()
+        )
+    });
+    let mem_sampler = MemSampler::start(
+        cfg.output_dir.join("mem_stats.csv"),
+        DEFAULT_SAMPLE_INTERVAL,
+    );
 
     let num_terminals = cfg.num_terminals.max(1);
-    let num_olap_threads = if cfg.htap_mode == MdbxHtapMode::None { 0 } else { cfg.num_olap_threads };
+    let num_olap_threads = if cfg.htap_mode == MdbxHtapMode::None {
+        0
+    } else {
+        cfg.num_olap_threads
+    };
     let db = Arc::new(open_db(&cfg.db_path, num_terminals, num_olap_threads));
-    let mdbx_reader_slots = db.info().expect("mdbx_tpcc: read database info").max_readers();
+    let mdbx_reader_slots = db
+        .info()
+        .expect("mdbx_tpcc: read database info")
+        .max_readers();
 
     println!(
         "libmdbx TPC-C benchmark\n\
@@ -987,8 +1227,12 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
          - duration              = {:?}\n\
          - db_path               = {}\n\
          - items/customers/orders per district = {}/{}/{}",
-        cfg.tpcc.num_warehouses, cfg.duration, cfg.db_path.display(),
-        cfg.tpcc.num_items, cfg.tpcc.customers_per_district, cfg.tpcc.initial_orders_per_district,
+        cfg.tpcc.num_warehouses,
+        cfg.duration,
+        cfg.db_path.display(),
+        cfg.tpcc.num_items,
+        cfg.tpcc.customers_per_district,
+        cfg.tpcc.initial_orders_per_district,
     );
 
     println!("Loading TPC-C data set...");
@@ -998,7 +1242,11 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     for w_id in 1..=cfg.tpcc.num_warehouses {
         populate_warehouse(&db, &cfg.tpcc, w_id, &history_seq);
     }
-    println!("Loaded {} warehouse(s) in {:?}.", cfg.tpcc.num_warehouses, load_start.elapsed());
+    println!(
+        "Loaded {} warehouse(s) in {:?}.",
+        cfg.tpcc.num_warehouses,
+        load_start.elapsed()
+    );
 
     // num_olap_threads OLAP threads when htap_mode is set - same "every distinct thread
     // permanently owns a barrier slot" shape as tpcc_driver.rs's num_terminals +
@@ -1007,27 +1255,31 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     let stop = Arc::new(AtomicBool::new(false));
     let duration = cfg.duration;
 
-    let handles: Vec<_> = (0..num_terminals).map(|_| {
-        let db = db.clone();
-        let cfg = cfg.tpcc;
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        let history_seq = history_seq.clone();
-        thread::spawn(move || terminal_thread(db, cfg, duration, stop, barrier, history_seq))
-    }).collect();
+    let handles: Vec<_> = (0..num_terminals)
+        .map(|_| {
+            let db = db.clone();
+            let cfg = cfg.tpcc;
+            let stop = stop.clone();
+            let barrier = barrier.clone();
+            let history_seq = history_seq.clone();
+            thread::spawn(move || terminal_thread(db, cfg, duration, stop, barrier, history_seq))
+        })
+        .collect();
 
     let (q1_cutoff, q6_date_lo, q6_date_hi) = htap_query_date_bounds(now_millis());
-    let olap_handles: Vec<_> = (0..num_olap_threads).map(|_| {
-        let db = db.clone();
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        let (date_lo, date_hi) = match cfg.htap_mode {
-            MdbxHtapMode::Q1 | MdbxHtapMode::Q1Selective => (i64::MIN, q1_cutoff),
-            MdbxHtapMode::Q6 | MdbxHtapMode::Q6Selective => (q6_date_lo, q6_date_hi),
-            MdbxHtapMode::None | MdbxHtapMode::Historic => (i64::MIN, i64::MAX),
-        };
-        thread::spawn(move || olap_thread(db, date_lo, date_hi, stop, barrier, cfg.htap_mode))
-    }).collect();
+    let olap_handles: Vec<_> = (0..num_olap_threads)
+        .map(|_| {
+            let db = db.clone();
+            let stop = stop.clone();
+            let barrier = barrier.clone();
+            let (date_lo, date_hi) = match cfg.htap_mode {
+                MdbxHtapMode::Q1 | MdbxHtapMode::Q1Selective => (i64::MIN, q1_cutoff),
+                MdbxHtapMode::Q6 | MdbxHtapMode::Q6Selective => (q6_date_lo, q6_date_hi),
+                MdbxHtapMode::None | MdbxHtapMode::Historic => (i64::MIN, i64::MAX),
+            };
+            thread::spawn(move || olap_thread(db, date_lo, date_hi, stop, barrier, cfg.htap_mode))
+        })
+        .collect();
 
     barrier.wait();
     let run_start = Instant::now();
@@ -1036,17 +1288,30 @@ pub fn run_mdbx_tpcc(cfg: MdbxTpccConfig) -> MdbxTpccRunSummary {
     stop.store(true, Relaxed);
 
     let stats: Vec<TerminalStats> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    let scan_results: Vec<MdbxScanResult> = olap_handles.into_iter()
+    let scan_results: Vec<MdbxScanResult> = olap_handles
+        .into_iter()
         .flat_map(|h| h.join().unwrap())
         .collect();
     let actual_wall = run_start.elapsed();
 
     mem_sampler.stop();
 
-    write_results(&stats, &scan_results, duration, actual_wall, &cfg.output_dir)
+    write_results(
+        &stats,
+        &scan_results,
+        duration,
+        actual_wall,
+        &cfg.output_dir,
+    )
 }
 
-fn write_results(stats: &[TerminalStats], scan_results: &[MdbxScanResult], requested_duration: Duration, actual_wall: Duration, out_dir: &std::path::Path) -> MdbxTpccRunSummary {
+fn write_results(
+    stats: &[TerminalStats],
+    scan_results: &[MdbxScanResult],
+    requested_duration: Duration,
+    actual_wall: Duration,
+    out_dir: &std::path::Path,
+) -> MdbxTpccRunSummary {
     let series_len = requested_duration.as_secs() as usize + 2;
     let mut per_sec = vec![0u64; series_len];
     let mut totals = [0u64; NUM_COUNTERS];
@@ -1061,30 +1326,56 @@ fn write_results(stats: &[TerminalStats], scan_results: &[MdbxScanResult], reque
 
     let oltp_ts_path = out_dir.join("tpcc_oltp_timeseries.csv");
     let _ = fs::remove_file(&oltp_ts_path);
-    let mut ts_file = OpenOptions::new().create(true).append(true).open(&oltp_ts_path).unwrap();
-    ts_file.write_all(b"elapsed_sec,new_order_committed\n").unwrap();
+    let mut ts_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&oltp_ts_path)
+        .unwrap();
+    ts_file
+        .write_all(b"elapsed_sec,new_order_committed\n")
+        .unwrap();
     for (sec, count) in per_sec.iter().enumerate() {
-        ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
+        ts_file
+            .write_all(format!("{sec},{count}\n").as_bytes())
+            .unwrap();
     }
 
-    // Same column shape as tpcc_driver.rs::write_results's tpcc_scan.csv (see
-    // MdbxScanResult's doc) - only written when the OLAP thread actually ran, so plain
-    // tpcc/ycsb_* runs don't leave a stale/empty file behind from a previous htap run
-    // reusing the same output_dir.
     if !scan_results.is_empty() {
         let scan_path = out_dir.join("tpcc_scan.csv");
         let _ = fs::remove_file(&scan_path);
-        let mut scan_file = OpenOptions::new().create(true).append(true).open(&scan_path).unwrap();
+        let mut scan_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&scan_path)
+            .unwrap();
         scan_file.write_all(b"mode,elapsed_secs,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary,staleness_versions\n").unwrap();
         for r in scan_results {
-            let tuples_per_sec = if r.latency_ns == 0 { 0.0 } else { r.scanned_tuples as f64 / (r.latency_ns as f64 / 1e9) };
-            scan_file.write_all(format!(
-                "{},{:.3},{},{},{},{},{:.2},{},{}\n",
-                r.mode, r.elapsed_secs, if r.mode == "historic_full_scan" { r.elapsed_secs } else { 0.0 },
-                r.snapshot, r.scanned_tuples, r.latency_ns, tuples_per_sec,
-                r.summary.map(|s| format!("{s:.2}")).unwrap_or_default(),
-                r.staleness_versions,
-            ).as_bytes()).unwrap();
+            let tuples_per_sec = if r.latency_ns == 0 {
+                0.0
+            } else {
+                r.scanned_tuples as f64 / (r.latency_ns as f64 / 1e9)
+            };
+            scan_file
+                .write_all(
+                    format!(
+                        "{},{:.3},{},{},{},{},{:.2},{},{}\n",
+                        r.mode,
+                        r.elapsed_secs,
+                        if r.mode == "historic_full_scan" {
+                            r.elapsed_secs
+                        } else {
+                            0.0
+                        },
+                        r.snapshot,
+                        r.scanned_tuples,
+                        r.latency_ns,
+                        tuples_per_sec,
+                        r.summary.map(|s| format!("{s:.2}")).unwrap_or_default(),
+                        r.staleness_versions,
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
         }
         println!("Wrote {}", scan_path.display());
     }
@@ -1104,24 +1395,22 @@ fn write_results(stats: &[TerminalStats], scan_results: &[MdbxScanResult], reque
 
 pub fn main_mdbx_tpcc(parms: Vec<String>) {
     fn arg<T: std::str::FromStr>(parms: &[String], idx: usize, default: T) -> T {
-        parms.get(idx).and_then(|s| s.parse().ok()).unwrap_or(default)
+        parms
+            .get(idx)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
     }
 
-    // Positional order mirrors the existing `tpcc` subcommand (main_tpcc) wherever the
-    // concept overlaps, dropping every knob that has no libmdbx equivalent (affinity, gc,
-    // update_in_place, root_star_index, WAL) - see mdbx_ycsb.rs/
-    // scripts/engines/libmdbx.py for the same convention. `htap_mode` (position 9) is the
-    // one piece of tpcc_driver.rs's OLAP/HTAP surface this file does port - "none"
-    // (default), canonical "ch_q1"/"ch_q6", or their "*_variant" forms - dropping
-    // tpcc_driver.rs's other olap_mode_str variants (sleep/fresh/scan-delay-sweep) and
-    // ch's own region_name/num_suppliers knobs, neither of which apply to Q1/Q6.
     let num_warehouses: u32 = arg(&parms, 2, 4);
     let num_terminals: usize = arg(&parms, 3, num_cpus::get());
     let duration_secs: u64 = arg(&parms, 4, 30);
     let num_items: u32 = arg(&parms, 5, 100_000);
     let customers_per_district: u32 = arg(&parms, 6, 3_000);
     let initial_orders_per_district: u32 = arg(&parms, 7, 3_000);
-    let db_path: String = parms.get(8).cloned().unwrap_or_else(|| "mdbx_tpcc_db".to_string());
+    let db_path: String = parms
+        .get(8)
+        .cloned()
+        .unwrap_or_else(|| "mdbx_tpcc_db".to_string());
     let htap_mode = match parms.get(9).map(|s| s.as_str()).unwrap_or("none") {
         "ch_q1" => MdbxHtapMode::Q1,
         "ch_q6" => MdbxHtapMode::Q6,

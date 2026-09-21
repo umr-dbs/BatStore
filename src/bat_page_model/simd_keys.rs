@@ -43,14 +43,6 @@ pub(crate) fn try_u64_scalar<Key: 'static + Copy>(value: Key) -> Option<u64> {
     Some(unsafe { *(&value as *const Key as *const u64) })
 }
 
-/// Scans `keys` for every position equal to `target`, from the highest
-/// index down to `0`, calling `on_candidate(index)` for each — stopping as
-/// soon as it returns `true`. Matches
-/// `keys.iter().enumerate().rev().filter(|(_, k)| **k == target)`'s
-/// candidate order and short-circuit behavior exactly; only the mechanism
-/// (a 4-wide SIMD compare vs. one comparison per element) differs.
-///
-/// Returns whether `on_candidate` ever returned `true`.
 #[inline]
 pub(crate) fn find_eq_desc(
     keys: &[u64],
@@ -80,21 +72,6 @@ pub(crate) fn find_eq_desc_scalar(
     false
 }
 
-/// Calls `on_match(index)` for every position in `keys` whose value falls
-/// within `[lower, upper]` (inclusive, unsigned comparison), in ascending
-/// index order. Matches
-/// `keys.iter().enumerate().filter(|(_, k)| lower <= **k && **k <= upper)`
-/// exactly.
-///
-/// Not currently wired into any call site: tried in `RangeQueryIter::refill`
-/// and measured (see git history around this comment) to make `refill`
-/// *slower* overall — TPC-C's own range scans are narrow enough that the
-/// dispatch overhead here (two `try_u64_scalar` calls, a `try_u64_keys`
-/// call, the `Option::zip` chain, a non-inlined `#[target_feature]` call
-/// boundary) outweighed the vectorized bound check's savings. Correctness
-/// is still verified (see this module's tests) — kept for a future call
-/// site with wider/less-narrow scans, where the vectorized check might
-/// actually amortize the dispatch cost.
 #[allow(dead_code)]
 #[inline]
 pub(crate) fn for_each_in_range(
@@ -146,13 +123,6 @@ mod avx2 {
         let tail = n % LANES;
         let target_v = unsafe { _mm256_set1_epi64x(target as i64) };
 
-        // Full 4-wide chunks first, from the highest index down — the tail
-        // (`keys[0..tail]`, the *oldest* physical entries, since a chunk
-        // boundary always starts at `tail` and counts up from there) is
-        // handled last, scalar, below. Candidate order within this loop
-        // still runs strictly high-to-low overall: chunk `full_chunks - 1`
-        // (the highest indices) is visited first, then each lower chunk in
-        // turn, and within a chunk lanes are checked lane 3 down to lane 0.
         for chunk in (0..full_chunks).rev() {
             let base = tail + chunk * LANES;
             let mask = unsafe {
@@ -191,11 +161,6 @@ mod avx2 {
         let full_chunks = n / LANES;
         let tail_start = full_chunks * LANES;
 
-        // AVX2 has no unsigned 64-bit compare — bias both operands by
-        // flipping the sign bit first, then unsigned order maps exactly
-        // onto signed order of the biased values (the standard trick: XOR
-        // with the sign bit is the same permutation as adding 2^63 mod
-        // 2^64, which turns the unsigned number line into the signed one).
         let sign = unsafe { _mm256_set1_epi64x(i64::MIN) };
         let lower_v = unsafe { _mm256_xor_si256(_mm256_set1_epi64x(lower as i64), sign) };
         let upper_v = unsafe { _mm256_xor_si256(_mm256_set1_epi64x(upper as i64), sign) };
@@ -260,7 +225,11 @@ mod tests {
         }
     }
 
-    fn collect_eq_desc(f: impl Fn(&[u64], u64, &mut dyn FnMut(usize) -> bool) -> bool, keys: &[u64], target: u64) -> Vec<usize> {
+    fn collect_eq_desc(
+        f: impl Fn(&[u64], u64, &mut dyn FnMut(usize) -> bool) -> bool,
+        keys: &[u64],
+        target: u64,
+    ) -> Vec<usize> {
         let mut found = Vec::new();
         f(keys, target, &mut |i| {
             found.push(i);
@@ -269,7 +238,12 @@ mod tests {
         found
     }
 
-    fn collect_range(f: impl Fn(&[u64], u64, u64, &mut dyn FnMut(usize)), keys: &[u64], lower: u64, upper: u64) -> Vec<usize> {
+    fn collect_range(
+        f: impl Fn(&[u64], u64, u64, &mut dyn FnMut(usize)),
+        keys: &[u64],
+        lower: u64,
+        upper: u64,
+    ) -> Vec<usize> {
         let mut found = Vec::new();
         f(keys, lower, upper, &mut |i| found.push(i));
         found
@@ -278,28 +252,35 @@ mod tests {
     #[test]
     fn eq_desc_avx2_matches_scalar_reference_across_random_inputs() {
         if !avx2_available() {
-            eprintln!("AVX2 not available on this CPU — skipping (scalar-only path is exercised elsewhere)");
+            eprintln!(
+                "AVX2 not available on this CPU — skipping (scalar-only path is exercised elsewhere)"
+            );
             return;
         }
         let mut rng = Rng(0x9E3779B97F4A7C15);
-        let lens = [0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 123, 200, 1019, 4001];
+        let lens = [
+            0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 123, 200, 1019, 4001,
+        ];
         for &len in &lens {
             for trial in 0..8 {
-                // Small key universe on some trials, so duplicate keys (the
-                // realistic "many versions of one key" leaf shape) actually
-                // occur; a wide-open universe on others, so near-misses and
-                // genuinely absent targets are also covered.
                 let universe: u64 = if trial % 2 == 0 { 8 } else { u64::MAX };
                 let keys: Vec<u64> = (0..len).map(|_| rng.next() % universe.max(1)).collect();
-                let targets: [u64; 4] = [0, universe.saturating_sub(1), rng.next() % universe.max(1), u64::MAX];
+                let targets: [u64; 4] = [
+                    0,
+                    universe.saturating_sub(1),
+                    rng.next() % universe.max(1),
+                    u64::MAX,
+                ];
                 for &target in &targets {
                     let expected = collect_eq_desc(
                         |k, t, cb| find_eq_desc_scalar(k, t, |i| cb(i)),
-                        &keys, target,
+                        &keys,
+                        target,
                     );
                     let actual = collect_eq_desc(
                         |k, t, cb| unsafe { avx2::find_eq_desc_avx2(k, t, cb) },
-                        &keys, target,
+                        &keys,
+                        target,
                     );
                     assert_eq!(
                         actual, expected,
@@ -332,29 +313,37 @@ mod tests {
     #[test]
     fn range_avx2_matches_scalar_reference_across_random_inputs() {
         if !avx2_available() {
-            eprintln!("AVX2 not available on this CPU — skipping (scalar-only path is exercised elsewhere)");
+            eprintln!(
+                "AVX2 not available on this CPU — skipping (scalar-only path is exercised elsewhere)"
+            );
             return;
         }
         let mut rng = Rng(0xD1B54A32D192ED03);
-        let lens = [0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 123, 200, 1019, 4001];
+        let lens = [
+            0usize, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 123, 200, 1019, 4001,
+        ];
         for &len in &lens {
             for trial in 0..8 {
                 let universe: u64 = if trial % 2 == 0 { 32 } else { u64::MAX };
                 let keys: Vec<u64> = (0..len).map(|_| rng.next() % universe.max(1)).collect();
                 let bounds = [
-                    (0u64, universe.max(1) - 1),                 // full range for that universe
-                    (u64::MIN, u64::MAX),                        // truly unrestricted (full-table scan shape)
-                    (universe / 2, universe / 2),                // single-value range
-                    (universe.max(2), universe.max(2) - 1),      // inverted -> always empty
+                    (0u64, universe.max(1) - 1),            // full range for that universe
+                    (u64::MIN, u64::MAX), // truly unrestricted (full-table scan shape)
+                    (universe / 2, universe / 2), // single-value range
+                    (universe.max(2), universe.max(2) - 1), // inverted -> always empty
                 ];
                 for &(lower, upper) in &bounds {
                     let expected = collect_range(
                         |k, lo, hi, cb| for_each_in_range_scalar(k, lo, hi, |i| cb(i)),
-                        &keys, lower, upper,
+                        &keys,
+                        lower,
+                        upper,
                     );
                     let actual = collect_range(
                         |k, lo, hi, cb| unsafe { avx2::for_each_in_range_avx2(k, lo, hi, cb) },
-                        &keys, lower, upper,
+                        &keys,
+                        lower,
+                        upper,
                     );
                     assert_eq!(
                         actual, expected,

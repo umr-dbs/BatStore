@@ -75,10 +75,6 @@ impl LeafZoneMap {
         self.non_null_count > 0 && self.lo <= query_hi && self.hi >= query_lo
     }
 
-    /// Widens `self` to also cover everything `other` covers — used to seed
-    /// a freshly built leaf (split/merge) from one or more source leaves'
-    /// zone maps, none of which need to be precise for the new, narrower
-    /// leaf, only a safe superset of it.
     #[inline(always)]
     pub(crate) fn absorb(&mut self, other: Self) {
         self.lo = self.lo.min(other.lo);
@@ -324,12 +320,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
         let mut p = Self::new();
         let records: Vec<_> = other.as_records().iter().collect();
         p.bulk_push(records);
-        // `p`'s records are a subset of `other`'s (a plain clone copies all
-        // of them; nothing here narrows the set further), so `other`'s zone
-        // map — a safe superset of its own records' projected values — is
-        // still a safe (if possibly loose) superset of `p`'s. Carrying it
-        // forward avoids `LeafPage` needing any knowledge of the owning
-        // tree's projection function at all.
         p.zone_map = other.zone_map;
         p
     }
@@ -346,20 +336,10 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
     pub(crate) fn zone_map(&self) -> LeafZoneMap {
         self.zone_map
     }
-    /// Seeds this (freshly built, not-yet-published, still-empty) leaf's
-    /// zone map — used by split/merge (`bat_tree::smo::push_records_onto`)
-    /// after computing `from` fresh from exactly the records landing in
-    /// this leaf (*not* carried forward from whichever source leaf(s) they
-    /// came from — see that function's doc for why recomputing exactly,
-    /// not just inheriting a looser superset, turned out to matter).
     #[inline(always)]
     pub(crate) fn seed_zone_map(&mut self, from: LeafZoneMap) {
         self.zone_map.absorb(from);
     }
-    /// Folds one more record's projected column value into this leaf's zone
-    /// map — called by the write path right after a new record is actually
-    /// stored (`None` if the tree has no zone-map projection configured, or
-    /// the projection found no value for this particular record).
     #[inline(always)]
     pub(crate) fn widen_zone_map(&mut self, projected: Option<u64>) {
         self.zone_map.widen(projected);
@@ -432,11 +412,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
     pub fn set_payload_at(&mut self, index: usize, payload: Payload) {
         self.data_mut()[index].payload.set(payload)
     }
-    /// Whether the entry at `index` still has a live (non-aborted)
-    /// insertion — i.e. not `VersionInfo::invalidate`d. Deletedness is a
-    /// separate axis (see `is_live`); this only tracks abort of the insert
-    /// itself, matching what `latest_position(_, skip_invalid=true)` and
-    /// the same-stamp predecessor searches below need.
     #[inline(always)]
     fn bit_is_valid(&self, index: usize) -> bool {
         !self.version_at(index).insertion_stamp().is_invalid()
@@ -510,26 +485,40 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
     }
     pub(crate) fn bulk_push<R: LeafRecordSource<Key, Payload>>(&mut self, records: Vec<R>) {
         let count = records.len();
-        self.bulk_push_iter(records, count)
+        self.bulk_push_iter(records, count, None);
     }
     pub(crate) fn bulk_push_from_slice_ref<R: LeafRecordSource<Key, Payload>>(
         &mut self,
         records: &[R],
     ) {
-        self.bulk_push_iter(records.iter(), records.len())
+        self.bulk_push_iter(records.iter(), records.len(), None);
     }
+
+    pub(crate) fn bulk_push_from_slice_ref_projected<R: LeafRecordSource<Key, Payload>>(
+        &mut self,
+        records: &[R],
+        project: Option<fn(&Payload) -> Option<u64>>,
+    ) -> LeafZoneMap {
+        self.bulk_push_iter(records.iter(), records.len(), project)
+    }
+
     fn bulk_push_iter<R: LeafRecordSource<Key, Payload>, I: IntoIterator<Item = R>>(
         &mut self,
         records: I,
         count: usize,
-    ) {
+        project: Option<fn(&Payload) -> Option<u64>>,
+    ) -> LeafZoneMap {
         let len = self.len();
         assert!(len + count <= N);
         let mut active = 0;
         let mut written = 0;
+        let mut zone_map = LeafZoneMap::empty();
         for (index, r) in records.into_iter().enumerate() {
             written += 1;
             active += usize::from(r.source_version().is_live());
+            if let Some(project) = project {
+                zone_map.widen(project(r.source_payload_slot().get()));
+            }
             unsafe {
                 self.key_region
                     .as_mut_ptr()
@@ -551,47 +540,10 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
                 (count - active) as PageLenPrimitive,
             ),
             Release,
-        )
+        );
+        zone_map
     }
 
-    /// Moves materialized records into the page. SMOs already own these
-    /// records, so cloning their versions and refcounted payload slots would
-    /// only add an avoidable increment/decrement pair.
-    pub(crate) fn bulk_push_owned<I>(&mut self, records: I)
-    where
-        I: IntoIterator<Item = RecordPoint<Key, Payload>>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let records = records.into_iter();
-        let count = records.len();
-        let len = self.len();
-        assert!(len + count <= N);
-        let mut active = 0;
-        let mut written = 0;
-        for (index, record) in records.enumerate() {
-            written += 1;
-            let (key, version, payload) = record.into_parts();
-            active += usize::from(version.is_live());
-            unsafe {
-                self.key_region
-                    .as_mut_ptr()
-                    .add(len + index)
-                    .write(MaybeUninit::new(key));
-                self.data_region
-                    .as_mut_ptr()
-                    .add(len + index)
-                    .write(MaybeUninit::new(LeafData { version, payload }));
-            }
-        }
-        assert_eq!(written, count, "owned bulk source length was incorrect");
-        self.len.store(
-            from_active_dead(
-                (len + active) as PageLenPrimitive,
-                (count - active) as PageLenPrimitive,
-            ),
-            Release,
-        );
-    }
     pub(crate) fn delete(&mut self, key: Key, del: TxStamp) -> Result<Option<VersionInfo>, ()> {
         let Some(i) = self.latest_position(key, true) else {
             return Ok(None);
@@ -626,11 +578,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
             Err(())
         }
     }
-    /// A key's versions never straddle a split (`smo::split`'s `KEY_SPLIT`
-    /// partitions by key range, and its `VERSION_SPLIT` moves a whole key's
-    /// surviving chain together), so an `Update`-abort's linked predecessor
-    /// (see `apply_invalidate`'s doc) is always on this same page when one
-    /// exists at all.
     pub(crate) fn abort_write(&mut self, key: Key, my_stamp: TxStamp) -> AbortOutcome {
         let Some(i) = self.latest_position(key, true) else {
             return AbortOutcome::NotFound;
@@ -651,11 +598,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
         }
         n
     }
-    /// Finds an entry for `key` — physically before index `before` if
-    /// given (bounds the search to `0..before`), else searches this whole
-    /// page — whose own `deletion_stamp` exactly matches `stamp`, and
-    /// undeletes it. Used by `apply_invalidate`'s own local, bounded
-    /// predecessor search.
     pub(crate) fn undelete_matching_deletion_stamp(
         &mut self,
         key: Key,
@@ -675,10 +617,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
         false
     }
 
-    /// Clones the exact predecessor an aborted hot update must resurrect,
-    /// but leaves this historical page unchanged. The caller installs the
-    /// undeleted clone in the owning hot leaf, preserving the invariant that
-    /// all current write-facing state is hot.
     pub(crate) fn clone_undeleted_matching(
         &self,
         key: Key,
@@ -694,12 +632,6 @@ impl<const N: usize, Key: Hash + Ord + Copy + Default, Payload: Clone + Default>
         record.version_mut().undelete();
         Some(record)
     }
-    /// Invalidates `key`'s latest (valid) entry — the reversal half of an
-    /// aborted `Insert`/`Update`'s own insert — and, if it was itself an
-    /// `Update`'s insert-half, resurrects the predecessor its own
-    /// `delete_after_update` marked deleted (same stamp on both halves).
-    /// A bare `Insert`'s abort has no such predecessor, so the search below
-    /// legitimately finds nothing in that case.
     pub(crate) fn apply_invalidate(&mut self, key: Key) {
         let Some(i) = self.latest_position(key, true) else {
             return;
@@ -779,12 +711,6 @@ mod zone_map_tests {
 
         a.absorb(b);
 
-        // Union [5,10] u [50,60]: must still claim it might match anything
-        // inside either original sub-range, and must not claim to match
-        // something in the gap strictly between them was ever excluded --
-        // absorb only ever widens, so the gap "generously" reads as a
-        // possible match too (that's fine: a false positive here just costs
-        // one wasted per-record pass, never a wrong answer).
         assert!(a.may_intersect(5, 10));
         assert!(a.may_intersect(50, 60));
         assert!(!a.may_intersect(0, 4));

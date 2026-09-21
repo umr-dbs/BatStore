@@ -187,10 +187,6 @@ fn scan_after_delay_once(db: &TpccDatabase, delay: Duration, run_start: Instant)
     }
 }
 
-/// Freshest-snapshot full-database scan, for throughput-style measurements.
-/// Since each table is now its own tree (no single "whole shared tree" to
-/// scan in one call — see `bat_bench::tpcc_schema` module docs), this sums a
-/// full-range scan over every table instead.
 fn fresh_full_scan_once(db: &TpccDatabase, run_start: Instant) -> ScanResult {
     let mut tx = TpccTxn::begin(db);
     let snapshot = tx.ts_start();
@@ -216,16 +212,6 @@ fn fresh_full_scan_once(db: &TpccDatabase, run_start: Instant) -> ScanResult {
     }
 }
 
-/// Runs each of the 4 implemented CH-benCHmark queries once (see
-/// `tpch_queries` module docs), reporting one `ScanResult` per query.
-/// `scanned_tuples` holds each query's *output* cardinality (group count,
-/// or 1 for the scalar Q6) — these queries don't expose their raw input
-/// scan size the way `fresh_full_scan_once` does — and `summary` holds a
-/// characteristic aggregate value (Q1: total revenue across every group;
-/// Q6: the forecasted revenue; Q4: total flagged orders; Q5: top nation's
-/// revenue). `staleness_versions` is `tree.current_version()` (read right
-/// after each query returns) minus that query's own snapshot — see
-/// `ScanResult::staleness_versions` and `tpch_queries` module docs.
 fn ch_benchmark_queries_once(
     db: &TpccDatabase,
     region_name: &str,
@@ -347,8 +333,14 @@ fn ch_q6_parallel_once(
     run_start: Instant,
 ) -> ScanResult {
     let start = Instant::now();
-    let (q6, ts_start) =
-        crate::bat_bench::parallel_scan::q6_parallel(db, pool, num_warehouses, date_lo, date_hi, max_qty);
+    let (q6, ts_start) = crate::bat_bench::parallel_scan::q6_parallel(
+        db,
+        pool,
+        num_warehouses,
+        date_lo,
+        date_hi,
+        max_qty,
+    );
     ScanResult {
         mode: "ch_q6_variant",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
@@ -406,7 +398,8 @@ fn benchbase_q1_parallel_once(
     run_start: Instant,
 ) -> ScanResult {
     let start = Instant::now();
-    let (q1, ts_start) = crate::bat_bench::parallel_scan::q1_benchbase_parallel(db, pool, num_warehouses);
+    let (q1, ts_start) =
+        crate::bat_bench::parallel_scan::q1_benchbase_parallel(db, pool, num_warehouses);
     ScanResult {
         mode: "ch_q1_pricing_summary",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
@@ -443,7 +436,8 @@ fn benchbase_q6_parallel_once(
     run_start: Instant,
 ) -> ScanResult {
     let start = Instant::now();
-    let (q6, ts_start) = crate::bat_bench::parallel_scan::q6_benchbase_parallel(db, pool, num_warehouses);
+    let (q6, ts_start) =
+        crate::bat_bench::parallel_scan::q6_benchbase_parallel(db, pool, num_warehouses);
     ScanResult {
         mode: "ch_q6_forecast_revenue",
         elapsed_secs: run_start.elapsed().as_secs_f64(),
@@ -495,11 +489,19 @@ pub fn run_olap_worker(
                 // PostgreSQL, libmdbx and WiredTiger. Exclude BatStore's two derived
                 // indexes and the three CH-benCHmark extension tables.
                 let scanned = [
-                    Table::Warehouse, Table::District, Table::Customer, Table::History,
-                    Table::NewOrder, Table::Orders, Table::OrderLine, Table::Item, Table::Stock,
-                ].iter()
-                    .map(|&table| tx.range_count(table, full_range))
-                    .sum();
+                    Table::Warehouse,
+                    Table::District,
+                    Table::Customer,
+                    Table::History,
+                    Table::NewOrder,
+                    Table::Orders,
+                    Table::OrderLine,
+                    Table::Item,
+                    Table::Stock,
+                ]
+                .iter()
+                .map(|&table| tx.range_count(table, full_range))
+                .sum();
                 let latency = start.elapsed();
                 if let Some(expected) = expected_count {
                     assert_eq!(scanned, expected, "historic snapshot cardinality changed");
@@ -542,15 +544,15 @@ pub fn run_olap_worker(
             delivered_before,
             num_warehouses,
         } => {
-            // Looked up once per OLAP thread's whole run, not per query: the
-            // pool (if any) is assigned once, database-wide, by whoever
-            // called `TpccDatabase::enable_scan_pool` — see that method's
-            // and `bat_tree::scan_pool::ScanWorkerPool`'s docs.
             match db.scan_pool(Table::OrderLine) {
                 Some(pool) => {
                     while !stop.load(Relaxed) {
                         let _ = results.send(ch_q1_parallel_once(
-                            db, &pool, num_warehouses, delivered_before, run_start,
+                            db,
+                            &pool,
+                            num_warehouses,
+                            delivered_before,
+                            run_start,
                         ));
                     }
                 }
@@ -570,7 +572,13 @@ pub fn run_olap_worker(
             Some(pool) => {
                 while !stop.load(Relaxed) {
                     let _ = results.send(ch_q6_parallel_once(
-                        db, &pool, num_warehouses, date_lo, date_hi, max_qty, run_start,
+                        db,
+                        &pool,
+                        num_warehouses,
+                        date_lo,
+                        date_hi,
+                        max_qty,
+                        run_start,
                     ));
                 }
             }
@@ -583,7 +591,12 @@ pub fn run_olap_worker(
         OlapMode::BenchbaseQ1 { num_warehouses } => match db.scan_pool(Table::OrderLine) {
             Some(pool) => {
                 while !stop.load(Relaxed) {
-                    let _ = results.send(benchbase_q1_parallel_once(db, &pool, num_warehouses, run_start));
+                    let _ = results.send(benchbase_q1_parallel_once(
+                        db,
+                        &pool,
+                        num_warehouses,
+                        run_start,
+                    ));
                 }
             }
             None => {
@@ -595,7 +608,12 @@ pub fn run_olap_worker(
         OlapMode::BenchbaseQ6 { num_warehouses } => match db.scan_pool(Table::OrderLine) {
             Some(pool) => {
                 while !stop.load(Relaxed) {
-                    let _ = results.send(benchbase_q6_parallel_once(db, &pool, num_warehouses, run_start));
+                    let _ = results.send(benchbase_q6_parallel_once(
+                        db,
+                        &pool,
+                        num_warehouses,
+                        run_start,
+                    ));
                 }
             }
             None => {

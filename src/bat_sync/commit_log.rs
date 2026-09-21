@@ -34,6 +34,13 @@ struct CommitLogState {
     /// Reused by every prune instead of allocating a fresh bitmap on the
     /// commit path. Capacity follows the largest observed log size.
     keep: Vec<bool>,
+    /// Number of pruned commits that may be appended before the next prune.
+    /// Pruning once per `max_workers` commits amortizes the worker-slot scan
+    /// while keeping at most `max_workers - 1` newly-obsolete entries.
+    /// Zero also invalidates the schedule after an unpruned `commit` call.
+    commits_until_prune: usize,
+    #[cfg(test)]
+    prune_count: usize,
 }
 
 impl CommitLog {
@@ -44,46 +51,25 @@ impl CommitLog {
                 #[cfg(feature = "tree-viz")]
                 history: Vec::new(),
                 keep: Vec::new(),
+                commits_until_prune: 0,
+                #[cfg(test)]
+                prune_count: 0,
             }),
         }
     }
 
-    /// Draws `ts_commit` from `glc` and appends it, without ever pruning.
-    /// `MVBTSt::commit_tx` falls back to this whenever block-reclaim GC is
-    /// disabled (see that method's and `TrackerHandleSt`'s docs for why
-    /// pruning isn't sound without it), so each worker's log then grows
-    /// unboundedly for the tree's lifetime — accepted the same way a GC-off
-    /// tree already accepts unbounded dead pages. Also usable directly by
-    /// anything (e.g. tests) that wants a `CommitLog` in isolation, without
-    /// a registry to prune against at all.
-    ///
-    /// A confirmed (not just flat-profile-inferred — checked via matching
-    /// `perf script` call stacks directly) cost of a long GC-off run: this
-    /// `Vec` growing without bound means `push` occasionally has to demand-
-    /// page-fault in the freshly-grown backing memory, with `commit` itself
-    /// on the stack when that happens (~2.4% of all `commit`-attributed
-    /// samples in one profiling run). Reallocation's *copy* cost couldn't be
-    /// pinned on this function the same way in that same profile — the
-    /// `memmove`/`rallocx` time visible elsewhere never co-occurred with
-    /// `commit` in a single stack, so unlike the page faults, that specific
-    /// connection is unconfirmed. A chunked/segmented log (fixed-size blocks
-    /// appended without ever copying old ones) would remove the page-fault
-    /// cost too; not done here since it's a real rewrite of `prune`/
-    /// `lcb_index`'s cross-block search, not a one-line change.
     pub fn commit(&self, glc: &GlobalClock) -> Version {
         let mut state = self.state.lock();
         let ts_commit = glc.next_timestamp();
         state.entries.push(ts_commit);
         #[cfg(feature = "tree-viz")]
         state.history.push(ts_commit);
+        // If callers later switch back to `commit_pruned`, make its first
+        // call derive a fresh schedule from the (possibly large) log.
+        state.commits_until_prune = 0;
         ts_commit
     }
 
-    /// Same as `commit`, but once the log reaches `max_workers` entries (the
-    /// paper's size bound), retains the LCB of every published snapshot.
-    /// An in-flight registration has only a lower bound on its eventual
-    /// snapshot timestamp, so every commit from that bound onward must also
-    /// survive until the exact snapshot is published.
     pub fn commit_pruned(
         &self,
         glc: &GlobalClock,
@@ -97,8 +83,24 @@ impl CommitLog {
         #[cfg(feature = "tree-viz")]
         state.history.push(ts_commit);
 
-        if state.entries.len() >= max_workers {
+        let prune_interval = max_workers.max(1);
+        let should_prune = if state.commits_until_prune == 0 {
+            if state.entries.len() >= prune_interval {
+                true
+            } else {
+                state.commits_until_prune = prune_interval - state.entries.len();
+                false
+            }
+        } else if state.commits_until_prune == 1 {
+            true
+        } else {
+            state.commits_until_prune -= 1;
+            false
+        };
+
+        if should_prune {
             Self::prune(&mut state, in_flight_bounds, active_snapshots);
+            state.commits_until_prune = prune_interval;
         }
 
         ts_commit
@@ -113,10 +115,12 @@ impl CommitLog {
         state.keep.resize(len, false);
         state.keep.fill(false);
 
-        // A bound can precede the real snapshot by intervening commits.
-        // Keeping only its LCB would lose the real snapshot's LCB if the
-        // registering worker pauses after drawing its timestamp.
-        for bound in in_flight_bounds {
+        #[cfg(test)]
+        {
+            state.prune_count += 1;
+        }
+
+        if let Some(bound) = in_flight_bounds.min() {
             let first_at_or_after = state.entries.partition_point(|&e| e < bound);
             if let Some(previous) = first_at_or_after.checked_sub(1) {
                 state.keep[previous] = true;
@@ -178,5 +182,10 @@ impl CommitLog {
     #[cfg(test)]
     pub(crate) fn prune_scratch_capacity(&self) -> usize {
         self.state.lock().keep.capacity()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prune_count(&self) -> usize {
+        self.state.lock().prune_count
     }
 }

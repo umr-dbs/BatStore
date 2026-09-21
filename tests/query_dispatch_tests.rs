@@ -14,22 +14,6 @@ fn leaf_counts(tree: &TestTree, key: u64) -> (Active, Dead) {
     leaf_deref_mut.as_leaf_page().active_dead_count()
 }
 
-/// Regression test: `MVBTSt::commit_tx` must NOT prune a worker's
-/// `CommitLog` while block-reclaim GC is disabled *and* historic-query
-/// truncation is disabled — pruning assumes any record whose `LCB` data
-/// gets dropped is itself unreachable, which is only true when block
-/// reclaim is actually removing dead pages in lockstep (see
-/// `TrackerHandleSt`'s type doc). Without GC, dead records — and an
-/// explicit historical read at an old `version` — stay reachable
-/// forever, so the log must grow unboundedly instead of silently
-/// losing the `LCB` data such a read would need.
-///
-/// A fresh tree's *default* config (`freshest_si_truncate_commit_log =
-/// true`) now prunes the commit log down to just each live snapshot's
-/// `LCB` even with GC off (see `TxContext::commit_tx`) — so exercising
-/// genuinely unbounded growth requires opting out via
-/// `allow_historic_query(true)`, which also disables that pruning (see
-/// its doc), not just leaving GC untouched.
 #[test]
 fn commit_log_grows_unbounded_without_gc_enabled() {
     let tree = TestTree::make_standard(RootIndexType::default());
@@ -51,10 +35,6 @@ fn commit_log_grows_unbounded_without_gc_enabled() {
     );
 }
 
-/// Counterpart to `commit_log_grows_unbounded_without_gc_enabled`: once
-/// `enable_gc` has actually been called, pruning is sound again (block
-/// reclaim is now removing dead pages in the same lockstep `LCB` pruning
-/// assumes), so the log should stay bounded near `max_workers`.
 #[test]
 fn commit_log_stays_bounded_with_gc_enabled() {
     let tree = TestTree::make_standard(RootIndexType::default());
@@ -76,16 +56,6 @@ fn commit_log_stays_bounded_with_gc_enabled() {
     );
 }
 
-/// Regression test for a bug found while building the WAL: `Update`'s
-/// `Ok(None)` (KeyDoesNotExist) and `Err(())` (KeyAlreadyDeleted)
-/// failure branches called `undo_uncommitted` without reversing the
-/// `commit_delta(1, 0)` applied just before, permanently inflating the
-/// leaf's tracked active count even though nothing was actually
-/// inserted. A failed op mutates nothing, so the leaf's tracked
-/// (active, dead) counts must be *exactly* the same before and after —
-/// checked directly, not via a rescan through `as_records()`, which is
-/// itself bounded by the same (possibly-corrupted) length and so can't
-/// independently catch this.
 #[test]
 fn failed_update_leaves_counts_unchanged() {
     let tree = TestTree::make_standard(RootIndexType::default());
@@ -131,12 +101,6 @@ fn failed_update_leaves_counts_unchanged() {
     );
 }
 
-/// Same bug, repeated many times on a small-fanout tree, then verified
-/// two independent ways: the tracked counts must still match their
-/// pre-batch value, and driving enough real inserts afterwards to force
-/// real splits must both (a) not panic inside smo.rs on a bad fill-ratio
-/// read and (b) leave the exact expected key set behind — not one key
-/// short, and not with a phantom extra key.
 #[test]
 fn repeated_failed_updates_do_not_corrupt_later_state() {
     let tree = TestTree::make_standard(RootIndexType::default());
@@ -166,14 +130,6 @@ fn repeated_failed_updates_do_not_corrupt_later_state() {
         ));
     }
 
-    // Point queries, not Range: Range has a separate, pre-existing bug
-    // with ascending sequential-key splits (some leaves become
-    // unreachable from the root's fence intervals) that's unrelated to
-    // the counter-drift fix under test here. Also: `current_version()`,
-    // not `current_version_for_reader()` — the latter aggregates across
-    // a process-global thread registry (see clock.rs), so under `cargo
-    // test`'s parallel test threads it can be dragged down by a
-    // completely unrelated test's tree/thread.
     let version = tree.current_version();
     for k in 1..=(FAN as u64) * 3 {
         let expected_payload = if k == 1 { 100 } else { k * 10 };
@@ -187,11 +143,6 @@ fn repeated_failed_updates_do_not_corrupt_later_state() {
     }
 }
 
-/// New invariant from simplifying the WAL to log `CRUDOperation`
-/// directly: since one logged record must equal one minted version,
-/// `Update`'s in-place fast path (which mints none) must never fire
-/// while a WAL is attached — every Update must go through the normal
-/// versioned path and get a fresh version instead.
 #[test]
 fn update_in_place_still_logs_a_fresh_stamp_while_wal_attached() {
     let path = std::env::temp_dir().join(format!(
@@ -211,15 +162,6 @@ fn update_in_place_still_logs_a_fresh_stamp_while_wal_attached() {
         panic!("expected Inserted");
     };
 
-    // No live readers registered, and GC+update-in-place is on: this still
-    // takes the in-place fast path (skips growing the live tree's version
-    // chain — see `MVBTSt::update_with`'s doc), but with a WAL attached it
-    // now goes through the ordinary commit protocol to log a real `Update`
-    // record, which mints a fresh stamp for the WAL/replay's sake even
-    // though the live leaf record's own version is left untouched. With no
-    // WAL (see `wal_disabled_path_unaffected` in wal_integration_tests.rs)
-    // no stamp is drawn at all and the reported version is just the current
-    // clock position.
     let CRUDOperationResult::Updated(update_version) =
         tree.dispatch_crud(CRUDOperation::Update(1, 200))
     else {

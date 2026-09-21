@@ -42,59 +42,6 @@ pub static SPLITS_COUNTER: Mutex<Vec<SnapShot>> = Mutex::new(vec![]);
 pub static MERGE_ROOT_COUNTER: Mutex<Vec<SnapShot>> = Mutex::new(vec![]);
 pub static SPLITS_ROOT_COUNTER: Mutex<Vec<SnapShot>> = Mutex::new(vec![]);
 
-// pub static mut RESTARTS_COUNTER: [AtomicUsize; 100] = [
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-//     AtomicUsize::new(0), AtomicUsize::new(0),
-// ];
-
 /// Diagnostic: attributes OLC write-traversal restarts (failed optimistic
 /// validations / lock-CAS failures) to the page and key that caused them.
 /// The question this answers: does contention concentrate on a *few pages
@@ -208,11 +155,6 @@ static SCAN_RECORDS_MATCHED: AtomicU64 = AtomicU64::new(0);
 static SCAN_TRACE_BY_TABLE: std::sync::LazyLock<Mutex<HashMap<usize, (u64, u64, u64)>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Records one leaf visited by a range scan: `tree_addr` identifies which
-/// table's tree this leaf belongs to (see `SCAN_TRACE_BY_TABLE`'s doc),
-/// `visited` is the leaf's whole physical record count (live + dead),
-/// `matched` is how many of those passed the scan's visibility+range
-/// filter. No-op, and dead-code eliminated, unless `SCAN_TRACE` is `true`.
 #[inline(always)]
 pub fn record_leaf_scan(tree_addr: usize, visited: usize, matched: usize) {
     if !SCAN_TRACE {
@@ -229,10 +171,6 @@ pub fn record_leaf_scan(tree_addr: usize, visited: usize, matched: usize) {
     entry.2 += matched as u64;
 }
 
-/// Resets `record_leaf_scan`'s accumulators — same rationale as
-/// `reset_restart_trace`: call before a fresh run's first scan so a
-/// multi-run process (e.g. a backend-comparison loop) doesn't carry over a
-/// prior run's counts.
 pub fn reset_scan_trace() {
     SCAN_LEAVES_VISITED.store(0, Relaxed);
     SCAN_RECORDS_VISITED.store(0, Relaxed);
@@ -240,21 +178,13 @@ pub fn reset_scan_trace() {
     SCAN_TRACE_BY_TABLE.lock().clear();
 }
 
-/// Writes the per-table visited/matched breakdown to `path` as CSV
-/// (`table_name,tree_addr,leaves_visited,records_visited,records_matched,
-/// visited_per_matched`), sorted by records visited descending — same
-/// resolution/caveats as `dump_root_restarts_by_table` (an address with no
-/// matching name prints as its raw hex address; must be called after every
-/// worker thread that might have scanned has already been `join`ed). Only
-/// ever non-empty when `SCAN_TRACE` is `true`.
 pub fn dump_scan_trace_by_table(path: &str, table_names: &[(usize, String)]) {
     let global = SCAN_TRACE_BY_TABLE.lock();
     let mut rows: Vec<(&usize, &(u64, u64, u64))> = global.iter().collect();
     rows.sort_by(|a, b| b.1.1.cmp(&a.1.1));
 
     let mut f = BufWriter::new(
-        fs::File::create(path)
-            .expect("dump_scan_trace_by_table: failed to create output file"),
+        fs::File::create(path).expect("dump_scan_trace_by_table: failed to create output file"),
     );
     writeln!(
         f,
@@ -271,7 +201,11 @@ pub fn dump_scan_trace_by_table(path: &str, table_names: &[(usize, String)]) {
         } else {
             visited as f64 / matched as f64
         };
-        writeln!(f, "{name},0x{addr:x},{leaves},{visited},{matched},{ratio:.2}").unwrap();
+        writeln!(
+            f,
+            "{name},0x{addr:x},{leaves},{visited},{matched},{ratio:.2}"
+        )
+        .unwrap();
     }
 
     println!(
@@ -280,10 +214,6 @@ pub fn dump_scan_trace_by_table(path: &str, table_names: &[(usize, String)]) {
     );
 }
 
-/// Prints the accumulated leaves/records-visited-vs-matched totals and their
-/// ratio (how many physical records a scan had to look at for every one it
-/// actually returned) to stdout. Only ever non-zero when `SCAN_TRACE` is
-/// `true`.
 pub fn dump_scan_trace() {
     let leaves = SCAN_LEAVES_VISITED.load(Relaxed);
     let visited = SCAN_RECORDS_VISITED.load(Relaxed);
@@ -315,13 +245,6 @@ static VERSION_SPLIT_PREV_SURVIVORS: std::sync::LazyLock<Mutex<HashMap<String, u
 static VERSION_SPLIT_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VERSION_SPLIT_NON_SHRINKING: AtomicU64 = AtomicU64::new(0);
 
-/// Records one `VERSION_SPLIT` of a leaf: `fence_key` identifies the key
-/// range (stable across repeated re-splits of the same leaf lineage),
-/// `survivor_count` is exactly what's about to be copied into the fresh
-/// page. Compares against the last recorded `survivor_count` for the same
-/// `fence_key` — if it didn't shrink, this `VERSION_SPLIT` made no real
-/// progress. No-op, and dead-code eliminated, unless `SPLIT_CONVERGENCE_TRACE`
-/// is `true`.
 #[inline(always)]
 pub fn record_version_split(fence_key: String, survivor_count: usize) {
     if !SPLIT_CONVERGENCE_TRACE {
@@ -405,14 +328,6 @@ pub fn record_root_restart_for_table(tree_addr: usize) {
     });
 }
 
-/// Writes the per-table root-restart breakdown to `path` as CSV
-/// (`table_name,tree_addr,root_restarts`), sorted by count descending.
-/// `table_names` resolves a tree address to a name (e.g.
-/// `Database::table_names_by_addr()`) — an address with no matching name
-/// (table dropped, or the caller didn't pass a mapping) is printed as its
-/// raw hex address instead. Must be called after every worker thread that
-/// might have recorded a root restart has already been `join`ed (same
-/// caveat as `dump_restart_trace`).
 pub fn dump_root_restarts_by_table(path: &str, table_names: &[(usize, String)]) {
     let global = ROOT_RESTARTS_BY_TABLE.lock();
     let mut rows: Vec<(&usize, &u64)> = global.iter().collect();
@@ -474,11 +389,6 @@ thread_local! {
     static RESTART_LOCAL: RefCell<RestartLocal> = RefCell::new(RestartLocal(HashMap::new()));
 }
 
-/// Records one restart attributed to `page_addr` (a stable identity for the
-/// life of the run today, since block-reclaim GC is off by default — see
-/// `SmartCell`'s doc) and `key`, tagged with the call site (`"leaf_write_lock"`,
-/// `"on_overflow_node"`, etc.) that observed it. No-op, and dead-code
-/// eliminated, unless `RESTART_TRACE` is `true`.
 #[inline(always)]
 pub fn record_restart(page_addr: usize, key: &impl Display, site: &'static str) {
     if !RESTART_TRACE {
@@ -499,10 +409,6 @@ pub fn record_restart(page_addr: usize, key: &impl Display, site: &'static str) 
     });
 }
 
-/// Total number of distinct `(page_addr, site, key)` entries currently held
-/// across every page in `RESTART_GLOBAL` — a direct measure of this
-/// diagnostic's own memory footprint, for tests that want to check it
-/// without dumping a CSV. Only ever non-zero when `RESTART_TRACE` is `true`.
 pub fn restart_trace_footprint() -> usize {
     RESTART_GLOBAL
         .lock()
@@ -511,18 +417,6 @@ pub fn restart_trace_footprint() -> usize {
         .sum()
 }
 
-/// Clears every accumulator `record_restart`/`record_root_restart_for_table`/
-/// `record_write_attempts` feed. These are process-lifetime `static`s that
-/// only ever grow (see `RestartLocal`/`RootRestartsLocal`'s doc for why
-/// they're merged into a global on thread-exit rather than reset there) —
-/// harmless for a single benchmark run that exits the process afterward, but
-/// a driver that calls `run_tpcc`/`run_ycsb` more than once in the same
-/// process (e.g. `tests/tpcc_wal_backend_bench.rs`'s backend-comparison
-/// loop) would otherwise keep accumulating every prior run's restart data
-/// on top of the current run's, unbounded, for as long as `RESTART_TRACE` is
-/// on. Call at the start of a fresh run, before any worker thread can record
-/// anything, so each run's `dump_restart_trace`/`dump_attempt_histogram`/
-/// `dump_root_restarts_by_table` output reflects only that run.
 pub fn reset_restart_trace() {
     RESTART_GLOBAL.lock().clear();
     ROOT_RESTARTS_BY_TABLE.lock().clear();
@@ -532,12 +426,6 @@ pub fn reset_restart_trace() {
     }
 }
 
-/// Writes the merged restart attribution to `path` as CSV
-/// (`page_addr,page_total_restarts,page_distinct_site_keys,site,key,count`),
-/// one row per (page, site, key) triple, sorted by page total descending.
-/// Must be called after every worker thread has been `join`ed (see
-/// `RestartLocal`'s doc) — a thread still running has its data sitting in
-/// that thread's own TLS, not yet merged into `RESTART_GLOBAL`.
 pub fn dump_restart_trace(path: &str) {
     let global = RESTART_GLOBAL.lock();
 
@@ -780,69 +668,6 @@ const UPDATE: u8 = 1;
 const DELETE: u8 = 2;
 
 pub(crate) fn main_insert_rate_limiter(parms: Vec<String>) {
-    // let log = parms[2].parse::<bool>().unwrap_or(false);
-    // let runtime_sec = parms[3].parse::<u64>().unwrap_or(10);
-    // let num_workers = parms[4].parse::<usize>().unwrap_or(10);
-    // let fps = parms[5].parse::<usize>().unwrap_or(100);
-    // let crud = CRUDOperation::InsertRand;
-    // let index = Arc::new(MVBT::default());
-    // let olap_workers = parms[6].parse::<usize>().unwrap_or(10);
-    // let olaps_per_worker = parms[7].parse::<usize>().unwrap_or(10);
-    // let olap_skew_workers = parms[8].parse::<f32>().unwrap_or(0f32);
-    // let olaps_key_range = parms[9].parse::<Key>().unwrap_or(Key::MAX);
-    // let olaps_si_freshest = parms[10].parse::<bool>().unwrap_or(false);
-    // let (info_sender, info_receiver)
-    //     = unbounded();
-    //
-    // let file_name
-    //     = format!("mv_runtime_{runtime_sec}_workers_{num_workers}_fps_{fps}_crud_{crud}.csv");
-    //
-    // let _ = fs::remove_file(file_name.as_str());
-    // let mut log_file = BufWriter::new(OpenOptions::new()
-    //     .write(true)
-    //     .append(true)
-    //     .create(true)
-    //     .open(file_name.as_str()).unwrap());
-    //
-    // log_file.write_all(b"tid,crud,fps,load,tick_ops,total_ops\n").unwrap();
-    //
-    // let start_time = Instant::now();
-    // let workers = (0..num_workers)
-    //     .map(|_| ThreadWorker::new(
-    //         index.clone(),
-    //         fps,
-    //         crud.clone(),
-    //         log,
-    //         info_sender.clone()))
-    //     .collect_vec();
-    //
-    // let signal = info_receiver.clone();
-    // spawn(move || olap_tests(
-    //     index,
-    //     olap_workers,
-    //     olaps_per_worker,
-    //     olap_skew_workers,
-    //     Either::Left(olaps_key_range),
-    //     olaps_si_freshest,
-    //     Some(signal)));
-    //
-    // while start_time.elapsed().as_secs() < runtime_sec {
-    //     match info_receiver.try_recv() {
-    //         Ok(info) =>
-    //             log_file.write_all(format!("{}\n", info).as_bytes()).unwrap(),
-    //         _ => thread::yield_now()
-    //     }
-    // }
-    //
-    // println!("Total Ops = {}", workers
-    //     .into_iter()
-    //     .map(|t| t.stop())
-    //     .collect_vec()
-    //     .into_iter()
-    //     .map(|handle| handle.join().unwrap())
-    //     .sum::<usize>());
-    //
-    // mem::drop(info_receiver);
 }
 pub(crate) fn main_test(parms: Vec<String>) {
     let n = parms[2].parse().unwrap();
@@ -1144,11 +969,6 @@ pub fn main_load_ycsb(parms: Vec<String>) {
 
         let (num_scans_executed, olap_total_time) = (0, 0);
 
-        // let reuse_blocks
-        //     = index.block_manager.reuse_count.load(SeqCst);
-        // let alloc_blocks
-        //     = index.block_manager.alloc_count.load(SeqCst);
-
         let reuse_blocks = 0;
         let alloc_blocks = 0;
 
@@ -1367,11 +1187,6 @@ pub(crate) fn main_load(parms: Vec<String>) {
         drop(olap_signal);
         let (num_scans_executed, olap_total_time) = olaps.join().unwrap();
 
-        // let reuse_blocks
-        //     = index.block_manager.reuse_count.load(SeqCst);
-        // let alloc_blocks
-        //     = index.block_manager.alloc_count.load(SeqCst);
-
         let reuse_blocks = 0;
         let alloc_blocks = 0;
 
@@ -1433,11 +1248,6 @@ pub(crate) fn main_load(parms: Vec<String>) {
             false,
             None,
         );
-
-        // let reuse_blocks
-        //     = index.block_manager.reuse_count.load(SeqCst);
-        // let alloc_blocks
-        //     = index.block_manager.alloc_count.load(SeqCst);
 
         let reuse_blocks = 0;
         let alloc_blocks = 0;
@@ -1906,12 +1716,6 @@ pub fn format_insertions(mut i: usize) -> String {
     }
 }
 
-/// Builds a small demo `MVBT` (plain `u64` keys/payloads) with enough
-/// inserts to force a couple of root* splits, deletes a sub-range so leaf
-/// pages show a realistic active/dead mix, then dumps its full root* list +
-/// block graph via `bat_viz::dump::dump_tree_to_file` - a quick way to get a
-/// file `tools/tree_visualizer.html` can load without wiring up a real
-/// benchmark. Usage: `viz_demo [out.json] [num_keys] [max_depth]`.
 #[cfg(feature = "tree-viz")]
 pub(crate) fn main_viz_demo(parms: Vec<String>) {
     use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
@@ -1950,14 +1754,6 @@ pub(crate) fn main_viz_demo(parms: Vec<String>) {
     );
 }
 
-// Test files physically live in `tests/` (not `src/bat_test/`) so all of the
-// project's tests are collected in one place; `#[path]` keeps them wired in
-// as unit tests compiled into the bin crate, since none of this is reachable
-// from a real `tests/` integration test without a `[lib]` target (see
-// `tests/loom_registration_ordering.rs`'s doc for the one test that's a true,
-// self-contained integration test). Each file's `[[test]]`-less status is
-// enforced via `autotests = false` in `Cargo.toml`, so cargo doesn't also try
-// to build these as their own standalone integration-test crates.
 #[cfg(test)]
 #[path = "../../tests/bench_s_ycsb_correctness_tests.rs"]
 mod bench_s_ycsb_correctness_tests;
@@ -1980,9 +1776,6 @@ mod bench_tpcc_wal_codec_tests;
 #[path = "../../tests/bench_tpch_correctness_tests.rs"]
 mod bench_tpch_correctness_tests;
 #[cfg(test)]
-#[path = "../../tests/idle_compaction_tests.rs"]
-mod idle_compaction_tests;
-#[cfg(test)]
 #[path = "../../tests/bench_tpch_stress_tests.rs"]
 mod bench_tpch_stress_tests;
 #[cfg(test)]
@@ -1991,9 +1784,6 @@ mod bench_wal_recovery_stress_tests;
 #[cfg(test)]
 #[path = "../../tests/bench_ycsb_correctness_tests.rs"]
 mod bench_ycsb_correctness_tests;
-#[cfg(test)]
-#[path = "../../tests/ycsb_scan_parallel_tests.rs"]
-mod ycsb_scan_parallel_tests;
 #[cfg(test)]
 #[path = "../../tests/bench_ycsb_stress_tests.rs"]
 mod bench_ycsb_stress_tests;
@@ -2007,11 +1797,14 @@ mod db_integration_tests;
 #[path = "../../tests/db_transaction_abort_tests.rs"]
 mod db_transaction_abort_tests;
 #[cfg(test)]
-#[path = "../../tests/iter_query_tests.rs"]
-mod iter_query_tests;
+#[path = "../../tests/idle_compaction_tests.rs"]
+mod idle_compaction_tests;
 #[cfg(test)]
 #[path = "../../tests/interval_range_split_tests.rs"]
 mod interval_range_split_tests;
+#[cfg(test)]
+#[path = "../../tests/iter_query_tests.rs"]
+mod iter_query_tests;
 #[cfg(test)]
 #[path = "../../tests/leaf_page_abort_tests.rs"]
 mod leaf_page_abort_tests;
@@ -2027,6 +1820,9 @@ mod query_transaction_tests;
 #[cfg(test)]
 #[path = "../../tests/restart_trace_leak_repro.rs"]
 mod restart_trace_leak_repro;
+#[cfg(test)]
+#[path = "../../tests/smo_direct_copy_concurrency_tests.rs"]
+mod smo_direct_copy_concurrency_tests;
 #[cfg(test)]
 #[path = "../../tests/smo_race_investigation_tests.rs"]
 mod smo_race_investigation_tests;
@@ -2072,6 +1868,9 @@ mod wal_writer_throughput_bench;
 #[cfg(test)]
 #[path = "../../tests/ycsb_autocommit_vs_txn_bench.rs"]
 mod ycsb_autocommit_vs_txn_bench;
+#[cfg(test)]
+#[path = "../../tests/ycsb_scan_parallel_tests.rs"]
+mod ycsb_scan_parallel_tests;
 #[cfg(test)]
 #[path = "../../tests/ycsb_wal_backend_bench.rs"]
 mod ycsb_wal_backend_bench;

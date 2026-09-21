@@ -170,10 +170,6 @@ fn concurrent_mixed_ops_keep_every_row_readable_and_correctly_shaped() {
     );
 }
 
-/// Workload D ("read latest": 95% read, 5% insert, `latest` distribution)
-/// under update-in-place GC - a different mix, distribution, and GC path
-/// than the test above, biased towards reading the newest inserted keys the
-/// instant after they're minted.
 #[test]
 fn concurrent_workload_d_read_latest_keeps_inserted_rows_consistent() {
     let mix = YcsbMix::workload("d").expect("workload d must be defined");

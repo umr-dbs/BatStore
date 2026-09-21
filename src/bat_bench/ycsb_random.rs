@@ -8,14 +8,6 @@ use std::cell::RefCell;
 use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbKey, YcsbRow};
 
 thread_local! {
-    // `rand::rng()` (used throughout this file previously) is a cryptographically
-    // secure generator (ChaCha-backed) - overkill for load-generator data that
-    // never needs to be unpredictable, and expensive enough that it dominated
-    // whole-benchmark `perf` profiles (a plain YCSB-C run spent ~14% of all
-    // cycles just picking which key to read). `SmallRng` (Xoshiro256++) is
-    // seeded once per thread from the real thread-local RNG via `make_rng` -
-    // paying the crypto-RNG cost exactly once, not once per op - then every
-    // draw after that is a cheap, non-cryptographic PRNG step.
     static FAST_RNG: RefCell<SmallRng> = RefCell::new(rand::make_rng());
 }
 
@@ -151,29 +143,6 @@ impl KeySampler {
         Self { dist, zipf }
     }
 
-    /// Samples a key. `record_count` is the originally loaded key range
-    /// (`1..=record_count`); `current_max_key` is the highest key inserted
-    /// so far (`>= record_count` once inserts start happening) — only used
-    /// by `Latest`, to bias towards the newest rows.
-    ///
-    /// `Zipfian` scrambles the raw Zipf rank through `fnv_hash64` before
-    /// treating it as a key (matching real YCSB's `ScrambledZipfianGenerator`,
-    /// which every `requestdistribution=zipfian` run actually uses, and the
-    /// `ScrambledZipfGenerator` the LeanStore/WiredTiger comparison engines
-    /// already apply — see `scripts/engines/leanstore_build.py`'s doc).
-    /// Without this, rank 1 (most popular) *is* key 1, rank 2 is key 2, etc.,
-    /// so the whole hot set sits in the lowest few thousand keys - physically
-    /// the same handful of leftmost leaf pages in this B-tree, for the whole
-    /// run. That gives this engine free cache/latch locality the comparison
-    /// engines don't get (their buffer pool has to actually keep a hot set
-    /// scattered across the full key range warm under a fixed `dram_gib`
-    /// budget), making cross-engine Zipfian throughput not comparable.
-    /// Scrambling keeps the same skew (rank 1 is still hashed to one fixed
-    /// key for the whole run, and is still drawn most often) but spreads
-    /// which physical keys are hot across the whole range instead.
-    /// Deliberately not applied to `Latest`: that mode's whole point is
-    /// bias towards the physically-newest keys, which real YCSB's own
-    /// `SkewedLatestGenerator` also leaves unscrambled.
     pub fn sample(&self, record_count: u64, current_max_key: u64) -> YcsbKey {
         with_fast_rng(|rng| match self.dist {
             RequestDistribution::Uniform => rng.random_range(1..=record_count.max(1)),
@@ -193,14 +162,6 @@ impl KeySampler {
     }
 }
 
-/// FNV-1 (64-bit) — same algorithm/constants as YCSB's own `Utils.fnvhash64`,
-/// reused here so `KeySampler::sample`'s `Zipfian` scrambling matches real
-/// YCSB's `ScrambledZipfianGenerator` bit-for-bit in spirit (not literally,
-/// since Java's version folds a `Math.abs` over a signed `long` - pointless
-/// here, `u64` has no sign to fix up). Deliberately not `std`'s
-/// `DefaultHasher`/`SipHash`: this only needs a cheap, well-mixed permutation
-/// of `[1, record_count]`, not collision resistance, and this runs on every
-/// single `Zipfian` key draw.
 #[inline]
 fn fnv_hash64(mut val: u64) -> u64 {
     const OFFSET_BASIS: u64 = 0xCBF29CE484222325;
@@ -227,13 +188,6 @@ pub struct YcsbMix {
 }
 
 impl YcsbMix {
-    /// The six standard YCSB "Core Workloads" (spec §3 / `workloads/workload{a..f}`):
-    /// - A: Update heavy — 50/50 read/update, zipfian.
-    /// - B: Read mostly — 95/5 read/update, zipfian.
-    /// - C: Read only — 100% read, zipfian.
-    /// - D: Read latest — 95% read, 5% insert, `latest` distribution.
-    /// - E: Short ranges — 95% scan, 5% insert, zipfian.
-    /// - F: Read-modify-write — 50% read, 50% read-modify-write, zipfian.
     pub fn workload(name: &str) -> Option<Self> {
         Some(match name {
             "a" => Self {
@@ -337,18 +291,9 @@ pub fn random_row(cfg: &YcsbConfig) -> YcsbRow {
 }
 
 thread_local! {
-    // Reused across every `with_random_field_patch` call on this thread so
-    // patch generation costs zero heap allocations after the first call
-    // (was one fresh `Vec<u8>` per call - a single-field YCSB update patch
-    // is on the timed path of every non-`writeallfields` update/RMW op).
     static FIELD_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Standard YCSB update (`writeallfields=false`): generates one uniformly
-/// selected field's replacement bytes into a thread-local scratch buffer and
-/// hands `(field_index, patch_bytes)` to `f`, which must copy what it needs
-/// out of `patch_bytes` before returning (the buffer is reused by the next
-/// call on this thread).
 pub fn with_random_field_patch<R>(cfg: &YcsbConfig, f: impl FnOnce(usize, &[u8]) -> R) -> R {
     if cfg.field_count == 0 || cfg.field_length == 0 {
         return f(0, &[]);
@@ -364,18 +309,6 @@ pub fn with_random_field_patch<R>(cfg: &YcsbConfig, f: impl FnOnce(usize, &[u8])
     })
 }
 
-/// Bulk random-byte generation plus rejection mapping. A 1 KiB row now
-/// needs a handful of PRNG bulk fills rather than 1,000 `Distribution::sample`
-/// calls. Rejecting bytes >= 248 keeps all 62 characters equiprobable.
-///
-/// `scratch` is 128 bytes, not larger: the common caller asks for exactly
-/// one YCSB field (`field_length` defaults to 100), and a too-large scratch
-/// buffer means the *last* fill of a loop draws far more random bytes than
-/// it can use once `out.len()` is nearly satisfied (a fixed 1024-byte
-/// scratch drew up to 2048 raw bytes to fill a 1000-byte row, an ~86%
-/// waste). 128 covers the default single-field case in one draw (expected
-/// ~124 accepted of 128, comfortably above 100) while keeping the same
-/// worst-case waste ratio for larger requests via the existing loop.
 fn fill_alphanumeric(rng: &mut SmallRng, out: &mut [u8]) {
     const ALPHABET: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut scratch = [0u8; 128];

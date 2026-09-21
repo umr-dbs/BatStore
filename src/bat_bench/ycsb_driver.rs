@@ -85,37 +85,10 @@ pub struct DriverConfig {
     pub idle_compaction: Option<(f64, Duration)>,
 }
 
-/// How many of `num_threads` worker threads are expected to be running a
-/// Scan op at any given instant: `num_threads * mix.scan`, rounded up and
-/// floored at 1 — not the raw `num_threads`, since most of YCSB's mixes are
-/// read/update/insert-heavy and only a `mix.scan` fraction of ops (issued by
-/// whichever thread happens to draw one) are scans at all. Using the full
-/// thread count here would overstate how many callers are actually sharing
-/// the pool at once, understating each one's real `fair_query_fanout` share
-/// (or tipping it into `None`, i.e. no parallelism) for any mix where scans
-/// are a minority of ops. Shared by `default_scan_pool_workers` (to size the
-/// pool) and `run_ycsb` (as `ScanWorkerPool::spawn`'s own
-/// `expected_concurrent_queries`) so the two stay consistent regardless of
-/// whether the pool ended up this size via that default or an explicit
-/// override.
 fn expected_scan_concurrency(num_threads: usize, mix: &YcsbMix) -> usize {
     ((num_threads as f64 * mix.scan).ceil() as usize).max(1)
 }
 
-/// Auto-sizes `DriverConfig::scan_pool_workers`: on whenever `mix` actually
-/// issues scans (`mix.scan > 0.0`) and `record_count` is at or above
-/// `parallel_scan::MIN_ROWS_FOR_SCAN_POOL` (below that, the pool's own
-/// per-job overhead costs more than a sequential scan just takes — see that
-/// constant's doc), `None` (off) otherwise. Sized to `num_cpus.max(
-/// scan_pool::DEFAULT_QUERY_FANOUT * expected_scan_concurrency(num_threads,
-/// mix))`, mirroring `tpcc_driver::main_tpcc`'s CLI parsing for `Table::
-/// OrderLine`'s pool — guaranteeing every concurrent scanner at least
-/// `DEFAULT_QUERY_FANOUT` workers of its own rather than letting
-/// `fair_query_fanout` divide a plain `num_cpus`-sized pool down to a
-/// too-thin share. Reusable by every caller that builds a `DriverConfig` —
-/// not just CLI parsing — so a workload with no scans (A/B/C/D/F) never pays
-/// for idle pool threads while YCSB-E gets the pool by default without any
-/// extra configuration.
 pub fn default_scan_pool_workers(
     record_count: u64,
     mix: &YcsbMix,
@@ -292,13 +265,6 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     );
 
     let num_threads = cfg.num_threads.max(1);
-    // One more permanent WorkerId if idle compaction is enabled — see
-    // `tpcc_driver::run_tpcc`'s identical `idle_compaction_cost`: the
-    // vacuum thread `spawn_vacuum_thread` starts below calls
-    // `compact_idle_pass`, which acquires its own `WorkerId` via
-    // `self.worker_id()` just like any terminal thread, so it has to be
-    // budgeted here too or its first sweep panics the registry once the
-    // loader + workers have already filled every other slot.
     let idle_compaction_cost = if cfg.gc && cfg.idle_compaction.is_some() {
         1
     } else {
@@ -307,10 +273,6 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     // +1: the main thread also acquires a WorkerId, for the sequential
     // population phase before any worker thread is spawned (see tpcc_driver).
     let fixed_cost = 1 + idle_compaction_cost;
-    // WorkerIds are registration slots, not CPUs. The loader keeps its slot
-    // after population, so size the registry for all participants rather than
-    // reducing requested concurrency to fit the machine's logical CPU count.
-    // This matches TPC-C and permits 128 benchmark workers on a 128-thread node.
     let worker_capacity = num_threads
         .checked_add(fixed_cost)
         .filter(|&capacity| capacity <= u16::MAX as usize)
@@ -330,10 +292,8 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     let tree = match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);
-            let base = YcsbTree::make_standard_with_max_workers(
-                cfg.root_star_index,
-                worker_capacity,
-            );
+            let base =
+                YcsbTree::make_standard_with_max_workers(cfg.root_star_index, worker_capacity);
             Arc::new(
                 match cfg.wal_lockfree_batch_size {
                     Some(batch_size) => {
@@ -362,11 +322,6 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         );
     }
 
-    // See `DriverConfig::scan_pool_workers`'s doc: a pool worker thread
-    // never calls `tree.worker_id()` (it only ever runs jobs built around
-    // `READ_ONLY_SCAN_WORKER_ID`, same as `ycsb_txn::scan_parallel`'s own
-    // sequential path), so unlike `num_threads` this is never counted
-    // against `worker_capacity` above.
     let scan_pool: Option<Arc<YcsbScanPool>> = cfg.scan_pool_workers.filter(|&n| n > 0).map(|n| {
         Arc::new(YcsbScanPool::spawn(
             tree.clone(),
@@ -492,14 +447,6 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     write_results(&stats, duration, actual_wall, &cfg.output_dir)
 }
 
-/// Dumps the per-shard local-reuse/steal/fresh-alloc breakdown accumulated
-/// over the whole run (population + timed phase) — see `bat_gc::GcStats`'s
-/// doc. Written the same way `mem_stats.csv` is (a plain CSV in `out_dir`),
-/// not stdout, so it stays parseable by a Python harness at scale. Only
-/// compiled in with the `gc-stats` feature (see its doc in `Cargo.toml`) —
-/// without it, no `gc_stats.csv` is written at all (rather than an
-/// all-zero/misleading one), so a Python reader can tell "feature off" apart
-/// from "no reclaim activity happened."
 #[cfg(feature = "gc-stats")]
 fn write_gc_stats(tree: &YcsbTree, out_dir: &Path, filename: &str) {
     let path = out_dir.join(filename);
@@ -512,7 +459,19 @@ fn write_gc_stats(tree: &YcsbTree, out_dir: &Path, filename: &str) {
     file.write_all(b"shard,local_reuse,steal,fresh_alloc,schema_version,request_count,latency_ns,latency_max_ns,scan_count,lists_checked,lists_checked_max\n").unwrap();
     for (shard, s) in tree.tracker().gc_stats_per_shard().into_iter().enumerate() {
         file.write_all(
-            format!("{shard},{},{},{},2,{},{},{},{},{},{}\n", s.local_reuse, s.steal, s.fresh_alloc, s.request_count, s.latency_ns, s.latency_max_ns, s.scan_count, s.lists_checked, s.lists_checked_max).as_bytes(),
+            format!(
+                "{shard},{},{},{},2,{},{},{},{},{},{}\n",
+                s.local_reuse,
+                s.steal,
+                s.fresh_alloc,
+                s.request_count,
+                s.latency_ns,
+                s.latency_max_ns,
+                s.scan_count,
+                s.lists_checked,
+                s.lists_checked_max
+            )
+            .as_bytes(),
         )
         .unwrap();
     }
@@ -714,10 +673,6 @@ pub fn main_ycsb(parms: Vec<String>) {
         "atomic" | "auto" | "autocommit" => YcsbExecutionMode::Atomic,
         other => panic!("ycsb: invalid execution mode '{other}' (expected atomic or transaction)"),
     };
-    // Same 3-way convention as `tpcc_driver::main_tpcc`'s position 22
-    // (`scan_pool_workers`'s doc): omitted entirely -> `default_scan_pool_workers`
-    // decides (on by default for a scan-issuing mix with enough rows);
-    // explicit "0" -> off; explicit "N" -> exactly N workers.
     let scan_pool_workers: Option<usize> = match parms.get(20).map(|s| s.as_str()) {
         None => default_scan_pool_workers(record_count, &mix, num_threads),
         Some(s) => match s.parse::<usize>() {

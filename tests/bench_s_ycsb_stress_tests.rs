@@ -61,19 +61,6 @@ fn read_bytes(tree: &YcsbTree, key: u64) -> Option<Vec<u8>> {
     }
 }
 
-/// Mirrors `s_ycsb_driver::write_worker_thread`'s op dispatch, minus the
-/// per-second bookkeeping this test doesn't need. Returns every key this
-/// thread actually wrote (arrival or hot-update) so the caller can verify
-/// exactly those keys - see the module doc for why the ticket range itself
-/// isn't a valid stand-in for that set under lateness.
-///
-/// A hot-tail sample can legitimately miss: `hot_sampler` is anchored to the
-/// shared `current_max_key` ticket counter, which another thread's
-/// `mint_arrival_key` bumps *before* that same arrival's row is actually
-/// materialized (there's a real window between the counter fetch-add and
-/// the row write) - so a concurrent hot update can sample a key whose
-/// arrival hasn't landed yet and correctly report a miss without writing
-/// anything. Only a reported hit is recorded as touched.
 fn write_worker(
     tree: Arc<YcsbTree>,
     cfg: YcsbConfig,
@@ -103,10 +90,6 @@ fn write_worker(
     touched
 }
 
-/// Mirrors `s_ycsb_driver::olap_worker_thread`, additionally recording any
-/// scan whose returned count exceeds its own requested span into `violations`
-/// instead of asserting inline (asserting inside a spawned thread would only
-/// surface as an opaque `join` panic message with no scan details attached).
 fn olap_worker(
     tree: Arc<YcsbTree>,
     current_max_key: Arc<AtomicU64>,
@@ -234,10 +217,6 @@ fn concurrent_default_mix_with_lateness_keeps_every_row_readable_and_scans_never
     );
 }
 
-/// A narrower hot window and heavier arrival share, under update-in-place
-/// GC and the `Transaction` execution mode - a different write concentration,
-/// GC path, and execution mode than the test above, deliberately chosen to
-/// force more frequent version-chain compaction on a smaller set of leaves.
 #[test]
 fn concurrent_narrow_hot_window_under_update_in_place_gc_and_transaction_mode() {
     run_stress_and_check(

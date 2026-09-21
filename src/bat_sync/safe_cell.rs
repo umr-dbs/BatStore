@@ -12,7 +12,7 @@ use std::ops::{Deref, DerefMut};
 
 /// Experimental: Remove AtomicRefCell dependency and sync it yourself.
 pub struct SafeCell<E> {
-    inner: UnsafeCell<E>
+    inner: UnsafeCell<E>,
 }
 
 /// Impl. Block for SafeCell and for all E.
@@ -21,7 +21,7 @@ impl<E> SafeCell<E> {
     #[inline(always)]
     pub const fn new(e: E) -> Self {
         Self {
-            inner: UnsafeCell::new(e)
+            inner: UnsafeCell::new(e),
         }
     }
 

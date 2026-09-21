@@ -26,20 +26,6 @@ fn point(tree: &TestTree, key: u64, version: Version) -> Option<u64> {
     }
 }
 
-/// Exercises inserts, updates, and deletes (with small FAN_OUT so splits
-/// actually fire) through the live WAL-enabled write path, drops the tree,
-/// then recovers it via `open_recovered` and diffs the final state against
-/// an in-memory oracle. This is the key correctness test for the whole
-/// design: it validates that structural repairs (never logged) are
-/// faithfully re-derived by replaying only the logged CRUD ops in causal
-/// order, reconstructing a logically equivalent tree.
-///
-/// Deliberately *not* checked: historical snapshots at specific version
-/// numbers from before the crash. Recovery mints fresh version numbers for
-/// everything it replays rather than preserving the originals (see
-/// `bat_wal::recovery`'s doc comment for why) — only the *final* logical
-/// state is a guaranteed match, not "the same version number means the same
-/// thing it did before the crash."
 #[test]
 fn crash_recovery_round_trip() {
     let path = temp_log_path("round_trip");
@@ -123,17 +109,6 @@ fn crash_recovery_round_trip() {
     let _ = fs::remove_file(&path);
 }
 
-/// Drives the WAL from many concurrent threads at once — the scenario the
-/// lock-free rewrite exists for. Minting a version and appending its record
-/// are two independent, uncoordinated steps per thread, so records can (and,
-/// with enough threads/keys, reliably do) land in the log file in a
-/// different order than their version numbers — this specifically exercises
-/// replay's "sort by commit order before applying" handling of that, not
-/// just the single-threaded, naturally-in-order case
-/// `crash_recovery_round_trip` covers. It also exercises the unified
-/// single-file writer for real: each of the `THREADS` writer threads gets
-/// its own `WorkerId`, but all of them enqueue into the same `WalWriter`
-/// and land in the same file.
 #[test]
 fn concurrent_writers_crash_recovery_round_trip() {
     let path = temp_log_path("concurrent_round_trip");
@@ -165,13 +140,6 @@ fn concurrent_writers_crash_recovery_round_trip() {
         TestTree::open_recovered(RootIndexType::default(), &path, Duration::from_millis(2))
             .unwrap();
 
-    // Query the *recovered* tree's own clock, not a version captured from
-    // the dropped original tree: they're independent `GlobalClock`s, and
-    // structural repairs (splits) consume a non-deterministic number of
-    // extra ticks on each side (concurrent execution vs. sequential
-    // replay), so there's no guaranteed numeric correspondence between the
-    // two — recovery deliberately mints fresh version numbers for
-    // everything it replays (see this module's top-level doc comment).
     let recovered_version = recovered.current_version();
 
     for key in 0..THREADS * KEYS_PER_THREAD {
@@ -186,10 +154,6 @@ fn concurrent_writers_crash_recovery_round_trip() {
     let _ = fs::remove_file(&path);
 }
 
-/// Simulates a crash mid-fsync by truncating a few bytes off the tail of an
-/// otherwise-valid log, and confirms recovery stops cleanly at the last
-/// valid record (no panic, no corrupted data) rather than either erroring
-/// out or misinterpreting the torn tail as valid.
 #[test]
 fn torn_write_stops_cleanly() {
     let path = temp_log_path("torn");
@@ -234,17 +198,6 @@ fn torn_write_stops_cleanly() {
     let _ = fs::remove_file(&path);
 }
 
-/// `dispatch_crud` never blocks on its own WAL flush anymore (no `.recv()`
-/// on a flush ticket remains anywhere in the write path — see
-/// `MVBTSt::wal_hardened_version`'s doc); this test can't assert on that
-/// directly (a "did this NOT block" check is a wall-clock race, not a
-/// deterministic property — how long the flush thread's linger + fsync
-/// actually takes depends on the machine), so instead it drives the other,
-/// checkable half of the contract: `wait_wal_hardened` genuinely reflects
-/// real on-disk durability, not just an always-true stub. Issues a batch of
-/// writes with nothing waiting on any of them individually, then confirms
-/// that once `wait_wal_hardened` returns for the *last* one, every one of
-/// them — not just the last — is actually present in the file on disk.
 #[test]
 fn wait_wal_hardened_reflects_real_on_disk_durability() {
     let path = temp_log_path("async_hardened");
@@ -306,11 +259,6 @@ fn wal_hardened_version_zero_when_wal_disabled() {
     assert_eq!(tree.wal_hardened_version(), 0);
 }
 
-/// Confirms the WAL-disabled path (never calling `enable_wal`) behaves
-/// exactly as before the WAL work: plain inserts/updates/deletes, including
-/// the update-in-place fast path (GC + update-in-place enabled, no
-/// registered readers), which is only skipped when a WAL is attached (see
-/// `dispatch.rs`'s `update_in_place_disabled_while_wal_attached` test).
 #[test]
 fn wal_disabled_path_unaffected() {
     let tree = TestTree::make_standard(RootIndexType::default());
@@ -343,15 +291,6 @@ fn wal_disabled_path_unaffected() {
     ));
 }
 
-/// A write that gets logged optimistically (`wal_start_commit`) but never
-/// actually commits must never resurface after recovery. `dispatch.rs`'s
-/// `Update`/`Delete` arms log their op *before* attempting the mutation, so
-/// an `Update`/`Delete` on a key that turns out not to exist still logs a
-/// `Write` entry — but since `commit_tx` (and so `wal_log_commit`) is never
-/// reached on that failure path, that entry never gets a matching Commit
-/// marker. Replay is commit-gated (see `WalEntry::Commit`'s doc), so it
-/// silently skips any `Write` without one, regardless of why it never
-/// committed.
 #[test]
 fn logged_but_never_committed_write_does_not_resurface_after_recovery() {
     let path = temp_log_path("never_committed");
@@ -399,16 +338,6 @@ fn logged_but_never_committed_write_does_not_resurface_after_recovery() {
     let _ = fs::remove_file(&path);
 }
 
-/// `bat_wal::lockfree_writer::LockFreeWalWriter` can, in principle, leave an
-/// *interior* hole (a byte range some thread reserved via `fetch_add` but
-/// never got to `pwrite` before the whole process died, while a
-/// later-offset write already landed and reached disk) — see that type's
-/// doc and `record::resync_next`'s for the full argument. `WalWriter`'s own
-/// strictly-sequential design can never produce this shape, so this test
-/// builds the file by hand instead of driving a live writer, and checks
-/// that `replay` — which now calls `resync_next` under the hood — recovers
-/// records on *both* sides of the hole, not just the ones before it (which
-/// is all the old "stop at the first bad frame" scan would have found).
 #[test]
 fn replay_recovers_records_after_an_interior_hole() {
     let path = temp_log_path("interior_hole");
@@ -480,21 +409,6 @@ fn replay_recovers_records_after_an_interior_hole() {
     let _ = fs::remove_file(&path);
 }
 
-/// `concurrent_writers_crash_recovery_round_trip`'s counterpart for the
-/// lock-free + per-thread-batched backend (`enable_wal_lockfree`/
-/// `open_recovered_lockfree`, via `bat_wal::backend::WalBackend::LockFree`) —
-/// proves the two pieces added on top of `LockFreeWalWriter` actually work
-/// together through the real production dispatch path, not just in
-/// isolation:
-/// - `LocalBatch`'s per-worker batching (`batch_size` small enough here
-///   that every worker actually crosses it at least once during the loop
-///   below, exercising the "flush early because full" path, not just the
-///   periodic sweep).
-/// - The periodic sweep thread's timeout-based flush (`flush_interval` set
-///   larger than this test's total write time, so *every* record reaching
-///   disk depends on the sweep firing at least once during `Drop` — see
-///   `LockFreeWalBackend::drop`'s doc — not on batches filling up on their
-///   own).
 #[test]
 fn concurrent_writers_lockfree_batched_crash_recovery_round_trip() {
     let path = temp_log_path("lockfree_batched_round_trip");
@@ -503,11 +417,6 @@ fn concurrent_writers_lockfree_batched_crash_recovery_round_trip() {
     let tree = TestTree::make_standard(RootIndexType::default())
         .with_wal_lockfree(&path, Duration::from_millis(500), 3)
         .unwrap();
-    // A generous flush_interval (deliberately longer than this test should
-    // take to issue all its writes) plus a small batch_size: most of what
-    // reaches disk here is forced out either by a batch filling up
-    // (batch_size=3) or by the one final sweep `Drop` triggers, not by a
-    // sweep firing mid-run.
 
     const THREADS: u64 = 8;
     const KEYS_PER_THREAD: u64 = 200;

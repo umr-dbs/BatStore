@@ -14,16 +14,12 @@ use crate::bat_wal::writer::WalWriter;
 
 type TestTree = MVBTSt<8, 8, u64, u64>;
 
-/// A single shared log carrying writes for two different tables (one
-/// transaction touching both, plus a second transaction touching only
-/// one) must, after `replay_database`, leave each tree with exactly its
-/// own writes — the concrete proof that table-tagged entries actually
-/// demultiplex instead of all landing in whichever tree happens to be
-/// passed first.
 #[test]
 fn replay_database_routes_writes_to_correct_table() {
-    let path =
-        std::env::temp_dir().join(format!("batstore_replay_db_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "batstore_replay_db_test_{}.log",
+        std::process::id()
+    ));
     let _ = fs::remove_file(&path);
 
     const TABLE_A: record::TableId = 0;

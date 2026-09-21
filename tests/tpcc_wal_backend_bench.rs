@@ -20,10 +20,6 @@ use crate::bat_bench::tpcc_driver::{DriverConfig, run_tpcc};
 use crate::bat_bench::tpcc_schema::TpccConfig;
 use crate::bat_root::index_root::RootIndexType;
 
-// >= max(THREAD_COUNTS): `run_tpcc` clamps `num_terminals` down to
-// `num_warehouses` under `affinity: true` (each terminal needs >= 1 owned
-// warehouse), so a lower warehouse count would silently make the higher
-// thread-count runs identical to the lower one instead of a real comparison.
 const FULL_WAREHOUSES: u32 = 16;
 const FULL_DURATION_SECS: u64 = 8;
 const FULL_THREAD_COUNTS: &[usize] = &[8, 16];
