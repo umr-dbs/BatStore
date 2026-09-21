@@ -1,7 +1,7 @@
-use std::fmt::Display;
-use std::hash::Hash;
 use crate::bat_crud_model::crud_operation::CRUDOperation;
 use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
+use std::fmt::Display;
+use std::hash::Hash;
 
 pub type NodeVisits = usize;
 pub trait AtomicTxDispatcher<
@@ -9,9 +9,11 @@ pub trait AtomicTxDispatcher<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
-> {
-    fn dispatch_crud(&'a self,
-                     operation: CRUDOperation<Key, Payload>
+    Payload: Display + Clone + Default + Sync + 'static,
+>
+{
+    fn dispatch_crud(
+        &'a self,
+        operation: CRUDOperation<Key, Payload>,
     ) -> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>;
 }

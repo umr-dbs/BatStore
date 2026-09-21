@@ -39,10 +39,6 @@ const MAX_RSS_GROWTH_KB: u64 = 20_000_000;
 
 fn config(num_terminals: usize, wal_path: PathBuf, batch_size: Option<usize>) -> DriverConfig {
     DriverConfig {
-        // Tiny catalog: keeps population (which runs before the timed
-        // phase, unavoidably counted against this test's wall-clock budget)
-        // down to well under a second, unlike the full-scale bench's
-        // defaults (100k items / 3k customers per district).
         tpcc: TpccConfig {
             num_warehouses: WAREHOUSES,
             customers_per_district: 10,

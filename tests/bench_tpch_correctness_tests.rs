@@ -10,14 +10,14 @@
 //! the strongest correctness check available when the input is fully under
 //! the test's control.
 
-use crate::bat_bench::tpcc_load::populate_regions_and_nations;
-use crate::bat_bench::tpcc_schema::{
-    BigTreeSize, Order, OrderLine, Stock, Supplier, Table, TpccDatabase, TpccKey, TpccRow, TpccTree, k_order,
-    k_order_line, k_stock, order_line_table_range, BENCHBASE_Q1_DELIVERY_AFTER_MILLIS,
-    BENCHBASE_Q6_DATE_HI_MILLIS, BENCHBASE_Q6_DATE_LO_MILLIS,
-};
 use crate::bat_bench::parallel_scan::{q1_parallel, q6_parallel};
+use crate::bat_bench::tpcc_load::populate_regions_and_nations;
 use crate::bat_bench::tpcc_schema::TpccScanWorkerPool as ScanWorkerPool;
+use crate::bat_bench::tpcc_schema::{
+    BENCHBASE_Q1_DELIVERY_AFTER_MILLIS, BENCHBASE_Q6_DATE_HI_MILLIS, BENCHBASE_Q6_DATE_LO_MILLIS,
+    BigTreeSize, Order, OrderLine, Stock, Supplier, Table, TpccDatabase, TpccKey, TpccRow,
+    TpccTree, k_order, k_order_line, k_stock, order_line_table_range,
+};
 use crate::bat_bench::tpcc_txn::TpccTxn;
 use crate::bat_bench::tpch_queries::{q1, q1_benchbase, q4, q5, q6, q6_benchbase};
 use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
@@ -122,14 +122,6 @@ fn q1_groups_and_sums_delivered_order_lines_by_ol_number() {
     assert!((groups[1].sum_amount - 60.0).abs() < 1e-9);
 }
 
-/// `q1`'s cutoff is inclusive (`delivered <= delivered_before`), and its
-/// closure no longer checks that itself at all — the automatic zone-map
-/// filter (`RangeQueryIter::with_zone_predicate`, bound `[i64::MIN,
-/// delivered_before]`) is the *only* thing enforcing it now. This exists
-/// specifically to catch an off-by-one there: a row delivered exactly *on*
-/// `delivered_before` must be included, one delivered the instant after
-/// must not, and `i64::MIN` itself (the encoded lower bound's literal
-/// edge) must not be accidentally excluded by the sign-bit-flip encoding.
 #[test]
 fn q1_includes_a_row_delivered_exactly_on_the_inclusive_cutoff() {
     let db = TpccDatabase::new(RootIndexType::default());
@@ -161,7 +153,10 @@ fn q1_includes_a_row_delivered_exactly_on_the_inclusive_cutoff() {
     let total_count: u64 = groups.iter().map(|g| g.count).sum();
     let total_amount: f64 = groups.iter().map(|g| g.sum_amount).sum();
 
-    assert_eq!(total_count, 2, "expected exactly the MIN-date and on-cutoff rows");
+    assert_eq!(
+        total_count, 2,
+        "expected exactly the MIN-date and on-cutoff rows"
+    );
     assert!(
         (total_amount - 11.0).abs() < 1e-9,
         "expected 1.0 + 10.0 = 11.0, got {total_amount}"
@@ -245,17 +240,6 @@ fn q6_sums_revenue_for_delivered_low_quantity_lines_in_date_range() {
     );
 }
 
-/// `q6`'s date range is `[date_lo, date_hi)` — upper-*exclusive* — but the
-/// automatic zone-map filter (`RangeQueryIter::with_zone_predicate`) that
-/// now does this filtering is bound-*inclusive* on both ends (see
-/// `LeafZoneMap::may_intersect`). `q6_parallel`/`q6` bridge that gap by
-/// passing `date_hi.saturating_sub(1)` as the inclusive upper bound — this
-/// test exists specifically to catch an off-by-one in that bridge: a row
-/// delivered exactly *on* `date_hi` must still be excluded (the automatic
-/// filter is the only thing checking the date range now, since both
-/// `q6`/`q6_parallel` dropped their manual date check), while one delivered
-/// at `date_lo` (inclusive) and one at `date_hi - 1` (the last still-valid
-/// instant) must both be included.
 #[test]
 fn q6_excludes_a_row_delivered_exactly_on_the_exclusive_upper_bound() {
     let db = TpccDatabase::new(RootIndexType::default());
@@ -533,12 +517,6 @@ fn region_and_nation_reference_data_has_the_expected_fixed_mapping() {
     assert_eq!(nation_at(8), ("INDIA".to_string(), 2));
 }
 
-/// Populates `Table::OrderLine` with 2 lines per warehouse across
-/// `1..=num_warehouses`, each warehouse's data shifted so the queries below
-/// have warehouse-distinguishable, hand-predictable totals — used to check
-/// `parallel_scan::q1_parallel`/`q6_parallel` (which split the scan by
-/// warehouse, see that module's doc) against the sequential `q1`/`q6` on
-/// exactly the same data.
 fn populate_multi_warehouse_order_lines(db: &TpccDatabase, num_warehouses: u32) {
     for w in 1..=num_warehouses {
         insert(
@@ -556,11 +534,6 @@ fn populate_multi_warehouse_order_lines(db: &TpccDatabase, num_warehouses: u32) 
     }
 }
 
-/// `q1_parallel` must agree with the sequential `q1` byte-for-byte on the
-/// same data, including when `fanout` doesn't evenly divide
-/// `num_warehouses` (uneven blocks) and when it exceeds it (some workers get
-/// a genuinely empty range) — see `partition_order_line_range`'s doc for
-/// both cases.
 #[test]
 fn q1_parallel_matches_sequential_q1_across_fanouts() {
     let db = TpccDatabase::new(RootIndexType::default());
@@ -568,13 +541,13 @@ fn q1_parallel_matches_sequential_q1_across_fanouts() {
     populate_multi_warehouse_order_lines(&db, num_warehouses);
 
     let (expected, _) = q1(&db, 100);
-    assert_eq!(expected.len(), 2, "ol_number 1 and 2 across all 5 warehouses");
+    assert_eq!(
+        expected.len(),
+        2,
+        "ol_number 1 and 2 across all 5 warehouses"
+    );
 
     for fanout in [1, 2, 3, 8] {
-        // `expected_concurrent_queries: Some(1)` makes `fair_query_fanout`
-        // hand back this whole pool (`pool.num_workers()`) to the one
-        // caller here, reproducing the pre-`fair_query_fanout` sweep this
-        // test was written for.
         let pool = ScanWorkerPool::spawn(db.tree_for(Table::OrderLine), fanout, Some(1));
         // `ScanWorkerPool::spawn` floors every request at 2 workers (a
         // "pool" of 1 buys no parallelism over the sequential path) — see
@@ -605,7 +578,10 @@ fn q6_parallel_matches_sequential_q6_across_fanouts() {
     populate_multi_warehouse_order_lines(&db, num_warehouses);
 
     let (expected, _) = q6(&db, 0, 200, 250);
-    assert!(expected > 0.0, "sanity: fixture should have matching revenue");
+    assert!(
+        expected > 0.0,
+        "sanity: fixture should have matching revenue"
+    );
 
     for fanout in [1, 2, 3, 8] {
         let pool = ScanWorkerPool::spawn(db.tree_for(Table::OrderLine), fanout, Some(1));
@@ -617,13 +593,6 @@ fn q6_parallel_matches_sequential_q6_across_fanouts() {
     }
 }
 
-/// Exercises the actual database-assignment path (`TpccDatabase::
-/// enable_scan_pool`/`scan_pool`/`disable_scan_pool`) rather than a
-/// hand-spawned `ScanWorkerPool` — this is what `OlapMode::ChQ1`/`ChQ6`
-/// actually call through in `olap_scan::run_olap_worker`. Confirms the
-/// assigned pool produces the exact same result as the sequential query,
-/// and that `scan_pool` correctly reports `None` before assignment and
-/// after `disable_scan_pool`.
 #[test]
 fn enable_scan_pool_assigns_a_working_pool_and_disable_scan_pool_removes_it() {
     let db = TpccDatabase::new(RootIndexType::default());
@@ -631,10 +600,15 @@ fn enable_scan_pool_assigns_a_working_pool_and_disable_scan_pool_removes_it() {
     populate_multi_warehouse_order_lines(&db, num_warehouses);
 
     let (expected, _) = q1(&db, 100);
-    assert!(db.scan_pool(Table::OrderLine).is_none(), "no pool assigned yet");
+    assert!(
+        db.scan_pool(Table::OrderLine).is_none(),
+        "no pool assigned yet"
+    );
 
     db.enable_scan_pool(Table::OrderLine, 3, None);
-    let pool = db.scan_pool(Table::OrderLine).expect("enable_scan_pool should have assigned one");
+    let pool = db
+        .scan_pool(Table::OrderLine)
+        .expect("enable_scan_pool should have assigned one");
     assert_eq!(pool.num_workers(), 3);
 
     let (actual, _) = q1_parallel(&db, &pool, num_warehouses, 100);
@@ -647,23 +621,15 @@ fn enable_scan_pool_assigns_a_working_pool_and_disable_scan_pool_removes_it() {
     }
 
     db.disable_scan_pool(Table::OrderLine);
-    assert!(db.scan_pool(Table::OrderLine).is_none(), "disable_scan_pool should have cleared it");
+    assert!(
+        db.scan_pool(Table::OrderLine).is_none(),
+        "disable_scan_pool should have cleared it"
+    );
 }
 
-/// The whole point of wiring parallel dispatch into `RangeQueryIter` itself
-/// (`collect_parallel`/`count_ref_parallel`) rather than a hand-rolled
-/// per-caller helper like `q1_parallel`/`q6_parallel`: a plain
-/// `TpccTxn::range`/`range_count` call on `Table::OrderLine` should already
-/// come out correct whether or not a pool happens to be assigned to it —
-/// the caller here never mentions pools, fanout, or splitting at all.
-/// `order_line_table_range()` is the key's full sentinel domain, so
-/// `RangeSplit::approx_len` clears `MIN_LEN_FOR_SPLIT_DISPATCH` regardless
-/// of how few rows are actually populated — this really does exercise the
-/// pool-dispatch branch, not just the small-range fallback (see
-/// `tests/interval_range_split_tests.rs`'s identical "correct but
-/// imbalanced" case for `TpccKey`'s full range).
 #[test]
-fn tpcc_txn_range_and_range_count_transparently_use_the_order_line_scan_pool_when_one_is_assigned() {
+fn tpcc_txn_range_and_range_count_transparently_use_the_order_line_scan_pool_when_one_is_assigned()
+{
     let db = TpccDatabase::new(RootIndexType::default());
     let num_warehouses = 5;
     populate_multi_warehouse_order_lines(&db, num_warehouses);
@@ -676,7 +642,11 @@ fn tpcc_txn_range_and_range_count_transparently_use_the_order_line_scan_pool_whe
         other => panic!("unexpected range result: {other}"),
     };
     tx_before.commit();
-    assert_eq!(expected_count, 2 * num_warehouses as usize, "sanity: 2 order-lines inserted per warehouse");
+    assert_eq!(
+        expected_count,
+        2 * num_warehouses as usize,
+        "sanity: 2 order-lines inserted per warehouse"
+    );
     assert_eq!(expected_rows, expected_count);
 
     db.enable_scan_pool(Table::OrderLine, 4, None);
@@ -689,19 +659,18 @@ fn tpcc_txn_range_and_range_count_transparently_use_the_order_line_scan_pool_whe
     };
     tx_after.commit();
 
-    assert_eq!(actual_count, expected_count, "range_count must agree whether or not a pool is assigned");
-    assert_eq!(actual_rows, expected_rows, "range must agree whether or not a pool is assigned");
+    assert_eq!(
+        actual_count, expected_count,
+        "range_count must agree whether or not a pool is assigned"
+    );
+    assert_eq!(
+        actual_rows, expected_rows,
+        "range must agree whether or not a pool is assigned"
+    );
 
     db.disable_scan_pool(Table::OrderLine);
 }
 
-/// The whole point of the redesigned pool (see `scan_pool::ScanWorkerPool`'s
-/// doc) is that several concurrent callers can share one pool without their
-/// jobs' results getting mixed up — the old per-query-exclusive design
-/// could only ever have one caller holding it at a time. Runs several
-/// `q1_parallel`/`q6_parallel` calls concurrently against one shared,
-/// database-assigned pool and checks every single one still gets the exact
-/// right answer.
 #[test]
 fn shared_scan_pool_serves_concurrent_callers_correctly() {
     let db = TpccDatabase::new(RootIndexType::default());
@@ -710,11 +679,6 @@ fn shared_scan_pool_serves_concurrent_callers_correctly() {
 
     let (expected_q1, _) = q1(&db, 100);
     let (expected_q6, _) = q6(&db, 0, 200, 250);
-    // `None`: keep the pool's whole 2-worker capacity available to each of
-    // the 4 concurrent callers below via `fair_query_fanout`'s "unknown"
-    // default (`Some(2)`), so this test still exercises real dispatch/
-    // sharing through the pool rather than every caller sharing a fair
-    // slice too thin to bother with.
     db.enable_scan_pool(Table::OrderLine, 2, None);
 
     std::thread::scope(|scope| {
@@ -723,7 +687,9 @@ fn shared_scan_pool_serves_concurrent_callers_correctly() {
                 let db = &db;
                 let expected_q1 = &expected_q1;
                 scope.spawn(move || {
-                    let pool = db.scan_pool(Table::OrderLine).expect("pool was assigned above");
+                    let pool = db
+                        .scan_pool(Table::OrderLine)
+                        .expect("pool was assigned above");
                     if i % 2 == 0 {
                         let (actual, _) = q1_parallel(db, &pool, num_warehouses, 100);
                         assert_eq!(actual.len(), expected_q1.len());
@@ -747,13 +713,6 @@ fn shared_scan_pool_serves_concurrent_callers_correctly() {
     db.disable_scan_pool(Table::OrderLine);
 }
 
-/// `q1_parallel`/`q6_parallel` go through `ScanWorkerPool::try_dispatch`,
-/// not `dispatch` — when the pool has no spare capacity, a query must run
-/// on the calling thread instead of queuing behind whatever else is
-/// keeping every worker busy. Occupies both of a 2-worker pool's workers
-/// with artificially slow jobs, then checks `q1_parallel` still returns the
-/// exact right answer, and returns almost immediately rather than waiting
-/// out the slow jobs' `hold` duration.
 #[test]
 fn try_dispatch_runs_inline_when_the_pool_has_no_spare_capacity() {
     let db = TpccDatabase::new(RootIndexType::default());
@@ -779,7 +738,10 @@ fn try_dispatch_runs_inline_when_the_pool_has_no_spare_capacity() {
         // Give both workers a moment to actually pick their job up
         // (`in_flight` only increments once a worker's `recv()` returns).
         std::thread::sleep(hold / 4);
-        assert!(!pool.has_spare_capacity(), "both workers should be busy with the slow filler jobs");
+        assert!(
+            !pool.has_spare_capacity(),
+            "both workers should be busy with the slow filler jobs"
+        );
 
         let start = Instant::now();
         let (actual, _) = q1_parallel(&db, &pool, num_warehouses, 100);
@@ -799,20 +761,13 @@ fn try_dispatch_runs_inline_when_the_pool_has_no_spare_capacity() {
     });
 }
 
-/// The whole point of `bat_sync::worker::READ_ONLY_SCAN_WORKER_ID` (see its
-/// doc) is that a `ScanWorkerPool`'s own worker threads never draw from the
-/// tree's fixed `WorkerRegistry` — so a pool can be sized past
-/// `max_workers` entirely safely. Builds a database whose registry only
-/// has room for 2 real workers, then assigns `ORDER_LINE` a 10-worker
-/// pool: if any pool worker thread ever called `tree.worker_id()`, the
-/// registry would panic (`WorkerRegistry::acquire`'s `assert!(id <
-/// max_workers)`) well before all 10 could register, which would surface
-/// here as `q1_parallel` never getting a result back for at least one of
-/// its jobs (a panicking worker drops its result sender without sending,
-/// so `ScanWorkerPool::dispatch`'s `rx.recv().expect(..)` panics too).
 #[test]
 fn scan_pool_can_oversubscribe_past_max_workers_without_registering() {
-    let db = TpccDatabase::new_with_big_tree_size_and_max_workers(RootIndexType::default(), BigTreeSize::default(), 2);
+    let db = TpccDatabase::new_with_big_tree_size_and_max_workers(
+        RootIndexType::default(),
+        BigTreeSize::default(),
+        2,
+    );
     let num_warehouses = 5;
     populate_multi_warehouse_order_lines(&db, num_warehouses);
     let (expected, _) = q1(&db, 100);
@@ -821,8 +776,14 @@ fn scan_pool_can_oversubscribe_past_max_workers_without_registering() {
     // this test's one caller, so the query below actually exercises all 10
     // pool threads rather than just its `Some(4)` "unknown" default.
     db.enable_scan_pool(Table::OrderLine, 10, Some(1));
-    let pool = db.scan_pool(Table::OrderLine).expect("enable_scan_pool should have assigned one");
-    assert_eq!(pool.num_workers(), 10, "far more workers than max_workers=2");
+    let pool = db
+        .scan_pool(Table::OrderLine)
+        .expect("enable_scan_pool should have assigned one");
+    assert_eq!(
+        pool.num_workers(),
+        10,
+        "far more workers than max_workers=2"
+    );
 
     let (actual, _) = q1_parallel(&db, &pool, num_warehouses, 100);
     assert_eq!(actual.len(), expected.len());
@@ -836,21 +797,6 @@ fn scan_pool_can_oversubscribe_past_max_workers_without_registering() {
     db.disable_scan_pool(Table::OrderLine);
 }
 
-/// Proves the pool genuinely *shares* capacity across concurrently
-/// querying callers, not just "doesn't halt anyone" — see `parallel_scan`'s
-/// "Partitioning" doc for why a query asks for a fair share of the pool
-/// (`ScanWorkerPool::fair_query_fanout`) rather than its entire capacity:
-/// with a 6-worker pool, 3 query-sized (2-worker) slices should all get
-/// serviced by the pool's workers at the same time, not one after another.
-/// Uses the same slow-filler-job technique as
-/// `try_dispatch_runs_inline_when_the_pool_has_no_spare_capacity`
-/// (`pool.dispatch` directly, bypassing q1/q6-specific logic, and so also
-/// bypassing `fair_query_fanout` — this test picks the 2-per-batch slice
-/// size itself) to make "did this run concurrently" a simple wall-clock
-/// check: 3 batches of 2 jobs each, each job sleeping `hold`, all submitted
-/// at once — if the pool actually shares its 6 workers across all 3
-/// batches, total wall time is ~1 `hold`; if it silently serialized them,
-/// ~3.
 #[test]
 fn scan_pool_serves_multiple_query_sized_slices_concurrently() {
     let db = TpccDatabase::new(RootIndexType::default());
@@ -862,10 +808,13 @@ fn scan_pool_serves_multiple_query_sized_slices_concurrently() {
     std::thread::scope(|scope| {
         for _ in 0..3 {
             scope.spawn(|| {
-                pool.dispatch(vec![order_line_table_range(), order_line_table_range()], move |_tree, _range| {
-                    std::thread::sleep(hold);
-                    0
-                });
+                pool.dispatch(
+                    vec![order_line_table_range(), order_line_table_range()],
+                    move |_tree, _range| {
+                        std::thread::sleep(hold);
+                        0
+                    },
+                );
             });
         }
     });
@@ -877,27 +826,15 @@ fn scan_pool_serves_multiple_query_sized_slices_concurrently() {
     );
 }
 
-/// Not a correctness check but kept as a permanent perf probe (same
-/// convention as this codebase's other `compare_*`/`*_bench` tests, e.g.
-/// `bat_test::tpcc_wal_backend_bench`): tracks where the scan-size
-/// crossover actually sits between `q1_parallel`'s pool overhead (channel
-/// send/recv + oneshot result channel per sub-range job) and sequential
-/// `q1` just walking the whole range itself — i.e. gives an early signal if
-/// a future change moves `parallel_scan::MIN_ROWS_FOR_SCAN_POOL`'s
-/// calibration (currently 65,536) out of date. Sweeps `ORDER_LINE` row
-/// counts with a fixed 2-worker pool (matching the driver's own floor/
-/// default) and a fixed 8 warehouses — one point sits exactly at
-/// `MIN_ROWS_FOR_SCAN_POOL` — timing several repeats of each at each size.
-/// Prints a table (`--nocapture` to see it) rather than asserting on exact
-/// timings, which would be flaky under CI/machine noise; the crossover
-/// itself was established once, deliberately, via a much finer sweep run
-/// by hand (not kept here) — see this constant's own doc for that data.
 #[test]
 fn scan_pool_vs_sequential_crossover() {
     let num_warehouses = 8u32;
     let repeats = 5usize;
 
-    println!("{:>12} {:>10} {:>14} {:>14} {:>8}", "rows/wh", "total", "seq_us", "pool_us", "pool/seq");
+    println!(
+        "{:>12} {:>10} {:>14} {:>14} {:>8}",
+        "rows/wh", "total", "seq_us", "pool_us", "pool/seq"
+    );
     for &rows_per_warehouse in &[100usize, 2_000, 8_192, 20_000] {
         let db = TpccDatabase::new(RootIndexType::default());
         for w in 1..=num_warehouses {
@@ -945,21 +882,6 @@ fn scan_pool_vs_sequential_crossover() {
     }
 }
 
-/// Not a correctness check but kept as a permanent perf probe (same
-/// convention as `scan_pool_vs_sequential_crossover` just above): measures
-/// how much `q1`'s automatic zone-map predicate (`RangeQueryIter::
-/// with_zone_predicate`, wired to `ol_delivery_d` in `create_all_tables`)
-/// actually saves versus visiting every leaf. `ol_delivery_d` is set equal
-/// to `i` here specifically so it's strongly correlated with insertion
-/// (and therefore physical leaf) order, mirroring real TPC-C data where
-/// `ol_delivery_d` tracks order age — the scenario this feature targets.
-/// A `NARROW` cutoff keeps only the earliest ~2% of each warehouse's dates,
-/// so almost every leaf's `[lo, hi]` should fall entirely above it and get
-/// skipped outright; `FULL` covers every row, so nothing should be
-/// prunable. Prints wall-clock timing (`--nocapture` to see it); see this
-/// session's own report for the matching leaf-visited/skipped counts,
-/// gathered separately via `bat_test::SCAN_TRACE` (off by default, so not
-/// asserted on here).
 #[test]
 fn zone_map_pruning_speeds_up_a_narrow_q1_predicate() {
     let num_warehouses = 8u32;
@@ -1018,11 +940,6 @@ fn zone_map_pruning_speeds_up_a_narrow_q1_predicate() {
     );
 }
 
-/// Splits `order_line_table_range()` into `fanout` contiguous warehouse
-/// blocks — a copy of `parallel_scan::partition_order_line_range`'s logic
-/// (private to that module) so this probe can sweep fanout independently
-/// of whatever `ScanWorkerPool::fair_query_fanout` would actually compute
-/// for a given pool/OLAP-thread-count combination.
 fn partition_warehouses(num_warehouses: u32, fanout: usize) -> Vec<Interval<TpccKey>> {
     let fanout = fanout.max(1);
     let n = num_warehouses as usize;
@@ -1040,38 +957,39 @@ fn partition_warehouses(num_warehouses: u32, fanout: usize) -> Vec<Interval<Tpcc
         let lo_w = next_w_id;
         let hi_w = next_w_id + count as u32 - 1;
         next_w_id = hi_w + 1;
-        let lower = if i == 0 { full.lower } else { k_order_line(lo_w, 0, 0, 0) };
-        let upper = if i == fanout - 1 { full.upper } else { k_order_line(hi_w + 1, 0, 0, 0) - 1 };
+        let lower = if i == 0 {
+            full.lower
+        } else {
+            k_order_line(lo_w, 0, 0, 0)
+        };
+        let upper = if i == fanout - 1 {
+            full.upper
+        } else {
+            k_order_line(hi_w + 1, 0, 0, 0) - 1
+        };
         ranges.push(Interval::new(lower, upper));
     }
     ranges
 }
 
-fn count_delivered(tree: &TpccTree, range: Interval<TpccKey>, ts_start: u64, delivered_before: i64) -> u64 {
+fn count_delivered(
+    tree: &TpccTree,
+    range: Interval<TpccKey>,
+    ts_start: u64,
+    delivered_before: i64,
+) -> u64 {
     let mut count = 0u64;
-    RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref(|_, row| {
-        let ol = row.as_order_line();
-        if ol.ol_delivery_d.is_some_and(|d| d <= delivered_before) {
-            count += 1;
-        }
-    });
+    RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).for_each_ref(
+        |_, row| {
+            let ol = row.as_order_line();
+            if ol.ol_delivery_d.is_some_and(|d| d <= delivered_before) {
+                count += 1;
+            }
+        },
+    );
     count
 }
 
-/// Investigative probe (`#[ignore]`d, not a correctness check): how much
-/// does one query's *own* latency actually improve as its fan-out grows?
-/// Times the same full-table scan split into 2/4/8/16/32/64 pool workers
-/// directly (bypassing `q1_parallel`'s `fair_query_fanout`-based
-/// partitioning), on one large, fixed-size fixture, to see where the
-/// per-query speedup curve actually saturates. This is the measurement
-/// that motivated `ScanWorkerPool::fair_query_fanout` in the first place:
-/// a fixed fan-out of 2 (this module's old, now-removed `QUERY_FANOUT`)
-/// only captured the first small step of a curve that keeps improving up
-/// to ~8 workers (~2.4x) before flattening out — so a query's fair share
-/// of a large, `num_cpus`-sized pool captures far more of that ceiling
-/// than a fixed small constant ever could, whenever few enough OLAP
-/// threads are sharing the pool to afford it.
-/// Run with: `cargo test --release --bin batstore -- --ignored --nocapture scan_pool_fanout_scaling`
 #[test]
 #[ignore]
 fn scan_pool_fanout_scaling() {
@@ -1109,30 +1027,28 @@ fn scan_pool_fanout_scaling() {
         let ranges = partition_warehouses(num_warehouses, fanout);
 
         // Warm up (thread spin-up, first-touch costs) before timing.
-        let _ = pool.dispatch(ranges.clone(), move |t, r| count_delivered(t, r, ts_start, 100));
+        let _ = pool.dispatch(ranges.clone(), move |t, r| {
+            count_delivered(t, r, ts_start, 100)
+        });
 
         let start = Instant::now();
         let mut total = 0u64;
         for _ in 0..repeats {
             total = pool
-                .dispatch(ranges.clone(), move |t, r| count_delivered(t, r, ts_start, 100))
+                .dispatch(ranges.clone(), move |t, r| {
+                    count_delivered(t, r, ts_start, 100)
+                })
                 .into_iter()
                 .sum();
         }
         let us = start.elapsed().as_micros() as f64 / repeats as f64;
-        assert_eq!(total, seq_total, "fanout={fanout} must count the same rows as sequential");
+        assert_eq!(
+            total, seq_total,
+            "fanout={fanout} must count the same rows as sequential"
+        );
         println!("{:>8} {:>14.1} {:>7.2}x", fanout, us, seq_us / us);
     }
 
-    // Compare against the *real* production path (q1_parallel, going
-    // through try_dispatch's busy check) on the exact same data, to see
-    // whether try_dispatch's has_spare_capacity() check is itself costing
-    // speedup in a tight back-to-back single-thread loop (each call's own
-    // last-received job may not have had its `in_flight` decrement land
-    // yet when the very next call checks capacity).
-    // `Some(1)`: this one caller should get the whole 2-worker pool
-    // (matching "pool=2" below), same as `fair_query_fanout`'s "unknown"
-    // default would give anyway at this size.
     db.enable_scan_pool(Table::OrderLine, 2, Some(1));
     let pool = db.scan_pool(Table::OrderLine).unwrap();
     let _ = q1_parallel(&db, &pool, num_warehouses, 100);
@@ -1143,17 +1059,15 @@ fn scan_pool_fanout_scaling() {
     let q1_parallel_us = start.elapsed().as_micros() as f64 / repeats as f64;
     println!(
         "{:>8} {:>14.1} {:>7.2}x  (real q1_parallel, try_dispatch, pool=2)",
-        "n/a", q1_parallel_us, seq_us / q1_parallel_us
+        "n/a",
+        q1_parallel_us,
+        seq_us / q1_parallel_us
     );
     db.disable_scan_pool(Table::OrderLine);
 
     tx.commit();
 }
 
-/// `ScanWorkerPool::fair_query_fanout` unit coverage — the core arithmetic
-/// behind `DriverConfig::scan_pool_workers`'s whole sizing design (see that
-/// field's doc) — checked directly rather than only indirectly through
-/// `q1_parallel`/`q6_parallel`'s own use of it.
 #[test]
 fn fair_query_fanout_uses_the_default_when_expected_concurrent_queries_is_unknown() {
     let db = TpccDatabase::new(RootIndexType::default());
@@ -1178,8 +1092,17 @@ fn fair_query_fanout_caps_the_unknown_default_at_pool_capacity() {
 #[test]
 fn fair_query_fanout_divides_pool_capacity_evenly_across_expected_callers() {
     let db = TpccDatabase::new(RootIndexType::default());
-    for &(num_workers, expected_callers, want) in &[(32usize, 4usize, 8usize), (16, 2, 8), (100, 10, 10), (9, 3, 3)] {
-        let pool = ScanWorkerPool::spawn(db.tree_for(Table::OrderLine), num_workers, Some(expected_callers));
+    for &(num_workers, expected_callers, want) in &[
+        (32usize, 4usize, 8usize),
+        (16, 2, 8),
+        (100, 10, 10),
+        (9, 3, 3),
+    ] {
+        let pool = ScanWorkerPool::spawn(
+            db.tree_for(Table::OrderLine),
+            num_workers,
+            Some(expected_callers),
+        );
         assert_eq!(
             pool.fair_query_fanout(),
             Some(want),
@@ -1199,11 +1122,6 @@ fn fair_query_fanout_returns_none_when_too_many_expected_callers_to_share_fairly
     assert_eq!(pool.fair_query_fanout(), None);
 }
 
-/// `TpccDatabase::enable_scan_pool`'s doc says this panics for
-/// `Warehouse`/`District` (they live outside `db`'s own table list — see
-/// `TreeClass`'s doc) rather than silently misbehaving through
-/// `table_ids`' meaningless `0` for those two — never actually exercised
-/// by any other test.
 #[test]
 #[should_panic(expected = "is a TreeClass::Big table")]
 fn enable_scan_pool_panics_for_warehouse_a_big_class_table() {
@@ -1225,38 +1143,37 @@ fn scan_pool_getter_panics_for_warehouse_a_big_class_table() {
     let _ = db.scan_pool(Table::Warehouse);
 }
 
-/// Two different tables' pools are entirely independent state — assigning
-/// or dropping one must never touch the other, since they're separate
-/// slots in `bat_db::Database`'s own `scan_pools` vector (indexed by
-/// `TableId`), not a single shared "the" pool.
 #[test]
 fn multiple_tables_can_have_independent_scan_pools_at_once() {
     let db = TpccDatabase::new(RootIndexType::default());
     db.enable_scan_pool(Table::OrderLine, 4, Some(2));
     db.enable_scan_pool(Table::Item, 10, Some(2));
 
-    let order_line_pool = db.scan_pool(Table::OrderLine).expect("OrderLine pool should be assigned");
-    let item_pool = db.scan_pool(Table::Item).expect("Item pool should be assigned");
+    let order_line_pool = db
+        .scan_pool(Table::OrderLine)
+        .expect("OrderLine pool should be assigned");
+    let item_pool = db
+        .scan_pool(Table::Item)
+        .expect("Item pool should be assigned");
     assert_eq!(order_line_pool.num_workers(), 4);
     assert_eq!(item_pool.num_workers(), 10);
     assert_eq!(order_line_pool.fair_query_fanout(), Some(2));
     assert_eq!(item_pool.fair_query_fanout(), Some(5));
 
     db.disable_scan_pool(Table::OrderLine);
-    assert!(db.scan_pool(Table::OrderLine).is_none(), "disabling OrderLine's pool must not touch Item's");
-    assert!(db.scan_pool(Table::Item).is_some(), "Item's own pool must still be assigned");
+    assert!(
+        db.scan_pool(Table::OrderLine).is_none(),
+        "disabling OrderLine's pool must not touch Item's"
+    );
+    assert!(
+        db.scan_pool(Table::Item).is_some(),
+        "Item's own pool must still be assigned"
+    );
 
     db.disable_scan_pool(Table::Item);
     assert!(db.scan_pool(Table::Item).is_none());
 }
 
-/// Re-`enable_scan_pool`-ing a table replaces its pool outright rather
-/// than layering a second one on top — and a caller that already grabbed
-/// the *old* `Arc<ScanWorkerPool>` before the replacement must keep
-/// working correctly regardless: its worker threads only exit once every
-/// last `Arc` clone (including one a caller is still holding) is dropped,
-/// not the instant a different pool object takes its place in `db`'s own
-/// slot.
 #[test]
 fn replacing_a_scan_pool_does_not_break_a_caller_still_holding_the_old_one() {
     let db = TpccDatabase::new(RootIndexType::default());
@@ -1270,7 +1187,11 @@ fn replacing_a_scan_pool_does_not_break_a_caller_still_holding_the_old_one() {
 
     db.enable_scan_pool(Table::OrderLine, 6, None);
     let new_pool = db.scan_pool(Table::OrderLine).unwrap();
-    assert_eq!(new_pool.num_workers(), 6, "re-enabling must replace, not add to, the old pool");
+    assert_eq!(
+        new_pool.num_workers(),
+        6,
+        "re-enabling must replace, not add to, the old pool"
+    );
 
     let (actual, _) = q1_parallel(&db, &old_pool, num_warehouses, 100);
     assert_eq!(actual.len(), expected.len());
@@ -1283,23 +1204,13 @@ fn replacing_a_scan_pool_does_not_break_a_caller_still_holding_the_old_one() {
     db.disable_scan_pool(Table::OrderLine);
 }
 
-/// A heavier version of `shared_scan_pool_serves_concurrent_callers_correctly`:
-/// 20 threads hammering one shared, modestly-sized pool concurrently for
-/// several iterations each, mixing `q1_parallel`/`q6_parallel`, every
-/// single result checked against the sequential answer — a stronger
-/// correctness signal than a handful of threads/iterations before
-/// committing this feature.
 #[test]
 fn shared_scan_pool_stays_correct_under_heavy_concurrent_load() {
-    // 20 test threads each act as their own OLAP thread (each permanently
-    // registers its own real `WorkerId` via `q1_parallel`/`q6_parallel`'s
-    // own `TpccTxn::begin`, unlike the pool's own worker threads — see
-    // `bat_sync::worker::READ_ONLY_SCAN_WORKER_ID`'s doc) — `TpccDatabase::
-    // new`'s default `max_workers` (`num_cpus`) isn't guaranteed to have
-    // room for 20 + this test's own thread on every machine this runs on,
-    // so size it explicitly rather than relying on the host having enough
-    // cores.
-    let db = TpccDatabase::new_with_big_tree_size_and_max_workers(RootIndexType::default(), BigTreeSize::default(), 32);
+    let db = TpccDatabase::new_with_big_tree_size_and_max_workers(
+        RootIndexType::default(),
+        BigTreeSize::default(),
+        32,
+    );
     let num_warehouses = 6;
     populate_multi_warehouse_order_lines(&db, num_warehouses);
 

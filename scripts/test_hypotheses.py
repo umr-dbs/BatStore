@@ -105,6 +105,8 @@ class HypothesesTests(unittest.TestCase):
         self.assertEqual(rows[2]["elapsed_secs"], 150)
         self.assertEqual(bucket_rows(rows, 20, 2)[0]["window_start"], 0)
         self.assertEqual(bucket_rows(rows, 200, 4)[-1]["window_start"], 150)
+        self.assertGreaterEqual(bucket_rows(rows, 200, 4)[0]["p99_latency_us"],
+                                bucket_rows(rows, 200, 4)[0]["median_latency_us"])
         sql = _postgres_scan_sql(10, Path("scan.csv"))
         self.assertIn("extract(epoch FROM scan_start - run_start)::double precision", sql)
         self.assertIn("END)::double precision", sql)

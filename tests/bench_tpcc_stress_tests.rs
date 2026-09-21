@@ -31,15 +31,6 @@ use crate::bat_query::interval::Interval;
 use crate::bat_record_model::record_point::RecordPointResult;
 use crate::bat_root::index_root::RootIndexType;
 
-/// Several warehouses/districts (so cross-warehouse remote ops and
-/// same-district counter contention both actually happen), still small
-/// enough that population is instant and every table scan below stays cheap.
-///
-/// `num_items` is large enough to retain a representative Stock-key
-/// distribution while keeping population fast. First-writer-wins and the
-/// same-transaction overwrite/reinsert fast paths bound unresolved physical
-/// versions per key; contention produces conflicts rather than an
-/// unbounded same-key chain.
 fn stress_cfg() -> TpccConfig {
     TpccConfig {
         num_warehouses: 4,
@@ -75,12 +66,6 @@ fn scan_all(db: &TpccDatabase, table: Table) -> Vec<RecordPointResult<TpccKey, T
     rows
 }
 
-/// One worker thread's whole run: the same 5-transaction-profile mix (with
-/// the same rough proportions) as `tpcc_driver::terminal_thread`, but with a
-/// fresh random home warehouse drawn *every* iteration (not affinity-pinned)
-/// so several threads regularly contend on the very same warehouse/district
-/// counters — the scenario `bench_tpcc_correctness_tests.rs`'s
-/// single-threaded tests can't exercise at all.
 #[allow(clippy::too_many_arguments)]
 fn stress_worker(
     db: Arc<TpccDatabase>,
@@ -190,19 +175,6 @@ fn snapshot(db: &TpccDatabase) -> BeforeSnapshot {
     }
 }
 
-/// Runs `stress_worker` on `num_threads` for `duration`, then checks every
-/// cross-table invariant that must hold regardless of how the threads'
-/// operations interleaved:
-/// - one district-counter bump / Orders row / NewOrder row per committed
-///   New-Order, minus one NewOrder row per district actually delivered;
-/// - total Stock `s_order_cnt` growth equals total new OrderLine rows;
-/// - total Stock `s_ytd` growth equals total order-line quantity inserted;
-/// - Warehouse ytd growth, District ytd growth, and Customer
-///   `c_ytd_payment` growth (three independently-scanned aggregates) must
-///   all agree with each other and with `-1x` total Customer balance
-///   growth — the same amount flows through all four every committed
-///   Payment, home-or-remote;
-/// - exactly one History row per committed Payment.
 fn run_stress_and_check_invariants(
     gc_update_in_place: bool,
     num_threads: usize,
@@ -331,12 +303,6 @@ fn run_stress_and_check_invariants_gc(
         committed_no as i64 - delivered as i64,
         "NewOrder row count must grow by committed New-Orders minus delivered districts"
     );
-    // These should agree exactly because the Stock updates and OrderLine
-    // inserts share one atomic transaction. Repeated strict runs currently
-    // expose a small pre-existing discrepancy (for example 120,914 Stock
-    // increments versus 120,934 OrderLines). It is not explained by the
-    // disproven same-key split theory; retain the narrow stress tolerance
-    // until that separate accounting/update issue is isolated.
     let ol_growth = (after.ol_count - before.ol_count) as u64;
     let s_order_cnt_growth = after.s_order_cnt_sum - before.s_order_cnt_sum;
     let order_cnt_tolerance = (ol_growth / 200).max(5); // 0.5%, floor of 5
@@ -369,9 +335,11 @@ fn run_stress_and_check_invariants_gc(
         let warehouses_now = scan_all(&db, Table::Warehouse);
         let districts_now = scan_all(&db, Table::District);
         for w in 1..=cfg.num_warehouses {
-            let logged_w: f64 = pay_log.iter()
+            let logged_w: f64 = pay_log
+                .iter()
                 .filter(|&&(id, lw, _, _)| id == db_id && lw == w)
-                .map(|&(_, _, _, a)| a).sum();
+                .map(|&(_, _, _, a)| a)
+                .sum();
             let actual_w = warehouses_now
                 .iter()
                 .find(|r| r.key as u32 == w)
@@ -412,11 +380,6 @@ fn run_stress_and_check_invariants_gc(
         (w_delta - c_ytd_delta).abs() < eps,
         "warehouse ytd growth ({w_delta}) must match total customer c_ytd_payment growth ({c_ytd_delta})"
     );
-    // Customer balance moves by -1x every committed Payment's amount *and*
-    // +1x every committed Delivery's credited total (see
-    // `BeforeSnapshot::delivered_ol_amount_sum`'s doc) - both run
-    // concurrently in this stress mix, so the balance invariant must
-    // account for both, not just Payment's share.
     assert!(
         (w_delta + c_balance_delta - delivered_credit).abs() < eps,
         "customer balance growth ({c_balance_delta}) must equal -1x warehouse ytd growth ({w_delta}) plus total delivery credit ({delivered_credit})"
@@ -567,10 +530,6 @@ fn diag_single_thread_gc_on_max_o_id_cross_check() {
     );
     let log = tpcc_txn::NO_DIAG_LOG.lock().unwrap();
 
-    // initial_orders_per_district existing orders were seeded at load time
-    // with o_id 1..=initial_orders_per_district, so the true expected
-    // d_next_o_id for a district is (max o_id ever committed by *this run*'s
-    // New-Order calls for it), or the seeded initial value if none landed.
     let mut mismatches = Vec::new();
     let mut dup_o_ids_found = 0u32;
     for w in 1..=cfg.num_warehouses {
@@ -587,7 +546,9 @@ fn diag_single_thread_gc_on_max_o_id_cross_check() {
                 dup_o_ids_found += before_dedup as u32 - o_ids.len() as u32;
             }
             let max_logged = o_ids.last().copied();
-            let expected_next = max_logged.map(|m| m + 1).unwrap_or(cfg.initial_orders_per_district + 1);
+            let expected_next = max_logged
+                .map(|m| m + 1)
+                .unwrap_or(cfg.initial_orders_per_district + 1);
             let actual = districts
                 .iter()
                 .find(|r| r.key == crate::bat_bench::tpcc_schema::k_district(w, d))

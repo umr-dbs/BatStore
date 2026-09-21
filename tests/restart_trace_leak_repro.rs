@@ -11,13 +11,6 @@
 
 use crate::bat_test;
 
-/// The actual bug: `RESTART_TRACE`'s own doc says "Off by default", but the
-/// `const` had been left `true` in checked-in code, so every write-traversal
-/// restart unconditionally paid to record itself into the global maps
-/// below — on a real benchmark run, fast/contended enough (see
-/// `tests/tpcc_wal_backend_bench.rs`'s lock-free WAL backend), that's
-/// millions of heap-allocated `String` keys per run, accumulating forever
-/// across repeated in-process runs.
 #[test]
 fn restart_trace_defaults_to_off() {
     assert!(
@@ -29,11 +22,6 @@ fn restart_trace_defaults_to_off() {
 }
 
 fn record_some_restarts() {
-    // A separate, joined thread: `record_restart`'s doc is explicit that its
-    // data sits in that thread's own TLS until the thread exits (`Drop`
-    // merges it into the global map) - recording on the test's own thread
-    // and reading `restart_trace_footprint()` back immediately would just
-    // see zero, without exercising the merge at all.
     std::thread::spawn(|| {
         bat_test::record_restart(0xAAAA, &"custkey-1", "leaf_write_lock");
         bat_test::record_restart(0xAAAA, &"custkey-2", "leaf_write_lock");
@@ -43,12 +31,6 @@ fn record_some_restarts() {
     .unwrap();
 }
 
-/// Defense in depth for whenever `RESTART_TRACE` is deliberately flipped
-/// back on for an investigation (its documented purpose): `run_tpcc` now
-/// calls `reset_restart_trace()` at the start of every run, so a second run
-/// in the same process reflects only its own data, not the first run's on
-/// top of it. No-op assertion when `RESTART_TRACE` is off (the default) -
-/// `record_restart` itself is a no-op then, so there's nothing to reset.
 #[test]
 fn restart_trace_reset_clears_previous_run_data() {
     if !bat_test::RESTART_TRACE {

@@ -27,28 +27,6 @@ impl<
     Payload: Display + Clone + Default + Sync + 'static,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
-    /// Decides whether `Update`/`UpdateRand` should take the "update in
-    /// place" fast path (mutate an existing record's payload without
-    /// minting a new version) rather than the normal versioned
-    /// insert-then-supersede path. Only decides — callers apply the
-    /// mutation themselves, since `Update` and `UpdateRand` differ slightly
-    /// in how they do so.
-    ///
-    /// `*Rand` operations (`UpdateRand` here) are used purely for
-    /// benchmark/data-generation workloads, never logged to the WAL, and so
-    /// are free to take this fast path whenever the heuristic says so. The
-    /// WAL-relevant `Update` arm also takes it when a WAL is attached, but
-    /// still logs an ordinary `Update` record through the ordinary commit
-    /// protocol (`wal_start_commit`/`commit_tx`/`wal_log_commit`) — see the
-    /// call site's doc for why that's sound even though the *live* tree
-    /// never mints a second version for it.
-    ///
-    /// Also vetoed by `TxContext::has_in_flight_registration` — a worker
-    /// mid-registration (drawn a real `ts_start` but not yet published to
-    /// `live_tx`) is invisible to `newest_live_si` below, and its real
-    /// `ts_start` can't be ruled out as newer than `version`'s own (see
-    /// that method's doc); the only sound response is to skip the fast
-    /// path whenever any registration is in flight at all.
     pub(crate) fn decide_update_in_place_record(&self, version: &VersionInfo) -> bool {
         if !self.has_update_in_place() || self.ctx.has_in_flight_registration() {
             return false;
@@ -89,18 +67,11 @@ impl<
         }
 
         let payload = make_payload(leaf_page.payload_at(position));
-        let zone_widen = self.cold.zone_map_projection.get().and_then(|f| f(&payload));
-        // In-place mutation never mints a version, so it stays sound under a
-        // WAL exactly the same way it's sound live: `decide_update_in_place_
-        // record` already proved no live-or-registering snapshot's `ts_start`
-        // falls between the target version's own insertion and now, so any
-        // future observer sees the same outcome whether this is logged as an
-        // ordinary `Update` (replay mints its own fresh version, one more
-        // than the live tree ever had — `bat_wal::recovery`'s doc already
-        // treats that as an acceptable divergence) or applied truly in
-        // place. So the WAL-off short-circuit below is purely a perf
-        // shortcut (skip the commit protocol entirely) — WAL-on still takes
-        // this branch, just pays for a real commit stamp and log record.
+        let zone_widen = self
+            .cold
+            .zone_map_projection
+            .get()
+            .and_then(|f| f(&payload));
         if self.decide_update_in_place_record(leaf_page.version_at(position)) {
             if matches!(self.cold.wal.as_ref(), WalBackend::Off) {
                 leaf_page.set_payload_at(position, payload);
@@ -156,7 +127,11 @@ impl<
                 let leaf_deref_mut = leaf_guard.deref_mut();
 
                 let leaf_page = leaf_deref_mut.as_leaf_page();
-                let zone_widen = self.cold.zone_map_projection.get().and_then(|f| f(&payload));
+                let zone_widen = self
+                    .cold
+                    .zone_map_projection
+                    .get()
+                    .and_then(|f| f(&payload));
 
                 let mut existing_dead_position = None;
                 if let Some(position) = leaf_page.latest_position(key, true) {
@@ -177,17 +152,6 @@ impl<
                     existing_dead_position = Some(position);
                 }
 
-                // Re-inserting over a tombstoned record can revive it in
-                // place instead of minting a new version, for exactly the
-                // reason `Update`'s own in-place branch gets to (see
-                // `decide_update_in_place_record`'s doc): a version that's
-                // provably invisible to every live-or-registering snapshot
-                // can be safely repurposed, since no observer can tell a
-                // reused version from a freshly-minted one. Same WAL
-                // handling as `Update`'s in-place branch too — WAL-off skips
-                // the commit protocol entirely, WAL-on still logs an
-                // ordinary `Insert` record (replay mints its own fresh
-                // version either way).
                 if let Some(position) = existing_dead_position {
                     if self.decide_update_in_place_record(leaf_page.version_at(position)) {
                         if matches!(self.cold.wal.as_ref(), WalBackend::Off) {
@@ -236,14 +200,6 @@ impl<
                     ));
                 }
 
-                // Commit while the leaf is still write-locked. OLC readers
-                // cannot validate the new prefix until the guard is
-                // released, so the version is already in OSIC's commit log
-                // at the first instant it can be observed successfully.
-                // record (if any) is flushed asynchronously in a batch by
-                // the writer's background thread, not waited on here. See
-                // `MVBTSt::wal_hardened_version`'s doc for how to check/wait
-                // for durability explicitly instead.
                 let ts_commit = self.commit_tx(stamp.worker_id());
                 drop(leaf_guard);
                 self.wal_log_commit(stamp, ts_commit);
@@ -256,21 +212,14 @@ impl<
                 let leaf_deref_mut = leaf_guard.deref_mut();
 
                 let leaf_page = leaf_deref_mut.as_leaf_page();
-                let zone_widen = self.cold.zone_map_projection.get().and_then(|f| f(&payload));
+                let zone_widen = self
+                    .cold
+                    .zone_map_projection
+                    .get()
+                    .and_then(|f| f(&payload));
 
                 let current_len = leaf_page.len();
 
-                // In-place mutation never mints a version, but that's fine
-                // under a WAL too: `decide_update_in_place_record` already
-                // proved no live-or-registering snapshot needs to
-                // distinguish the old payload from the new one, so logging
-                // this as an ordinary `Update` (replay mints its own fresh
-                // version) produces the same observable outcome as any
-                // future reader would see either way — see `update_with`'s
-                // doc for the full argument. WAL-off keeps the old
-                // zero-commit-protocol shortcut; WAL-on pays for a real
-                // stamp and log record but still skips growing the version
-                // chain on the live tree.
                 let latest_position = leaf_page.latest_position(key, false);
                 if let Some(position) = latest_position {
                     if self.decide_update_in_place_record(leaf_page.version_at(position)) {
@@ -376,8 +325,8 @@ impl<
 
                 let stamp = self.wal_start_commit(|_| CRUDOperation::Delete(key));
 
-                match leaf_page.delete(key, stamp) {
-                    Ok(Some(..)) => {
+                match position {
+                    Some(position) if leaf_page.version_mut_at(position).delete(stamp) => {
                         leaf_page.commit_delta(-1, 1);
                         if VERBOSE {
                             println!(
@@ -391,8 +340,8 @@ impl<
                         self.wal_log_commit(stamp, ts_commit);
                         CRUDOperationResult::Deleted(stamp.ts_start())
                     }
-                    Ok(None) => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
-                    Err(()) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted),
+                    Some(_) => CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted),
+                    None => CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
                 }
             }
             CRUDOperation::Range(range, version) if RANGE_DISPATCH_LAZY => {
@@ -430,20 +379,6 @@ impl<
             CRUDOperation::RangeIter(key, version) => CRUDOperationResult::MatchedRecordIter(
                 RangeQueryIter::new(self, version, key, true, self.worker_id()),
             ),
-            // `*Si` ("read the current snapshot") variants: unlike
-            // `Point`/`Range`/`RangeIter`, which accept a `version` the
-            // caller already drew (typically via `current_version()`,
-            // arbitrarily long before this call — the right choice for a
-            // deliberate, explicit-version read, e.g. a historical query or
-            // one sharing an already-open `Transaction`'s snapshot, but
-            // racy for "just read whatever's freshest right now": there's a
-            // real gap between the caller reading that version and this
-            // function registering it, during which a concurrent GC
-            // decision can't see this reader yet and may reclaim a page it
-            // needs — see `bat_sync::version_handle::begin_snapshot`'s doc,
-            // which this mirrors), these draw their own version via
-            // `begin_snapshot` — gap-free by construction, since drawing
-            // and registering happen as one unit there.
             CRUDOperation::PointSi(key) => {
                 let reader_worker = self.worker_id();
                 let version = self.begin_snapshot();
@@ -464,16 +399,6 @@ impl<
                     other => other,
                 }
             }
-            // Uses `draw_snapshot_version_with`, not `begin_snapshot`:
-            // `RangeQueryIter::new`'s own `register_reader_si: true` path is
-            // what actually registers this version (so that *it* — not this
-            // arm — is what releases it later, on completion or drop, since
-            // the iterator outlives this function call). Calling
-            // `begin_snapshot` here too would register twice per read but
-            // only ever release once — a permanent leak that pins
-            // `live_min_snapshot` at this version forever, so `free_block`
-            // could never reclaim anything again for the lifetime of the
-            // tree.
             CRUDOperation::RangeIterSi(key) => {
                 CRUDOperationResult::MatchedRecordIter(self.draw_snapshot_version_with(|version| {
                     RangeQueryIter::new(self, version, key, true, self.worker_id())

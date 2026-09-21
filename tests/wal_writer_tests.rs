@@ -43,14 +43,12 @@ fn group_commit_flushes_and_wait_unblocks() {
     let _ = fs::remove_file(&path);
 }
 
-/// The `Database`-shared-writer path: two records logged under two
-/// different table ids via `start_commit_logged_for_table` must still
-/// group-commit together (one file, `flush_loop` unchanged) and each
-/// decoded entry's `table_id` must match what was logged for it.
 #[test]
 fn group_commit_table_tagged_flushes_and_round_trips() {
-    let path =
-        std::env::temp_dir().join(format!("batstore_wal_table_test_{}.log", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "batstore_wal_table_test_{}.log",
+        std::process::id()
+    ));
     let _ = fs::remove_file(&path);
 
     let writer: WalWriter<u64, u64> = WalWriter::open(&path, Duration::from_millis(5)).unwrap();

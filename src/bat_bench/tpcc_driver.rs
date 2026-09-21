@@ -25,11 +25,13 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::unbounded;
 use rand::prelude::*;
 
-use crate::bat_bench::mem_stats::{MemSampler, DEFAULT_SAMPLE_INTERVAL};
-use crate::bat_bench::olap_scan::{run_olap_worker, OlapMode, ScanResult};
-use crate::bat_bench::tpcc_load::{populate_items, populate_regions_and_nations, populate_suppliers, populate_warehouse};
-use crate::bat_bench::tpcc_schema::{TpccConfig, TpccDatabase, htap_query_date_bounds};
+use crate::bat_bench::mem_stats::{DEFAULT_SAMPLE_INTERVAL, MemSampler};
+use crate::bat_bench::olap_scan::{OlapMode, ScanResult, run_olap_worker};
+use crate::bat_bench::tpcc_load::{
+    populate_items, populate_regions_and_nations, populate_suppliers, populate_warehouse,
+};
 use crate::bat_bench::tpcc_random::now_millis;
+use crate::bat_bench::tpcc_schema::{TpccConfig, TpccDatabase, htap_query_date_bounds};
 use crate::bat_bench::tpcc_txn::{self, TxnOutcome};
 use crate::bat_root::index_root::RootIndexType;
 use crate::bat_tree::idle_compaction::{DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL};
@@ -168,11 +170,20 @@ const DELIV_CONFLICTS: usize = 13;
 const NUM_COUNTERS: usize = 14;
 
 const COUNTER_NAMES: [&str; NUM_COUNTERS] = [
-    "new_order_committed", "new_order_conflict", "new_order_user_abort",
-    "payment_committed", "payment_conflict", "payment_user_abort",
-    "order_status_committed", "order_status_conflict", "order_status_user_abort",
-    "stock_level_committed", "stock_level_conflict", "stock_level_user_abort",
-    "delivery_districts_delivered", "delivery_conflicts",
+    "new_order_committed",
+    "new_order_conflict",
+    "new_order_user_abort",
+    "payment_committed",
+    "payment_conflict",
+    "payment_user_abort",
+    "order_status_committed",
+    "order_status_conflict",
+    "order_status_user_abort",
+    "stock_level_committed",
+    "stock_level_conflict",
+    "stock_level_user_abort",
+    "delivery_districts_delivered",
+    "delivery_conflicts",
 ];
 
 #[inline]
@@ -219,7 +230,8 @@ fn terminal_thread(
                 let outcome = tpcc_txn::new_order(&db, &cfg, home_w, allow_remote);
                 record(&mut totals, NO, outcome);
                 if outcome == TxnOutcome::Committed {
-                    let idx = (start.elapsed().as_secs() as usize).min(new_order_committed_per_sec.len() - 1);
+                    let idx = (start.elapsed().as_secs() as usize)
+                        .min(new_order_committed_per_sec.len() - 1);
                     new_order_committed_per_sec[idx] += 1;
                 }
             }
@@ -243,7 +255,10 @@ fn terminal_thread(
         }
     }
 
-    TerminalStats { new_order_committed_per_sec, totals }
+    TerminalStats {
+        new_order_committed_per_sec,
+        totals,
+    }
 }
 
 pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
@@ -253,13 +268,11 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
         cfg.update_in_place = false;
         cfg.idle_compaction = None;
     }
-    assert!(cfg.tpcc.num_warehouses >= 1, "tpcc: num_warehouses must be >= 1");
+    assert!(
+        cfg.tpcc.num_warehouses >= 1,
+        "tpcc: num_warehouses must be >= 1"
+    );
 
-    // See `bat_test::reset_restart_trace`'s doc: without this, a caller that
-    // invokes `run_tpcc` more than once in the same process (e.g.
-    // `tests/tpcc_wal_backend_bench.rs`'s backend-comparison loop) would
-    // accumulate every prior run's restart-trace data into this run's dump,
-    // unbounded, whenever `RESTART_TRACE` is on.
     crate::bat_test::reset_restart_trace();
     crate::bat_test::reset_scan_trace();
 
@@ -273,50 +286,46 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
     }
     let num_olap = cfg.num_olap_threads;
 
-    // The HTAP baseline sub-phase (if enabled) spawns its own `num_terminals`
-    // OS threads before the real phase's — a *different* set of threads from
-    // the real phase's terminals, each still permanently claiming its own
-    // WorkerId (see module docs), so it doubles the terminal thread budget.
     let terminal_cost = if cfg.htap_baseline.is_some() { 2 } else { 1 };
 
     let olap_thread_cost = 1;
 
-    // Two more permanent `WorkerId`s if idle compaction is enabled — see
-    // `DriverConfig::idle_compaction`'s and `TpccDatabase::set_vacuum`'s
-    // docs: one sweep thread for the 12 standard tables (`Database`'s own),
-    // one for `Table::Warehouse`/`Table::District` (`TpccDatabase`'s own,
-    // since `big_trees` lives outside `Database`'s table list entirely).
     let idle_compaction_cost = if cfg.idle_compaction.is_some() { 2 } else { 0 };
 
-    // Deliberately *not* counted here: `scan_pool_workers`' pool threads
-    // (see `bat_sync::worker::READ_ONLY_SCAN_WORKER_ID`'s doc) never call
-    // `tree.worker_id()` and so never draw from the `WorkerRegistry` this
-    // budget sizes — they're pure job-runners, not workload participants,
-    // and can freely oversubscribe past the CPU count however large
-    // `cfg.scan_pool_workers` is. `ScanWorkerPool::spawn` still floors it
-    // at 2 (a "pool" of 1 buys no parallelism), but that floor has nothing
-    // to do with this `WorkerId` budget.
-    //
-    // +1: the main thread itself acquires a WorkerId too, since it does the
-    // (sequential) data-set population directly via `dispatch_crud` before
-    // any terminal/OLAP thread is spawned.
     let fixed_cost = 1 + idle_compaction_cost;
-    fs::create_dir_all(&cfg.output_dir)
-        .unwrap_or_else(|e| panic!("tpcc: failed to create output_dir {}: {e}", cfg.output_dir.display()));
-    let mem_sampler = MemSampler::start(cfg.output_dir.join("mem_stats.csv"), DEFAULT_SAMPLE_INTERVAL);
+    fs::create_dir_all(&cfg.output_dir).unwrap_or_else(|e| {
+        panic!(
+            "tpcc: failed to create output_dir {}: {e}",
+            cfg.output_dir.display()
+        )
+    });
+    let mem_sampler = MemSampler::start(
+        cfg.output_dir.join("mem_stats.csv"),
+        DEFAULT_SAMPLE_INTERVAL,
+    );
 
     let worker_capacity = fixed_cost + num_terminals * terminal_cost + num_olap * olap_thread_cost;
-    assert!(worker_capacity <= u16::MAX as usize, "tpcc: requested concurrency exceeds WorkerId capacity");
+    assert!(
+        worker_capacity <= u16::MAX as usize,
+        "tpcc: requested concurrency exceeds WorkerId capacity"
+    );
     let db = Arc::new(match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);
             TpccDatabase::new_with_big_tree_size_and_max_workers_and_wal(
-                cfg.root_star_index, cfg.big_tree_size, worker_capacity,
-                wal_path, *flush_interval, cfg.wal_lockfree_batch_size,
-            ).expect("failed to configure WAL at database construction")
+                cfg.root_star_index,
+                cfg.big_tree_size,
+                worker_capacity,
+                wal_path,
+                *flush_interval,
+                cfg.wal_lockfree_batch_size,
+            )
+            .expect("failed to configure WAL at database construction")
         }
         None => TpccDatabase::new_with_big_tree_size_and_max_workers(
-            cfg.root_star_index, cfg.big_tree_size, worker_capacity,
+            cfg.root_star_index,
+            cfg.big_tree_size,
+            worker_capacity,
         ),
     });
     if historic {
@@ -324,7 +333,6 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
     } else if cfg.gc {
         db.enable_gc(cfg.update_in_place, None);
     }
-
 
     println!(
         "TPC-C + OLAP scan benchmark\n\
@@ -341,16 +349,27 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
          - HTAP baseline         = {}",
         cfg.tpcc.num_warehouses,
         num_olap_mode_summary(&cfg.olap_mode),
-        if cfg.affinity { "warehouse affinity (0% remote)" } else { "cross warehouse" },
+        if cfg.affinity {
+            "warehouse affinity (0% remote)"
+        } else {
+            "cross warehouse"
+        },
         cfg.duration,
-        cfg.gc, cfg.update_in_place,
+        cfg.gc,
+        cfg.update_in_place,
         match (&cfg.wal, cfg.wal_lockfree_batch_size) {
-            (Some((path, interval)), None) => format!("On, batched ({} @ {interval:?} flush)", path.display()),
-            (Some((path, interval)), Some(batch_size)) => format!("On, lock-free batch={batch_size} ({} @ {interval:?} flush)", path.display()),
+            (Some((path, interval)), None) =>
+                format!("On, batched ({} @ {interval:?} flush)", path.display()),
+            (Some((path, interval)), Some(batch_size)) => format!(
+                "On, lock-free batch={batch_size} ({} @ {interval:?} flush)",
+                path.display()
+            ),
             (None, _) => "Off".to_string(),
         },
         cfg.root_star_index,
-        cfg.tpcc.num_items, cfg.tpcc.customers_per_district, cfg.tpcc.initial_orders_per_district,
+        cfg.tpcc.num_items,
+        cfg.tpcc.customers_per_district,
+        cfg.tpcc.initial_orders_per_district,
         cfg.tpcc.num_suppliers,
         match cfg.htap_baseline {
             Some(d) => format!("On ({d:?} OLTP-only sub-phase)"),
@@ -365,35 +384,37 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
 
     let history_seq = Arc::new(AtomicU64::new(0));
 
-    // Population is sequential, on this (main) thread — deliberately not
-    // parallelized across warehouses: this tree's structural-modification
-    // (split) and GC/block-reuse paths are only exercised concurrently by
-    // the timed OLTP/OLAP phase below, matching how the rest of this
-    // project's benchmarks (see `bat_test::main_load`) load their initial
-    // data set single-threaded before spawning concurrent workers.
-    println!("Loading CH-benCHmark dimension tables (5 regions, 25 nations, {} suppliers)...", cfg.tpcc.num_suppliers);
+    println!(
+        "Loading CH-benCHmark dimension tables (5 regions, 25 nations, {} suppliers)...",
+        cfg.tpcc.num_suppliers
+    );
     let ch_load_start = Instant::now();
     populate_regions_and_nations(&db);
     populate_suppliers(&db, &cfg.tpcc);
-    println!("Loaded CH-benCHmark dimension tables in {:?}.", ch_load_start.elapsed());
+    println!(
+        "Loaded CH-benCHmark dimension tables in {:?}.",
+        ch_load_start.elapsed()
+    );
 
     println!("Loading item catalog ({} items)...", cfg.tpcc.num_items);
     let load_start = Instant::now();
     populate_items(&db, &cfg.tpcc);
-    println!("Loaded item catalog in {:?}. Loading {} warehouse(s)...", load_start.elapsed(), cfg.tpcc.num_warehouses);
+    println!(
+        "Loaded item catalog in {:?}. Loading {} warehouse(s)...",
+        load_start.elapsed(),
+        cfg.tpcc.num_warehouses
+    );
 
     let wh_load_start = Instant::now();
     for w in 1..=cfg.tpcc.num_warehouses {
         populate_warehouse(&db, &cfg.tpcc, w, &history_seq);
     }
-    println!("Loaded {} warehouse(s) in {:?}.", cfg.tpcc.num_warehouses, wh_load_start.elapsed());
+    println!(
+        "Loaded {} warehouse(s) in {:?}.",
+        cfg.tpcc.num_warehouses,
+        wh_load_start.elapsed()
+    );
 
-    // HTAP interference baseline (see `DriverConfig::htap_baseline` docs): a
-    // short OLTP-only sub-phase, using the *same* loaded data set, same
-    // `num_terminals`/affinity assignment, and same `history_seq` counter as
-    // the real timed phase below — so its tpmC is a fair OLAP-free
-    // comparison point for the real phase's tpmC (measured with OLAP
-    // running), not a separate/differently-configured run.
     let baseline_tpm_c = cfg.htap_baseline.map(|baseline_duration| {
         println!("Running HTAP baseline (OLTP-only, no OLAP) for {baseline_duration:?}...");
         let stop = Arc::new(AtomicBool::new(false));
@@ -432,27 +453,42 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
     let affinity = cfg.affinity;
     let tpcc_cfg = cfg.tpcc;
 
-    let terminal_handles: Vec<_> = (0..num_terminals).map(|t| {
-        let db = db.clone();
-        let cfg = tpcc_cfg;
-        let my_ws = assigned[t].clone();
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        let history_seq = history_seq.clone();
-        thread::spawn(move || terminal_thread(db, cfg, my_ws, affinity, duration, stop, barrier, history_seq))
-    }).collect();
-
-    let olap_handles: Vec<_> = (0..num_olap).map(|_| {
-        let db = db.clone();
-        let stop = stop.clone();
-        let barrier = barrier.clone();
-        let mode = cfg.olap_mode.clone();
-        let scan_tx = scan_tx.clone();
-        thread::spawn(move || {
-            barrier.wait();
-            run_olap_worker(&db, mode, &stop, &scan_tx);
+    let terminal_handles: Vec<_> = (0..num_terminals)
+        .map(|t| {
+            let db = db.clone();
+            let cfg = tpcc_cfg;
+            let my_ws = assigned[t].clone();
+            let stop = stop.clone();
+            let barrier = barrier.clone();
+            let history_seq = history_seq.clone();
+            thread::spawn(move || {
+                terminal_thread(
+                    db,
+                    cfg,
+                    my_ws,
+                    affinity,
+                    duration,
+                    stop,
+                    barrier,
+                    history_seq,
+                )
+            })
         })
-    }).collect();
+        .collect();
+
+    let olap_handles: Vec<_> = (0..num_olap)
+        .map(|_| {
+            let db = db.clone();
+            let stop = stop.clone();
+            let barrier = barrier.clone();
+            let mode = cfg.olap_mode.clone();
+            let scan_tx = scan_tx.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                run_olap_worker(&db, mode, &stop, &scan_tx);
+            })
+        })
+        .collect();
     drop(scan_tx);
 
     // Releases at the same instant as every worker thread, once loading is
@@ -460,20 +496,15 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
     // load time entirely.
     barrier.wait();
 
-    // `TpccDatabase::set_vacuum`'s own background thread(s) — see
-    // `DriverConfig::idle_compaction`'s doc — started right as the timed
-    // phase begins, same as everything else measured in it, and stopped
-    // right as it ends, below, so a caller that runs `run_tpcc` more than
-    // once in the same process (`bat_bench::suite`) never leaves a stale
-    // sweep thread running against an about-to-be-dropped `db`. Set
-    // independently of `enable_gc`'s own `vacuum` parameter above since GC
-    // itself (if on) should stay on through both load and timed phases,
-    // while the vacuum sweep is only meant to run during the timed one.
     if let Some((dead_ratio_threshold, sweep_interval)) = cfg.idle_compaction {
         db.set_vacuum(Some((dead_ratio_threshold, sweep_interval)));
     }
     if let Some(num_workers) = cfg.scan_pool_workers.filter(|&n| n > 0) {
-        db.enable_scan_pool(crate::bat_bench::tpcc_schema::Table::OrderLine, num_workers, Some(num_olap));
+        db.enable_scan_pool(
+            crate::bat_bench::tpcc_schema::Table::OrderLine,
+            num_workers,
+            Some(num_olap),
+        );
     }
 
     let run_start = Instant::now();
@@ -483,7 +514,10 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
     db.set_vacuum(None);
     db.disable_scan_pool(crate::bat_bench::tpcc_schema::Table::OrderLine);
 
-    let terminal_stats: Vec<TerminalStats> = terminal_handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let terminal_stats: Vec<TerminalStats> = terminal_handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect();
     for h in olap_handles {
         let _ = h.join();
     }
@@ -496,19 +530,10 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
 
     mem_sampler.stop();
 
-    // Plain global atomics (no thread-local merge-on-drop, unlike
-    // `RESTART_TRACE` below), so this is safe to read any time — placed
-    // after the join purely to report a fully-settled count. No-op when
-    // `SCAN_TRACE` is off.
     if crate::bat_test::SCAN_TRACE {
         crate::bat_test::dump_scan_trace();
     }
 
-    // Shared table-name resolution for both per-table dumps below (`SCAN_TRACE`'s
-    // per-table breakdown and `RESTART_TRACE`'s root-restart breakdown) — built at
-    // most once, and only when at least one of the two is actually enabled, since
-    // both flags are `false` by default and this whole block is dead-code-eliminated
-    // then.
     if crate::bat_test::SCAN_TRACE || crate::bat_test::RESTART_TRACE {
         use crate::bat_bench::tpcc_schema::{BigTreeOp, Table, TpccKey, TpccRow};
 
@@ -523,36 +548,56 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
             }
         }
         let mut table_names = db.db.table_names_by_addr();
-        table_names.push((db.dispatch_big(Table::Warehouse, AddrOp), "warehouse".to_string()));
-        table_names.push((db.dispatch_big(Table::District, AddrOp), "district".to_string()));
+        table_names.push((
+            db.dispatch_big(Table::Warehouse, AddrOp),
+            "warehouse".to_string(),
+        ));
+        table_names.push((
+            db.dispatch_big(Table::District, AddrOp),
+            "district".to_string(),
+        ));
 
-        // `SCAN_TRACE`'s per-table breakdown: which table's leaves are actually
-        // paying the visited-vs-matched "garbage tax" documented in
-        // `docs/bigtree_size_benchmark.md` — see `htap_q1`/`htap_q6`'s `ORDER_LINE`
-        // scans specifically. Safe to read any time (see the plain-global-atomics
-        // comment above), so no join-ordering constraint here either.
         if crate::bat_test::SCAN_TRACE {
             crate::bat_test::dump_scan_trace_by_table(
-                cfg.output_dir.join("tpcc_scan_trace_by_table.csv").to_str().unwrap(),
-                &table_names);
+                cfg.output_dir
+                    .join("tpcc_scan_trace_by_table.csv")
+                    .to_str()
+                    .unwrap(),
+                &table_names,
+            );
         }
 
-        // All terminal/OLAP worker threads are joined above, so every thread's
-        // `RestartLocal` TLS has already torn down and merged into the global
-        // aggregate by this point (see `bat_test::RestartLocal`'s doc) — safe to
-        // dump now. No-op (writes an empty file) when `RESTART_TRACE` is off.
         if crate::bat_test::RESTART_TRACE {
             crate::bat_test::dump_restart_trace(
-                cfg.output_dir.join("tpcc_restart_trace.csv").to_str().unwrap());
+                cfg.output_dir
+                    .join("tpcc_restart_trace.csv")
+                    .to_str()
+                    .unwrap(),
+            );
             crate::bat_test::dump_attempt_histogram(
-                cfg.output_dir.join("tpcc_attempt_histogram.csv").to_str().unwrap());
+                cfg.output_dir
+                    .join("tpcc_attempt_histogram.csv")
+                    .to_str()
+                    .unwrap(),
+            );
             crate::bat_test::dump_root_restarts_by_table(
-                cfg.output_dir.join("tpcc_root_restarts_by_table.csv").to_str().unwrap(),
-                &table_names);
+                cfg.output_dir
+                    .join("tpcc_root_restarts_by_table.csv")
+                    .to_str()
+                    .unwrap(),
+                &table_names,
+            );
         }
     }
 
-    write_results(&terminal_stats, &scan_results, duration, actual_wall, baseline_tpm_c, &cfg.output_dir)
+    write_results(
+        &terminal_stats,
+        &scan_results,
+        duration,
+        actual_wall,
+        baseline_tpm_c,
+        &cfg.output_dir,
+    )
 }
 
 fn num_olap_mode_summary(mode: &OlapMode) -> &'static str {
@@ -591,23 +636,48 @@ fn write_results(
 
     let oltp_ts_path = out_dir.join("tpcc_oltp_timeseries.csv");
     let _ = fs::remove_file(&oltp_ts_path);
-    let mut ts_file = OpenOptions::new().create(true).append(true).open(&oltp_ts_path).unwrap();
-    ts_file.write_all(b"elapsed_sec,new_order_committed\n").unwrap();
+    let mut ts_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&oltp_ts_path)
+        .unwrap();
+    ts_file
+        .write_all(b"elapsed_sec,new_order_committed\n")
+        .unwrap();
     for (sec, count) in per_sec.iter().enumerate() {
-        ts_file.write_all(format!("{sec},{count}\n").as_bytes()).unwrap();
+        ts_file
+            .write_all(format!("{sec},{count}\n").as_bytes())
+            .unwrap();
     }
 
     let scan_path = out_dir.join("tpcc_scan.csv");
     let _ = fs::remove_file(&scan_path);
-    let mut scan_file = OpenOptions::new().create(true).append(true).open(&scan_path).unwrap();
+    let mut scan_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&scan_path)
+        .unwrap();
     scan_file.write_all(b"mode,elapsed_secs,delay_secs,snapshot,scanned_tuples,latency_ns,tuples_per_sec,summary,staleness_versions\n").unwrap();
     for r in scan_results {
-        scan_file.write_all(format!(
-            "{},{:.3},{},{},{},{},{:.2},{},{}\n",
-            r.mode, r.elapsed_secs, r.delay_secs, r.snapshot, r.scanned_tuples, r.latency_ns, r.tuples_per_sec(),
-            r.summary.map(|s| format!("{s:.2}")).unwrap_or_default(),
-            r.staleness_versions.map(|s| s.to_string()).unwrap_or_default(),
-        ).as_bytes()).unwrap();
+        scan_file
+            .write_all(
+                format!(
+                    "{},{:.3},{},{},{},{},{:.2},{},{}\n",
+                    r.mode,
+                    r.elapsed_secs,
+                    r.delay_secs,
+                    r.snapshot,
+                    r.scanned_tuples,
+                    r.latency_ns,
+                    r.tuples_per_sec(),
+                    r.summary.map(|s| format!("{s:.2}")).unwrap_or_default(),
+                    r.staleness_versions
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
     }
 
     let new_order_total = totals[NO];
@@ -619,22 +689,44 @@ fn write_results(
     }
     println!("{:<32} {:.2}", "tpmC (New-Order/min)", tpm_c);
     if let Some(baseline) = baseline_tpm_c {
-        let interference_pct = if baseline > 0.0 { (baseline - tpm_c) / baseline * 100.0 } else { 0.0 };
+        let interference_pct = if baseline > 0.0 {
+            (baseline - tpm_c) / baseline * 100.0
+        } else {
+            0.0
+        };
         println!("{:<32} {:.2}", "tpmC (HTAP baseline, no OLAP)", baseline);
-        println!("{:<32} {:.1}%", "OLTP interference from OLAP", interference_pct);
+        println!(
+            "{:<32} {:.1}%",
+            "OLTP interference from OLAP", interference_pct
+        );
     }
-    println!("{:<32} {}", "OLAP scans/holds completed", scan_results.len());
+    println!(
+        "{:<32} {}",
+        "OLAP scans/holds completed",
+        scan_results.len()
+    );
     if !scan_results.is_empty() {
-        let avg_tps = scan_results.iter().map(|r| r.tuples_per_sec()).sum::<f64>() / scan_results.len() as f64;
+        let avg_tps = scan_results.iter().map(|r| r.tuples_per_sec()).sum::<f64>()
+            / scan_results.len() as f64;
         println!("{:<32} {:.1}", "OLAP avg tuples/sec", avg_tps);
     }
-    let staleness: Vec<u64> = scan_results.iter().filter_map(|r| r.staleness_versions).collect();
+    let staleness: Vec<u64> = scan_results
+        .iter()
+        .filter_map(|r| r.staleness_versions)
+        .collect();
     if !staleness.is_empty() {
         let avg = staleness.iter().sum::<u64>() as f64 / staleness.len() as f64;
         let max = staleness.iter().max().unwrap();
-        println!("{:<32} {:.1} (max {max})", "HTAP staleness (versions, avg)", avg);
+        println!(
+            "{:<32} {:.1} (max {max})",
+            "HTAP staleness (versions, avg)", avg
+        );
     }
-    println!("Wrote {} and {}", oltp_ts_path.display(), scan_path.display());
+    println!(
+        "Wrote {} and {}",
+        oltp_ts_path.display(),
+        scan_path.display()
+    );
 
     let avg_scan_tuples_per_sec = if scan_results.is_empty() {
         0.0
@@ -653,7 +745,10 @@ fn write_results(
 
 pub fn main_tpcc(parms: Vec<String>) {
     fn arg<T: std::str::FromStr>(parms: &[String], idx: usize, default: T) -> T {
-        parms.get(idx).and_then(|s| s.parse().ok()).unwrap_or(default)
+        parms
+            .get(idx)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
     }
 
     let num_warehouses: u32 = arg(&parms, 2, num_cpus::get_physical() as u32);
@@ -668,16 +763,26 @@ pub fn main_tpcc(parms: Vec<String>) {
         "bt" => RootIndexType::BTree,
         _ => RootIndexType::FrugalList,
     };
-    let olap_mode_str = parms.get(9).map(|s| s.as_str()).unwrap_or("scan_sweep").to_string();
+    let olap_mode_str = parms
+        .get(9)
+        .map(|s| s.as_str())
+        .unwrap_or("scan_sweep")
+        .to_string();
     let num_olap_threads: usize = arg(&parms, 10, 1);
     let olap_param: f64 = arg(&parms, 11, 10.0);
     let num_items: u32 = arg(&parms, 12, 100_000);
     let customers_per_district: u32 = arg(&parms, 13, 3_000);
     let initial_orders_per_district: u32 = arg(&parms, 14, 3_000);
     let wal_enabled: bool = arg(&parms, 15, false);
-    let wal_path: String = parms.get(16).cloned().unwrap_or_else(|| "tpcc_wal.log".to_string());
+    let wal_path: String = parms
+        .get(16)
+        .cloned()
+        .unwrap_or_else(|| "tpcc_wal.log".to_string());
     let wal_flush_ms: u64 = arg(&parms, 17, 5);
-    let ch_region: String = parms.get(18).cloned().unwrap_or_else(|| "EUROPE".to_string());
+    let ch_region: String = parms
+        .get(18)
+        .cloned()
+        .unwrap_or_else(|| "EUROPE".to_string());
     let num_suppliers: u32 = arg(&parms, 19, 10_000);
     let htap_baseline_secs: u64 = arg(&parms, 20, 0);
     // Table::Warehouse/Table::District's leaf capacity — see
@@ -693,59 +798,6 @@ pub fn main_tpcc(parms: Vec<String>) {
         "512kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB512,
         _ => crate::bat_bench::tpcc_schema::BigTreeSize::KiB32,
     };
-    // `Table::OrderLine`'s shared scan pool (see `DriverConfig::
-    // scan_pool_workers`'s and `scan_pool::ScanWorkerPool`'s docs), used by
-    // any OLAP mode that ends up calling `TpccTxn::range`/`range_count`
-    // against `OrderLine` (i.e. every mode except `OpenAndSleep`, whose
-    // `sleep`/`none` scan warehouse/district — `Big`-class trees the pool
-    // can't be attached to at all) to fan a query out across several threads
-    // instead of scanning sequentially. Sized independently of how many
-    // workers any one query actually asks for — see `enable_scan_pool`'s
-    // call below, which passes `num_olap` as `expected_concurrent_queries`
-    // so `ScanWorkerPool::fair_query_fanout` can divide this pool's capacity
-    // evenly across however many OLAP threads are actually sharing it,
-    // rather than every query grabbing the same fixed slice. Three ways to
-    // say how many total workers the pool itself gets, by whether/what
-    // position 22 holds:
-    //   - omitted entirely (fewer than 23 positional args given at all): on
-    //     by default whenever there's at least one OLAP thread to use it and
-    //     this population is estimated large enough for the pool to
-    //     actually help (see `estimated_order_line_rows`/
-    //     `parallel_scan::MIN_ROWS_FOR_SCAN_POOL` below) — sized to
-    //     `num_cpus.max(scan_pool::DEFAULT_QUERY_FANOUT * num_olap_threads)`
-    //     so every OLAP thread is guaranteed at least
-    //     `DEFAULT_QUERY_FANOUT` workers of its own even when there are more
-    //     OLAP threads than cores, rather than the plain `num_cpus` sizing
-    //     `fair_query_fanout` could divide down to a too-thin (or, past
-    //     `num_cpus / 2` callers, `None`/no-parallelism-at-all) share. Left
-    //     at `None`/off for zero OLAP threads (nothing would ever look the
-    //     pool up) or a too-small population (the pool would just be
-    //     net-negative — see `MIN_ROWS_FOR_SCAN_POOL`'s doc for the
-    //     measurement behind that).
-    //   - explicit `"0"`: off, matching every prior sequential behavior
-    //     exactly (this is what every engines/batstore.py-driven run sends
-    //     by default, so scripted sweeps keep an unambiguous off baseline) —
-    //     and, unlike the omitted case, *not* subject to the row-count
-    //     check below: an explicit request is trusted outright, exactly the
-    //     same way an explicit `"N"` is.
-    //   - explicit `"N"` (`N > 0`): exactly `N` workers, unconditionally.
-    // `ScanWorkerPool::spawn` floors whatever number comes out of this at 2
-    // regardless (a 1-worker "pool" buys no parallelism over the
-    // sequential path). Unlike every other thread this function counts,
-    // none of this is clamped against `max_workers` below — pool worker
-    // threads never register a `WorkerId` at all (see
-    // `bat_sync::worker::READ_ONLY_SCAN_WORKER_ID`'s doc), so oversubscribing
-    // this past the machine's core count is deliberately allowed: the pool
-    // is memory-latency-bound leaf traversal, not compute-bound, so more
-    // in-flight workers than cores hides that latency instead of just adding
-    // contention — a bigger-than-necessary pool otherwise costs nothing but
-    // idle, blocked (not spinning) threads — see `fair_query_fanout`'s doc.
-    //
-    // `estimated_order_line_rows`: `districts_per_warehouse` is fixed at 10
-    // here (see the `TpccConfig` literal below) and `populate_warehouse`
-    // draws each order's `ol_cnt` uniformly from `5..=15` (average 10) — the
-    // same arithmetic that population itself runs, just used here ahead of
-    // time to size-gate the pool instead.
     const DISTRICTS_PER_WAREHOUSE: u32 = 10;
     const AVG_ORDER_LINES_PER_ORDER: u32 = 10;
     let estimated_order_line_rows = num_warehouses as u64
@@ -754,10 +806,16 @@ pub fn main_tpcc(parms: Vec<String>) {
         * AVG_ORDER_LINES_PER_ORDER as u64;
     let scan_pool_workers: Option<usize> = match parms.get(22).map(|s| s.as_str()) {
         None if num_olap_threads > 0
-            && estimated_order_line_rows >= crate::bat_bench::parallel_scan::MIN_ROWS_FOR_SCAN_POOL =>
+            && estimated_order_line_rows
+                >= crate::bat_bench::parallel_scan::MIN_ROWS_FOR_SCAN_POOL =>
         {
-            let fair_share_floor = crate::bat_tree::scan_pool::DEFAULT_QUERY_FANOUT * num_olap_threads;
-            Some(crate::bat_tree::mvbt::default_max_workers().max(fair_share_floor).max(2))
+            let fair_share_floor =
+                crate::bat_tree::scan_pool::DEFAULT_QUERY_FANOUT * num_olap_threads;
+            Some(
+                crate::bat_tree::mvbt::default_max_workers()
+                    .max(fair_share_floor)
+                    .max(2),
+            )
         }
         None => None,
         Some(s) => match s.parse::<usize>() {
@@ -765,46 +823,60 @@ pub fn main_tpcc(parms: Vec<String>) {
             Ok(n) => Some(n.max(2)),
         },
     };
-    // Idle/proactive compaction (`bat_tree::idle_compaction`,
-    // `DriverConfig::idle_compaction`'s doc) — GC's own background vacuum
-    // thread, on by default at `DEFAULT_VACUUM_DEAD_RATIO`/
-    // `DEFAULT_VACUUM_SWEEP_INTERVAL` whenever GC itself is on, since
-    // nothing on the ordinary write path ever revisits a read-heavy leaf's
-    // garbage otherwise (see that module's doc). `0.0` explicitly passed
-    // for arg 23 opts back out — a real dead ratio is always `> 0.0` once
-    // any garbage exists, so `0.0` could never mean "opt-in but never
-    // trigger" the way it does here.
     let idle_compaction_dead_ratio: f64 =
         arg(&parms, 23, if gc { DEFAULT_VACUUM_DEAD_RATIO } else { 0.0 });
     let idle_compaction_sweep_secs: f64 =
         arg(&parms, 24, DEFAULT_VACUUM_SWEEP_INTERVAL.as_secs_f64());
-    let idle_compaction = (idle_compaction_dead_ratio > 0.0)
-        .then(|| (idle_compaction_dead_ratio, Duration::from_secs_f64(idle_compaction_sweep_secs)));
+    let idle_compaction = (idle_compaction_dead_ratio > 0.0).then(|| {
+        (
+            idle_compaction_dead_ratio,
+            Duration::from_secs_f64(idle_compaction_sweep_secs),
+        )
+    });
 
     let (q1_cutoff, q6_date_lo, q6_date_hi) = htap_query_date_bounds(now_millis());
     let (olap_mode, num_olap_threads) = match olap_mode_str.as_str() {
         "none" => (OlapMode::RepeatedFreshFullScan, 0),
-        "sleep" => (OlapMode::OpenAndSleep { hold: Duration::from_secs_f64(olap_param) }, num_olap_threads),
+        "sleep" => (
+            OlapMode::OpenAndSleep {
+                hold: Duration::from_secs_f64(olap_param),
+            },
+            num_olap_threads,
+        ),
         "fresh" => (OlapMode::RepeatedFreshFullScan, num_olap_threads),
         "historic" => (OlapMode::RepeatedHistoricFullScan, num_olap_threads),
         "ch" => (
-            OlapMode::ChBenchmark { region_name: ch_region, date_lo: q6_date_lo, date_hi: q6_date_hi },
+            OlapMode::ChBenchmark {
+                region_name: ch_region,
+                date_lo: q6_date_lo,
+                date_hi: q6_date_hi,
+            },
             num_olap_threads,
         ),
         "ch_q1_variant" => (
-            OlapMode::ChQ1 { delivered_before: q1_cutoff, num_warehouses },
+            OlapMode::ChQ1 {
+                delivered_before: q1_cutoff,
+                num_warehouses,
+            },
             num_olap_threads,
         ),
-        "ch_q6_variant" => (OlapMode::ChQ6 {
-            date_lo: q6_date_lo,
-            date_hi: q6_date_hi,
-            max_qty: 24,
-            num_warehouses,
-        }, num_olap_threads),
+        "ch_q6_variant" => (
+            OlapMode::ChQ6 {
+                date_lo: q6_date_lo,
+                date_hi: q6_date_hi,
+                max_qty: 24,
+                num_warehouses,
+            },
+            num_olap_threads,
+        ),
         "ch_q1" => (OlapMode::BenchbaseQ1 { num_warehouses }, num_olap_threads),
         "ch_q6" => (OlapMode::BenchbaseQ6 { num_warehouses }, num_olap_threads),
         _ => (
-            OlapMode::ScanDelaySweep { delays: (0..=(olap_param.max(0.0) as u64)).map(Duration::from_secs).collect() },
+            OlapMode::ScanDelaySweep {
+                delays: (0..=(olap_param.max(0.0) as u64))
+                    .map(Duration::from_secs)
+                    .collect(),
+            },
             num_olap_threads,
         ),
     };
@@ -830,7 +902,12 @@ pub fn main_tpcc(parms: Vec<String>) {
         big_tree_size,
         olap_mode,
         num_olap_threads,
-        wal: wal_enabled.then(|| (std::path::PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),
+        wal: wal_enabled.then(|| {
+            (
+                std::path::PathBuf::from(wal_path),
+                Duration::from_millis(wal_flush_ms),
+            )
+        }),
         wal_lockfree_batch_size: None,
         htap_baseline: (htap_baseline_secs > 0).then(|| Duration::from_secs(htap_baseline_secs)),
         idle_compaction,
@@ -839,13 +916,6 @@ pub fn main_tpcc(parms: Vec<String>) {
     });
 }
 
-/// Shared defaults for the `tpch`/`htap` one-command presets below:
-/// standard TPC-C/CH-benCHmark scale (`TpccConfig::default()` — 3,000
-/// customers/orders per district, 100,000 items, 10,000 suppliers),
-/// warehouse affinity, GC on, no WAL. Only what actually differs between the
-/// two presets (OLAP mode, OLAP thread count, HTAP baseline) is left as a
-/// parameter — the whole point of these presets is that the caller
-/// shouldn't have to think about anything else.
 fn standard_driver_config(
     num_warehouses: u32,
     duration: Duration,
@@ -854,7 +924,10 @@ fn standard_driver_config(
     htap_baseline: Option<Duration>,
 ) -> DriverConfig {
     DriverConfig {
-        tpcc: TpccConfig { num_warehouses, ..TpccConfig::default() },
+        tpcc: TpccConfig {
+            num_warehouses,
+            ..TpccConfig::default()
+        },
         num_terminals: num_warehouses as usize,
         duration,
         affinity: true,
@@ -873,58 +946,60 @@ fn standard_driver_config(
     }
 }
 
-/// One-command CH-benCHmark preset ("typical TPC-H" run in this harness):
-/// the standard TPC-C OLTP mix running concurrently with the 4 implemented
-/// CH-benCHmark analytical queries (`tpch_queries`) in rotation — see
-/// `OlapMode::ChBenchmark`. There's no standalone "TPC-H alone" mode:
-/// CH-benCHmark's whole premise is TPC-H-style queries layered on the live
-/// TPC-C schema, so this mixed run *is* what "run TPC-H" means here.
-///
-/// Args: `[num_warehouses=4] [duration_secs=60] [num_olap_threads=1]
-/// [region_name=EUROPE]` — for full control over every other TPC-C/CH
-/// parameter, use `tpcc ... 9=ch ...` directly (see `main_tpcc`).
 pub fn main_tpch(parms: Vec<String>) {
     fn arg<T: std::str::FromStr>(parms: &[String], idx: usize, default: T) -> T {
-        parms.get(idx).and_then(|s| s.parse().ok()).unwrap_or(default)
+        parms
+            .get(idx)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
     }
 
     let num_warehouses: u32 = arg(&parms, 2, 4);
     let duration_secs: u64 = arg(&parms, 3, 60);
     let num_olap_threads: usize = arg(&parms, 4, 1);
-    let region_name: String = parms.get(5).cloned().unwrap_or_else(|| "EUROPE".to_string());
+    let region_name: String = parms
+        .get(5)
+        .cloned()
+        .unwrap_or_else(|| "EUROPE".to_string());
 
     run_tpcc(standard_driver_config(
         num_warehouses,
         Duration::from_secs(duration_secs),
-        OlapMode::ChBenchmark { region_name, date_lo: i64::MIN, date_hi: i64::MAX },
+        OlapMode::ChBenchmark {
+            region_name,
+            date_lo: i64::MIN,
+            date_hi: i64::MAX,
+        },
         num_olap_threads,
         None,
     ));
 }
 
-/// One-command HTAP preset: identical to [`main_tpch`] but additionally
-/// enables the OLTP-only baseline sub-phase (`DriverConfig::htap_baseline`),
-/// so the report includes the HTAP-specific interference (%) and
-/// freshness/staleness (versions) metrics — see `tpcc_driver`/`tpch_queries`
-/// module docs.
-///
-/// Args: `[num_warehouses=4] [duration_secs=60] [num_olap_threads=1]
-/// [baseline_secs=15] [region_name=EUROPE]`.
 pub fn main_htap(parms: Vec<String>) {
     fn arg<T: std::str::FromStr>(parms: &[String], idx: usize, default: T) -> T {
-        parms.get(idx).and_then(|s| s.parse().ok()).unwrap_or(default)
+        parms
+            .get(idx)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
     }
 
     let num_warehouses: u32 = arg(&parms, 2, 4);
     let duration_secs: u64 = arg(&parms, 3, 60);
     let num_olap_threads: usize = arg(&parms, 4, 1);
     let baseline_secs: u64 = arg(&parms, 5, 15);
-    let region_name: String = parms.get(6).cloned().unwrap_or_else(|| "EUROPE".to_string());
+    let region_name: String = parms
+        .get(6)
+        .cloned()
+        .unwrap_or_else(|| "EUROPE".to_string());
 
     run_tpcc(standard_driver_config(
         num_warehouses,
         Duration::from_secs(duration_secs),
-        OlapMode::ChBenchmark { region_name, date_lo: i64::MIN, date_hi: i64::MAX },
+        OlapMode::ChBenchmark {
+            region_name,
+            date_lo: i64::MIN,
+            date_hi: i64::MAX,
+        },
         num_olap_threads,
         Some(Duration::from_secs(baseline_secs)),
     ));

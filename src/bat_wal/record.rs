@@ -1,10 +1,10 @@
+use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_record_model::tx_stamp::{TxStamp, WorkerId};
+use crate::bat_record_model::version_info::Version;
 use std::cmp::Ord;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::mem::size_of;
-use crate::bat_crud_model::crud_operation::CRUDOperation;
-use crate::bat_record_model::tx_stamp::{TxStamp, WorkerId};
-use crate::bat_record_model::version_info::Version;
 
 const TAG_INSERT: u8 = 0;
 const TAG_UPDATE: u8 = 1;
@@ -38,15 +38,6 @@ pub trait WalPayload: Sized {
     fn wal_encode(&self, out: &mut Vec<u8>);
     fn wal_decode(bytes: &[u8]) -> Option<Self>;
 
-    /// Upper-bound-ish estimate of how many bytes `wal_encode` is about to
-    /// write, used only to pre-size the framing `Vec` (see
-    /// `entry_size_hint`/`WalWriter::log_with_stamp`) so encoding a real
-    /// payload doesn't pay for repeated grow-and-copy reallocations along
-    /// the way (`Vec::extend_from_slice` on an undersized buffer). Getting
-    /// this wrong costs at worst one extra reallocation, never correctness
-    /// — `wal_encode` remains the sole source of truth for what's actually
-    /// written. Default of `8` matches the base `u64` payload exactly;
-    /// override for anything bigger (see `TpccRow`/`YcsbRow`'s impls).
     #[inline]
     fn wal_encode_size_hint(&self) -> usize {
         8
@@ -77,19 +68,10 @@ pub struct WalRecord<Key: Ord + Copy + Hash + Display, Payload: Clone> {
     pub op: CRUDOperation<Key, Payload>,
 }
 
-/// Reinterprets `value`'s bytes directly — only ever used for `Key` now
-/// (`Payload` goes through `WalPayload` instead). Deliberately not bounded by
-/// `Copy`: `T: Sized` is all raw byte reinterpretation actually needs, and
-/// requiring `Copy` here would force every generic caller up the call chain
-/// to also require `Key: Copy`, even though only this module cares. The real
-/// constraint — `T` must be a plain fixed-size value with no owned heap data
-/// (no `Vec`/`String`/`Box`) — is a documented discipline, not something the
-/// type system enforces; it holds for this project's actual `Key = u64`.
 #[inline]
 unsafe fn write_raw<T>(out: &mut Vec<u8>, value: &T) {
-    let bytes = unsafe {
-        std::slice::from_raw_parts(value as *const T as *const u8, size_of::<T>())
-    };
+    let bytes =
+        unsafe { std::slice::from_raw_parts(value as *const T as *const u8, size_of::<T>()) };
     out.extend_from_slice(bytes);
 }
 
@@ -99,17 +81,6 @@ unsafe fn read_raw<T>(bytes: &[u8]) -> T {
     unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const T) }
 }
 
-/// Encodes a single record's body (no length prefix, no checksum) as:
-/// `[u8 tag][u64 ts_start][u16 worker_id][Key bytes][Payload bytes]?`
-/// `Key` is always raw fixed-size bytes (every real instantiation uses
-/// `Key = u64`, see `write_raw`); `Payload` uses its `WalPayload` impl, which
-/// may be fixed-size raw bytes (POD payloads like `u64`) or a real
-/// variable-length encoding (payloads with owned heap data, like `TpccRow`).
-///
-/// Panics if `record.op` isn't `Insert`/`Update`/`Delete` — nothing else is
-/// ever handed to this function: the dispatch layer only calls
-/// `wal_start_commit`/`wal_log_write` for those three, and read/`*Rand`
-/// operations are never logged at all.
 pub fn encode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
     record: &WalRecord<Key, Payload>,
     out: &mut Vec<u8>,
@@ -130,12 +101,6 @@ pub fn encode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
     }
 }
 
-/// Decodes a record body produced by [`encode`]. Returns `None` if `bytes`
-/// is too short, the tag is unrecognized, or `Payload::wal_decode` rejects
-/// its bytes — all treated as corruption by callers. Since the WAL's outer
-/// per-record framing (`frame`/`read_frame`) already delimits the exact
-/// bytes belonging to this record, whatever remains after the key is handed
-/// to `Payload::wal_decode` in full — no separate payload length to compute.
 pub fn decode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
     bytes: &[u8],
 ) -> Option<WalRecord<Key, Payload>> {
@@ -193,34 +158,20 @@ pub enum WalEntry<Key: Ord + Copy + Hash + Display, Payload: Clone> {
     Commit { stamp: TxStamp, ts_commit: Version },
 }
 
-/// Estimated total framed size of `entry` — `tag(1) + ts_start(8) +
-/// worker_id(2) + Key(size_of::<Key>()) + frame overhead(4 len + 4 crc)`,
-/// plus the payload's own `wal_encode_size_hint` for a `Write` entry backed
-/// by `Insert`/`Update` (an entry with no payload — `Delete`/`Commit` —
-/// adds none). Callers that pre-size their encoding buffer with
-/// `Vec::with_capacity(entry_size_hint(entry))` avoid the repeated
-/// grow-and-copy `encode_entry_framed`/`encode_entry_for_table_framed`
-/// would otherwise pay for a payload much bigger than a fixed small guess
-/// (real payloads like `TpccRow`/`YcsbRow` routinely run into the hundreds
-/// of bytes, not the ~20-30 bytes a `u64`-payload record needs).
 pub fn entry_size_hint<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
     entry: &WalEntry<Key, Payload>,
 ) -> usize {
     const HEADER_AND_FRAME: usize = 1 + 8 + 2 + 4 + 4;
     let payload_hint = match entry {
-        WalEntry::Write(WalRecord { op: CRUDOperation::Insert(_, p) | CRUDOperation::Update(_, p), .. }) => {
-            p.wal_encode_size_hint()
-        }
+        WalEntry::Write(WalRecord {
+            op: CRUDOperation::Insert(_, p) | CRUDOperation::Update(_, p),
+            ..
+        }) => p.wal_encode_size_hint(),
         _ => 0,
     };
     HEADER_AND_FRAME + size_of::<Key>() + payload_hint
 }
 
-/// Encodes one [`WalEntry`]'s body (no length prefix, no checksum). A
-/// `Write` entry is exactly `encode`'s layout; a `Commit` entry is
-/// `[u8 tag=TAG_COMMIT][u64 ts_start][u16 worker_id][u64 ts_commit]` — the
-/// same header as a `Write` entry, with `ts_commit` in place of a
-/// key/payload.
 pub fn encode_entry<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
     entry: &WalEntry<Key, Payload>,
     out: &mut Vec<u8>,
@@ -250,7 +201,10 @@ pub fn decode_entry<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayloa
         let ts_start = Version::from_le_bytes(bytes[1..9].try_into().ok()?);
         let worker_id = WorkerId::from_le_bytes(bytes[9..11].try_into().ok()?);
         let ts_commit = Version::from_le_bytes(bytes[header_sz..header_sz + 8].try_into().ok()?);
-        return Some(WalEntry::Commit { stamp: TxStamp::new(worker_id, ts_start), ts_commit });
+        return Some(WalEntry::Commit {
+            stamp: TxStamp::new(worker_id, ts_start),
+            ts_commit,
+        });
     }
 
     decode(bytes).map(WalEntry::Write)
@@ -298,11 +252,10 @@ pub fn decode_entry_for_table<Key: Ord + Copy + Hash + Display, Payload: Clone +
     Some((table_id, entry))
 }
 
-/// Table-tagged counterpart to `encode_entry_framed`: same single-buffer,
-/// placeholder-patched framing (`[u32 len][table_id][entry body][u32 crc32]`),
-/// just with `table_id` folded into the framed body. Used by
-/// `WalWriter::log_with_stamp_for_table`/`log_commit_for_table`.
-pub fn encode_entry_for_table_framed<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
+pub fn encode_entry_for_table_framed<
+    Key: Ord + Copy + Hash + Display,
+    Payload: Clone + WalPayload,
+>(
     table_id: TableId,
     entry: &WalEntry<Key, Payload>,
     out: &mut Vec<u8>,
@@ -339,15 +292,6 @@ const CRC32_TABLE: [u32; 256] = {
     table
 };
 
-/// Standard (IEEE) CRC-32, implemented by hand (table-driven — see
-/// `CRC32_TABLE`) to avoid pulling in a dependency and to stay stable across
-/// toolchains/versions (unlike e.g. `DefaultHasher`, whose algorithm is
-/// explicitly not guaranteed stable). Same output as the straightforward
-/// byte-at-a-time bit-loop this replaced: profiling a write-heavy workload
-/// found that loop (8 branchy shift-xor steps per byte, inlined into every
-/// call site via `encode_entry_framed`) costing over 20% of total CPU time,
-/// since it runs on every single WAL record's body. One table lookup per
-/// byte instead of 8 shift-xor steps is the standard fix.
 pub fn crc32(bytes: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in bytes {
@@ -366,14 +310,6 @@ pub fn frame(body: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(&crc32(body).to_le_bytes());
 }
 
-/// Same wire format as `encode_entry` followed by `frame`
-/// (`[u32 len][body][u32 crc32(body)]`), but encodes the body straight into
-/// `out` instead of into a separate buffer first — one allocation instead
-/// of two, and no copy of the body into a second buffer. The length prefix
-/// is written as a placeholder, then patched once the body's actual length
-/// is known. Used by `WalWriter::log_with_stamp`/`log_commit`, each of
-/// which frames exactly one entry per call and has no other reason to keep
-/// the body separate.
 pub fn encode_entry_framed<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
     entry: &WalEntry<Key, Payload>,
     out: &mut Vec<u8>,
@@ -389,11 +325,6 @@ pub fn encode_entry_framed<Key: Ord + Copy + Hash + Display, Payload: Clone + Wa
     out.extend_from_slice(&crc.to_le_bytes());
 }
 
-/// Attempts to read one framed record starting at `bytes[0]`. Returns the
-/// body slice and the total number of bytes consumed (frame overhead + body),
-/// or `None` if the frame is incomplete or fails its checksum — both cases
-/// are treated identically by recovery as "log ends here" (a torn write from
-/// a crash mid-fsync is expected, not an error).
 pub fn read_frame(bytes: &[u8]) -> Option<(&[u8], usize)> {
     if bytes.len() < 4 {
         return None;
@@ -411,51 +342,6 @@ pub fn read_frame(bytes: &[u8]) -> Option<(&[u8], usize)> {
     Some((body, total))
 }
 
-/// `read_frame` + `decode`, tolerant of an **interior** hole rather than
-/// only a torn *tail*: scans forward from `bytes[0]` a byte at a time until
-/// it finds a position where a frame parses *and* `decode` accepts its
-/// body, returning the decoded value and the total bytes consumed from
-/// `bytes[0]` (including whatever was skipped to get there). `None` once
-/// the scan runs off the end of `bytes` with nothing found — a genuine
-/// torn tail, same as `read_frame` returning `None` right away used to
-/// mean for the strictly-sequential writer this module was originally
-/// written for.
-///
-/// # Why this exists
-/// `bat_wal::writer::WalWriter` appends strictly in the order its one
-/// background thread drains its channel, so there `read_frame` returning
-/// `None` can *only* mean "this is where a crash cut off the tail" —
-/// stopping the scan right there (what every `recovery::replay*` used to
-/// do) is exactly correct. `bat_wal::lockfree_writer::LockFreeWalWriter`
-/// breaks that assumption: concurrent writers reserve disjoint byte ranges
-/// via `fetch_add` but can *complete* out of order, so a thread that
-/// reserved a low offset and then died (the whole process crashing, not
-/// just that thread stalling) before its `pwrite` landed leaves a hole of
-/// unwritten (zero) bytes with valid, durable records on *both* sides of
-/// it — see that type's doc for the full argument. A plain "stop at the
-/// first bad frame" scan would silently discard every record after such a
-/// hole, even though they really did reach disk.
-///
-/// # Why a byte-at-a-time scan is safe here
-/// A real record's body is never empty (every real `encode`/`encode_entry`
-/// output is at least 19 bytes — `1` tag `+ 8` ts_start `+ 2` worker_id
-/// `+` at least a `Key`/`ts_commit`'s worth more), so `len == 0` can only
-/// come from a hole's zero bytes, never genuine data. Since a hole is
-/// always *some enqueue call's entire reserved range* (`tail.fetch_add`
-/// hands out one call's whole framed length atomically — never a partial
-/// record from two different calls), the byte immediately after a hole is
-/// always the true, aligned start of the next real frame. So advancing one
-/// byte at a time through anything that doesn't parse-and-decode is
-/// guaranteed to land exactly there, however long the hole is and whatever
-/// it's misaligned against (no assumption that a hole's length is a
-/// multiple of anything). The one residual risk — some misaligned window
-/// *inside* a hole coincidentally produces a length that fits the
-/// remaining bytes *and* whose CRC32 happens to match *and* whose decoded
-/// body looks superficially valid — is the same class of (astronomically
-/// unlikely, ~1-in-4-billion-per-candidate-position) risk `read_frame`'s
-/// CRC32 already accepts as "good enough to catch a torn write, not a
-/// cryptographic guarantee"; this doesn't introduce a new kind of risk,
-/// just more chances (one per skipped byte) to hit the existing one.
 pub fn resync_next<T>(bytes: &[u8], decode: impl Fn(&[u8]) -> Option<T>) -> Option<(T, usize)> {
     let mut skip = 0usize;
     while skip < bytes.len() {
@@ -475,11 +361,6 @@ pub fn resync_next<T>(bytes: &[u8], decode: impl Fn(&[u8]) -> Option<T>) -> Opti
 mod crc32_tests {
     use super::crc32;
 
-    /// The standard CRC-32/ISO-HDLC check value for the ASCII string
-    /// "123456789" — the reference test vector every implementation of this
-    /// polynomial is checked against. Pins the table-driven implementation
-    /// to the exact same algorithm the byte-at-a-time bit-loop it replaced
-    /// computed.
     #[test]
     fn matches_standard_check_value() {
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
@@ -490,4 +371,3 @@ mod crc32_tests {
         assert_eq!(crc32(b""), 0x0000_0000);
     }
 }
-

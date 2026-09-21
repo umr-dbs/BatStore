@@ -83,37 +83,49 @@ fn transaction_resolves_each_tables_read_root_only_once() {
 }
 
 #[test]
-fn read_committed_refreshes_once_per_statement_and_keeps_write_stamp() {
+fn read_committed_refreshes_automatically_and_keeps_write_stamp() {
     let db = new_db();
     let table = db.create_table("rc").table_id().unwrap();
     let mut setup = DbTransaction::begin(&db);
-    assert!(matches!(setup.insert(table, 1, 10), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        setup.insert(table, 1, 10),
+        CRUDOperationResult::Inserted(_)
+    ));
     setup.commit();
 
     let mut tx = DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
     let write_stamp = tx.ts_start();
-    tx.begin_statement();
-    assert!(matches!(tx.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 10));
+    assert!(
+        matches!(tx.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 10)
+    );
 
     std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut writer = DbTransaction::begin(&db);
-            assert!(matches!(writer.update(table, 1, 20), CRUDOperationResult::Updated(_)));
-            writer.commit();
-        }).join().unwrap();
+        scope
+            .spawn(|| {
+                let mut writer = DbTransaction::begin(&db);
+                assert!(matches!(
+                    writer.update(table, 1, 20),
+                    CRUDOperationResult::Updated(_)
+                ));
+                writer.commit();
+            })
+            .join()
+            .unwrap();
     });
 
-    // Two reads in one statement use the same timestamp and cached root.
-    assert!(matches!(tx.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 10));
-    tx.begin_statement();
+    // The next operation automatically sees the later commit.
+    assert!(
+        matches!(tx.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 20)
+    );
     assert!(tx.read_ts() > write_stamp);
-    assert!(matches!(tx.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 20));
     assert!(matches!(tx.update(table, 1, 30), CRUDOperationResult::Updated(v) if v == write_stamp));
     assert_eq!(tx.ts_start(), write_stamp);
     tx.commit();
 
     let mut check = DbTransaction::begin(&db);
-    assert!(matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 30));
+    assert!(
+        matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 30)
+    );
     check.commit();
 }
 
@@ -122,14 +134,19 @@ fn read_committed_abort_after_refresh_reverts_original_stamp() {
     let db = new_db();
     let table = db.create_table("rc_abort").table_id().unwrap();
     let mut tx = DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
-    tx.begin_statement();
-    assert!(matches!(tx.insert(table, 7, 70), CRUDOperationResult::Inserted(_)));
-    tx.begin_statement();
-    assert!(matches!(tx.point(table, 7), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 70));
+    assert!(matches!(
+        tx.insert(table, 7, 70),
+        CRUDOperationResult::Inserted(_)
+    ));
+    assert!(
+        matches!(tx.point(table, 7), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 70)
+    );
     assert!(tx.abort());
     assert_eq!(db.ctx.live_min_snapshot(), None);
     let mut check = DbTransaction::begin(&db);
-    assert!(matches!(check.point(table, 7), CRUDOperationResult::MatchedRecords(r) if r.is_empty()));
+    assert!(
+        matches!(check.point(table, 7), CRUDOperationResult::MatchedRecords(r) if r.is_empty())
+    );
 }
 
 #[test]
@@ -137,7 +154,10 @@ fn read_committed_statement_survives_commit_log_pruning() {
     let db = new_db();
     let table = db.create_table("rc_prune").table_id().unwrap();
     let mut setup = DbTransaction::begin(&db);
-    assert!(matches!(setup.insert(table, 1, 0), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        setup.insert(table, 1, 0),
+        CRUDOperationResult::Inserted(_)
+    ));
     setup.commit();
 
     let mut reader = DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
@@ -148,7 +168,10 @@ fn read_committed_statement_survives_commit_log_pruning() {
         let writer = scope.spawn(move || {
             for value in 1..=40 {
                 let mut writer = DbTransaction::begin(writer_db);
-                assert!(matches!(writer.update(table, 1, value), CRUDOperationResult::Updated(_)));
+                assert!(matches!(
+                    writer.update(table, 1, value),
+                    CRUDOperationResult::Updated(_)
+                ));
                 writer.commit();
                 if value == 1 {
                     first_done_tx.send(()).unwrap();
@@ -157,13 +180,15 @@ fn read_committed_statement_survives_commit_log_pruning() {
             }
         });
         first_done_rx.recv().unwrap();
-        reader.begin_statement();
+        assert!(
+            matches!(reader.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 1)
+        );
         continue_tx.send(()).unwrap();
         writer.join().unwrap();
     });
-    assert!(matches!(reader.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 1));
-    reader.begin_statement();
-    assert!(matches!(reader.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 40));
+    assert!(
+        matches!(reader.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r[0].payload == 40)
+    );
     reader.commit();
 }
 
@@ -172,89 +197,125 @@ fn read_committed_insert_conflicts_with_uncommitted_foreign_delete() {
     let db = new_db();
     let table = db.create_table("rc_delete_race").table_id().unwrap();
     let mut setup = DbTransaction::begin(&db);
-    assert!(matches!(setup.insert(table, 1, 10), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        setup.insert(table, 1, 10),
+        CRUDOperationResult::Inserted(_)
+    ));
     setup.commit();
 
     let mut deleting = DbTransaction::begin(&db);
-    assert!(matches!(deleting.delete(table, 1), CRUDOperationResult::Deleted(_)));
+    assert!(matches!(
+        deleting.delete(table, 1),
+        CRUDOperationResult::Deleted(_)
+    ));
     std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut inserting = DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
-            inserting.begin_statement();
-            assert!(matches!(inserting.insert(table, 1, 20), CRUDOperationResult::Conflict));
-        }).join().unwrap();
+        scope
+            .spawn(|| {
+                let mut inserting =
+                    DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
+                assert!(matches!(
+                    inserting.insert(table, 1, 20),
+                    CRUDOperationResult::Conflict
+                ));
+            })
+            .join()
+            .unwrap();
     });
     assert!(deleting.abort());
     let mut check = DbTransaction::begin(&db);
-    assert!(matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 10));
+    assert!(
+        matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 10)
+    );
 }
 
 #[test]
-fn read_committed_uses_one_snapshot_across_tables_and_range_reads() {
+fn read_committed_refreshes_and_replaces_cached_roots_for_each_operation() {
     let db = new_db();
     let a = db.create_table("rc_a").table_id().unwrap();
     let b = db.create_table("rc_b").table_id().unwrap();
     let all = crate::bat_query::interval::Interval::new(0, 100);
     let mut setup = DbTransaction::begin(&db);
     for key in 1..=8 {
-        assert!(matches!(setup.insert(a, key, key), CRUDOperationResult::Inserted(_)));
-        assert!(matches!(setup.insert(b, key, key), CRUDOperationResult::Inserted(_)));
+        assert!(matches!(
+            setup.insert(a, key, key),
+            CRUDOperationResult::Inserted(_)
+        ));
+        assert!(matches!(
+            setup.insert(b, key, key),
+            CRUDOperationResult::Inserted(_)
+        ));
     }
     setup.commit();
 
     db.enable_gc(false, None);
     let mut reader = DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
-    reader.begin_statement();
-    let first = reader.read_ts();
     assert_eq!(reader.range_count(a, all), 8);
+    let first = reader.read_ts();
     assert_eq!(reader.range_count(b, all), 8);
-    assert_eq!(reader.cached_read_root_count(), 2);
+    assert_eq!(reader.cached_read_root_count(), 1);
 
     std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut writer = DbTransaction::begin(&db);
-            for key in 9..=32 {
-                assert!(matches!(writer.insert(a, key, key), CRUDOperationResult::Inserted(_)));
-                assert!(matches!(writer.insert(b, key, key), CRUDOperationResult::Inserted(_)));
-            }
-            writer.commit();
-        }).join().unwrap();
+        scope
+            .spawn(|| {
+                let mut writer = DbTransaction::begin(&db);
+                for key in 9..=32 {
+                    assert!(matches!(
+                        writer.insert(a, key, key),
+                        CRUDOperationResult::Inserted(_)
+                    ));
+                    assert!(matches!(
+                        writer.insert(b, key, key),
+                        CRUDOperationResult::Inserted(_)
+                    ));
+                }
+                writer.commit();
+            })
+            .join()
+            .unwrap();
     });
 
-    assert_eq!(reader.read_ts(), first);
-    assert_eq!(reader.range_count(a, all), 8);
-    assert_eq!(reader.range_count(b, all), 8);
-    reader.begin_statement();
-    assert_eq!(reader.cached_read_root_count(), 0);
     assert_eq!(reader.range_count(a, all), 32);
+    assert!(reader.read_ts() > first);
     assert_eq!(reader.range_count(b, all), 32);
+    assert_eq!(reader.cached_read_root_count(), 1);
     reader.commit();
     assert_eq!(db.ctx.live_min_snapshot(), None);
 }
 
 #[test]
-fn read_committed_rechecks_committed_delete_and_rejects_stale_statement() {
+fn read_committed_rechecks_committed_delete_automatically() {
     let db = new_db();
     let table = db.create_table("rc_reinsert").table_id().unwrap();
     let mut setup = DbTransaction::begin(&db);
-    assert!(matches!(setup.insert(table, 1, 10), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        setup.insert(table, 1, 10),
+        CRUDOperationResult::Inserted(_)
+    ));
     setup.commit();
 
     let mut tx = DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
-    tx.begin_statement();
     std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut deleting = DbTransaction::begin(&db);
-            assert!(matches!(deleting.delete(table, 1), CRUDOperationResult::Deleted(_)));
-            deleting.commit();
-        }).join().unwrap();
+        scope
+            .spawn(|| {
+                let mut deleting = DbTransaction::begin(&db);
+                assert!(matches!(
+                    deleting.delete(table, 1),
+                    CRUDOperationResult::Deleted(_)
+                ));
+                deleting.commit();
+            })
+            .join()
+            .unwrap();
     });
-    assert!(matches!(tx.insert(table, 1, 20), CRUDOperationResult::Conflict));
-    tx.begin_statement();
-    assert!(matches!(tx.insert(table, 1, 20), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        tx.insert(table, 1, 20),
+        CRUDOperationResult::Inserted(_)
+    ));
     tx.commit();
     let mut check = DbTransaction::begin(&db);
-    assert!(matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 20));
+    assert!(
+        matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 20)
+    );
 }
 
 #[test]
@@ -262,26 +323,37 @@ fn read_committed_update_and_delete_conflict_with_uncommitted_delete() {
     let db = new_db();
     let table = db.create_table("rc_tombstone").table_id().unwrap();
     let mut setup = DbTransaction::begin(&db);
-    assert!(matches!(setup.insert(table, 1, 10), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        setup.insert(table, 1, 10),
+        CRUDOperationResult::Inserted(_)
+    ));
     setup.commit();
     let mut deleting = DbTransaction::begin(&db);
-    assert!(matches!(deleting.delete(table, 1), CRUDOperationResult::Deleted(_)));
+    assert!(matches!(
+        deleting.delete(table, 1),
+        CRUDOperationResult::Deleted(_)
+    ));
     std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut tx = DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
-            tx.begin_statement();
-            assert!(matches!(tx.update(table, 1, 20), CRUDOperationResult::Conflict));
-            assert!(matches!(tx.delete(table, 1), CRUDOperationResult::Conflict));
-        }).join().unwrap();
+        scope
+            .spawn(|| {
+                let mut tx =
+                    DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
+                assert!(matches!(
+                    tx.update(table, 1, 20),
+                    CRUDOperationResult::Conflict
+                ));
+                assert!(matches!(tx.delete(table, 1), CRUDOperationResult::Conflict));
+            })
+            .join()
+            .unwrap();
     });
     assert!(deleting.abort());
 }
 
 #[test]
 fn read_committed_writes_across_statements_recover_as_one_transaction() {
-    let path = std::env::temp_dir().join(format!(
-        "batstore_rc_recovery_{}.log", std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("batstore_rc_recovery_{}.log", std::process::id()));
     let meta = std::path::PathBuf::from(format!("{}.meta", path.display()));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&meta);
@@ -292,30 +364,43 @@ fn read_committed_writes_across_statements_recover_as_one_transaction() {
         let b = db.create_table("b").table_id().unwrap();
         let mut tx = DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
         let write_stamp = tx.ts_start();
-        tx.begin_statement();
-        assert!(matches!(tx.insert(a, 1, 10), CRUDOperationResult::Inserted(v) if v == write_stamp));
-        tx.begin_statement();
+        assert!(
+            matches!(tx.insert(a, 1, 10), CRUDOperationResult::Inserted(v) if v == write_stamp)
+        );
         assert!(matches!(tx.update(a, 1, 11), CRUDOperationResult::Updated(v) if v == write_stamp));
-        assert!(matches!(tx.insert(b, 2, 20), CRUDOperationResult::Inserted(v) if v == write_stamp));
+        assert!(
+            matches!(tx.insert(b, 2, 20), CRUDOperationResult::Inserted(v) if v == write_stamp)
+        );
         tx.commit();
         db.table(a).unwrap().wait_wal_hardened(write_stamp);
 
         let mut aborted = DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
-        aborted.begin_statement();
-        assert!(matches!(aborted.insert(b, 3, 30), CRUDOperationResult::Inserted(_)));
-        aborted.begin_statement();
+        assert!(matches!(
+            aborted.insert(b, 3, 30),
+            CRUDOperationResult::Inserted(_)
+        ));
         assert!(aborted.abort());
     }
 
     let recovered = TestDb::open_recovered(
-        RootIndexType::default(), inc, dec, u64::MIN, u64::MAX,
-        &path, std::time::Duration::from_millis(2),
-    ).unwrap();
+        RootIndexType::default(),
+        inc,
+        dec,
+        u64::MIN,
+        u64::MAX,
+        &path,
+        std::time::Duration::from_millis(2),
+    )
+    .unwrap();
     let a = recovered.table_named("a").unwrap().table_id().unwrap();
     let b = recovered.table_named("b").unwrap().table_id().unwrap();
     let mut check = DbTransaction::begin(&recovered);
-    assert!(matches!(check.point(a, 1), CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 11));
-    assert!(matches!(check.point(b, 2), CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 20));
+    assert!(
+        matches!(check.point(a, 1), CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 11)
+    );
+    assert!(
+        matches!(check.point(b, 2), CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && r[0].payload == 20)
+    );
     assert!(matches!(check.point(b, 3), CRUDOperationResult::MatchedRecords(r) if r.is_empty()));
     check.commit();
     drop(recovered);
@@ -324,16 +409,16 @@ fn read_committed_writes_across_statements_recover_as_one_transaction() {
 }
 
 #[test]
-fn statement_boundary_keeps_snapshot_isolation_default_unchanged() {
+fn automatic_refresh_keeps_snapshot_isolation_default_unchanged() {
     let db = new_db();
     let table = db.create_table("si_default").table_id().unwrap();
     let mut tx = DbTransaction::begin(&db);
     let start = tx.ts_start();
     let clock = db.current_version();
-    tx.begin_statement();
+    assert_eq!(tx.read_ts(), start);
+    assert!(matches!(tx.insert(table, 1, 1), CRUDOperationResult::Inserted(v) if v == start));
     assert_eq!(tx.read_ts(), start);
     assert_eq!(db.current_version(), clock);
-    assert!(matches!(tx.insert(table, 1, 1), CRUDOperationResult::Inserted(v) if v == start));
     tx.commit();
 }
 
@@ -343,14 +428,20 @@ fn read_committed_drop_releases_both_snapshots_and_rolls_back() {
     let table = db.create_table("rc_drop").table_id().unwrap();
     {
         let mut tx = DbTransaction::begin_with_isolation(&db, IsolationLevel::ReadCommitted);
-        tx.begin_statement();
-        assert!(matches!(tx.insert(table, 1, 10), CRUDOperationResult::Inserted(_)));
-        tx.begin_statement();
-        assert!(matches!(tx.update(table, 1, 20), CRUDOperationResult::Updated(_)));
+        assert!(matches!(
+            tx.insert(table, 1, 10),
+            CRUDOperationResult::Inserted(_)
+        ));
+        assert!(matches!(
+            tx.update(table, 1, 20),
+            CRUDOperationResult::Updated(_)
+        ));
     }
     assert_eq!(db.ctx.live_min_snapshot(), None);
     let mut check = DbTransaction::begin(&db);
-    assert!(matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r.is_empty()));
+    assert!(
+        matches!(check.point(table, 1), CRUDOperationResult::MatchedRecords(r) if r.is_empty())
+    );
 }
 
 #[test]
@@ -378,12 +469,6 @@ fn transaction_owned_olc_traversals_do_not_draw_nested_snapshots() {
     );
 }
 
-/// Mirrors the paper's Figure 3 worked example: worker W1 commits two
-/// transactions ("a" then "e"), worker W2 starts a transaction ("d")
-/// that never commits, and a transaction "f" on a third worker takes
-/// its snapshot after a/e committed but while d is still open. f must
-/// see a and e, but not d — exactly the Transitive Commit Invariant
-/// this project's `CommitLog`/`is_visible` are built on.
 #[test]
 fn transitive_commit_invariant_worked_example() {
     let glc = GlobalClock::new();
@@ -510,16 +595,10 @@ fn first_writer_wins_conflict() {
     ));
 }
 
-/// A multi-op `DbTransaction`'s writes must survive a crash: each
-/// `insert`/`update`/`delete` logs to the WAL as it happens (under the
-/// transaction's one fixed stamp), and `commit` waits for all of them to
-/// be durably flushed before returning — so once `commit()` has
-/// returned, every write the transaction made must reappear after
-/// `open_recovered`, even though recovery mints fresh stamps for
-/// everything it replays and has no notion of transaction boundaries.
 #[test]
 fn multi_op_transaction_writes_are_durable_across_recovery() {
-    let path = std::env::temp_dir().join(format!("batstore_tx_wal_test_{}.log", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("batstore_tx_wal_test_{}.log", std::process::id()));
     let meta_path = format!("{}.meta", path.display());
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&meta_path);
@@ -578,14 +657,6 @@ fn multi_op_transaction_writes_are_durable_across_recovery() {
     let _ = std::fs::remove_file(&meta_path);
 }
 
-/// The motivating gap from `bat_db::transaction`'s type doc: before this
-/// feature, `bat_sync::visibility::is_visible`'s same-worker fast path
-/// treated a transaction's own writes as visible forever, regardless of
-/// whether it ever committed. A transaction that writes a key, then hits a
-/// `Conflict` on a later op in the *same* transaction and drops without
-/// `commit()`, must have its earlier write actually reverted — not just
-/// leave its snapshot released while the write sits in the tree as if
-/// committed.
 #[test]
 fn dropped_transaction_reverts_its_earlier_writes_on_conflict() {
     let db = new_db();
@@ -636,11 +707,6 @@ fn dropped_transaction_reverts_its_earlier_writes_on_conflict() {
     tx3.commit();
 }
 
-/// An aborted write must not resurface after a crash + recovery:
-/// `Drop`'s abort path is purely in-memory (see `MVBTSt::abort_write`'s
-/// doc) and this transaction never logs a Commit marker for it, so
-/// replay's commit-gating skips these writes entirely and ends up at
-/// the same "never really happened" result the live abort produced.
 #[test]
 fn aborted_transaction_write_does_not_resurface_after_recovery() {
     let path = std::env::temp_dir().join(format!(

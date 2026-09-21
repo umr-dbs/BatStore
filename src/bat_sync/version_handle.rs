@@ -9,10 +9,6 @@ use std::hash::Hash;
 
 pub(crate) const START_VERSION: Version = 1;
 
-// Diagnostic instrumentation for the tpcc-stress cross-table invariant bug
-// (2026-08-15) - counts how often abort_writes' silent give-up path
-// actually triggers. debug-only: this is hot-path code, so the counter
-// (and its eprintln!) doesn't belong in release builds.
 #[cfg(debug_assertions)]
 pub(crate) static ABORT_TERMINAL_WITH_REMAINING: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -42,20 +38,11 @@ impl<
         self.ctx.worker_id()
     }
 
-    /// Draws a fresh `ts_start` and hands it to `register`, which must be
-    /// whatever actually records it as a protected reader — see
-    /// `TxContext::draw_snapshot_version_with` for why this is gap-free
-    /// against concurrent block reclaim.
     #[inline(always)]
     pub(crate) fn draw_snapshot_version_with<R>(&self, register: impl FnOnce(Version) -> R) -> R {
         self.ctx.draw_snapshot_version_with(register)
     }
 
-    /// Draws a fresh OSIC snapshot (`ts_start`) and registers it as an
-    /// active transaction against this tree's `ctx` — callers must pair this
-    /// with `end_snapshot` (or `commit_tx`, which does so as part of
-    /// committing) once the transaction is done, so `CommitLog` pruning
-    /// never drops an entry this snapshot's future `LCB` queries still need.
     #[inline(always)]
     pub(crate) fn begin_snapshot(&self) -> Version {
         self.ctx.begin_snapshot()
@@ -119,39 +106,11 @@ impl<
         self.ctx.commit_tx(worker_id)
     }
 
-    /// Every write's WAL record (if any) is handed to the writer and *never
-    /// waited on* by the write itself — `dispatch_crud`/`Transaction::commit`
-    /// return as soon as `commit_tx` makes the write visible, regardless of
-    /// whether (or when) it's actually fsynced. There is deliberately no
-    /// per-op durability wait anymore (previously: Early Lock Release,
-    /// paper §3.4 — commit visibility, then block for this op's own flush
-    /// plus every dependency's flush before returning). That gave every
-    /// single-op caller a crash-durability guarantee at the cost of paying a
-    /// flush round-trip on every op; callers who actually need a durability
-    /// point-in-time now ask for one explicitly via `wal_hardened_version`/
-    /// `wait_wal_hardened` below instead of every op paying for it.
-    ///
-    /// This tree's WAL durability watermark (see
-    /// `WalWriter::hardened_version`): every write with `ts_start` at or
-    /// below this value is confirmed durably fsynced. Advances in batches
-    /// as the writer's background thread completes a flush, not per
-    /// operation. `0` when no WAL is attached (or one is attached but
-    /// nothing has flushed yet) — nothing is guaranteed durable, so callers
-    /// polling this get an honest "not yet" instead of a stale/optimistic
-    /// value.
     #[inline(always)]
     pub fn wal_hardened_version(&self) -> Version {
         self.cold.wal.hardened_version()
     }
 
-    /// Blocks until `wal_hardened_version()` reaches `target` — i.e. until
-    /// every write up to that point is confirmed durable. For an explicit,
-    /// caller-chosen checkpoint only (e.g. "durability-sync before reporting
-    /// a batch job done"); never called automatically by the write path
-    /// itself (see `wal_hardened_version`'s doc). Polls on a short sleep
-    /// rather than busy-spinning: unlike the old per-op ELR wait (usually
-    /// zero-iteration), this can legitimately span multiple flush intervals,
-    /// so spinning would just burn CPU for no benefit.
     pub fn wait_wal_hardened(&self, target: Version) {
         while self.wal_hardened_version() < target {
             std::thread::sleep(std::time::Duration::from_micros(100));
@@ -171,22 +130,6 @@ impl<
     Payload: Display + Clone + Default + Sync + 'static + crate::bat_wal::record::WalPayload,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
-    /// Mints a fresh OSIC stamp for a single, auto-committing write (the
-    /// existing `Insert`/`Update`/`Delete` dispatch arms — each one *is* a
-    /// one-operation transaction) and, if a WAL is attached, hands
-    /// `build(ts_start)` to it for logging. Concurrent commits can land in
-    /// the log in either order regardless of which timestamp is numerically
-    /// smaller; `replay` (see `bat_wal::recovery`) accounts for this by
-    /// sorting records by `ts_commit` before applying them. Fire-and-forget:
-    /// the caller never waits on this write's flush (see
-    /// `MVBTSt::wal_hardened_version`'s doc), so there's no ticket to return
-    /// here — just the stamp. `build` is only ever called with
-    /// `CRUDOperation::Insert`/`Update`/`Delete`.
-    ///
-    /// This write is logged optimistically, before its transaction is known
-    /// to commit — callers must follow up with `wal_log_commit` once (and
-    /// only once) they've actually committed it, or replay will correctly
-    /// never see this write at all (see `WalEntry::Commit`'s doc).
     #[inline(always)]
     pub(crate) fn wal_start_commit(
         &self,
@@ -195,13 +138,6 @@ impl<
         let worker_id = self.worker_id();
 
         match self.cold.wal.as_ref() {
-            // `self.table_id` is `Some` only for a `bat_db::Database` table
-            // (see `MVBTSt::table_id`'s doc) — its writer is shared with
-            // every other table on that database, so every entry must carry
-            // this table's id for `bat_wal::recovery::replay_database` to
-            // demultiplex the interleaved file. `None` (every other caller,
-            // including `TpccDatabase`'s own per-table files) keeps today's
-            // plain, untagged encoding, byte-for-byte unchanged.
             writer => match self.cold.table_id {
                 Some(table_id) => writer.start_commit_logged_for_table(
                     table_id,
@@ -214,13 +150,6 @@ impl<
         }
     }
 
-    /// Logs one write for a multi-op `bat_db::transaction::DbTransaction`
-    /// under `stamp` — the transaction's *own* `(worker_id, ts_start)`, not
-    /// a freshly-minted one, since every write in the same transaction must
-    /// share its one `ts_start` (see `WalWriter::log_with_stamp`). No-op
-    /// when no WAL is attached; fire-and-forget otherwise, same as
-    /// `wal_start_commit` — including needing a matching `wal_log_commit`
-    /// once the transaction actually commits.
     #[inline(always)]
     pub(crate) fn wal_log_write(
         &self,
@@ -239,13 +168,6 @@ impl<
         }
     }
 
-    /// Logs a **Commit marker** confirming `stamp`'s transaction actually
-    /// committed at `ts_commit` — see `WalEntry::Commit`'s doc. Must be
-    /// called exactly once, after `commit_tx` has actually succeeded, for
-    /// every write previously logged via `wal_start_commit`/`wal_log_write`
-    /// under this `stamp`; replay only ever applies a write once it finds
-    /// this marker. No-op when no WAL is attached; fire-and-forget
-    /// otherwise, same model as every other WAL call here.
     #[inline(always)]
     pub(crate) fn wal_log_commit(&self, stamp: TxStamp, ts_commit: Version) {
         match self.cold.table_id {
@@ -258,29 +180,11 @@ impl<
         }
     }
 
-    /// Reverts `key`'s write by the transaction identified by `stamp` — see
-    /// `bat_page_model::leaf_page::LeafPage::abort_write`'s doc for the two
-    /// cases (`Invalidate` an `Insert`/`Update`, or `Undelete` a plain
-    /// `Delete`). Called once per key a `bat_db::transaction::DbTransaction`/
-    /// `bat_bench::tpcc_txn::TpccTxn` touched, from `Drop` when it's dropped
-    /// without `commit()`. Purely an in-memory reversal — `stamp`'s
-    /// transaction never committed, so it never got (and never will get) a
-    /// `wal_log_commit` marker for whatever `wal_start_commit`/
-    /// `wal_log_write` already logged; replay skips it for that reason
-    /// alone, with no separate WAL-side abort record needed here.
     #[inline]
     pub(crate) fn abort_write(&self, key: Key, stamp: TxStamp) {
         self.abort_writes(key, stamp, 1);
     }
 
-    /// Reverts a consecutive run of writes to one key. Normally all of its
-    /// versions reside in one leaf and therefore require one traversal and
-    /// one latch. The defensive retry preserves the old one-call-per-entry
-    /// behavior if a run is ever distributed across leaves.
-    ///
-    /// An `Update`-abort's linked predecessor is always resolved locally by
-    /// `LeafPage::abort_write` itself: a key's versions never straddle a
-    /// split, so there is no separate page left to search.
     #[inline]
     pub(crate) fn abort_writes(&self, key: Key, stamp: TxStamp, count: usize) {
         let mut remaining = count;
@@ -295,7 +199,8 @@ impl<
                 // (already-fully-reverted, or count was already 0) case.
                 #[cfg(debug_assertions)]
                 if remaining > 1 {
-                    ABORT_TERMINAL_WITH_REMAINING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    ABORT_TERMINAL_WITH_REMAINING
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     eprintln!(
                         "[abort-diag] terminal NotFound with remaining={remaining} key={key} stamp={stamp}"
                     );

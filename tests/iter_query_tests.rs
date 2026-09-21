@@ -104,12 +104,6 @@ fn collect_range_iter(
     }
 }
 
-/// Many threads insert disjoint keys concurrently (shuffled insertion order,
-/// both across and within threads); once every insert has returned, both the
-/// eager `Range` and the lazy `RangeIter` path must yield exactly the full
-/// set of (key, payload) pairs actually written — verified two ways: an
-/// exact match over the whole key space, and an exact match over an
-/// arbitrary sub-range that spans a split boundary.
 #[test]
 fn range_and_iter_query_return_exactly_the_concurrently_inserted_records() {
     let tree = make_tree();
@@ -178,15 +172,6 @@ fn range_and_iter_query_return_exactly_the_concurrently_inserted_records() {
     );
 }
 
-/// A range query taken at a version from *before* a concurrent batch of
-/// inserts must see only the pre-existing data — none of the concurrently
-/// inserted keys — even though, by the time the query actually runs, the
-/// tree already physically contains them. A query taken *after* must see
-/// everything. This is the property the whole `registrations_in_flight`/
-/// `live_tx` machinery (see `tx_context_registration_tests.rs`,
-/// `loom_registration_ordering.rs`) exists to keep safe under GC, and the
-/// property a reader actually cares about: not just "do writes eventually
-/// show up" but "does *my* snapshot see exactly what it should."
 #[test]
 fn range_query_respects_snapshot_isolation_across_concurrent_inserts() {
     let tree = make_tree();
@@ -257,16 +242,6 @@ fn range_query_respects_snapshot_isolation_across_concurrent_inserts() {
     );
 }
 
-/// `LeafPage` records are append-ordered, never re-sorted by key
-/// (`LeafPage::push_uncommitted` always writes at the next free slot) — so
-/// `RangeQueryIter::min_by_key` can't just trust `next()`'s first result,
-/// it has to actually compare every match within the first matching leaf.
-/// Inserting keys in *descending* order specifically catches a naive "just
-/// take next()" implementation, which would return the first-inserted
-/// (largest, physically-first) key instead of the true minimum — exactly
-/// the bug this test guards against regressing (it's what `bat_bench::
-/// tpcc_txn::deliver_one_district` relies on `range_min` for: finding the
-/// oldest — smallest-key — queued new-order).
 #[test]
 fn range_min_by_key_finds_the_true_minimum_despite_descending_insertion_order() {
     let tree = make_tree();
@@ -292,23 +267,6 @@ fn range_min_by_key_finds_the_true_minimum_despite_descending_insertion_order() 
     assert_eq!(*min.payload, payload_for(0));
 }
 
-/// `RangeQueryIter::with_zone_predicate` both skips a leaf outright (see
-/// `LeafZoneMap`'s doc) and automatically filters individual records by
-/// value as part of the normal range/visibility check. This test's
-/// `filtered_scan` re-applies the same payload-range check in its own
-/// `visit` closure anyway (redundant with the automatic filter when
-/// `with_pruning` is true, but exactly what's needed when it's false, to
-/// get a like-for-like comparison), then compares against the same closure
-/// run with no zone predicate at all (visiting every leaf, no skipping, no
-/// automatic filtering): if zone-map pruning/filtering is sound, the two
-/// must always agree.
-///
-/// `FAN` stays small and the key count large enough to force many splits
-/// (both `KEY_SPLIT` and `VERSION_SPLIT`, per `smo::split`'s own 80%/40%
-/// thresholds) — the split/merge zone-map carry-forward wiring in
-/// `bat_tree::smo` is exactly the part of this feature most at risk of a
-/// silent "leaf loses its projected range" bug, and only actually gets
-/// exercised once real splits happen.
 #[test]
 fn zone_map_pruned_scan_matches_unpruned_scan_across_many_forced_splits() {
     const ZONE_FAN: usize = 8;
@@ -345,12 +303,6 @@ fn zone_map_pruned_scan_matches_unpruned_scan_across_many_forced_splits() {
         out
     };
 
-    // Windows chosen to land: entirely inside the data's real payload range,
-    // spanning it, a single value, and one guaranteed to match nothing at
-    // all (every leaf provably prunable) — the case a broken "empty zone
-    // map always skips" bug (see `push_records_onto`'s doc) would otherwise
-    // hide, since an all-skip result there would look identical to a
-    // correct all-skip result here.
     let payload_lo = payload_for(0);
     let payload_hi = payload_for(TOTAL - 1);
     let windows = [
@@ -371,13 +323,6 @@ fn zone_map_pruned_scan_matches_unpruned_scan_across_many_forced_splits() {
     }
 }
 
-/// A tree with no `set_zone_map_projection` configured must behave
-/// identically whether or not a caller (mistakenly, or via generic code
-/// that doesn't know which trees are configured) calls
-/// `with_zone_predicate` — see that method's doc on why this guard exists.
-/// Without the `tree.cold.zone_map_projection.is_some()` cross-check in
-/// `try_for_each_ref`, every leaf's default-empty zone map would make this
-/// silently return nothing at all instead of the true result.
 #[test]
 fn zone_predicate_is_inert_on_a_tree_with_no_projection_configured() {
     let tree = make_tree();
@@ -404,13 +349,6 @@ fn zone_predicate_is_inert_on_a_tree_with_no_projection_configured() {
     assert_eq!(with_predicate, 64);
 }
 
-/// The automatic per-record filter (see `RangeQueryIter::with_zone_predicate`'s
-/// doc) must be correct *on its own*, with no help from the caller's `visit`
-/// closure — this is the property `q1`/`q1_parallel` actually rely on now
-/// that they dropped their own manual `ol_delivery_d` check. `visit` here
-/// only counts and never re-checks the payload itself; if the automatic
-/// filter were missing or wrong, this would either over- or under-count
-/// relative to a plain `HashMap` filter computed independently below.
 #[test]
 fn zone_predicate_alone_filters_correctly_with_no_help_from_the_visit_closure() {
     const ZONE_FAN: usize = 8;
@@ -435,13 +373,19 @@ fn zone_predicate_alone_filters_correctly_with_no_help_from_the_visit_closure() 
     let zone_hi = payload_for(150);
 
     let mut actual = HashMap::new();
-    RangeQueryIter::new(&tree, version, Interval::new(0, TOTAL - 1), false, tree.worker_id())
-        .with_zone_predicate(zone_lo, zone_hi)
-        .for_each_ref(|k, p| {
-            // Deliberately no re-check here: correctness of this result
-            // depends entirely on the engine's own automatic filter.
-            actual.insert(k, *p);
-        });
+    RangeQueryIter::new(
+        &tree,
+        version,
+        Interval::new(0, TOTAL - 1),
+        false,
+        tree.worker_id(),
+    )
+    .with_zone_predicate(zone_lo, zone_hi)
+    .for_each_ref(|k, p| {
+        // Deliberately no re-check here: correctness of this result
+        // depends entirely on the engine's own automatic filter.
+        actual.insert(k, *p);
+    });
 
     let expected_in_window: HashMap<u64, u64> = expected
         .into_iter()
@@ -453,19 +397,12 @@ fn zone_predicate_alone_filters_correctly_with_no_help_from_the_visit_closure() 
         "the automatic zone-predicate filter (no closure help) disagreed with an \
          independently computed payload-window filter"
     );
-    assert!(!actual.is_empty(), "sanity: the window should match at least one row");
+    assert!(
+        !actual.is_empty(),
+        "sanity: the window should match at least one row"
+    );
 }
 
-/// Same soundness property as `zone_map_pruned_scan_matches_unpruned_scan_
-/// across_many_forced_splits`, but for `bat_tree::smo::merge` instead of
-/// `split`: deletes enough keys after the initial (split-heavy) load to
-/// force real underflow-driven merges (`smo::merge`'s own `KeySplit`/
-/// `Merged` leaf branches), then checks pruned vs. unpruned scans over the
-/// *surviving* keys still agree. `push_records_onto`'s zone-map
-/// recomputation fix applies identically to merge's call sites, but
-/// nothing exercised them until this test — a merge combines *two* source
-/// leaves' records into one (or splits the combination back out), a
-/// genuinely different code path from split's "one leaf into two."
 #[test]
 fn zone_map_pruned_scan_matches_unpruned_scan_across_forced_merges() {
     const ZONE_FAN: usize = 8;
@@ -540,15 +477,6 @@ fn zone_map_pruned_scan_matches_unpruned_scan_across_forced_merges() {
     }
 }
 
-/// Concurrent writers keep inserting new keys (forcing live splits) while a
-/// zone-pruned scan runs at a fixed snapshot — mirrors this codebase's
-/// standard snapshot-isolation test shape (`range_query_respects_snapshot_
-/// isolation_across_concurrent_inserts` above) but specifically exercises
-/// `with_zone_predicate` against a tree that's actively splitting *during*
-/// the scan, not just before it. A scan taken at `version_before` must see
-/// none of the concurrently-inserted keys, pruned or not; one taken after
-/// must see all of them, and the pruned/unpruned results must still agree
-/// with each other at both snapshots.
 #[test]
 fn zone_map_pruned_scan_is_snapshot_consistent_under_concurrent_inserts_and_splits() {
     const ZONE_FAN: usize = 8;

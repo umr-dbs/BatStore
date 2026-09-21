@@ -146,15 +146,6 @@ fn duration_for(experiment: &str, scale: Scale) -> Duration {
     }
 }
 
-/// Runs one experiment variant directly (in the *current* process — used by
-/// the `_bench_one` child) and returns `(metric_name, metric_value,
-/// baseline_metric_value)`. `baseline_metric_value` is only ever populated
-/// for `htap` (its OLTP-only sub-phase tpmC, already computed by
-/// `tpcc_driver::run_tpcc` via `DriverConfig::htap_baseline` — see
-/// `TpccRunSummary::baseline_tpm_c` — but previously only printed to stdout,
-/// never persisted): it's what makes an accurate "OLTP interference from
-/// concurrent OLAP" plot possible without re-deriving it from two
-/// differently-configured runs.
 fn run_one(
     experiment: &str,
     scale: Scale,
@@ -181,7 +172,8 @@ fn run_one(
                 wal: None,
                 wal_lockfree_batch_size: None,
                 htap_baseline: None,
-                idle_compaction: gc.then(|| (DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
+                idle_compaction: gc
+                    .then(|| (DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
                 scan_pool_workers: None,
                 output_dir: out_dir,
             });
@@ -211,7 +203,8 @@ fn run_one(
                 wal: None,
                 wal_lockfree_batch_size: None,
                 htap_baseline,
-                idle_compaction: gc.then(|| (DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
+                idle_compaction: gc
+                    .then(|| (DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
                 scan_pool_workers: None,
                 output_dir: out_dir,
             });
@@ -247,7 +240,8 @@ fn run_one(
                     &mix,
                     scale.ycsb_threads(),
                 ),
-                idle_compaction: gc.then(|| (DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
+                idle_compaction: gc
+                    .then(|| (DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL)),
             });
             ("ops_per_sec", summary.throughput_ops_sec, None)
         }
@@ -255,11 +249,6 @@ fn run_one(
     }
 }
 
-/// Hidden subcommand the `benchmark` orchestrator re-execs itself with, once
-/// per experiment variant, so each runs in its own fresh process (see module
-/// docs). Args: `_bench_one <experiment> <gc:true|false> <scale:full|quick>
-/// <output_dir>`. Writes `<output_dir>/result.csv` (`metric_name,metric_value`
-/// header + one row) for the parent to read back.
 pub fn main_bench_one(parms: Vec<String>) {
     let experiment = parms
         .get(2)
@@ -383,10 +372,6 @@ fn write_system_info(run_dir: &Path, scale: Scale) {
         .unwrap_or_else(|e| panic!("benchmark: failed to write system_info.txt: {e}"));
 }
 
-/// Spawns one child process running `_bench_one` for a single (experiment,
-/// gc) variant, waits for it to exit, and folds its result into `manifest`.
-/// Stdout/stderr are inherited so the child's own driver output (population
-/// progress, per-run summary, ...) still streams live to the terminal.
 fn run_variant(
     exe: &Path,
     run_dir: &Path,

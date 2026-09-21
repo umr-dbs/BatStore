@@ -8,9 +8,9 @@ use crossbeam_utils::CachePadded;
 use parking_lot::Mutex;
 use std::fmt::Display;
 use std::hash::Hash;
+use std::sync::atomic::AtomicBool;
 #[cfg(feature = "gc-stats")]
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use triomphe::Arc;
 
@@ -150,14 +150,22 @@ impl<
 
     #[cfg(feature = "gc-stats")]
     fn zero_counters(count: usize) -> Vec<CachePadded<AtomicU64>> {
-        (0..count).map(|_| CachePadded::new(AtomicU64::new(0))).collect()
+        (0..count)
+            .map(|_| CachePadded::new(AtomicU64::new(0)))
+            .collect()
     }
 
-    pub(crate) fn queue_fresh_blocks(&self, worker_id: WorkerId, pages: impl IntoIterator<Item = BlockRef<P_F, P_N, Key, Payload>>) {
+    pub(crate) fn queue_fresh_blocks(
+        &self,
+        worker_id: WorkerId,
+        pages: impl IntoIterator<Item = BlockRef<P_F, P_N, Key, Payload>>,
+    ) {
         self.dead_blocks.register_fresh_batch(worker_id, pages);
     }
 
-    pub(crate) fn alloc_batch_size(&self) -> usize { self.dead_blocks.batch_size() }
+    pub(crate) fn alloc_batch_size(&self) -> usize {
+        self.dead_blocks.batch_size()
+    }
 
     #[cfg(feature = "gc-stats")]
     pub(crate) fn record_request_latency(&self, worker_id: WorkerId, nanos: u64) {
@@ -220,11 +228,6 @@ impl<
         self.block_reclaim_enabled.load(Relaxed)
     }
 
-    /// Always marks `page` retired (see `RETIRED_FLAG_VERSION`'s doc) — a
-    /// correctness fix independent of GC, so it applies whether or not block
-    /// reclaim is on. The actual `dead_blocks` bookkeeping stays gated
-    /// behind `block_reclaim_enabled` as before — otherwise it would just
-    /// grow forever recording pages nothing will ever come collect.
     #[inline]
     pub fn register_died_page(
         &self,
@@ -254,14 +257,6 @@ impl<
         }
     }
 
-    /// Reclaims one dead page safe to reuse, or `None` if reclaim is off or
-    /// nothing qualifies yet. Takes `ctx` — the (possibly shared)
-    /// transactional core this table's tree belongs to — because the "safe
-    /// to reclaim" bound is a property of *every* active snapshot across
-    /// every table sharing `ctx`, not just this table's own readers: a
-    /// cross-table transaction registers its snapshot once, before
-    /// necessarily having touched this specific table yet, so this table's
-    /// reclaim must still respect it.
     #[inline]
     pub fn free_block(&self, ctx: &TxContext) -> Option<BlockRef<P_F, P_N, Key, Payload>> {
         if !self.block_reclaim_enabled.load(Relaxed) {
@@ -274,31 +269,30 @@ impl<
             #[cfg(feature = "gc-stats")]
             let page = {
                 let (page, stolen, fresh) = page;
-                let counter = if fresh { &self.fresh_alloc } else if stolen { &self.steal } else { &self.local_reuse };
+                let counter = if fresh {
+                    &self.fresh_alloc
+                } else if stolen {
+                    &self.steal
+                } else {
+                    &self.local_reuse
+                };
                 counter[cache_index].fetch_add(1, Relaxed);
                 page
             };
             return Some(page);
         }
 
-        // `live_min_snapshot` already folds in any worker mid-registration
-        // (drawn a ts_start, not yet recorded in `live_tx` — might need
-        // exactly the block we're about to hand out) alongside fully-active
-        // transactions — see `TxContext::in_flight_bound`'s doc. No separate
-        // "wait until nothing anywhere is mid-registration" check needed.
         let live_min_snapshot = ctx.live_min_snapshot();
 
-        let (reclaimed_roots, _local_count, _steal_count, checked) =
-            self.dead_blocks
-                .reclaim_batch(
-                    worker_id,
-                    self.dead_blocks.batch_size(),
-                    |(dead_v, _)| match live_min_snapshot {
-            _ if dead_v == 0 => true,
-            None => true,
-            Some(live_min_snapshot) => dead_v.lt_self_any(live_min_snapshot),
-                    },
-                );
+        let (reclaimed_roots, _local_count, _steal_count, checked) = self
+            .dead_blocks
+            .reclaim_batch(worker_id, self.dead_blocks.batch_size(), |(dead_v, _)| {
+                match live_min_snapshot {
+                    _ if dead_v == 0 => true,
+                    None => true,
+                    Some(live_min_snapshot) => dead_v.lt_self_any(live_min_snapshot),
+                }
+            });
         #[cfg(feature = "gc-stats")]
         {
             self.scan_count[cache_index].fetch_add(1, Relaxed);
@@ -309,14 +303,23 @@ impl<
         let _ = checked;
         // reclaim_batch orders own-shard pages first, then stolen pages.
         #[cfg(feature = "gc-stats")]
-        let mut reclaimed: Vec<_> = reclaimed_roots.into_iter().enumerate()
-            .map(|(index, (key, page))| (page, index >= _local_count, key.0 == 0)).collect();
+        let mut reclaimed: Vec<_> = reclaimed_roots
+            .into_iter()
+            .enumerate()
+            .map(|(index, (key, page))| (page, index >= _local_count, key.0 == 0))
+            .collect();
         #[cfg(not(feature = "gc-stats"))]
         let mut reclaimed: Vec<_> = reclaimed_roots.into_iter().map(|(_, page)| page).collect();
         let result = reclaimed.pop();
         #[cfg(feature = "gc-stats")]
         let result = result.map(|(page, stolen, fresh)| {
-            let counter = if fresh { &self.fresh_alloc } else if stolen { &self.steal } else { &self.local_reuse };
+            let counter = if fresh {
+                &self.fresh_alloc
+            } else if stolen {
+                &self.steal
+            } else {
+                &self.local_reuse
+            };
             counter[cache_index].fetch_add(1, Relaxed);
             page
         });

@@ -1,9 +1,11 @@
+use crate::bat_crud_model::crud_operation_result::CRUDOperationResult::{
+    Deleted, Inserted, MatchedRecordIter, MatchedRecords, Updated,
+};
+use crate::bat_query::iter_query::RangeQueryIter;
+use crate::bat_record_model::record_point::{RecordPoint, RecordPointResult};
+use crate::bat_record_model::version_info::Version;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
-use crate::bat_record_model::record_point::{RecordPoint, RecordPointResult};
-use crate::bat_crud_model::crud_operation_result::CRUDOperationResult::{Deleted, Inserted, MatchedRecordIter, MatchedRecords, Updated};
-use crate::bat_query::iter_query::RangeQueryIter;
-use crate::bat_record_model::version_info::Version;
 
 /// Defines possible Transaction execution result.
 /// *Error*, indicates execution error.
@@ -13,8 +15,8 @@ use crate::bat_record_model::version_info::Version;
 /// a potential match is held.
 /// *MatchedRecords*, indicates that the Transaction executed was successful and the result of
 /// matches is held.
-pub type AtomicTxResult<'a, const FAN_OUT: usize, const NUM_RECORDS: usize, Key, Payload>
-= CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>;
+pub type AtomicTxResult<'a, const FAN_OUT: usize, const NUM_RECORDS: usize, Key, Payload> =
+    CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>;
 
 #[derive(Default)]
 pub enum CRUDOperationResult<
@@ -22,7 +24,7 @@ pub enum CRUDOperationResult<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
+    Payload: Display + Clone + Default + Sync + 'static,
 > {
     MatchedRecords(Vec<RecordPointResult<Key, Payload>>),
     MatchedRecordIter(RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload>),
@@ -53,17 +55,19 @@ pub enum CRUDOperationInnerReason {
     KeyAlreadyExists,
 }
 
-impl<'a,
+impl<
+    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
-> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Display + Clone + Default + Sync + 'static,
+> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     #[inline(always)]
     pub const fn is_err(&self) -> bool {
         match self {
             CRUDOperationResult::Error | CRUDOperationResult::Conflict => true,
-            _ => false
+            _ => false,
         }
     }
 
@@ -74,16 +78,17 @@ impl<'a,
 }
 
 /// Implements pretty printers for TransactionResult.
-impl<'a,
+impl<
+    'a,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
-    Payload: Display + Clone + Default + Sync + 'static
-> Display for CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
+    Payload: Display + Clone + Default + Sync + 'static,
+> Display for CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            CRUDOperationResult::Error =>
-                write!(f, "Error"),
+            CRUDOperationResult::Error => write!(f, "Error"),
             MatchedRecords(records) => {
                 write!(f, "MatchedRecords[len={}]\n", records.len());
                 records.iter().for_each(|record| {
@@ -91,37 +96,43 @@ impl<'a,
                 });
                 write!(f, "]")
             }
-            Inserted(version) =>
-                write!(f, "Inserted(version: {})", version),
-            Updated(version) =>
-                write!(f, "Updated(version: {})", version),
-            Deleted(version) =>
-                write!(f, "Deleted(version: {})", version),
-            MatchedRecordIter(iter) =>
-                write!(f, "RangeQueryIterator(low: {}, high: {}, version: {})",
-                       iter.range.lower(),
-                       iter.range.upper(),
-                       iter.isolated_snapshot.snapshot()),
-            CRUDOperationResult::ZeroAffected(CRUDOperationInnerReason::KeyAlreadyDeleted) =>
-                write!(f, "ZeroAffected(KeyAlreadyDeleted)"),
-            CRUDOperationResult::ZeroAffected(CRUDOperationInnerReason::KeyDoesNotExist) =>
-                write!(f, "ZeroAffected(KeyDoesNotExist)"),
-            CRUDOperationResult::ZeroAffected(CRUDOperationInnerReason::KeyAlreadyExists) =>
-                write!(f, "ZeroAffected(KeyAlreadyExists)"),
-            CRUDOperationResult::Conflict =>
-                write!(f, "Conflict"),
-            CRUDOperationResult::InsertedRand(key, version) =>
-                write!(f, "InsertedRand(key: {key}, version: {version})"),
-            CRUDOperationResult::UpdatedRand(key, version) =>
-                write!(f, "UpdatedRand(key: {key}, version: {version})"),
-            CRUDOperationResult::DeletedRand(key, version) =>
-                write!(f, "DeletedRand(key: {key}, version: {version})"),
+            Inserted(version) => write!(f, "Inserted(version: {})", version),
+            Updated(version) => write!(f, "Updated(version: {})", version),
+            Deleted(version) => write!(f, "Deleted(version: {})", version),
+            MatchedRecordIter(iter) => write!(
+                f,
+                "RangeQueryIterator(low: {}, high: {}, version: {})",
+                iter.range.lower(),
+                iter.range.upper(),
+                iter.isolated_snapshot.snapshot()
+            ),
+            CRUDOperationResult::ZeroAffected(CRUDOperationInnerReason::KeyAlreadyDeleted) => {
+                write!(f, "ZeroAffected(KeyAlreadyDeleted)")
+            }
+            CRUDOperationResult::ZeroAffected(CRUDOperationInnerReason::KeyDoesNotExist) => {
+                write!(f, "ZeroAffected(KeyDoesNotExist)")
+            }
+            CRUDOperationResult::ZeroAffected(CRUDOperationInnerReason::KeyAlreadyExists) => {
+                write!(f, "ZeroAffected(KeyAlreadyExists)")
+            }
+            CRUDOperationResult::Conflict => write!(f, "Conflict"),
+            CRUDOperationResult::InsertedRand(key, version) => {
+                write!(f, "InsertedRand(key: {key}, version: {version})")
+            }
+            CRUDOperationResult::UpdatedRand(key, version) => {
+                write!(f, "UpdatedRand(key: {key}, version: {version})")
+            }
+            CRUDOperationResult::DeletedRand(key, version) => {
+                write!(f, "DeletedRand(key: {key}, version: {version})")
+            }
         }
     }
 }
 
 /// Sugar implementation, wrapping collection of records to a RecordPointResult.
-impl<Key: Ord + Hash + Copy + Default, Payload: Clone + Default> Into<RecordPointResult<Key, Payload>> for RecordPoint<Key, Payload> {
+impl<Key: Ord + Hash + Copy + Default, Payload: Clone + Default>
+    Into<RecordPointResult<Key, Payload>> for RecordPoint<Key, Payload>
+{
     fn into(self) -> RecordPointResult<Key, Payload> {
         RecordPointResult::from(&self)
     }

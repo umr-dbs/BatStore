@@ -30,19 +30,6 @@ impl SnapshotCache {
     }
 }
 
-/// Direct port of the paper's Listing 1 `isVisible`: a version stamped by
-/// `stamp.worker_id` at `stamp.ts_start` is visible to a reader on
-/// `reader_worker` with snapshot `reader_ts_start` iff it's the reader's own
-/// write (from this-or-an-earlier transaction on the same worker) or
-/// `LCB(stamp.worker_id, reader_ts_start) > stamp.ts_start`.
-///
-/// Checked *before* either of those: a stamp marked invalid (its writing
-/// transaction aborted — see `TxStamp::is_invalid`'s doc) is never visible,
-/// to anyone, including the writer's own later transactions on the same
-/// worker — deliberately ahead of the same-worker fast path below, since
-/// that fast path is exactly what would otherwise keep an aborted write
-/// visible to its own writer forever (it doesn't consult the commit log at
-/// all, so an uncommitted write's absence from it never mattered there).
 pub fn is_visible(
     commit_logs: &[CommitLog],
     cache: &mut SnapshotCache,
@@ -55,12 +42,6 @@ pub fn is_visible(
     }
 
     if stamp.worker_id() == reader_worker {
-        // A worker's own transactions are strictly serialized in time, so
-        // any write by "me" is visible to "my" current transaction — but
-        // not to a deliberately historical/point-in-time snapshot (a
-        // smaller `reader_ts_start` than the write's own `ts_start`), which
-        // BatStore supports as a first-class feature distinct from the paper's
-        // "current snapshot only" model.
         return stamp.ts_start() <= reader_ts_start;
     }
 
@@ -69,8 +50,7 @@ pub fn is_visible(
     if cache.snapshot_versions[index] > reader_ts_start {
         cache.lcb[index] = commit_logs[index].lcb(reader_ts_start);
         cache.snapshot_versions[index] = reader_ts_start;
-    }
-    else if cache.lcb[index] > stamp.ts_start() {
+    } else if cache.lcb[index] > stamp.ts_start() {
         return true; // cache hit: already known-visible
     }
 

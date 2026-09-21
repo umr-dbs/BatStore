@@ -1,7 +1,7 @@
+use crate::bat_record_model::tx_stamp::TxStamp;
 use std::fmt::{Display, Formatter};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
-use crate::bat_record_model::tx_stamp::TxStamp;
 
 /// Declares the version type.
 pub type Version = u64;
@@ -87,24 +87,13 @@ impl VersionInfo {
         }
     }
 
-    /// Returns true iff this version is visible to a reader for whom
-    /// `is_visible(stamp)` decides whether a given writer's stamp has
-    /// already committed (see `bat_sync::visibility::is_visible` for the
-    /// actual OSIC LCB-based check) — visible iff the insertion is visible
-    /// and, if deleted, the deletion is not (yet) visible to this reader.
-    ///
-    /// Generic + `?Sized` rather than a plain `&mut dyn FnMut(TxStamp) ->
-    /// bool`, so a caller with a concrete (`Sized`) closure gets a
-    /// statically-dispatched, inlinable call — `dyn FnMut(..)` itself still
-    /// satisfies `FnMut(..) + ?Sized`, so every existing call site passing
-    /// an actual `&mut dyn FnMut(..)` (unchanged dynamic dispatch) keeps
-    /// compiling and behaving identically with no changes needed there; see
-    /// `bat_query::iter_query::RangeQueryIter::refill`'s call site for the
-    /// concrete-closure path this exists for.
     #[inline(always)]
     pub fn matches<F: FnMut(TxStamp) -> bool + ?Sized>(&self, is_visible: &mut F) -> bool {
         is_visible(self.insertion_stamp())
-            && !self.deletion_stamp().map(|del| is_visible(del)).unwrap_or(false)
+            && !self
+                .deletion_stamp()
+                .map(|del| is_visible(del))
+                .unwrap_or(false)
     }
 
     /// Retrieves the insertion stamp.
@@ -130,44 +119,24 @@ impl VersionInfo {
         self.delete_stamp.load(Relaxed) & DELETE_PRESENT_FLAG != 0
     }
 
-    /// "Does this look like a normal, present record" — false for a
-    /// properly deleted version (as `is_deleted` already covers) *and* for
-    /// one whose `insert_stamp` has been marked invalid (its writing
-    /// transaction aborted — see `TxStamp::is_invalid`'s doc). Every
-    /// `!is_deleted()`-as-existence-check call site (SMO's "keep only live
-    /// records" filters, `Insert`'s `KeyAlreadyExists` check, the
-    /// update-in-place fast path, ...) uses this instead, so an invalidated
-    /// record stops blocking a fresh insert and stops being carried into a
-    /// new page version by split/merge, exactly like a deleted one already
-    /// does.
     #[inline(always)]
     pub fn is_live(&self) -> bool {
         !self.is_deleted() && !self.insertion_stamp().is_invalid()
     }
 
-    /// Marks this version's `insert_stamp` invalid — called when the
-    /// transaction that wrote it aborts (see `TxStamp::is_invalid`'s doc).
-    /// `&self`, not `&mut self`: only ever called by the single writer
-    /// holding this block's exclusive lock (so no lost-update risk from the
-    /// plain load-then-store), but the store itself must stay atomic so a
-    /// concurrent *reader* (which never takes this lock) can't observe a
-    /// torn value — see this type's own doc.
     #[inline(always)]
     pub fn invalidate(&self) {
         let invalidated = self.insertion_stamp().mark_invalid();
         self.insert_stamp.store(invalidated.raw(), Relaxed);
     }
 
-    /// Actively deletes this version by setting deletion to supplied delete
-    /// stamp. Fails the same way for an already-deleted *or* already-invalid
-    /// version (see `is_live`) — either way there's nothing left here to
-    /// delete. `&self` — see `invalidate`'s doc for why.
     #[inline(always)]
     pub fn delete(&self, delete_stamp: TxStamp) -> bool {
         if !self.is_live() {
             false
         } else {
-            self.delete_stamp.store(delete_stamp.raw() | DELETE_PRESENT_FLAG, Relaxed);
+            self.delete_stamp
+                .store(delete_stamp.raw() | DELETE_PRESENT_FLAG, Relaxed);
             true
         }
     }

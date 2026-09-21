@@ -67,11 +67,6 @@ fn detects_truncated_frame() {
     }
 }
 
-/// `encode_entry_framed`'s single-buffer path must produce byte-for-byte
-/// the same frame as the two-step `encode` + `frame` it replaces in
-/// `WalWriter::log_with_stamp` — otherwise recovery (which only knows
-/// the two-step format's invariants) could silently start reading a
-/// different wire format.
 #[test]
 fn encode_entry_framed_matches_two_step_encode_and_frame() {
     let record = WalRecord {
@@ -96,11 +91,6 @@ fn encode_entry_framed_matches_two_step_encode_and_frame() {
     assert_ops_eq(&decoded.op, &record.op);
 }
 
-/// Same byte-for-byte equivalence, but writing into a buffer that
-/// already has unrelated bytes at the front — guards against the
-/// placeholder-patch math in `encode_entry_framed` assuming `out` starts
-/// empty (it only ever gets called that way today, but the offset
-/// arithmetic must stay correct if that changes).
 #[test]
 fn encode_entry_framed_patches_length_correctly_with_a_nonempty_prefix() {
     let record: WalRecord<u64, u64> = WalRecord {
@@ -217,11 +207,6 @@ fn table_tagged_commit_round_trips_with_sentinel() {
     }
 }
 
-/// `encode_entry_for_table_framed`'s single-buffer path must produce
-/// byte-for-byte the same frame as manually prepending the table id
-/// before `encode_entry` and then framing — mirrors
-/// `encode_entry_framed_matches_two_step_encode_and_frame`'s check for
-/// the non-table-tagged path.
 #[test]
 fn table_tagged_framed_matches_manual_prefix_plus_frame() {
     let record: WalRecord<u64, u64> = WalRecord {
@@ -278,13 +263,6 @@ fn detects_corrupted_body() {
     assert!(read_frame(&framed).is_none());
 }
 
-/// `resync_next` must skip clean over an **interior** hole (the scenario
-/// `read_frame`'s plain "stop at the first bad frame" can't handle — see
-/// that function's doc for why `LockFreeWalWriter` can produce one) and
-/// still find the record on the far side, at a hole length that is
-/// deliberately *not* a multiple of the frame header size, so a naive
-/// "skip by 8 bytes and retry" fix (which would misalign past the hole's
-/// true end) would fail this.
 #[test]
 fn resync_next_skips_an_interior_hole_of_unaligned_length() {
     let first = WalRecord {
@@ -305,11 +283,6 @@ fn resync_next_skips_an_interior_hole_of_unaligned_length() {
     encode_entry_framed(&WalEntry::Write(second), &mut bytes);
     let second_len = bytes.len() - second_offset;
 
-    // `offset` tracks where each `resync_next` call *starts* scanning from,
-    // not where it actually found its entry (that's `offset` plus however
-    // much of `consumed` was spent skipping) — recovery only ever needs
-    // "advance by `consumed`", never the found position itself, so that's
-    // all this loop tracks too.
     let mut offset = 0;
     let mut found = Vec::new();
     while let Some((entry, consumed)) = resync_next(&bytes[offset..], decode_entry::<u64, u64>) {
@@ -341,10 +314,6 @@ fn resync_next_skips_an_interior_hole_of_unaligned_length() {
     assert_eq!(second_offset + second_len, bytes.len());
 }
 
-/// A hole reaching all the way to true EOF (nothing follows it) must be
-/// treated as a torn tail, same as `read_frame` already does — `resync_next`
-/// generalizes "stop at the first bad frame" to "stop once nothing further
-/// is found", not "keep looking forever".
 #[test]
 fn resync_next_returns_none_when_the_hole_reaches_eof() {
     let first = WalRecord {

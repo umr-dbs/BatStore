@@ -1,12 +1,6 @@
 use crate::bat_sync::clock::GlobalClock;
 use crate::bat_sync::commit_log::CommitLog;
 
-/// The bug this whole file's `commit_pruned` vs. plain `commit` split
-/// exists to let callers avoid: with no snapshots ever registered as
-/// active (an empty `active_snapshots` iterator every time, exactly
-/// what a tree with no open transactions looks like), `commit_pruned`
-/// must still keep the log bounded near `max_workers`, not grow with
-/// every commit the way `commit` deliberately does.
 #[test]
 fn commit_pruned_stays_bounded_with_no_active_snapshots() {
     let glc = GlobalClock::new();
@@ -22,6 +16,49 @@ fn commit_pruned_stays_bounded_with_no_active_snapshots() {
         "expected at most {max_workers} entries after pruning, got {}",
         log.len()
     );
+}
+
+#[test]
+fn retained_log_is_pruned_once_per_worker_window() {
+    let glc = GlobalClock::new();
+    let log = CommitLog::new();
+    let max_workers = 4;
+    let oldest_possible_snapshot = glc.current_version();
+
+    // This in-flight bound deliberately forces every entry to survive each
+    // prune, reproducing the case that previously retriggered pruning on
+    // every subsequent commit because len remained >= max_workers.
+    for _ in 0..max_workers {
+        log.commit_pruned(
+            &glc,
+            max_workers,
+            [oldest_possible_snapshot].into_iter(),
+            std::iter::empty(),
+        );
+    }
+    assert_eq!(log.prune_count(), 1);
+
+    for _ in 0..max_workers - 1 {
+        log.commit_pruned(
+            &glc,
+            max_workers,
+            [oldest_possible_snapshot].into_iter(),
+            std::iter::empty(),
+        );
+    }
+    assert_eq!(
+        log.prune_count(),
+        1,
+        "a retained log must not retrigger pruning on every commit"
+    );
+
+    log.commit_pruned(
+        &glc,
+        max_workers,
+        [oldest_possible_snapshot].into_iter(),
+        std::iter::empty(),
+    );
+    assert_eq!(log.prune_count(), 2);
 }
 
 #[test]
@@ -132,7 +169,14 @@ fn long_overlapping_registrations_match_unpruned_lcb_history() {
     assert!(log.len() <= snapshots.len() + 1);
 
     snapshots.clear();
-    glc.next_timestamp();
-    log.commit_pruned(&glc, 3, std::iter::empty(), std::iter::empty());
+    let prune_count = log.prune_count();
+    for _ in 0..3 {
+        glc.next_timestamp();
+        log.commit_pruned(&glc, 3, std::iter::empty(), std::iter::empty());
+        if log.prune_count() != prune_count {
+            break;
+        }
+    }
+    assert_eq!(log.prune_count(), prune_count + 1);
     assert_eq!(log.len(), 1);
 }

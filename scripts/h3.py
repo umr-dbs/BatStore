@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime
+import math
 import os
 import subprocess
 import sys
@@ -30,13 +31,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 from hypothesis_common import configure_checkout, check_worker_log
 
 configure_checkout()
 from engines import batstore, common, libmdbx, postgres_benchbase
 from engines import leanstore_build
-from plot_styles import (ENGINE_COLORS, ENGINE_LABELS, ENGINE_MARKERS,
+from plot_styles import (ENGINE_LABELS, engine_line_style,
                          compact_enabled, finalize_layout, set_compact)
 
 DEFAULT_ENGINES = ("batstore", "postgres", "libmdbx", "wiredtiger")
@@ -275,6 +277,7 @@ def bucket_rows(rows: list, duration: int, num_buckets: int) -> list:
             "median_latency_us": median(latency_us),
             "p25_latency_us": percentile(latency_us, 0.25),
             "p75_latency_us": percentile(latency_us, 0.75),
+            "p99_latency_us": percentile(latency_us, 0.99),
             "median_tuples_per_sec": median([r["tuples_per_sec"] for r in bucket]),
             "median_scanned_tuples": median([r["scanned_tuples"] for r in bucket]),
         })
@@ -392,51 +395,88 @@ def main() -> None:
 
 def plot(rows_by_engine: dict, summaries_by_engine: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    _plot_variant(summaries_by_engine, out_dir, p99_band=False)
+    _plot_variant(summaries_by_engine, out_dir, p99_band=True)
+    print(f"plots            : {out_dir}")
+
+
+def _plot_variant(summaries_by_engine: dict, out_dir: Path, *, p99_band: bool) -> None:
     if compact_enabled():
         fig, axes = plt.subplots(1, 1, figsize=(11.5, 7.5))
         ax_lat, ax_tup = axes, None
     else:
-        fig, (ax_lat, ax_tup) = plt.subplots(1, 2, figsize=(10.2, 3.2))
+        fig, (ax_lat, ax_tup) = plt.subplots(1, 2, figsize=(8.5, 2.95))
 
     for engine, summaries in summaries_by_engine.items():
         mids = [(s["window_start"] + s["window_end"]) / 2.0 for s in summaries]
-        color = ENGINE_COLORS[engine]
-        marker = ENGINE_MARKERS[engine]
-        ax_lat.fill_between(
-            mids, [s["p25_latency_us"] / 1000.0 for s in summaries],
-            [s["p75_latency_us"] / 1000.0 for s in summaries],
-            color=color, alpha=0.13, linewidth=0,
-        )
+        if p99_band:
+            ax_lat.fill_between(
+                mids, [s["median_latency_us"] / 1000.0 for s in summaries],
+                [s["p99_latency_us"] / 1000.0 for s in summaries],
+                color=engine_line_style(engine)["color"], alpha=0.28,
+                linewidth=0, zorder=1,
+            )
         ax_lat.plot(
             mids, [s["median_latency_us"] / 1000.0 for s in summaries],
-            color=color, marker=marker, markersize=5, markeredgecolor="white",
-            markeredgewidth=0.6, linewidth=1.8, label=ENGINE_LABELS[engine],
+            label=ENGINE_LABELS[engine], **engine_line_style(engine),
         )
         if ax_tup is not None:
             ax_tup.plot(
                 mids, [s["median_tuples_per_sec"] / 1_000_000.0 for s in summaries],
-                color=color, marker=marker, markersize=5, markeredgecolor="white",
-                markeredgewidth=0.6, linewidth=1.8, label=ENGINE_LABELS[engine],
+                label=ENGINE_LABELS[engine], **engine_line_style(engine),
             )
 
     ax_lat.set_xlabel("Snapshot age at scan start (s)")
     ax_lat.set_ylabel("Full-scan latency (ms, log scale)")
     ax_lat.set_yscale("log")
-    ax_lat.grid(axis="y", alpha=0.25)
-    ax_lat.legend(frameon=False, fontsize=8)
+    ax_lat.set_ylim(10, max(ax_lat.get_ylim()[1], 1.1e5))
+    ax_lat.set_yticks([10, 100, 1_000, 10_000, 100_000])
+    ax_lat.grid(axis="both", alpha=0.25)
     if ax_tup is not None:
         ax_tup.set_xlabel("Snapshot age at scan start (s)")
         ax_tup.set_ylabel("Throughput (M tuples/s)")
-        ax_tup.grid(axis="y", alpha=0.25)
-        ax_tup.legend(frameon=False, fontsize=8)
+        top_tick = max(40, 10 * math.ceil(ax_tup.get_ylim()[1] / 10))
+        ax_tup.set_ylim(0, top_tick * 1.02)
+        ax_tup.set_yticks(range(0, top_tick + 1, 10))
+        ax_tup.grid(axis="both", alpha=0.25)
+        if "wiredtiger" in summaries_by_engine:
+            wt = summaries_by_engine["wiredtiger"]
+            wt_rates = [s["median_tuples_per_sec"] / 1_000_000.0 for s in wt]
+            if wt_rates and max(wt_rates) < top_tick / 10:
+                inset = ax_tup.inset_axes([0.53, 0.35, 0.43, 0.28])
+                wt_style = engine_line_style("wiredtiger")
+                wt_style.update(markersize=3, linewidth=1.2, markeredgewidth=0.3)
+                inset.plot([(s["window_start"] + s["window_end"]) / 2.0 for s in wt],
+                           wt_rates, **wt_style)
+                inset.set_xlim(ax_tup.get_xlim())
+                inset.set_ylim(0, max(wt_rates) * 1.1)
+                inset.set_title("WiredTiger (M tuples/s)", fontsize=8, pad=1)
+                inset.tick_params(labelsize=7, length=2, pad=1)
+                inset.grid(alpha=0.2)
 
-    finalize_layout(fig)
+    handles, labels = ax_lat.get_legend_handles_labels()
+    if p99_band:
+        handles.append(Patch(facecolor="#777777", alpha=0.35))
+        labels.append("Median–P99")
+    if compact_enabled():
+        ax_lat.legend(handles, labels, frameon=False, fontsize=8)
+        finalize_layout(fig)
+    else:
+        for ax in (ax_lat, ax_tup):
+            ax.tick_params(axis="both", labelsize=11)
+            ax.xaxis.label.set_size(12)
+            ax.yaxis.label.set_size(12)
+        fig.legend(handles, labels, loc="upper center", ncol=len(labels),
+                   bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=11,
+                   columnspacing=1.3, handletextpad=0.6)
+        fig.tight_layout(rect=(0, 0, 1, 0.92), w_pad=1.8)
     suffix = "_compact" if compact_enabled() else ""
+    if p99_band:
+        suffix += "_p99"
     for ext in ("pdf", "png"):
         fig.savefig(out_dir / f"h3_scan_vs_snapshot_age{suffix}.{ext}", dpi=200 if compact_enabled() else 150,
                     bbox_inches="tight")
     plt.close(fig)
-    print(f"plots            : {out_dir}")
 
 
 if __name__ == "__main__":

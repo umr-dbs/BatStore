@@ -17,11 +17,6 @@ use crate::bat_crud_model::crud_operation_result::{CRUDOperationInnerReason, CRU
 use crate::bat_db::transaction::insert_on_tree;
 use crate::bat_record_model::tx_stamp::TxStamp;
 
-/// Inserts `key` if it has never been written, or falls back to an ordinary
-/// update if a bounded-lateness draw made this arrival collide with an
-/// already-materialized row. Returns `true` for a genuinely new row,
-/// `false` for a late-arrival upsert of an existing one - the driver uses
-/// this to keep separate `arrival`/`late_upsert` counters.
 pub fn arrival_upsert(
     tree: &YcsbTree,
     cfg: &YcsbConfig,
@@ -46,16 +41,6 @@ fn atomic_arrival_upsert(
     let payload = random_row(cfg);
     match tree.dispatch_crud(CRUDOperation::Insert(key, payload)) {
         CRUDOperationResult::Inserted(_) => true,
-        // `KeyAlreadyExists`: this ticket's (possibly jittered) key was
-        // already materialized by an earlier arrival — a legitimate late
-        // upsert (see this module's doc). `Conflict`: a live version exists
-        // but isn't yet visible to this read of `current_version()` — the
-        // same live-key situation, just observed mid-commit by a racing
-        // writer (jittered keys from different write threads can collide),
-        // so it gets the same upsert treatment. Atomic `Update` (unlike
-        // `Insert`) doesn't check visibility at all — it always overwrites
-        // the latest position unconditionally — so falling back to it here
-        // is safe in both cases.
         CRUDOperationResult::ZeroAffected(CRUDOperationInnerReason::KeyAlreadyExists)
         | CRUDOperationResult::Conflict => {
             ycsb_txn::update_with_execution_mode(

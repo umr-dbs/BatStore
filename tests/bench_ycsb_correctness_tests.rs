@@ -52,10 +52,6 @@ fn populate_loads_exactly_the_configured_keys_with_correctly_shaped_rows() {
     );
 }
 
-/// Insert mints a brand-new row; Read must then find it with the right
-/// shape; Update must change exactly one field by default while
-/// leaving the key itself in place; Update on a never-inserted key must
-/// report a miss instead of silently creating one.
 #[test]
 fn insert_read_and_update_round_trip_correctly() {
     let cfg = tiny_cfg();

@@ -48,11 +48,6 @@ fn group_fsync_flushes_and_wait_unblocks() {
     let _ = fs::remove_file(&path);
 }
 
-/// The whole point of this writer: many threads calling `log_with_stamp`
-/// concurrently, each doing its own `pwrite` with no lock and no channel
-/// hand-off. Every record must land intact, exactly once, at a distinct
-/// offset — this is what would break first if `tail.fetch_add`'s disjoint
-/// ranges ever overlapped or a partial `pwrite` were left unretried.
 #[test]
 fn concurrent_writers_each_land_intact_and_distinct() {
     let path = std::env::temp_dir().join(format!(
@@ -96,10 +91,6 @@ fn concurrent_writers_each_land_intact_and_distinct() {
         }
     }
 
-    // Every `start_commit_logged` call above already returned (the thread
-    // that made it was `join`ed), and `enqueue` doesn't return until its
-    // own `pwrite` has: every record's bytes are already in the page cache
-    // and visible to a plain `read()` below, fsync/quiescence notwithstanding.
     drop(writer);
 
     let bytes = fs::read(&path).unwrap();
@@ -133,12 +124,6 @@ fn concurrent_writers_each_land_intact_and_distinct() {
     let _ = fs::remove_file(&path);
 }
 
-/// `LocalBatch`: several threads each grouping their own records into
-/// fixed-size local batches (flushed with one `pwrite` each via
-/// `flush_batch`) concurrently against the same writer/file. Every batch's
-/// bytes must land intact and at a distinct offset, same as the unbatched
-/// concurrent test above — `enqueue_bytes` doesn't care whether it's
-/// writing one record or several concatenated ones.
 #[test]
 fn concurrent_local_batches_each_land_intact_and_distinct() {
     let path = std::env::temp_dir().join(format!(
@@ -248,13 +233,6 @@ fn hardened_version_starts_unset_and_only_advances_on_commit() {
 
     let ts_commit = clock.next_timestamp();
     writer.log_commit(stamp, ts_commit);
-    // Not `writer.wait_flushed(stamp.ts_start())`: the Write logged above
-    // shares this same `ts_start`, so `flushed_any` (see that field's doc)
-    // was already satisfied by the Write alone, before the Commit was even
-    // issued — waiting on it here would return immediately rather than
-    // actually waiting for the Commit's own fsync cycle. Poll
-    // `hardened_version` (Commit-gated) directly instead, which is the
-    // thing this test actually wants to observe.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while writer.hardened_version() != stamp.ts_start() {
         assert!(

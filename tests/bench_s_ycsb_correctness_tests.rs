@@ -57,10 +57,6 @@ fn arrival_upsert_on_a_fresh_key_inserts_a_correctly_shaped_row() {
     assert_eq!(bytes.len(), cfg.field_count * cfg.field_length);
 }
 
-/// A "late" event whose (possibly jittered) key collides with an
-/// already-materialized cold row is a legitimate upsert, not an error:
-/// `arrival_upsert` must report `false` and must actually rewrite the row's
-/// content rather than leaving the original bytes or losing the key.
 #[test]
 fn arrival_upsert_on_an_already_materialized_key_upserts_instead_of_panicking() {
     let cfg = tiny_cfg();
@@ -84,10 +80,6 @@ fn arrival_upsert_on_an_already_materialized_key_upserts_instead_of_panicking() 
     );
 }
 
-/// Same late-arrival-collision behavior, but through the `Transaction`
-/// execution mode's registered-snapshot path instead of `Atomic`'s
-/// single-operation path — both are exercised by the real driver depending
-/// on CLI config, and must agree on outcome.
 #[test]
 fn arrival_upsert_upserts_correctly_under_transaction_execution_mode() {
     let cfg = tiny_cfg();
@@ -147,13 +139,6 @@ fn hot_tail_sample_targets_the_window_and_the_update_changes_content() {
     assert_ne!(before, after);
 }
 
-/// Regression test guarding against double-counting in `RangeQueryIter`:
-/// hammers a narrow hot-tail window with far more updates than one leaf's
-/// capacity, under GC, forcing repeated `VERSION_SPLIT`s, then scans a range
-/// spanning that churned window. Every key in `1..=record_count` is live
-/// (never deleted) throughout, so a correct scan must return exactly
-/// `record_count` rows — a dedup regression would instead over-count by
-/// returning more than one row for some key.
 #[test]
 fn olap_scan_over_a_hot_cold_straddling_range_counts_each_live_key_exactly_once() {
     let cfg = YcsbConfig {

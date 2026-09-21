@@ -29,12 +29,24 @@ const TAG_REGION: u8 = 14;
 struct Writer<'a>(&'a mut Vec<u8>);
 
 impl<'a> Writer<'a> {
-    fn u8(&mut self, v: u8) { self.0.push(v); }
-    fn bool(&mut self, v: bool) { self.0.push(v as u8); }
-    fn u32(&mut self, v: u32) { self.0.extend_from_slice(&v.to_le_bytes()); }
-    fn i32(&mut self, v: i32) { self.0.extend_from_slice(&v.to_le_bytes()); }
-    fn i64(&mut self, v: i64) { self.0.extend_from_slice(&v.to_le_bytes()); }
-    fn f64(&mut self, v: f64) { self.0.extend_from_slice(&v.to_le_bytes()); }
+    fn u8(&mut self, v: u8) {
+        self.0.push(v);
+    }
+    fn bool(&mut self, v: bool) {
+        self.0.push(v as u8);
+    }
+    fn u32(&mut self, v: u32) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn i32(&mut self, v: i32) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn i64(&mut self, v: i64) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn f64(&mut self, v: f64) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
 
     fn str(&mut self, s: &str) {
         self.u32(s.len() as u32);
@@ -50,14 +62,20 @@ impl<'a> Writer<'a> {
 
     fn opt_u32(&mut self, v: Option<u32>) {
         match v {
-            Some(x) => { self.bool(true); self.u32(x); }
+            Some(x) => {
+                self.bool(true);
+                self.u32(x);
+            }
             None => self.bool(false),
         }
     }
 
     fn opt_i64(&mut self, v: Option<i64>) {
         match v {
-            Some(x) => { self.bool(true); self.i64(x); }
+            Some(x) => {
+                self.bool(true);
+                self.i64(x);
+            }
             None => self.bool(false),
         }
     }
@@ -105,7 +123,9 @@ impl<'a> Reader<'a> {
 
     fn str(&mut self) -> Option<String> {
         let len = self.u32()? as usize;
-        std::str::from_utf8(self.take(len)?).ok().map(str::to_string)
+        std::str::from_utf8(self.take(len)?)
+            .ok()
+            .map(str::to_string)
     }
 
     fn fixed<const N: usize>(&mut self) -> Option<[u8; N]> {
@@ -113,11 +133,19 @@ impl<'a> Reader<'a> {
     }
 
     fn opt_u32(&mut self) -> Option<Option<u32>> {
-        if self.bool()? { Some(Some(self.u32()?)) } else { Some(None) }
+        if self.bool()? {
+            Some(Some(self.u32()?))
+        } else {
+            Some(None)
+        }
     }
 
     fn opt_i64(&mut self) -> Option<Option<i64>> {
-        if self.bool()? { Some(Some(self.i64()?)) } else { Some(None) }
+        if self.bool()? {
+            Some(Some(self.i64()?))
+        } else {
+            Some(None)
+        }
     }
 }
 
@@ -365,54 +393,74 @@ impl WalPayload for TpccRow {
         })
     }
 
-    /// Exact, not just an estimate: mirrors `wal_encode` above field for
-    /// field (a `str` field costs `4 + s.len()`, matching `Writer::str`'s
-    /// own length-prefix-then-bytes shape), so this always matches what
-    /// `wal_encode` is about to write. Worth the small amount of duplication
-    /// since the default hint (`8`, tuned for a bare `u64` payload) would
-    /// otherwise be off by hundreds of bytes for every variant here except
-    /// the tiny marker ones (`Empty`/`CustomerNameIdx`/`NewOrder`/
-    /// `CustLastOrder`) — enough to force several grow-and-copy
-    /// reallocations per WAL write for the common row types
-    /// (`Customer`/`Stock` routinely exceed 300-400 bytes).
     fn wal_encode_size_hint(&self) -> usize {
-        fn str_len(s: &str) -> usize { 4 + s.len() }
-        fn opt_len(present: bool, some_size: usize) -> usize { 1 + if present { some_size } else { 0 } }
+        fn str_len(s: &str) -> usize {
+            4 + s.len()
+        }
+        fn opt_len(present: bool, some_size: usize) -> usize {
+            1 + if present { some_size } else { 0 }
+        }
 
         const TAG: usize = 1;
         match self {
             TpccRow::Empty | TpccRow::CustomerNameIdx => TAG,
             TpccRow::Warehouse(x) => {
-                TAG + str_len(&x.w_name) + str_len(&x.w_street_1) + str_len(&x.w_street_2)
-                    + str_len(&x.w_city) + str_len(&x.w_state) + str_len(&x.w_zip) + 8 + 8
+                TAG + str_len(&x.w_name)
+                    + str_len(&x.w_street_1)
+                    + str_len(&x.w_street_2)
+                    + str_len(&x.w_city)
+                    + str_len(&x.w_state)
+                    + str_len(&x.w_zip)
+                    + 8
+                    + 8
             }
             TpccRow::District(x) => {
-                TAG + str_len(&x.d_name) + str_len(&x.d_street_1) + str_len(&x.d_street_2)
-                    + str_len(&x.d_city) + str_len(&x.d_state) + str_len(&x.d_zip) + 8 + 8 + 4
+                TAG + str_len(&x.d_name)
+                    + str_len(&x.d_street_1)
+                    + str_len(&x.d_street_2)
+                    + str_len(&x.d_city)
+                    + str_len(&x.d_state)
+                    + str_len(&x.d_zip)
+                    + 8
+                    + 8
+                    + 4
             }
             TpccRow::Customer(x) => {
-                TAG + str_len(&x.c_first) + str_len(&x.c_middle) + str_len(&x.c_last)
-                    + str_len(&x.c_street_1) + str_len(&x.c_street_2) + str_len(&x.c_city)
-                    + str_len(&x.c_state) + str_len(&x.c_zip) + str_len(&x.c_phone)
-                    + 8 + 1 + 8 + 8 + 8 + 8 + 4 + 4 + str_len(&x.c_data)
+                TAG + str_len(&x.c_first)
+                    + str_len(&x.c_middle)
+                    + str_len(&x.c_last)
+                    + str_len(&x.c_street_1)
+                    + str_len(&x.c_street_2)
+                    + str_len(&x.c_city)
+                    + str_len(&x.c_state)
+                    + str_len(&x.c_zip)
+                    + str_len(&x.c_phone)
+                    + 8
+                    + 1
+                    + 8
+                    + 8
+                    + 8
+                    + 8
+                    + 4
+                    + 4
+                    + str_len(&x.c_data)
             }
             TpccRow::History(x) => TAG + 4 + 1 + 4 + 1 + 4 + 8 + 8 + str_len(&x.h_data),
             TpccRow::NewOrder(_) => TAG + 4,
-            TpccRow::Order(x) => {
-                TAG + 4 + 8 + opt_len(x.o_carrier_id.is_some(), 4) + 1 + 1
-            }
+            TpccRow::Order(x) => TAG + 4 + 8 + opt_len(x.o_carrier_id.is_some(), 4) + 1 + 1,
             TpccRow::OrderLine(x) => {
                 TAG + 4 + 4 + opt_len(x.ol_delivery_d.is_some(), 8) + 1 + 8 + 24
             }
             TpccRow::Item(x) => TAG + 4 + str_len(&x.i_name) + 8 + str_len(&x.i_data),
-            TpccRow::Stock(x) => {
-                TAG + 4 + x.s_dist.len() * 24
-                    + 8 + 4 + 4 + str_len(&x.s_data) + 4
-            }
+            TpccRow::Stock(x) => TAG + 4 + x.s_dist.len() * 24 + 8 + 4 + 4 + str_len(&x.s_data) + 4,
             TpccRow::CustLastOrder(_) => TAG + 4,
             TpccRow::Supplier(x) => {
-                TAG + str_len(&x.s_name) + str_len(&x.s_address) + 1 + str_len(&x.s_phone)
-                    + 8 + str_len(&x.s_comment)
+                TAG + str_len(&x.s_name)
+                    + str_len(&x.s_address)
+                    + 1
+                    + str_len(&x.s_phone)
+                    + 8
+                    + str_len(&x.s_comment)
             }
             TpccRow::Nation(x) => TAG + str_len(&x.n_name) + 1 + str_len(&x.n_comment),
             TpccRow::Region(x) => TAG + str_len(&x.r_name) + str_len(&x.r_comment),

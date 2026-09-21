@@ -4,6 +4,9 @@ use chrono::{DateTime, Local};
 use itertools::Itertools;
 use std::{env, fs};
 
+use crate::bat_bench::tpcc_schema::TPCC_FAN_OUT;
+use crate::bat_bench::tpcc_schema::TPCC_NUM_RECORDS;
+use crate::bat_bench::ycsb_schema::{YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow};
 use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
 use crate::bat_crud_model::crud_operation::{CRUDOperation, TxAtomicOperation};
 use crate::bat_crud_model::crud_operation_result::{AtomicTxResult, CRUDOperationResult};
@@ -11,37 +14,30 @@ use crate::bat_tree::mvbt::Key;
 use crate::bat_tree::mvbt::NUM_RECORDS;
 use crate::bat_tree::mvbt::Payload;
 use crate::bat_tree::mvbt::{FAN_OUT, MVBT};
-use crate::bat_bench::tpcc_schema::TPCC_FAN_OUT;
-use crate::bat_bench::tpcc_schema::TPCC_NUM_RECORDS;
-use crate::bat_bench::ycsb_schema::{YcsbKey, YcsbRow, YCSB_FAN_OUT, YCSB_NUM_RECORDS};
 
 mod bat_bench;
 mod bat_block;
 mod bat_crud_model;
+mod bat_db;
 mod bat_gc;
 mod bat_page_model;
 mod bat_query;
 mod bat_record_model;
-mod bat_test;
-mod bat_tree;
 mod bat_root;
 mod bat_sync;
-mod bat_wal;
-mod bat_db;
+mod bat_test;
+mod bat_tree;
 #[cfg(feature = "tree-viz")]
 mod bat_viz;
+mod bat_wal;
 
+use crate::bat_bench::tpcc_schema::{TpccKey, TpccRow};
 use crate::bat_sync::smart_cell::OptCell;
 #[cfg(all(not(miri), not(feature = "mimalloc")))]
 use jemallocator::Jemalloc;
 #[cfg(feature = "mimalloc")]
 use mimalloc::MiMalloc;
-use crate::bat_bench::tpcc_schema::{TpccKey, TpccRow};
 
-// Miri interprets pure Rust/LLVM IR only — it can't run either allocator's
-// FFI'd C, so this swaps in the default (System) allocator under `cargo
-// miri`. The `mimalloc` feature (see `Cargo.toml`) swaps jemalloc for
-// mimalloc as an A/B experiment - see that feature's doc for why.
 #[cfg(all(not(miri), not(feature = "mimalloc")))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -56,7 +52,7 @@ fn main() {
     let args = env::args();
     let parms = args.collect_vec();
 
-    if parms.len() > 1  {
+    if parms.len() > 1 {
         match parms[1].as_str() {
             "" | "test" => test(),
             "minimal_repro" => minimal_repro(),
@@ -81,50 +77,21 @@ fn main() {
             "viz_demo" => bat_test::main_viz_demo(parms),
             // "load_cc_new" => main_load_cc_new(parms),
             // "sorted_insert" => main_sorted_insert(parms),
-            s => println!("Unknown Command '{s}'")
+            s => println!("Unknown Command '{s}'"),
         }
-    }
-    else {
+    } else {
         println!("*********** Use a Command ***********")
     }
 
-    // fs::write("restarts.csv", "\n").unwrap();
-    //
-    // let mut f = OpenOptions::new()
-    //     .append(true)
-    //     .create(true)
-    //     .open("restarts.csv")
-    //     .unwrap();
-    //
-    // f.write_all( unsafe { RESTARTS_COUNTER.as_ref() }
-    //     .iter()
-    //     .map(|a| a.load(SeqCst))
-    //     .join(",")
-    //     .as_bytes())
-    //     .unwrap();
-    //
-    // println!("Restarts: {}", unsafe { RESTARTS_COUNTER.as_ref() }
-    //     .iter()
-    //     .enumerate()
-    //     .map(|(i, count)| format!("{i}: {}", count.load(SeqCst)))
-    //     .join("\n"))
 }
 
-/// Minimal, TPCC-free regression repro for the `RangeIterSi`
-/// `register_reader_si` bug (see `dispatch.rs`'s `CRUDOperation::RangeIterSi`
-/// arm): many concurrent inserts forcing heavy split churn on one plain
-/// tree, racing concurrent deletes and concurrent `RangeSi` scans, while GC
-/// block-reclaim is on. Before the fix this reliably crashed (a block a
-/// scan was still traversing got reclaimed and repopulated mid-read,
-/// exposing a torn/never-written record slot) within seconds; after the
-/// fix it should run clean for the full duration.
 fn minimal_repro() {
     use crate::bat_bench::tpcc_schema::{OrderLine, TpccRow, TpccTree};
     use crate::bat_crud_model::crud_operation::TxAtomicOperation;
     use crate::bat_crud_model::crud_operation_result::AtomicTxResult;
     use crate::bat_query::interval::Interval;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
     use std::time::Duration;
 
     fn line(i_id: u32) -> TpccRow {
@@ -152,7 +119,8 @@ fn minimal_repro() {
         handles.push(std::thread::spawn(move || {
             while !stop.load(Relaxed) {
                 let key = next_key.fetch_add(1, Relaxed);
-                let _ = tree.dispatch_atomic_transaction(TxAtomicOperation::Insert(key, line(key as u32)));
+                let _ = tree
+                    .dispatch_atomic_transaction(TxAtomicOperation::Insert(key, line(key as u32)));
             }
         }));
     }
@@ -174,16 +142,19 @@ fn minimal_repro() {
         let stop = stop.clone();
         handles.push(std::thread::spawn(move || {
             while !stop.load(Relaxed) {
-                if let AtomicTxResult::MatchedRecords(records) =
-                    tree.dispatch_atomic_transaction(TxAtomicOperation::RangeSi(Interval::new(0, u64::MAX)))
-                {
+                if let AtomicTxResult::MatchedRecords(records) = tree.dispatch_atomic_transaction(
+                    TxAtomicOperation::RangeSi(Interval::new(0, u64::MAX)),
+                ) {
                     let _ = records.len();
                 }
             }
         }));
     }
 
-    let secs: u64 = env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+    let secs: u64 = env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
     std::thread::sleep(Duration::from_secs(secs));
     stop.store(true, Relaxed);
     for h in handles {
@@ -196,28 +167,28 @@ fn test() {
     let tree = MVBT::default();
 
     for key in 0..10_000_000 {
-        let res
-            = tree.dispatch_atomic_transaction(TxAtomicOperation::Insert(key, 0));
+        let res = tree.dispatch_atomic_transaction(TxAtomicOperation::Insert(key, 0));
 
         if let AtomicTxResult::Inserted(..) = res {
-        } else { panic!("Error") }
+        } else {
+            panic!("Error")
+        }
     }
 
     for v in (10..20).step_by(2) {
-        let range
-            = tree.dispatch_atomic_transaction(TxAtomicOperation::Range((0..Key::MAX).into(), v));
+        let range =
+            tree.dispatch_atomic_transaction(TxAtomicOperation::Range((0..Key::MAX).into(), v));
 
         match range {
-            CRUDOperationResult::MatchedRecords(records) =>{
+            CRUDOperationResult::MatchedRecords(records) => {
                 let len = records.len();
                 let str_re = records.iter().join("\n");
 
                 println!("Len= {}\n{}", len, str_re);
             }
-            s => println!("ERROR = {s}")
+            s => println!("ERROR = {s}"),
         }
     }
-
 }
 /// Essential function.
 fn make_splash() {
@@ -281,8 +252,7 @@ fn startup() {
            >>u64: NUM_RECORDS: \t\t{NUM_RECORDS}\n\
            >>u64: size_of(BLOCK): \t\t{} bytes; {b_kb} kb\n\
            >>u64: size_of(CELL): \t\t{} bytes; {cell_kb} kb\n",
-        block_size,
-        cell_sz,
+        block_size, cell_sz,
     );
 
     println!("*****************************************************");
@@ -297,8 +267,7 @@ fn startup() {
            >>TPC-C: NUM_RECORDS: \t\t{TPCC_NUM_RECORDS}\n\
            >>TPC-C: size_of(BLOCK): \t{} bytes; {b_kb} kb\n\
            >>TPC-C: size_of(CELL): \t{} bytes; {cell_kb} kb\n",
-        block_size,
-        cell_sz,
+        block_size, cell_sz,
     );
     println!("*****************************************************");
     let block_size = size_of::<Block<YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow>>();
@@ -312,8 +281,7 @@ fn startup() {
            >>YCSB: NUM_RECORDS: \t\t{YCSB_NUM_RECORDS}\n\
            >>YCSB: size_of(BLOCK): \t{} bytes; {b_kb} kb\n\
            >>YCSB: size_of(CELL): \t\t{} bytes; {cell_kb} kb\n",
-        block_size,
-        cell_sz,
+        block_size, cell_sz,
     );
     println!("*****************************************************");
     println!("*****************************************************");

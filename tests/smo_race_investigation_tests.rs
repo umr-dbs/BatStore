@@ -62,11 +62,6 @@ const THREADS: u64 = 6;
 const KEYS_PER_THREAD: u64 = 300;
 const ITERATIONS: usize = 30;
 
-/// One "logical thread's" share of the original failing workload: insert,
-/// update, then (for even keys) delete, over its own disjoint key range
-/// `[t*KEYS_PER_THREAD, (t+1)*KEYS_PER_THREAD)`. No WAL involved — the
-/// assertion under investigation is purely about in-memory leaf-page
-/// bookkeeping during a structural split, unrelated to durability.
 fn run_range(tree: &TestTree, t: u64) {
     for i in 0..KEYS_PER_THREAD {
         let key = t * KEYS_PER_THREAD + i;
@@ -87,10 +82,6 @@ fn run_range(tree: &TestTree, t: u64) {
     }
 }
 
-/// Same work, but every individual `dispatch_crud` call is wrapped by
-/// `lock` first — used by the serialized variant so no two threads' calls
-/// can ever be physically in flight against the tree at once, even though
-/// six real OS threads with six real `WorkerId`s are still doing the work.
 fn run_range_serialized(tree: &TestTree, t: u64, lock: &Mutex<()>) {
     for i in 0..KEYS_PER_THREAD {
         let key = t * KEYS_PER_THREAD + i;
@@ -130,10 +121,6 @@ fn sequential_workload_never_violates_the_split_invariant() {
     }
 }
 
-/// Condition 2: real threads/workers, but every tree access serialized so
-/// no two threads' mutations can ever overlap in wall-clock time. If the
-/// invariant can still be violated here, physical overlap on a leaf's
-/// memory is not the cause.
 #[test]
 fn serialized_concurrent_workload_never_violates_the_split_invariant() {
     for _ in 0..ITERATIONS {

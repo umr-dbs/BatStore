@@ -54,14 +54,6 @@ fn config(field_length: usize, execution_mode: YcsbExecutionMode) -> DriverConfi
     }
 }
 
-/// Throughput of `Atomic` vs `Transaction` execution mode across increasing
-/// `field_length` (payload size). If the atomic/transaction gap stayed
-/// roughly constant (in absolute ops/sec) across payload sizes, the fixed
-/// per-op machinery difference (snapshot registration + retry loop vs. the
-/// lightweight reclamation pin, see `ycsb_txn.rs`'s module doc) is the
-/// dominant cost. If the gap shrinks as a fraction of throughput while
-/// payload grows, larger payloads (copy/serialize cost) increasingly
-/// dominate over the execution-mode overhead itself.
 #[test]
 fn atomic_vs_transaction_across_payload_sizes() {
     let rss_before = read_vm_rss_kb().unwrap_or(0);

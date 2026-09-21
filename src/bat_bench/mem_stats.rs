@@ -22,8 +22,8 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -50,25 +50,17 @@ struct JemallocStats {
 }
 
 fn read_jemalloc_stats() -> Option<JemallocStats> {
-    // Miri interprets pure Rust/LLVM IR only — it can't call into jemalloc's
-    // FFI'd C, and `main.rs` already swaps the global allocator out for
-    // Miri builds, so there's no real jemalloc to query anyway. Same idea
-    // for the `mimalloc` feature (see `main.rs`/`Cargo.toml`): jemalloc's
-    // own arena sits idle when it isn't the `#[global_allocator]`, so its
-    // stats would read as stale/near-zero noise rather than real numbers -
-    // report `None` (the allocator-independent `VmRSS` column still works)
-    // instead of a misleading jemalloc reading.
     #[cfg(any(miri, feature = "mimalloc"))]
     return None;
     #[cfg(not(any(miri, feature = "mimalloc")))]
     {
-    jemalloc_ctl::epoch::advance().ok()?;
-    Some(JemallocStats {
-        allocated: jemalloc_ctl::stats::allocated::read().ok()? as u64,
-        active: jemalloc_ctl::stats::active::read().ok()? as u64,
-        resident: jemalloc_ctl::stats::resident::read().ok()? as u64,
-        mapped: jemalloc_ctl::stats::mapped::read().ok()? as u64,
-    })
+        jemalloc_ctl::epoch::advance().ok()?;
+        Some(JemallocStats {
+            allocated: jemalloc_ctl::stats::allocated::read().ok()? as u64,
+            active: jemalloc_ctl::stats::active::read().ok()? as u64,
+            resident: jemalloc_ctl::stats::resident::read().ok()? as u64,
+            mapped: jemalloc_ctl::stats::mapped::read().ok()? as u64,
+        })
     }
 }
 
@@ -87,8 +79,13 @@ impl MemSampler {
 
         let handle = thread::spawn(move || {
             let _ = std::fs::remove_file(&csv_path);
-            let mut file = OpenOptions::new().create(true).append(true).open(&csv_path)
-                .unwrap_or_else(|e| panic!("mem_stats: failed to open {}: {e}", csv_path.display()));
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&csv_path)
+                .unwrap_or_else(|e| {
+                    panic!("mem_stats: failed to open {}: {e}", csv_path.display())
+                });
             file.write_all(b"elapsed_sec,rss_kb,jemalloc_allocated_bytes,jemalloc_active_bytes,jemalloc_resident_bytes,jemalloc_mapped_bytes\n").unwrap();
 
             let start = Instant::now();
@@ -97,13 +94,17 @@ impl MemSampler {
                 let rss_kb = read_vm_rss_kb().unwrap_or(0);
                 let j = read_jemalloc_stats();
 
-                file.write_all(format!(
-                    "{elapsed:.3},{rss_kb},{},{},{},{}\n",
-                    j.as_ref().map(|s| s.allocated).unwrap_or(0),
-                    j.as_ref().map(|s| s.active).unwrap_or(0),
-                    j.as_ref().map(|s| s.resident).unwrap_or(0),
-                    j.as_ref().map(|s| s.mapped).unwrap_or(0),
-                ).as_bytes()).unwrap();
+                file.write_all(
+                    format!(
+                        "{elapsed:.3},{rss_kb},{},{},{},{}\n",
+                        j.as_ref().map(|s| s.allocated).unwrap_or(0),
+                        j.as_ref().map(|s| s.active).unwrap_or(0),
+                        j.as_ref().map(|s| s.resident).unwrap_or(0),
+                        j.as_ref().map(|s| s.mapped).unwrap_or(0),
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
 
                 thread::sleep(interval);
             }
@@ -114,16 +115,23 @@ impl MemSampler {
             let elapsed = start.elapsed().as_secs_f64();
             let rss_kb = read_vm_rss_kb().unwrap_or(0);
             let j = read_jemalloc_stats();
-            file.write_all(format!(
-                "{elapsed:.3},{rss_kb},{},{},{},{}\n",
-                j.as_ref().map(|s| s.allocated).unwrap_or(0),
-                j.as_ref().map(|s| s.active).unwrap_or(0),
-                j.as_ref().map(|s| s.resident).unwrap_or(0),
-                j.as_ref().map(|s| s.mapped).unwrap_or(0),
-            ).as_bytes()).unwrap();
+            file.write_all(
+                format!(
+                    "{elapsed:.3},{rss_kb},{},{},{},{}\n",
+                    j.as_ref().map(|s| s.allocated).unwrap_or(0),
+                    j.as_ref().map(|s| s.active).unwrap_or(0),
+                    j.as_ref().map(|s| s.resident).unwrap_or(0),
+                    j.as_ref().map(|s| s.mapped).unwrap_or(0),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
         });
 
-        Self { stop, handle: Some(handle) }
+        Self {
+            stop,
+            handle: Some(handle),
+        }
     }
 
     /// Signals the sampler thread to take one last sample and exit, then
@@ -153,7 +161,9 @@ pub fn summarize(csv_path: &Path) -> Option<MemSummary> {
 
     for line in content.lines().skip(1) {
         let cols: Vec<&str> = line.split(',').collect();
-        if cols.len() < 5 { continue; }
+        if cols.len() < 5 {
+            continue;
+        }
         if let Ok(rss_kb) = cols[1].parse::<u64>() {
             rss_samples.push(rss_kb as f64 / 1024.0);
         }

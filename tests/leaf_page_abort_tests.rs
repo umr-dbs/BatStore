@@ -99,10 +99,6 @@ fn abort_writes_reverts_a_same_key_run_under_one_leaf_latch() {
     );
 }
 
-/// Reverting an aborted `Update`: the newer entry must be invalidated
-/// *and* the older entry it superseded (via `delete_after_update`) must
-/// come back to life — net counts must return to exactly what they were
-/// before the update, since it's as if the update never happened.
 #[test]
 fn abort_write_reverts_an_update_and_resurrects_its_predecessor() {
     let mut leaf = TestLeaf::new();
@@ -140,10 +136,6 @@ fn abort_write_reverts_an_update_and_resurrects_its_predecessor() {
         "the resurrected entry is the original value"
     );
 
-    // The invalidated entry is still physically present (SMO drops it
-    // at the next split/version-compaction, see smo.rs's `is_live()`
-    // filters) — one live (the resurrected original) + one dead (the
-    // now-invalidated update), not zero dead.
     assert_eq!(leaf.active_dead_count(), (1, 1));
 }
 
@@ -170,13 +162,6 @@ fn cold_predecessor_is_cloned_undeleted_without_mutating_history() {
     assert_eq!(cold.active_dead_count(), (0, 1));
 }
 
-/// Regression for a bug found via the TPC-C smoke benchmark: after one
-/// update's abort leaves an invalidated entry sitting physically between
-/// the true (resurrected) predecessor and wherever the next write lands,
-/// a *second* update to the same key must still find and mark that true
-/// predecessor deleted — not the invalidated entry that happens to be
-/// nearer (which `delete_after_update` used to grab, since it only ever
-/// looked at the physically-second-to-last entry for the key).
 #[test]
 fn delete_after_update_skips_an_invalidated_entry_to_reach_the_true_predecessor() {
     let mut leaf = TestLeaf::new();
@@ -219,11 +204,6 @@ fn delete_after_update_skips_an_invalidated_entry_to_reach_the_true_predecessor(
     assert_eq!(*records[2].payload(), 12);
 }
 
-/// Regression for a second bug found alongside the one above:
-/// invalidating a plain `Insert` must never resurrect an unrelated,
-/// already-deleted predecessor for the same key — only a predecessor
-/// deleted *by the very same stamp being invalidated* (i.e. an
-/// `Update`'s own `delete_after_update`) may be undeleted.
 #[test]
 fn apply_invalidate_does_not_resurrect_an_unrelated_deletion() {
     let mut leaf = TestLeaf::new();
@@ -260,14 +240,6 @@ fn apply_invalidate_does_not_resurrect_an_unrelated_deletion() {
     );
 }
 
-/// Regression: reverting a plain `Delete` (not an `Update`) must find the
-/// deleted entry even when a physically newer, invalidated entry for the
-/// same key sits after it. `delete` itself already skips such invalid
-/// entries via `is_live_lineage` to find the true live record to mark
-/// deleted (see `delete_after_update_skips_an_invalidated_entry_...`
-/// above) — `apply_undelete` must search the same way to find it again,
-/// rather than a raw newest-by-key search that lands on the trailing
-/// invalid entry instead and reports nothing to undo.
 #[test]
 fn abort_write_reverts_a_plain_delete_past_a_trailing_invalidated_entry() {
     let mut leaf = TestLeaf::new();
@@ -290,10 +262,6 @@ fn abort_write_reverts_a_plain_delete_past_a_trailing_invalidated_entry() {
     leaf.commit_delta(-1, 1);
     assert_eq!(leaf.active_dead_invalid(), (0, 1, 1)); // v0 dead, v1 invalid
 
-    // T2 aborts the delete. Before the fix, `apply_undelete` re-found the
-    // physically-newest entry (v1, invalid but not deleted) instead of
-    // v0, reported no deleted entry to undo, and left v0 wrongly deleted
-    // forever.
     assert_eq!(leaf.abort_write(1, stamp_t2), AbortOutcome::Undeleted);
 
     let records: Vec<_> = leaf

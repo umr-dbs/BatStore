@@ -72,11 +72,6 @@ fn oltp_worker(
     }
 }
 
-/// One OLAP worker thread's whole run: q1/q6/q4/q5 in a loop, asserting
-/// every result stays within the bounds any valid snapshot must satisfy.
-/// Returns how many full rounds it completed, so the test can confirm real
-/// overlap with the concurrent OLTP phase happened (not just a handful of
-/// queries against an empty/static database).
 fn olap_worker(db: Arc<TpccDatabase>, region_name: &str, stop: Arc<AtomicBool>) -> u64 {
     let mut rounds = 0u64;
     while !stop.load(Relaxed) {

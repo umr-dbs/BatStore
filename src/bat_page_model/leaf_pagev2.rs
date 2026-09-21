@@ -426,26 +426,6 @@ impl<const NUM_RECORDS: usize,
             from_active_dead(len as LenP + records.len() as LenP, 0), Release)
     }
 
-    // #[inline(always)]
-    // pub(crate) fn bulk_push_from_slice(&mut self, records: &[RecordPoint<Key, Payload>]) {
-    //     let len
-    //         = self.len();
-    //
-    //     unsafe {
-    //         records.into_iter().enumerate().for_each(|(index, record)| {
-    //             self.record_data
-    //                 .as_mut_ptr()
-    //                 .add(index + len)
-    //                 .write(MaybeUninit::new(record.clone()));
-    //         });
-    //     }
-    //
-    //     fence(Release);
-    //     self.len.store(
-    //         from_active_dead(len as LenP + records.len() as LenP, 0),
-    //         Release)
-    // }
-
     #[inline]
     pub(crate) fn delete(&mut self, key: Key, del: Version) -> Result<Option<()>, ()>  {
         let keys

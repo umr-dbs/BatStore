@@ -50,21 +50,6 @@ pub const DEFAULT_VACUUM_DEAD_RATIO: f64 = 0.5;
 /// fraction of overall background CPU.
 pub const DEFAULT_VACUUM_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Spawns a background vacuum thread for a single, bare (not
-/// `bat_db::Database`-owned) tree — for a driver like `ycsb_driver`/
-/// `s_ycsb_driver` that runs one standalone `MVBTSt` rather than a
-/// multi-table `Database`, so `bat_db::database::Database::set_vacuum`'s
-/// own multi-table sweep doesn't apply. Same mechanism otherwise: repeatedly
-/// calls `compact_idle_pass(dead_ratio_threshold)`, sleeping
-/// `sweep_interval` between sweeps, until `stop` is set, at the same
-/// lowest-OS-priority `bat_db::database::lower_current_thread_priority`
-/// gives every other vacuum thread in this codebase. Callers own `stop` and
-/// are responsible for setting it (and, if they care about a clean
-/// shutdown, joining the returned handle) — this doesn't wait for anything
-/// on its own. Takes `triomphe::Arc` specifically, the one `Arc` every
-/// workload driver's tree handle uses (see `tpcc_driver`/`ycsb_driver`/
-/// `s_ycsb_driver`, all `use triomphe::Arc`), same as `bat_db::Database`'s
-/// own table storage.
 pub fn spawn_vacuum_thread<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
@@ -95,21 +80,6 @@ impl<
     Payload: Display + Clone + Default + Sync + 'static,
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
-    /// One idle-compaction sweep: scans every leaf currently reachable from
-    /// this tree's latest root, then forces a compaction
-    /// (`compact_leaf_olc`) on each whose dead/(active+dead) ratio is at or
-    /// above `dead_ratio_threshold`. Returns how many leaves were actually
-    /// compacted — a candidate that turned out already-fine by the time the
-    /// forced descent reached it (see `compact_leaf_olc`'s doc for why that
-    /// can happen) doesn't count.
-    ///
-    /// Candidates are collected into a `Vec` before any compaction starts,
-    /// rather than compacting inline from the scan's own visitor:
-    /// `compact_leaf_olc` takes write locks and can restructure the very
-    /// node the read-only scan is mid-descent through, and the scan already
-    /// holds its own reader-snapshot registration for its whole duration —
-    /// recursing into a write from inside its visitor would self-deadlock
-    /// against that registration the moment GC ever has to wait on it.
     pub fn compact_idle_pass(&self, dead_ratio_threshold: f64) -> usize {
         let version = self.current_version();
         let worker_id = self.worker_id();

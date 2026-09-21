@@ -114,10 +114,6 @@ fn transactional_insert(
     result
 }
 
-/// Point read of the freshest committed version. Returns whether the row
-/// was found (a miss can only happen for a key beyond the currently-inserted
-/// range, e.g. a `Latest`-distribution read racing just ahead of a fresh
-/// `Insert`'s counter bump).
 pub fn read(tree: &YcsbTree, key: YcsbKey) -> bool {
     read_with_mode(tree, key, true)
 }
@@ -147,12 +143,6 @@ pub fn read_with_mode(tree: &YcsbTree, key: YcsbKey, read_payload: bool) -> bool
     }
 }
 
-/// Updates a row using YCSB's `writeallfields` policy. When it is `true`, a
-/// fresh complete row is generated. The standard/default `false` changes one
-/// randomly selected field while preserving all other fields. The latter is
-/// applied atomically under the leaf write latch, so concurrent updates of
-/// different fields cannot overwrite each other's already-committed bytes.
-/// Returns `false` if the key does not currently exist.
 pub fn update(tree: &YcsbTree, cfg: &YcsbConfig, key: YcsbKey, write_all_fields: bool) -> bool {
     update_with_execution_mode(tree, cfg, key, write_all_fields, YcsbExecutionMode::Atomic)
 }
@@ -261,13 +251,6 @@ pub fn insert_with_execution_mode(
     }
 }
 
-/// Range scan of `len` rows starting at `start_key` (YCSB "scan a range of
-/// records"), against the freshest committed version. Returns the number of
-/// rows actually found (can be `< len` near the end of the loaded key range).
-///
-/// Goes via `RangeIterSi` and its zero-copy `count_ref` terminal operation:
-/// no result vector, `RecordPointResult`, or payload-handle clone is needed
-/// for YCSB's count-only scan result.
 pub fn scan(tree: &YcsbTree, start_key: YcsbKey, len: u64) -> usize {
     scan_with_mode(tree, start_key, len, true)
 }
@@ -295,34 +278,6 @@ pub fn scan_with_mode(tree: &YcsbTree, start_key: YcsbKey, len: u64, read_payloa
     }
 }
 
-/// One entry point for a scan that may or may not have a pool to fan out
-/// across: `pool: None` always takes the same plain sequential path
-/// `scan_with_mode` does (a real, explicit "no parallel workers" mode, not
-/// just an incidental fallback — useful on its own, e.g. for a test that
-/// wants a guaranteed-sequential baseline). `Some(pool)` hands the decision
-/// of whether `[start_key, start_key + len - 1]` is even worth splitting —
-/// and, if so, how — to `RangeQueryIter::fold_ref_parallel`; this function
-/// itself never checks size or fair share, so a caller with a pool can
-/// always just call this instead of branching between this and
-/// `scan_with_mode` itself.
-///
-/// `YcsbKey`'s dense, unpacked sequential-id layout (unlike `tpcc_schema::
-/// TpccKey`'s bit-packed fields) is exactly the case `bat_query::interval::
-/// RangeSplit`'s `u64` impl is safe for without any extra care — this
-/// call's own range is already the real, tight bounds of what's being
-/// scanned, not a type-level sentinel.
-///
-/// Manages its own snapshot registration (`tree.begin_snapshot`/
-/// `on_release_reader_snapshot`) the same way `RangeIterSi`'s own dispatch
-/// arm does, since a pool's sub-range jobs run with `register_reader_si:
-/// false` and rely on it staying registered for the whole dispatch — see
-/// `bat_bench::parallel_scan`'s module doc for the same trust relationship
-/// `q1_parallel`/`q6_parallel` already rely on via their own `TpccTxn`.
-/// Uses `READ_ONLY_SCAN_WORKER_ID` even on the sequential path (not this
-/// thread's own real `WorkerId`): this scan never writes, so there is no
-/// same-worker fast path to lose by not using it, and it keeps this
-/// function's behavior identical regardless of which path it ends up
-/// taking — see that constant's doc.
 pub fn scan_parallel(
     pool: Option<&YcsbScanPool>,
     tree: &YcsbTree,
@@ -334,28 +289,27 @@ pub fn scan_parallel(
     let range = Interval::new(start_key, hi);
     let ts_start = tree.begin_snapshot();
 
-    let count = RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID).fold_ref_parallel(
-        pool,
-        || 0usize,
-        move |count, _, payload| {
-            if read_payload {
-                let checksum = payload.as_bytes().iter().fold(0u8, |a, b| a.wrapping_add(*b));
-                std::hint::black_box(checksum);
-            }
-            count + 1
-        },
-        |a, b| a + b,
-    );
+    let count = RangeQueryIter::new(tree, ts_start, range, false, READ_ONLY_SCAN_WORKER_ID)
+        .fold_ref_parallel(
+            pool,
+            || 0usize,
+            move |count, _, payload| {
+                if read_payload {
+                    let checksum = payload
+                        .as_bytes()
+                        .iter()
+                        .fold(0u8, |a, b| a.wrapping_add(*b));
+                    std::hint::black_box(checksum);
+                }
+                count + 1
+            },
+            |a, b| a + b,
+        );
 
     tree.on_release_reader_snapshot(ts_start);
     count
 }
 
-/// Reads then unconditionally rewrites `key` (YCSB "read a record, modify
-/// it, write it back") as two sequential ops — see module docs for why this
-/// isn't wrapped in a multi-op `Transaction`. Returns whether the write half
-/// found the row (the read half's outcome isn't separately observable here,
-/// same as real YCSB clients which don't act on the read's content either).
 pub fn read_modify_write(
     tree: &YcsbTree,
     cfg: &YcsbConfig,

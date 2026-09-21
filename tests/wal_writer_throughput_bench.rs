@@ -158,14 +158,6 @@ fn bench_lockfree_writer(threads: usize, path: &std::path::Path) -> RunStats {
     }
 }
 
-/// Same shape as `bench_lockfree_writer`, but each thread groups its own
-/// records into a `LocalBatch` of `batch_size` and flushes with one
-/// `pwrite` per group instead of one per record (see
-/// `bat_wal::lockfree_writer::LocalBatch`'s doc). Per-op latency is measured
-/// around `push_write` + the conditional `flush_batch` — most ops just hit
-/// the cheap local accumulate; every `batch_size`-th one also pays that
-/// group's `pwrite`, so the latency distribution below has a "usually
-/// cheap, occasionally pays for the whole group" shape by construction.
 fn bench_lockfree_batched_writer(
     threads: usize,
     batch_size: usize,

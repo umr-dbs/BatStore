@@ -54,13 +54,6 @@ fn dec(k: u64) -> u64 {
 const HOT_KEY: u64 = 1;
 const MISC_KEYS_PER_THREAD: u64 = 5;
 
-/// Two threads, each running small multi-step transactions (a few private
-/// "misc" key reads/updates - à la New-Order's Warehouse/District/Customer/
-/// Item steps - before and after touching one shared key exactly once, then
-/// committing). A small `FAN`/`NUM_RECORDS` (16, vs. production's 125) makes
-/// the page-filling state that used to panic reachable in well under a
-/// second instead of requiring a much longer/heavier run - the mechanism is
-/// identical at production scale, just far rarer there.
 #[test]
 fn concurrent_multi_step_transactions_never_overflow_or_lose_a_committed_update() {
     let db: Arc<TestDb> = Arc::new(Database::new(
