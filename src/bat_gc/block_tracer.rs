@@ -27,6 +27,20 @@ fn setting(name: &str, default: usize, max: usize) -> usize {
     }
 }
 
+fn optional_setting(name: &str, max: usize) -> Option<usize> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let parsed = value
+                .parse::<usize>()
+                .unwrap_or_else(|_| panic!("{name} must be an integer from 0 to {max}"));
+            assert!(parsed <= max, "{name} must be an integer from 0 to {max}");
+            Some(parsed)
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("{name}: {error}"),
+    }
+}
+
 use crate::bat_page_model::BlockRef;
 use crate::bat_record_model::tx_stamp::WorkerId;
 use crate::bat_record_model::version_info::Version;
@@ -88,6 +102,9 @@ pub(crate) struct BlockTrace<
     shards: Vec<CachePadded<BlockTraceShard<P_F, P_N, Key, Payload>>>,
     batch_size: usize,
     scan_percent: usize,
+    /// Exact number of non-local shards to probe. When absent, retain the
+    /// legacy percentage-based policy for backwards compatibility.
+    max_neighbors: Option<usize>,
 }
 
 impl<
@@ -105,6 +122,10 @@ impl<
                 .collect(),
             batch_size: setting("BATSTORE_GC_BATCH_SIZE", ALLOC_BATCH_SIZE, 1024),
             scan_percent: setting("BATSTORE_GC_SCAN_PERCENT", SCAN_PERCENT, 100),
+            max_neighbors: optional_setting(
+                "BATSTORE_GC_MAX_NEIGHBORS",
+                shard_count.saturating_sub(1),
+            ),
         }
     }
 
@@ -238,12 +259,19 @@ impl<
         let local_count = out.len();
         let mut checked = 1;
         if out.is_empty() && self.shards.len() > 1 {
-            let max_checked = self
-                .shards
-                .len()
-                .saturating_mul(self.scan_percent)
-                .div_ceil(100)
-                .max(1);
+            // `checked` includes the local shard. The explicit setting counts
+            // only neighbours, which makes zero a useful local-only baseline.
+            // If it is not set, preserve BATSTORE_GC_SCAN_PERCENT semantics.
+            let max_checked = self.max_neighbors.map_or_else(
+                || {
+                    self.shards
+                        .len()
+                        .saturating_mul(self.scan_percent)
+                        .div_ceil(100)
+                        .max(1)
+                },
+                |neighbors| neighbors.saturating_add(1),
+            );
             let start = fastrand::usize(..self.shards.len());
             for offset in 0..self.shards.len() {
                 if checked >= max_checked {
