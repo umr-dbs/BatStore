@@ -58,6 +58,9 @@ assert.deepEqual(result.steps.map(step=>step.result.status),
 assert.equal(result.steps[3].result.rows[0].value,"second");
 const withPayload={name:"one",tree,rows:[{key:"42",value:"stored"}],snapshot_version:"4"};
 assert.equal(model.execute([withPayload],[{kind:"read",tableIndex:0,key:"42"}],4n,2).steps[0].result.rows[0].value,"stored");
+assert.equal(model.execute([withPayload],[{kind:"read",tableIndex:0,key:"42",predicate:{field:"value",operator:"eq",value:"stored"}}],4n,2).steps[0].result.status,"found");
+assert.equal(model.execute([withPayload],[{kind:"read",tableIndex:0,key:"42",predicate:{field:"value",operator:"contains",value:"missing"}}],4n,2).steps[0].result.status,"filtered");
+assert.deepEqual(model.execute([{name:"one",tree:cleanTree,rows:[]}],[{kind:"insert",tableIndex:0,key:"7",values:{value:12}},{kind:"insert",tableIndex:0,key:"8",values:{value:3}},{kind:"scan",tableIndex:0,lower:"1",upper:"9",predicate:{field:"value",operator:"gt",value:10}}],10n,2).steps[2].result.rows.map(row=>row.key),["7"]);
 const ruResult=model.execute([{name:"one",tree:invalidTree,rows:[]}],[{kind:"read",tableIndex:0,key:"9"}],8n,2,null,{mode:"ru"});
 assert.equal(ruResult.steps[0].result.status,"found");
 assert.equal(ruResult.steps[0].result.rows[0].status,"PHYSICALLY ACCESSED");

@@ -45,18 +45,21 @@
     for (const root of roots) { if (bigint(root.version) <= ts) result = root; else break; }
     return result;
   }
-  function stampVisible(tree, ts, readerWorker, stampWorker, stampTs, invalid) {
+  function stampVisible(tree, ts, readerWorker, stampWorker, stampTs, invalid, commitCache=null) {
     if (invalid) return false;
     const stamp = bigint(stampTs);
     if (stamp === null || stamp > ts) return false;
     if (Number(stampWorker) === readerWorker) return true;
     const log = tree.commit_logs?.[Number(stampWorker)];
     if (!Array.isArray(log)) return stamp < ts; // legacy dump: commit unknown
+    const cacheKey=Number(stampWorker)+"@"+String(ts);
+    if(commitCache?.has(cacheKey))return commitCache.get(cacheKey)>stamp;
     let last = 0n;
     for (const entry of log) {
       const commit = bigint(entry);
       if (commit !== null && commit < ts && commit > last) last = commit;
     }
+    commitCache?.set(cacheKey,last);
     return last > stamp;
   }
   function progressTable(tree, tsInput, maxWorker, simulatedCommits = []) {
@@ -104,7 +107,7 @@
   function snapshot(tree, tsInput, readerWorker, bundleRows, rowsVersion, options = {}) {
     const ts = bigint(tsInput);
     if (ts === null || ts < 0n) throw new Error("Snapshot time must be a nonnegative integer.");
-    const root = rootAt(tree, ts), found = new Map(), phantoms = new Map(), visited = new Set();
+    const root = rootAt(tree, ts), found = new Map(), phantoms = new Map(), visited = new Set(),commitCache=new Map(),requestedKey=options.key==null?null:String(options.key);
     if (!root) return {rows:[], phantoms:[], root:null, truncated:false};
     let truncated = ts > 0n && ts < bigint(root.version);
     const visibilityTs = () => {
@@ -117,9 +120,10 @@
       visited.add(id);
       const node = tree.nodes?.[id]; if (!node) {truncated=true;return;}
       if (node.type === "internal_truncated") {truncated=true;return;}
-      if (node.type === "internal") {for (const child of activeChildren(node, ts)) walk(child.node_id);return;}
+      if (node.type === "internal") {for (const child of activeChildren(node, ts))if(requestedKey===null||(compareKeys(requestedKey,child.key_lower)>=0&&compareKeys(requestedKey,child.key_upper)<=0))walk(child.node_id);return;}
       for (const record of node.records || []) {
         const key = String(record.key);
+        if(requestedKey!==null&&key!==requestedKey)continue;
         const metadata = {key,insert_ts:String(record.insert_ts),insert_worker:record.insert_worker,
           delete_ts:record.deleted ? String(record.delete_ts) : null,
           delete_worker:record.deleted ? record.delete_worker : null,
@@ -129,8 +133,8 @@
           if (stamp !== null && stamp <= ts) phantoms.set(key+":"+record.insert_worker+":"+record.insert_ts,metadata);
           continue;
         }
-        if (!stampVisible(tree, visibilityTs(), readerWorker, record.insert_worker, record.insert_ts, record.insert_invalid)) continue;
-        if (record.deleted && stampVisible(tree, visibilityTs(), readerWorker, record.delete_worker, record.delete_ts, record.delete_invalid)) continue;
+        if (!stampVisible(tree, visibilityTs(), readerWorker, record.insert_worker, record.insert_ts, record.insert_invalid,commitCache)) continue;
+        if (record.deleted && stampVisible(tree, visibilityTs(), readerWorker, record.delete_worker, record.delete_ts, record.delete_invalid,commitCache)) continue;
         const previous = found.get(key);
         if (!previous || bigint(record.insert_ts) > bigint(previous.insert_ts)) found.set(key,metadata);
       }
@@ -138,22 +142,24 @@
     walk(root.node_id);
     const valuesAvailable = bundleRows && rowsVersion != null && ts >= bigint(rowsVersion)
       && ts <= clockInfo(tree).last + 1n;
-    const values = valuesAvailable ? new Map(bundleRows.map(row => [String(row.key), row])) : null;
+    const values = valuesAvailable ? requestedKey===null?new Map(bundleRows.map(row => [String(row.key), row])):new Map(bundleRows.filter(row=>String(row.key)===requestedKey).map(row=>[requestedKey,row])) : null;
     const rows = [...found.values()].map(row => values?.has(row.key) ? {...values.get(row.key),...row} : row)
       .sort((a,b) => compareKeys(a.key,b.key));
     return {rows,phantoms:[...phantoms.values()].sort((a,b)=>compareKeys(a.key,b.key)),root,truncated,valuesAvailable:!!valuesAvailable};
   }
-  function physicalSnapshot(tree, bundleRows) {
-    const ts=clockInfo(tree).last,root=rootAt(tree,ts),found=new Map(),visited=new Set();
+  function physicalSnapshot(tree, bundleRows, requestedKey=null, tsInput=null) {
+    requestedKey=requestedKey==null?null:String(requestedKey);
+    const suppliedTs=bigint(tsInput),ts=suppliedTs??clockInfo(tree).last,root=rootAt(tree,ts),found=new Map(),visited=new Set();
     if(!root)return {rows:[],root:null,truncated:false,valuesAvailable:false};
     let truncated=false;
     function walk(id){
       if(visited.has(id))return;visited.add(id);
       const node=tree.nodes?.[id];if(!node){truncated=true;return;}
       if(node.type==="internal_truncated"){truncated=true;return;}
-      if(node.type==="internal"){for(const child of activeChildren(node,ts))walk(child.node_id);return;}
+      if(node.type==="internal"){for(const child of activeChildren(node,ts))if(requestedKey===null||(compareKeys(requestedKey,child.key_lower)>=0&&compareKeys(requestedKey,child.key_upper)<=0))walk(child.node_id);return;}
       for(const record of node.records||[]){
         const key=String(record.key),previous=found.get(key),stamp=bigint(record.insert_ts)??0n;
+        if(requestedKey!==null&&key!==requestedKey)continue;
         if(previous&&stamp<previous._physicalStamp)continue;
         found.set(key,{key,insert_ts:String(record.insert_ts),insert_worker:record.insert_worker,
           delete_ts:record.deleted?String(record.delete_ts):null,delete_worker:record.deleted?record.delete_worker:null,
@@ -161,7 +167,7 @@
       }
     }
     walk(root.node_id);
-    const values=new Map((bundleRows||[]).map(row=>[String(row.key),row]));
+    const values=requestedKey===null?new Map((bundleRows||[]).map(row=>[String(row.key),row])):new Map((bundleRows||[]).filter(row=>String(row.key)===requestedKey).map(row=>[requestedKey,row]));
     const rows=[...found.values()].map(row=>{const {_physicalStamp,...clean}=row;return values.has(clean.key)?{...values.get(clean.key),...clean}:clean;}).sort((a,b)=>compareKeys(a.key,b.key));
     return {rows,root,truncated,valuesAvailable:values.size>0};
   }
@@ -177,14 +183,29 @@
         : operator === "lte" ? cmp <= 0 : actual.toLowerCase().includes(String(value).toLowerCase());
     });
   }
+  function predicateMatches(row, predicate) {
+    if(!predicate?.field)return true;
+    const actual=row?.[predicate.field],expected=predicate.value,operator=predicate.operator||"eq";
+    if(operator==="contains")return String(actual??"").toLowerCase().includes(String(expected??"").toLowerCase());
+    const comparison=compareKeys(actual??"",expected??"");
+    return operator==="neq"?comparison!==0:operator==="gt"?comparison>0:operator==="gte"?comparison>=0:operator==="lt"?comparison<0:operator==="lte"?comparison<=0:comparison===0;
+  }
   function execute(tables, operations, ts, worker, rowsVersion, options = {}) {
     const mode=options.mode||"si",dynamic=mode==="rc"||mode==="ru",overlays=tables.map(()=>new Map());
     let glcCursor=bigint(options.glcBase)??bigint(ts)??0n,visibilityChecks=0;
     if(mode==="rc")glcCursor+=1n; // BEGIN draws the RC transaction's ts_start.
     const statementSnapshots=[],statementVisibilityChecks=[];
+    if(operations.length===1&&operations[0].kind==="read"){
+      const op=operations[0],table=tables[op.tableIndex];
+      if(!table)throw new Error("Unknown table in transaction.");
+      const statementTs=mode==="rc"?glcCursor:(bigint(ts)??0n),nextVisibilityTs=options.reloadGlcPerTuple?()=>{visibilityChecks++;return glcCursor;}:null;
+      const unfiltered=mode==="ru"?physicalSnapshot(table.tree,table.rows,op.key,statementTs).rows:snapshot(table.tree,statementTs,worker,table.rows,table.snapshot_version??rowsVersion,{key:op.key,nextVisibilityTs}).rows,rows=unfiltered.filter(row=>predicateMatches(row,op.predicate));
+      statementSnapshots.push(String(statementTs));statementVisibilityChecks.push(visibilityChecks);
+      return {steps:[{operation:op,result:{status:rows.length?"found":unfiltered.length?"filtered":"missing",rows:rows.length?[{...rows[0]}]:[]}}],aborted:false,statementSnapshots,statementVisibilityChecks,visibilityChecks,lastGlc:String(glcCursor)};
+    }
     const loadState=(table,index,statementTs)=>{
       const nextVisibilityTs=options.reloadGlcPerTuple?()=>{visibilityChecks++;return glcCursor;}:null;
-      const rows=mode==="ru"?physicalSnapshot(table.tree,table.rows).rows:snapshot(table.tree,statementTs,worker,table.rows,table.snapshot_version??rowsVersion,{nextVisibilityTs}).rows;
+      const rows=mode==="ru"?physicalSnapshot(table.tree,table.rows,null,statementTs).rows:snapshot(table.tree,statementTs,worker,table.rows,table.snapshot_version??rowsVersion,{nextVisibilityTs}).rows;
       const map=new Map(rows.map(row=>[String(row.key),{...row}]));
       for(const [key,row] of overlays[index])row===null?map.delete(key):map.set(key,{...row});
       return map;
@@ -202,9 +223,9 @@
       if (!map) throw new Error("Unknown table in transaction.");
       const before = map.get(String(op.key));
       let result;
-      if (op.kind === "read") result = before ? {status:"found",rows:[{...before}]} : {status:"missing",rows:[]};
+      if (op.kind === "read") result = before ? predicateMatches(before,op.predicate)?{status:"found",rows:[{...before}]}:{status:"filtered",rows:[]} : {status:"missing",rows:[]};
       else if (op.kind === "scan") {
-        const rows = [...map.values()].filter(row => compareKeys(row.key,op.lower)>=0 && compareKeys(row.key,op.upper)<=0).sort((a,b)=>compareKeys(a.key,b.key));
+        const rows = [...map.values()].filter(row => compareKeys(row.key,op.lower)>=0 && compareKeys(row.key,op.upper)<=0&&predicateMatches(row,op.predicate)).sort((a,b)=>compareKeys(a.key,b.key));
         result = {status:"matched",rows};
       } else if (op.kind === "insert") {
         if (before) { result={status:"conflict",rows:[{...before}]};aborted=true; }
@@ -222,7 +243,7 @@
     }
     return {steps,aborted,statementSnapshots,statementVisibilityChecks,visibilityChecks,lastGlc:String(glcCursor)};
   }
-  const api = {clockInfo,progressTable,workerActivity,snapshot,physicalSnapshot,select,execute,compareKeys};
+  const api = {clockInfo,progressTable,workerActivity,snapshot,physicalSnapshot,select,execute,compareKeys,predicateMatches};
   scope.BatStoreSnapshot = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis);

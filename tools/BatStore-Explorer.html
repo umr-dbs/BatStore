@@ -371,7 +371,31 @@
   .txn-chain { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin:15px 0; color:#a9bbd9; }
   .txn-chain span { padding:5px 8px; border-radius:6px; background:#202f48; color:#dae6ff; font:11px ui-monospace,monospace; }
   .txn-chain i { color:#91b3f4; font-style:normal; }
-  .txn-empty { text-align:center; padding:45px 20px; }
+  .txn-empty { max-width:980px; margin:26px auto 0; padding:38px; text-align:center; background:radial-gradient(circle at 50% 0,rgba(91,140,255,.1),transparent 45%),var(--panel); }
+  .txn-empty-kicker { color:#8fadd8; font-size:10px; font-weight:850; letter-spacing:.12em; text-transform:uppercase; }
+  .txn-empty h2 { margin:7px 0 6px; color:var(--txn-ink); font-size:24px; }
+  .txn-empty > p { max-width:650px; margin:0 auto; color:var(--txn-muted); line-height:1.55; }
+  .txn-start-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:11px; margin-top:28px; text-align:left; }
+  .txn-start-card { display:flex; min-width:0; min-height:210px; flex-direction:column; align-items:flex-start; padding:18px; border:1px solid #43526a; border-radius:14px; color:#dbe6f5; background:#1b2330; cursor:pointer; font:inherit; transition:transform .15s,border-color .15s,background .15s,box-shadow .15s; }
+  .txn-start-card:hover { transform:translateY(-3px); border-color:#7896c2; background:#222d3d; box-shadow:0 13px 25px rgba(4,9,16,.24); }
+  .txn-start-card:focus-visible { outline:3px solid rgba(126,183,255,.4); outline-offset:3px; }
+  .txn-start-card.auto { box-shadow:inset 0 3px #65cad7; } .txn-start-card.si { box-shadow:inset 0 3px #9c8bdc; } .txn-start-card.rc { box-shadow:inset 0 3px #e6a955; } .txn-start-card.ru { box-shadow:inset 0 3px #e879a0; }
+  .txn-start-icon { display:grid; place-items:center; width:40px; height:40px; margin-bottom:18px; border-radius:11px; color:#f5f9ff; background:rgba(255,255,255,.08); font-size:22px; }
+  .txn-start-card strong { margin-bottom:6px; color:#f4f8ff; font-size:15px; }
+  .txn-start-card small { color:#aebbd0; font-size:11px; line-height:1.5; }
+  .txn-start-card > span:last-child { margin-top:auto; padding-top:18px; color:#bcd6ff; font-size:10px; font-weight:800; }
+  .txn-template-section { margin-top:28px; padding-top:22px; border-top:1px solid #34445a; text-align:left; }
+  .txn-template-heading { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:12px; }
+  .txn-template-heading span { color:#8fadd8; font-size:9px; font-weight:850; letter-spacing:.11em; text-transform:uppercase; }
+  .txn-template-heading h3 { margin:3px 0 0; color:#eaf2ff; font-size:15px; }
+  .txn-template-heading p { max-width:420px; margin:0; color:#93a3b8; font-size:10px; }
+  .txn-template-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; }
+  .txn-template-card { display:grid; grid-template-columns:30px 1fr; grid-template-rows:auto auto; align-items:center; gap:1px 8px; min-width:0; padding:11px; border:1px solid #3f5069; border-radius:10px; color:#dce8f7; background:#192230; cursor:pointer; font:inherit; text-align:left; transition:border-color .14s,background .14s,transform .14s; }
+  .txn-template-card:hover { transform:translateY(-2px); border-color:#769acb; background:#243247; }
+  .txn-template-card > span { grid-row:1/3; display:grid; place-items:center; width:30px; height:30px; border-radius:8px; color:#d8e9ff; background:#26364d; font-size:17px; }
+  .txn-template-card b { overflow:hidden; color:#eef5ff; font-size:11px; text-overflow:ellipsis; }
+  .txn-template-card small { overflow:hidden; color:#91a2b9; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
+  .txn-template-card.read { border-bottom-color:#6aa9ff; } .txn-template-card.scan { border-bottom-color:#66d2db; } .txn-template-card.insert { border-bottom-color:#54d991; } .txn-template-card.update { border-bottom-color:#f2bf56; } .txn-template-card.delete { border-bottom-color:#f0788d; }
   .txn-mode-bar { display:grid; grid-template-columns:repeat(4,minmax(155px,1fr)); gap:9px; margin:12px 0 10px; }
   .txn-mode-choice { display:block; min-width:0; padding:13px 15px; border:1px solid #39465a; border-radius:12px; color:#dbe6f5; background:#1b2330; font:inherit; text-align:left; cursor:pointer; transition:border-color .15s,background .15s,transform .15s,box-shadow .15s; }
   .txn-mode-choice:hover { border-color:#7188a9; background:#222c3b; transform:translateY(-2px); box-shadow:0 8px 18px rgba(4,9,16,.2); }
@@ -416,11 +440,43 @@
   .txn-outline summary { cursor:pointer; }
   .txn-canvas .data-controls { margin:8px 0 2px; gap:7px; }
   .txn-canvas .data-controls input,.txn-canvas .data-controls select { min-width:95px; max-width:230px; padding:5px 7px; }
+  .txn-begin-setup { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(220px,.8fr); gap:14px; margin-top:13px; }
+  .txn-setup-field { min-width:0; padding:11px; border:1px solid rgba(143,186,224,.2); border-radius:10px; background:rgba(10,17,27,.2); }
+  .txn-setup-label { display:block; margin-bottom:8px; color:#b8c8dd; font-size:10px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }
+  .txn-worker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(55px,1fr)); gap:6px; max-height:126px; overflow:auto; }
+  .txn-worker-choice { display:flex; align-items:center; justify-content:center; gap:4px; min-height:37px; padding:7px 8px; border:1px solid #465873; border-radius:8px; color:#c3d1e3; background:#1a2433; cursor:pointer; font:750 11px ui-monospace,monospace; }
+  .txn-worker-choice span { color:#7f96b5; font:850 9px system-ui,sans-serif; }
+  .txn-worker-choice:hover { border-color:#7da6dc; color:#fff; background:#24354e; }
+  .txn-worker-choice.active { border-color:#71b5df; color:#fff; background:#294667; box-shadow:inset 0 0 0 1px rgba(141,211,255,.22); }
+  .txn-worker-choice.new { grid-column:span 2; font-family:system-ui,sans-serif; }
+  .txn-new-worker { gap:6px; margin-top:9px; color:#9fb0c7; font-size:9px; font-weight:750; }
+  .txn-new-worker-row { display:flex; align-items:center; gap:7px; }
+  .txn-new-worker input { width:78px; min-width:0!important; padding:7px!important; }
+  .txn-new-worker output { padding:7px 9px; border:1px solid #4d6687; border-radius:7px; color:#d8ecff; background:#1c3048; font:800 11px ui-monospace,monospace; }
+  .txn-time-picker { display:grid; grid-template-columns:34px minmax(0,1fr) 34px; gap:5px; }
+  .txn-time-picker input { width:100%; min-width:0!important; max-width:none!important; box-sizing:border-box; padding:7px!important; text-align:center; font:800 12px ui-monospace,monospace; }
+  .txn-time-picker button,.txn-time-presets button { border:1px solid #4a5d78; border-radius:7px; color:#cbd9ea; background:#1b2636; cursor:pointer; font:750 11px system-ui,sans-serif; }
+  .txn-time-picker button:hover,.txn-time-presets button:hover { border-color:#7ca4d8; color:#fff; background:#293a53; }
+  .txn-time-picker button:disabled,.txn-time-presets button:disabled { cursor:not-allowed; opacity:.42; }
+  .txn-time-presets { display:flex; gap:5px; margin-top:7px; }
+  .txn-time-presets button { flex:1; padding:6px; font-size:9px; }
+  .txn-clock-note { margin:10px 0 0; color:#aebdd1; font-size:10px; line-height:1.45; }
   .txn-fixed-value { display:flex; align-items:center; min-width:95px; min-height:28px; box-sizing:border-box; padding:5px 8px; border:1px solid #4a566a; border-radius:6px; color:#eef4ff; background:#202735; font:750 11px ui-monospace,monospace; }
   .lego-block .data-controls input,.lego-block .data-controls select { max-width:145px; }
   .txn-canvas .lego-head { gap:6px; flex-wrap:wrap; }
   .txn-canvas .lego-head .btn { padding:3px 7px; }
+  .txn-op-status { padding:3px 7px; border:1px solid rgba(104,211,158,.32); border-radius:999px; color:#9fe4c0; background:rgba(49,146,100,.12); font-size:9px; font-weight:800; text-transform:uppercase; }
+  .lego-block.failed .txn-op-status { border-color:rgba(232,116,134,.38); color:#ffb8c4; background:rgba(185,67,88,.13); }
   .txn-canvas .lego-palette { margin:10px 0; }
+  .txn-predicate { margin-top:10px; border:1px solid #405574; border-radius:9px; background:rgba(54,86,132,.09); }
+  .txn-predicate > summary { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 11px; color:#c4d8f2; cursor:pointer; font-size:10px; font-weight:800; list-style:none; }
+  .txn-predicate > summary::-webkit-details-marker { display:none; }
+  .txn-predicate > summary::before { content:"+"; display:grid; place-items:center; width:17px; height:17px; flex:none; border:1px solid #58749b; border-radius:5px; color:#a9c9f3; }
+  .txn-predicate[open] > summary::before { content:"−"; }
+  .txn-predicate > summary span { margin-right:auto; }
+  .txn-predicate > summary small { color:#8799b1; font-size:8px; font-weight:750; letter-spacing:.07em; text-transform:uppercase; }
+  .txn-predicate .data-controls { margin:0; padding:0 10px 10px; border-top:1px solid rgba(100,132,176,.2); }
+  .txn-predicate .data-controls label { margin-top:9px; }
   .txn-canvas.mode-auto { max-width:760px; padding:20px; border-color:#437582; background:linear-gradient(180deg,rgba(76,177,190,.08),transparent 190px),#171d27; }
   .txn-canvas.mode-auto .txn-outline,.txn-canvas.mode-auto .txn-connector,.txn-canvas.mode-auto .txn-stage-label { display:none; }
   .txn-canvas.mode-auto .txn-begin { margin-bottom:10px; border-color:#4e7d99; background:linear-gradient(120deg,rgba(46,91,112,.72),#1c293d); }
@@ -465,7 +521,13 @@
   .txn-clock-info strong { color:#e8f2ff; font:800 20px ui-monospace,monospace; }
   .txn-clock-info small { color:#aac2e5; font-size:10px; }
   .txn-execution { border-color:#36445a; border-radius:13px; background:#1a222e; }
-  @media (max-width:850px) { .txn-mode-bar { grid-template-columns:1fr; } .txn-header-actions { width:100%; justify-content:space-between; } .txn-shell > .table-library-head { align-items:flex-start; flex-wrap:wrap; } }
+  .txn-result-scroll { width:100%; max-height:46vh; border:1px solid #303d50; border-radius:8px; }
+  .txn-result-table { min-width:100%; width:max-content; font-size:10px; white-space:normal; }
+  .txn-result-table th,.txn-result-table td { min-width:54px; max-width:150px; padding:6px 7px; overflow-wrap:anywhere; vertical-align:top; }
+  .txn-result-table th { white-space:nowrap; }
+  .txn-result-table th:first-child,.txn-result-table td:first-child { min-width:62px; }
+  @media (max-width:850px) { .txn-mode-bar { grid-template-columns:1fr; } .txn-header-actions { width:100%; justify-content:space-between; } .txn-shell > .table-library-head { align-items:flex-start; flex-wrap:wrap; } .txn-start-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .txn-template-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .txn-begin-setup { grid-template-columns:1fr; } }
+  @media (max-width:520px) { .txn-start-grid,.txn-template-grid { grid-template-columns:1fr; } .txn-start-card { min-height:170px; } .txn-template-heading { align-items:flex-start; flex-direction:column; } }
   .txn-snapshot-badge { padding:4px 7px; border:1px solid #6b9cc5; border-radius:7px; color:#d7ecff; background:#183149; cursor:pointer; font:700 10px ui-monospace,monospace; }
   .txn-snapshot-badge:hover { border-color:#a3d7ff; background:#254a69; }
   .progress-table { width:100%; border-collapse:collapse; margin:12px 0; }
@@ -477,12 +539,30 @@
   .worker-panel-section { padding:12px; border:1px solid #34435a; border-radius:10px; background:linear-gradient(145deg,rgba(91,140,255,.055),var(--panel-2)); }
   .worker-panel-section h3 { margin:0 0 5px; color:#e3edfa; font-size:13px; }
   .worker-panel-section > p { margin:4px 0 9px; color:#9eacbf; font-size:10px; line-height:1.45; }
+  .worker-panel-launch-grid { display:grid; gap:10px; }
+  .worker-panel-launch { cursor:pointer; transition:border-color .14s,background .14s,transform .14s; }
+  .worker-panel-launch:hover { border-color:#668bbd; background:linear-gradient(145deg,rgba(91,140,255,.12),var(--panel-2)); transform:translateY(-1px); }
+  .worker-panel-launch:focus-visible { outline:3px solid rgba(126,183,255,.34); outline-offset:2px; }
+  .worker-panel-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:8px; }
+  .worker-panel-heading h3 { margin:0 0 3px; }
+  .worker-panel-heading p { margin:0; color:#9eacbf; font-size:9px; line-height:1.4; }
+  .worker-panel-heading > span { flex:none; color:#a9caff; font-size:9px; font-weight:800; }
+  .worker-preview-table { table-layout:fixed; margin:4px 0; font-size:10px; }
+  .worker-preview-table th,.worker-preview-table td { padding:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .worker-preview-more { display:block; margin-top:7px; color:#8999ae; font-size:9px; text-align:right; }
   .worker-snapshot-controls { display:flex; align-items:flex-end; gap:7px; margin:9px 0; }
   .worker-snapshot-controls label { display:grid; flex:1; gap:4px; color:#9eacbf; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
   .worker-snapshot-controls input { min-width:0; padding:7px 8px; border:1px solid #435674; border-radius:7px; color:var(--text); background:#182131; }
-  .worker-panel-table-wrap { max-height:280px; overflow:auto; border:1px solid #303d50; border-radius:8px; }
-  .worker-panel-table-wrap .progress-table { margin:0; }
-  .worker-panel-table-wrap .progress-table th { position:sticky; top:0; z-index:1; background:#1c2636; }
+  #utilityPanel.worker-detail-open { width:min(720px,92%); }
+  .worker-detail-view { min-height:100%; }
+  .worker-detail-back { margin:0 0 11px; padding:7px 10px; border:1px solid #455a78; border-radius:8px; color:#bdd2f1; background:#1c293b; cursor:pointer; font:750 10px system-ui,sans-serif; }
+  .worker-detail-back:hover { border-color:#7197ca; color:#fff; background:#263a56; }
+  .worker-detail-summary { display:flex; align-items:baseline; gap:8px; margin:14px 0 5px; padding:12px; border:1px solid #3f5573; border-radius:10px; background:#1b2a40; }
+  .worker-detail-summary strong { color:#eaf4ff; font:850 24px ui-monospace,monospace; }
+  .worker-detail-summary span { color:#aebdd1; font-size:10px; }
+  .worker-detail-note { margin:7px 0 13px; color:#9eacbf; font-size:10px; line-height:1.5; }
+  .worker-full-table { margin:0; font-size:11px; }
+  .worker-full-table th { position:sticky; top:-12px; z-index:1; background:var(--panel); box-shadow:0 1px var(--border); }
   .worker-event-kind { font-size:9px; font-weight:800; text-transform:uppercase; }
   .worker-event-kind.write { color:#67d7e8; } .worker-event-kind.delete { color:#f0788d; }
   #dashboardView.hidden { display:none; }
@@ -1472,6 +1552,176 @@
      before laying it out - see measureNodeHeight(). Same width a node box
      renders at in the real tree, so wrapping/line-count matches exactly. */
   #measure { position: fixed; left: -9999px; top: 0; visibility: hidden; width: var(--node-w); }
+  /* ---------- 2026 interface polish ---------- */
+  :root { --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-5:24px; --space-6:32px; --radius-sm:7px; --radius-md:11px; --radius-lg:15px; --surface-shadow:0 8px 24px rgba(4,8,14,.18); }
+  #toolbar { display:none !important; }
+  #workspaceTabs { width:108px; padding-inline:6px; }
+  .workspace-brand { margin-inline:-6px; padding:12px 7px 10px; }
+  .workspace-brand-mark { justify-content:center; font-size:0; }
+  .workspace-brand-mark::before { width:24px; height:24px; }
+  .workspace-brand small { display:none; }
+  #sidebar.context-collapsed { width:108px !important; }
+  #sidebar.rail-only { width:108px !important; }
+  #sidebar.rail-only #workspaceTabPanels,#sidebar.rail-only #sidebarResize,#sidebar.rail-only #contextPanelToggle { display:none !important; }
+  :where(button,input,select,textarea,summary,[role="button"]):focus-visible { outline:3px solid rgba(126,183,255,.42); outline-offset:2px; }
+  .workspace-tab-section { margin-top:12px; font-size:calc(10px * var(--font-scale)); }
+  .workspace-tab { min-height:53px; flex-direction:column; justify-content:center; gap:3px; padding:6px 3px; font-size:calc(10px * var(--font-scale)); text-align:center; }
+  .workspace-nav-group { margin:4px 0; border:1px solid transparent; border-radius:9px; }
+  .workspace-nav-group[open] { border-color:#2d3644; background:rgba(255,255,255,.018); }
+  .workspace-nav-group > summary { display:flex; align-items:center; min-height:38px; padding:8px 7px; border-radius:8px; color:#aeb9ca; cursor:pointer; font-size:calc(10px * var(--font-scale)); font-weight:750; list-style:none; }
+  .workspace-nav-group > summary::-webkit-details-marker { display:none; }
+  .workspace-nav-group > summary::before { content:"›"; width:18px; color:#738198; font-size:18px; transform-origin:45% 50%; transition:transform .15s; }
+  .workspace-nav-group[open] > summary::before { transform:rotate(90deg); }
+  .workspace-nav-group > .workspace-tab { width:calc(100% - 10px); margin:0 5px 3px; padding-left:8px; }
+  .workspace-nav-group > .workspace-tab::before { width:20px; height:20px; }
+  .data-controls label { font-size:calc(12px * var(--font-scale)); }
+  .page-header { display:flex; align-items:center; justify-content:space-between; gap:var(--space-4); margin-bottom:var(--space-4); padding:0 0 var(--space-4); border-bottom:1px solid var(--border); background:transparent; }
+  .page-header-copy { min-width:0; }
+  .page-header h1 { margin:0 0 var(--space-1); font-size:calc(25px * var(--font-scale)); letter-spacing:-.025em; }
+  .page-header p { max-width:760px; margin:0; color:var(--text-dim); font-size:calc(12px * var(--font-scale)); line-height:1.5; }
+  .page-header-actions { display:flex; align-items:center; justify-content:flex-end; gap:var(--space-2); flex-wrap:wrap; }
+  .page-header-actions .txn-clock { margin:0; padding:6px 10px; border-radius:11px; }
+  .page-header-actions .txn-clock-face { width:42px; height:42px; border-width:2px; }
+  .page-header-actions .txn-clock-face::before { height:11px; top:7px; transform-origin:50% 14px; }
+  .page-header-actions .txn-clock-face i { top:2px; transform-origin:0 18px; }
+  .page-help { margin-top:var(--space-2); color:var(--text-dim); font-size:calc(11px * var(--font-scale)); }
+  .page-help summary { width:max-content; color:#9eb9e3; cursor:pointer; }
+  .data-shell .btn,.workspace-link { min-height:36px; }
+  .data-card,.txn-shell > .table-library-head,.txn-canvas { box-shadow:none; }
+  .dashboard-card,.evolution-group,.health-at-glance-group { box-shadow:none !important; }
+  .dashboard-section { padding:var(--space-4); border:1px solid var(--border); border-radius:var(--radius-md); background:var(--panel); }
+  .dashboard-section .dashboard-card { padding:var(--space-2) 0; border-color:transparent; background:transparent; }
+  .data-table th { z-index:2; }
+  .data-table th:first-child,.data-table td:first-child { position:sticky; left:0; z-index:1; background:var(--panel); }
+  .data-table th:first-child { z-index:3; }
+  .data-table tbody tr { cursor:pointer; }
+  .data-table tbody tr:hover td { background:rgba(91,140,255,.08); }
+  .data-table tbody tr:focus-visible { outline:3px solid rgba(126,183,255,.42); outline-offset:-3px; }
+  .data-table tbody tr.selected td { background:rgba(91,140,255,.16); box-shadow:inset 0 1px rgba(122,169,255,.26),inset 0 -1px rgba(122,169,255,.26); }
+  .data-table.compact th,.data-table.compact td { padding:5px 9px; }
+  .data-table-sort { display:flex; align-items:center; gap:6px; width:100%; padding:0; border:0; color:inherit; background:transparent; cursor:pointer; font:inherit; font-weight:750; text-align:left; }
+  .data-table-sort::after { content:"↕"; color:#69778e; font-size:10px; }
+  .data-table-sort.active::after { content:attr(data-direction); color:#9ec3ff; }
+  .overview-toolbar { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
+  .overview-empty { display:grid; place-items:center; gap:10px; min-height:150px; color:var(--text-dim); text-align:center; }
+  .overview-empty.hidden,.data-table.hidden { display:none; }
+  .txn-tabs { position:sticky; top:0; z-index:12; padding-top:10px; background:linear-gradient(var(--bg) 75%,transparent); }
+  .txn-tab-wrap { min-height:38px; }
+  .txn-tab-state { position:absolute; left:7px; top:50%; display:grid; place-items:center; width:14px; height:14px; border-radius:50%; color:#8190a7; font-size:11px; font-weight:900; transform:translateY(-50%); }
+  .txn-tab-wrap.has-ops .txn-tab { padding-left:25px; }
+  .txn-tab-wrap.status-success .txn-tab-state { color:#55c995; }
+  .txn-tab-wrap.status-failed .txn-tab-state { color:#ed7185; }
+  .txn-tab-wrap.status-running .txn-tab-state { color:#ffbf5b; animation:tab-status-pulse .8s ease-in-out infinite alternate; }
+  @keyframes tab-status-pulse { to { box-shadow:0 0 0 4px rgba(255,191,91,.14); } }
+  .txn-mode-bar { position:sticky; top:45px; z-index:11; display:grid; grid-template-columns:repeat(4,minmax(80px,1fr)); gap:0; width:min(640px,100%); margin:0 auto var(--space-3); padding:0; overflow:hidden; border:1px solid #3d4a5e; border-radius:10px; background:var(--panel); }
+  .txn-mode-choice { min-height:42px; padding:8px 12px; border:0; border-right:1px solid #3d4a5e; border-radius:0; text-align:center; transform:none !important; box-shadow:none !important; }
+  .txn-mode-choice:nth-of-type(4) { border-right:0; }
+  .txn-mode-choice strong { margin:0; font-size:calc(12px * var(--font-scale)); }
+  .txn-mode-choice strong span { display:inline-block; min-width:17px; margin-right:3px; font-size:15px; line-height:1; vertical-align:-1px; }
+  .txn-mode-choice small { display:none; }
+  .txn-mode-bar .mode-hint { grid-column:1/-1; border:0; border-top:1px solid #3d4a5e; border-radius:0; text-align:center; }
+  .txn-summary { display:flex; flex-wrap:wrap; justify-content:center; gap:7px; width:min(820px,100%); margin:0 auto 10px; }
+  .txn-summary span { padding:5px 9px; border:1px solid #3a475a; border-radius:999px; color:#b9c8dc; background:#1b2330; font-size:calc(11px * var(--font-scale)); }
+  .txn-add-menu { position:relative; width:min(610px,100%); margin:10px auto; }
+  .txn-add-menu > summary { display:flex; justify-content:center; min-height:40px; padding:10px 14px; border:1px dashed #5877aa; border-radius:10px; color:#d6e6ff; background:rgba(57,91,145,.12); cursor:pointer; font-weight:750; list-style:none; }
+  .txn-add-menu > summary::-webkit-details-marker { display:none; }
+  .txn-add-menu[open] > summary { border-style:solid; background:rgba(57,91,145,.2); }
+  .txn-add-menu .lego-palette { justify-content:center; padding:9px; margin:6px 0 0; border:1px solid #37455a; border-radius:10px; background:#171e29; }
+  .txn-field-error { margin:8px 0 0; padding:7px 9px; border-left:3px solid #e87486; border-radius:5px; color:#ffc4ce; background:rgba(185,67,88,.12); font-size:calc(11px * var(--font-scale)); }
+  .lego-block [aria-invalid="true"] { border-color:#e87486 !important; box-shadow:0 0 0 2px rgba(232,116,134,.14); }
+  .lego-block.has-issue { border-color:#a94f62; }
+  .lego-block.collapsed .data-controls,.lego-block.collapsed .txn-field-error { display:none; }
+  .txn-op-menu { position:relative; }
+  .txn-op-menu > summary { display:grid; place-items:center; min-width:36px; min-height:34px; padding:4px 8px; list-style:none; }
+  .txn-op-menu > summary::-webkit-details-marker { display:none; }
+  .txn-op-menu > div { position:absolute; top:calc(100% + 5px); right:0; z-index:6; display:grid; gap:5px; min-width:125px; padding:7px; border:1px solid #46546a; border-radius:9px; background:var(--panel); box-shadow:var(--surface-shadow); }
+  .txn-op-menu > div .btn { width:100%; text-align:left; }
+  .transaction-locked .txn-op-menu { display:none; }
+  .txn-workspace-grid { display:grid; grid-template-columns:minmax(0,820px) minmax(280px,1fr); align-items:start; gap:14px; }
+  .txn-sticky-controls { position:relative; margin:0 0 12px; padding:8px 0 10px; border-bottom:1px solid var(--border); background:var(--bg); }
+  .txn-sticky-controls .txn-tabs { position:relative; top:auto; padding-top:0; background:transparent; }
+  .txn-sticky-controls .txn-mode-bar { position:relative; top:auto; margin-bottom:0; }
+  .txn-workspace-grid .txn-canvas { width:100%; }
+  .txn-execution { position:sticky; top:142px; z-index:8; max-height:calc(100vh - 180px); overflow:auto; box-shadow:0 10px 35px rgba(3,7,12,.32); }
+  .toast { align-items:center; }
+  .toast { pointer-events:auto; }
+  .toast-action { margin-left:auto; padding:5px 9px; border:1px solid #7fa5e8; border-radius:6px; color:#eaf2ff; background:#304d82; cursor:pointer; font:750 12px system-ui,sans-serif; }
+  .toast-action:hover { background:#3d61a0; }
+  #statVisible,#statReachable { display:none; }
+  body:not(.tree-workspace) #statusBar > .status-control-group,body:not(.tree-workspace) #statusDataViewHost { display:none; }
+  .status-more { position:relative; }
+  .status-more > summary { list-style:none; }
+  .status-more > summary::-webkit-details-marker { display:none; }
+  .status-more-menu { position:absolute; right:0; bottom:calc(100% + 8px); z-index:100; display:grid; gap:5px; min-width:165px; padding:8px; border:1px solid var(--border); border-radius:9px; background:var(--panel); box-shadow:var(--surface-shadow); }
+  .status-more-menu .btn { width:100%; text-align:left; }
+  .status-more-menu #grpDataView { display:grid; gap:5px; padding:0 0 7px; border:0; border-bottom:1px solid var(--border); background:transparent; }
+  .status-more-menu #grpDataView .sep { display:none; }
+  .status-more-menu #grpDataView .toolbar-group-label { margin-bottom:2px; }
+  body.inspector-open #canvasWrap::after { content:""; position:absolute; inset:0; z-index:6; background:rgba(5,9,15,.24); backdrop-filter:blur(1px); }
+  body.inspector-open .side-panel:not(.hidden),body.inspector-open #map2dPanel:not(.hidden) { isolation:isolate; }
+  .side-panel { width:min(460px,90%); border-left-color:#50617a; }
+  .trace-header { min-height:52px; }
+  body.light-theme .workspace-nav-group[open] { border-color:#d3dbe6; background:#f7f9fc; }
+  body.light-theme .txn-tabs,body.light-theme .txn-mode-bar { background:var(--bg); }
+  body.light-theme .txn-summary span { color:#34445b; background:#f5f7fb; }
+  body.light-theme .txn-empty { background:radial-gradient(circle at 50% 0,rgba(91,140,255,.1),transparent 45%),#fff; }
+  body.light-theme .txn-start-card { border-color:#c4cfde; color:#26364b; background:#f7f9fc; }
+  body.light-theme .txn-start-card:hover { border-color:#7d9fc9; background:#fff; }
+  body.light-theme .txn-start-card strong { color:#172538; }
+  body.light-theme .txn-start-card small { color:#64748b; }
+  body.light-theme .txn-start-icon { color:#263f63; background:#e6edf7; }
+  body.light-theme .txn-template-section { border-color:#d4dce7; }
+  body.light-theme .txn-template-heading h3 { color:#172538; }
+  body.light-theme .txn-template-heading p { color:#64748b; }
+  body.light-theme .txn-template-card { border-color:#c3cfde; color:#26364b; background:#f7f9fc; }
+  body.light-theme .txn-template-card:hover { border-color:#7899c4; background:#fff; }
+  body.light-theme .txn-template-card > span { color:#294c76; background:#e5edf7; }
+  body.light-theme .txn-template-card b { color:#172538; }
+  body.light-theme .txn-template-card small { color:#64748b; }
+  body.light-theme .txn-setup-field { border-color:#cbd6e4; background:#f5f8fc; }
+  body.light-theme .txn-setup-label { color:#53677f; }
+  body.light-theme .txn-worker-choice,body.light-theme .txn-time-picker button,body.light-theme .txn-time-presets button { border-color:#bdcadd; color:#43556d; background:#fff; }
+  body.light-theme .txn-worker-choice:hover,body.light-theme .txn-time-picker button:hover,body.light-theme .txn-time-presets button:hover { border-color:#7197c7; color:#172538; background:#edf3fa; }
+  body.light-theme .txn-worker-choice.active { border-color:#568dc0; color:#17324e; background:#dcecf9; }
+  body.light-theme .txn-new-worker output { border-color:#adc3dc; color:#1d4267; background:#e8f2fb; }
+  body.light-theme .txn-predicate { border-color:#bccce0; background:#f1f6fb; }
+  body.light-theme .txn-predicate > summary { color:#294966; }
+  body.light-theme .txn-predicate .data-controls { border-color:#d1dbe7; }
+  body.light-theme .txn-clock-note { color:#60738a; }
+  body.light-theme .worker-panel-section { border-color:#ccd6e3; background:#f7f9fc; }
+  body.light-theme .worker-panel-section h3 { color:#1d2d42; }
+  body.light-theme .worker-panel-heading p,body.light-theme .worker-detail-note { color:#64748b; }
+  body.light-theme .worker-panel-launch:hover { border-color:#7698c4; background:#eef4fb; }
+  body.light-theme .worker-panel-heading > span { color:#35649f; }
+  body.light-theme .worker-detail-back { border-color:#b7c7da; color:#355477; background:#edf3fa; }
+  body.light-theme .worker-detail-summary { border-color:#c7d4e3; background:#eef4fb; }
+  body.light-theme .worker-detail-summary strong { color:#1a3554; }
+  body.light-theme .worker-detail-summary span { color:#60738a; }
+  body.light-theme .txn-add-menu .lego-palette { background:#f7f9fc; }
+  body.light-theme .txn-shell { --txn-ink:#1f2d40; --txn-muted:#617087; }
+  body.light-theme .txn-shell > .table-library-head { border-color:#c8d3e2; background:#f7f9fc; }
+  body.light-theme .txn-header-copy h1,body.light-theme .txn-mode-choice strong { color:#172538; }
+  body.light-theme .txn-header-copy p,body.light-theme .txn-mode-choice small { color:#64748b; }
+  body.light-theme .txn-header-actions .txn-clock { border-color:#aabbd2; background:#edf3fa; }
+  body.light-theme .txn-clock-info strong { color:#1c3454; }
+  body.light-theme .txn-clock-info small { color:#55708f; }
+  body.light-theme .txn-tab-wrap { border-color:#b9c7da; background:#edf2f8; }
+  body.light-theme .txn-tab { color:#56677d; }
+  body.light-theme .txn-tab:hover { color:#172538; background:#e1e9f4; }
+  body.light-theme .txn-tab-wrap.active { border-color:#7191c4; border-bottom-color:#fff; background:#fff; }
+  body.light-theme .txn-tab-wrap.active .txn-tab { color:#172538; }
+  body.light-theme .txn-mode-choice { border-color:#c4cfde; color:#26364b; background:#f7f9fc; }
+  body.light-theme .txn-mode-bar .mode-hint { border-color:#c5d0de; color:#35465d; background:#f2f5f9; }
+  body.light-theme .txn-canvas,body.light-theme .txn-canvas.mode-auto,body.light-theme .txn-canvas.mode-si,body.light-theme .txn-canvas.mode-rc,body.light-theme .txn-canvas.mode-ru { border-color:#bdc9da; background:#f7f9fc; box-shadow:none; }
+  body.light-theme .txn-begin,body.light-theme .txn-end,body.light-theme .txn-canvas.mode-si .txn-begin,body.light-theme .txn-canvas.mode-si .txn-end,body.light-theme .txn-canvas.mode-rc .txn-begin,body.light-theme .txn-canvas.mode-rc .txn-end,body.light-theme .txn-canvas.mode-ru .txn-begin,body.light-theme .txn-canvas.mode-ru .txn-end { border-color:#b7c5d8; color:#23344a; background:#fff; box-shadow:none; }
+  body.light-theme .txn-begin h2,body.light-theme .txn-end h2 { color:#1c2b3d; }
+  body.light-theme .lego-block,body.light-theme .lego-block.op-read,body.light-theme .lego-block.op-scan,body.light-theme .lego-block.op-insert,body.light-theme .lego-block.op-update,body.light-theme .lego-block.op-delete { color:#26364b; background:#fff; box-shadow:none; }
+  body.light-theme .lego-head b { color:#1f2d40; }
+  body.light-theme .lego-head select { color:#223650; background:#f1f5fa; }
+  body.light-theme .txn-execution { background:#fff; box-shadow:0 10px 28px rgba(30,48,76,.12); }
+  @media (max-width:1150px) { .txn-workspace-grid { grid-template-columns:1fr; } .txn-execution { position:relative; top:auto; max-height:none; } }
+  @media (max-width:850px) { .page-header { align-items:flex-start; flex-direction:column; } .page-header-actions { justify-content:flex-start; } .txn-tabs { top:0; } .txn-mode-bar { position:relative; top:auto; grid-template-columns:repeat(2,1fr); } .txn-mode-choice:nth-of-type(2) { border-right:0; } .txn-mode-choice:nth-of-type(-n+2) { border-bottom:1px solid #3d4a5e; } }
+  @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto !important; animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; } }
 </style>
 </head>
 <body>
@@ -1531,7 +1781,7 @@
           </div>
         </details>
         <details class="toolbar-popover">
-          <summary class="btn">Change&hellip; &#9662;</summary>
+          <summary class="btn" title="More tree actions" aria-label="More tree actions">&bull;&bull;&bull;</summary>
           <div class="toolbar-popover-panel toolbar-action-list">
             <button class="btn" id="expandAllBtn">Expand all</button>
             <button class="btn" id="collapseAllBtn">Collapse all</button>
@@ -1608,27 +1858,32 @@
     <div id="sidebar">
       <nav id="workspaceTabs" aria-label="Visualizer views">
         <div class="workspace-brand"><div class="workspace-brand-mark">BatStore Explorer</div></div>
-        <div class="workspace-tab-section">Views</div>
-        <button class="workspace-tab active" data-workspace="dashboard">Dashboard</button>
-        <button class="workspace-tab" data-workspace="overview">Table overview</button>
-        <button class="workspace-tab" data-workspace="animation">Transaction executor</button>
-        <button class="workspace-tab" data-workspace="snapshots">Tree view</button>
-        <button class="workspace-tab" data-workspace="appearance">Appearance</button>
-        <div class="workspace-tab-section">Diagnostics</div>
-        <button class="workspace-tab" data-workspace="health">Health</button>
-        <button class="workspace-tab" data-workspace="queries">Queries</button>
-        <button class="workspace-tab" data-workspace="history">History</button>
-        <button class="workspace-tab" data-workspace="validation">Validation</button>
-        <div class="workspace-tab-section">Workspace</div>
-        <button class="workspace-tab" data-workspace="bookmarks">Bookmarks</button>
-        <button class="workspace-tab" data-workspace="compare">Compare</button>
-        <button class="workspace-tab" data-workspace="export">Export</button>
+        <div class="workspace-tab-section">Explore</div>
+        <button class="workspace-tab active" data-workspace="dashboard" title="Dashboard">Dashboard</button>
+        <button class="workspace-tab" data-workspace="overview" title="Table overview">Tables</button>
+        <button class="workspace-tab" data-workspace="snapshots" title="Tree view">Tree</button>
+        <div class="workspace-tab-section">Work</div>
+        <button class="workspace-tab" data-workspace="animation" title="Transaction executor">Transactions</button>
+        <button class="workspace-tab" data-workspace="queries" title="Queries">Queries</button>
+        <details class="workspace-nav-group">
+          <summary title="Analysis tools">Analyze</summary>
+          <button class="workspace-tab" data-workspace="health" title="Health">Health</button>
+          <button class="workspace-tab" data-workspace="history" title="History">History</button>
+          <button class="workspace-tab" data-workspace="validation" title="Validation">Validation</button>
+          <button class="workspace-tab" data-workspace="compare" title="Compare snapshots">Compare</button>
+        </details>
+        <details class="workspace-nav-group">
+          <summary title="More tools">More</summary>
+          <button class="workspace-tab" data-workspace="bookmarks" title="Bookmarks">Bookmarks</button>
+          <button class="workspace-tab" data-workspace="export" title="Export">Export</button>
+          <button class="workspace-tab" data-workspace="appearance" title="Appearance">Appearance</button>
+        </details>
         <button class="btn" id="contextPanelToggle" title="Collapse the options panel">&#9664; Panel</button>
       </nav>
       <div id="workspaceTabPanels">
         <section class="workspace-tab-panel active" data-panel="dashboard"><h2>Dashboard</h2><div class="dashboard-overview-intro"><span>Explore the loaded tree</span><p>Jump between current health, indexing cost, version history, workload activity, and structural diagnostics.</p></div><nav id="dashboardSectionNav" class="dashboard-section-nav" aria-label="Dashboard sections"></nav></section>
         <section class="workspace-tab-panel" data-panel="overview"><h2>Tables</h2><div id="overviewTableList"></div><button class="btn" id="addTableSidebar">Add table dumps…</button><p>Each table has its own index. A database bundle can also include column values.</p></section>
-        <section class="workspace-tab-panel" data-panel="animation"><h2>Simulation</h2><p>Replay reads and writes against the exported snapshot without changing the dump.</p></section>
+        <section class="workspace-tab-panel" data-panel="animation" data-context="none"></section>
         <section class="workspace-tab-panel" data-panel="snapshots">
           <h2>Tree view</h2>
           <div id="treeTableList"></div>
@@ -1777,9 +2032,9 @@
     <span class="status-chip status-metric" id="statVisible">Visible <strong>-</strong></span>
     <span class="status-chip status-metric" id="statReachable">Reachable <strong>-</strong></span>
     <span class="status-chip status-metric" id="statSelection">Root <strong>-</strong></span>
-    <div class="status-control-group"><span class="toolbar-group-label">Tree view</span><select id="treeLayoutSelect" title="Choose how the visible tree is arranged"><option value="hierarchical">Top-down</option><option value="compact">Compact</option><option value="horizontal">Left to right</option><option value="leaves">Leaf focused</option></select><details id="rootSelector"><summary class="btn" id="latestTreeBtn" title="Choose a tree root">Latest tree ▴</summary><div class="toolbar-popover-panel" id="rootSelectorPanel"></div></details><button class="btn" id="replayLatestBtn" title="Replay the structural change between the two latest root versions">▶ Replay change</button><button class="btn" id="fitTreeSideBtn">Fit</button><button class="btn" id="minimapSideBtn">Minimap</button><button class="btn" id="statsOverlayBtn">Stats</button><button class="btn" id="guidedTourBtn">Tour</button><button class="btn" id="commandPaletteBtn" title="Open command palette (Ctrl/Cmd + K)">⌘K</button></div>
+    <div class="status-control-group"><span class="toolbar-group-label">Tree</span><details id="rootSelector"><summary class="btn" id="latestTreeBtn" title="Choose a tree root">Latest tree ▴</summary><div class="toolbar-popover-panel" id="rootSelectorPanel"></div></details><button class="btn" id="fitTreeSideBtn">Fit</button><details class="status-more"><summary class="btn">View options</summary><div class="status-more-menu"><label class="toolbar-group-label" for="treeLayoutSelect">Layout</label><select id="treeLayoutSelect" title="Choose how the visible tree is arranged"><option value="hierarchical">Top-down</option><option value="compact">Compact</option><option value="horizontal">Left to right</option><option value="leaves">Leaf focused</option></select><button class="btn" id="replayLatestBtn" title="Replay the structural change between the two latest root versions">▶ Replay change</button><button class="btn" id="minimapSideBtn">Minimap</button><button class="btn" id="statsOverlayBtn">Statistics</button><button class="btn" id="guidedTourBtn">Guided tour</button></div></details><button class="btn" id="commandPaletteBtn" title="Open command palette (Ctrl/Cmd + K)">⌘K</button></div>
     <div id="statusDataViewHost"></div>
-    <div class="status-control-group" id="statusTreeActionsHost"><span class="toolbar-group-label">Tree actions</span><span id="statusTreeActionsMenuHost"></span><span class="status-chip hidden" id="treeActionStatus"></span></div>
+    <div class="status-control-group" id="statusTreeActionsHost"><span id="statusTreeActionsMenuHost"></span><span class="status-chip hidden" id="treeActionStatus"></span></div>
     <span id="liveLegend" class="hidden">
       <span class="legend-swatch legend-live"></span>live/active
       <span class="legend-swatch legend-dead"></span>dead/obsolete
@@ -1836,18 +2091,21 @@
     for (const root of roots) { if (bigint(root.version) <= ts) result = root; else break; }
     return result;
   }
-  function stampVisible(tree, ts, readerWorker, stampWorker, stampTs, invalid) {
+  function stampVisible(tree, ts, readerWorker, stampWorker, stampTs, invalid, commitCache=null) {
     if (invalid) return false;
     const stamp = bigint(stampTs);
     if (stamp === null || stamp > ts) return false;
     if (Number(stampWorker) === readerWorker) return true;
     const log = tree.commit_logs?.[Number(stampWorker)];
     if (!Array.isArray(log)) return stamp < ts; // legacy dump: commit unknown
+    const cacheKey=Number(stampWorker)+"@"+String(ts);
+    if(commitCache?.has(cacheKey))return commitCache.get(cacheKey)>stamp;
     let last = 0n;
     for (const entry of log) {
       const commit = bigint(entry);
       if (commit !== null && commit < ts && commit > last) last = commit;
     }
+    commitCache?.set(cacheKey,last);
     return last > stamp;
   }
   function progressTable(tree, tsInput, maxWorker, simulatedCommits = []) {
@@ -1895,7 +2153,7 @@
   function snapshot(tree, tsInput, readerWorker, bundleRows, rowsVersion, options = {}) {
     const ts = bigint(tsInput);
     if (ts === null || ts < 0n) throw new Error("Snapshot time must be a nonnegative integer.");
-    const root = rootAt(tree, ts), found = new Map(), phantoms = new Map(), visited = new Set();
+    const root = rootAt(tree, ts), found = new Map(), phantoms = new Map(), visited = new Set(),commitCache=new Map(),requestedKey=options.key==null?null:String(options.key);
     if (!root) return {rows:[], phantoms:[], root:null, truncated:false};
     let truncated = ts > 0n && ts < bigint(root.version);
     const visibilityTs = () => {
@@ -1908,9 +2166,10 @@
       visited.add(id);
       const node = tree.nodes?.[id]; if (!node) {truncated=true;return;}
       if (node.type === "internal_truncated") {truncated=true;return;}
-      if (node.type === "internal") {for (const child of activeChildren(node, ts)) walk(child.node_id);return;}
+      if (node.type === "internal") {for (const child of activeChildren(node, ts))if(requestedKey===null||(compareKeys(requestedKey,child.key_lower)>=0&&compareKeys(requestedKey,child.key_upper)<=0))walk(child.node_id);return;}
       for (const record of node.records || []) {
         const key = String(record.key);
+        if(requestedKey!==null&&key!==requestedKey)continue;
         const metadata = {key,insert_ts:String(record.insert_ts),insert_worker:record.insert_worker,
           delete_ts:record.deleted ? String(record.delete_ts) : null,
           delete_worker:record.deleted ? record.delete_worker : null,
@@ -1920,8 +2179,8 @@
           if (stamp !== null && stamp <= ts) phantoms.set(key+":"+record.insert_worker+":"+record.insert_ts,metadata);
           continue;
         }
-        if (!stampVisible(tree, visibilityTs(), readerWorker, record.insert_worker, record.insert_ts, record.insert_invalid)) continue;
-        if (record.deleted && stampVisible(tree, visibilityTs(), readerWorker, record.delete_worker, record.delete_ts, record.delete_invalid)) continue;
+        if (!stampVisible(tree, visibilityTs(), readerWorker, record.insert_worker, record.insert_ts, record.insert_invalid,commitCache)) continue;
+        if (record.deleted && stampVisible(tree, visibilityTs(), readerWorker, record.delete_worker, record.delete_ts, record.delete_invalid,commitCache)) continue;
         const previous = found.get(key);
         if (!previous || bigint(record.insert_ts) > bigint(previous.insert_ts)) found.set(key,metadata);
       }
@@ -1929,22 +2188,24 @@
     walk(root.node_id);
     const valuesAvailable = bundleRows && rowsVersion != null && ts >= bigint(rowsVersion)
       && ts <= clockInfo(tree).last + 1n;
-    const values = valuesAvailable ? new Map(bundleRows.map(row => [String(row.key), row])) : null;
+    const values = valuesAvailable ? requestedKey===null?new Map(bundleRows.map(row => [String(row.key), row])):new Map(bundleRows.filter(row=>String(row.key)===requestedKey).map(row=>[requestedKey,row])) : null;
     const rows = [...found.values()].map(row => values?.has(row.key) ? {...values.get(row.key),...row} : row)
       .sort((a,b) => compareKeys(a.key,b.key));
     return {rows,phantoms:[...phantoms.values()].sort((a,b)=>compareKeys(a.key,b.key)),root,truncated,valuesAvailable:!!valuesAvailable};
   }
-  function physicalSnapshot(tree, bundleRows) {
-    const ts=clockInfo(tree).last,root=rootAt(tree,ts),found=new Map(),visited=new Set();
+  function physicalSnapshot(tree, bundleRows, requestedKey=null, tsInput=null) {
+    requestedKey=requestedKey==null?null:String(requestedKey);
+    const suppliedTs=bigint(tsInput),ts=suppliedTs??clockInfo(tree).last,root=rootAt(tree,ts),found=new Map(),visited=new Set();
     if(!root)return {rows:[],root:null,truncated:false,valuesAvailable:false};
     let truncated=false;
     function walk(id){
       if(visited.has(id))return;visited.add(id);
       const node=tree.nodes?.[id];if(!node){truncated=true;return;}
       if(node.type==="internal_truncated"){truncated=true;return;}
-      if(node.type==="internal"){for(const child of activeChildren(node,ts))walk(child.node_id);return;}
+      if(node.type==="internal"){for(const child of activeChildren(node,ts))if(requestedKey===null||(compareKeys(requestedKey,child.key_lower)>=0&&compareKeys(requestedKey,child.key_upper)<=0))walk(child.node_id);return;}
       for(const record of node.records||[]){
         const key=String(record.key),previous=found.get(key),stamp=bigint(record.insert_ts)??0n;
+        if(requestedKey!==null&&key!==requestedKey)continue;
         if(previous&&stamp<previous._physicalStamp)continue;
         found.set(key,{key,insert_ts:String(record.insert_ts),insert_worker:record.insert_worker,
           delete_ts:record.deleted?String(record.delete_ts):null,delete_worker:record.deleted?record.delete_worker:null,
@@ -1952,7 +2213,7 @@
       }
     }
     walk(root.node_id);
-    const values=new Map((bundleRows||[]).map(row=>[String(row.key),row]));
+    const values=requestedKey===null?new Map((bundleRows||[]).map(row=>[String(row.key),row])):new Map((bundleRows||[]).filter(row=>String(row.key)===requestedKey).map(row=>[requestedKey,row]));
     const rows=[...found.values()].map(row=>{const {_physicalStamp,...clean}=row;return values.has(clean.key)?{...values.get(clean.key),...clean}:clean;}).sort((a,b)=>compareKeys(a.key,b.key));
     return {rows,root,truncated,valuesAvailable:values.size>0};
   }
@@ -1968,14 +2229,29 @@
         : operator === "lte" ? cmp <= 0 : actual.toLowerCase().includes(String(value).toLowerCase());
     });
   }
+  function predicateMatches(row, predicate) {
+    if(!predicate?.field)return true;
+    const actual=row?.[predicate.field],expected=predicate.value,operator=predicate.operator||"eq";
+    if(operator==="contains")return String(actual??"").toLowerCase().includes(String(expected??"").toLowerCase());
+    const comparison=compareKeys(actual??"",expected??"");
+    return operator==="neq"?comparison!==0:operator==="gt"?comparison>0:operator==="gte"?comparison>=0:operator==="lt"?comparison<0:operator==="lte"?comparison<=0:comparison===0;
+  }
   function execute(tables, operations, ts, worker, rowsVersion, options = {}) {
     const mode=options.mode||"si",dynamic=mode==="rc"||mode==="ru",overlays=tables.map(()=>new Map());
     let glcCursor=bigint(options.glcBase)??bigint(ts)??0n,visibilityChecks=0;
     if(mode==="rc")glcCursor+=1n; // BEGIN draws the RC transaction's ts_start.
     const statementSnapshots=[],statementVisibilityChecks=[];
+    if(operations.length===1&&operations[0].kind==="read"){
+      const op=operations[0],table=tables[op.tableIndex];
+      if(!table)throw new Error("Unknown table in transaction.");
+      const statementTs=mode==="rc"?glcCursor:(bigint(ts)??0n),nextVisibilityTs=options.reloadGlcPerTuple?()=>{visibilityChecks++;return glcCursor;}:null;
+      const unfiltered=mode==="ru"?physicalSnapshot(table.tree,table.rows,op.key,statementTs).rows:snapshot(table.tree,statementTs,worker,table.rows,table.snapshot_version??rowsVersion,{key:op.key,nextVisibilityTs}).rows,rows=unfiltered.filter(row=>predicateMatches(row,op.predicate));
+      statementSnapshots.push(String(statementTs));statementVisibilityChecks.push(visibilityChecks);
+      return {steps:[{operation:op,result:{status:rows.length?"found":unfiltered.length?"filtered":"missing",rows:rows.length?[{...rows[0]}]:[]}}],aborted:false,statementSnapshots,statementVisibilityChecks,visibilityChecks,lastGlc:String(glcCursor)};
+    }
     const loadState=(table,index,statementTs)=>{
       const nextVisibilityTs=options.reloadGlcPerTuple?()=>{visibilityChecks++;return glcCursor;}:null;
-      const rows=mode==="ru"?physicalSnapshot(table.tree,table.rows).rows:snapshot(table.tree,statementTs,worker,table.rows,table.snapshot_version??rowsVersion,{nextVisibilityTs}).rows;
+      const rows=mode==="ru"?physicalSnapshot(table.tree,table.rows,null,statementTs).rows:snapshot(table.tree,statementTs,worker,table.rows,table.snapshot_version??rowsVersion,{nextVisibilityTs}).rows;
       const map=new Map(rows.map(row=>[String(row.key),{...row}]));
       for(const [key,row] of overlays[index])row===null?map.delete(key):map.set(key,{...row});
       return map;
@@ -1993,9 +2269,9 @@
       if (!map) throw new Error("Unknown table in transaction.");
       const before = map.get(String(op.key));
       let result;
-      if (op.kind === "read") result = before ? {status:"found",rows:[{...before}]} : {status:"missing",rows:[]};
+      if (op.kind === "read") result = before ? predicateMatches(before,op.predicate)?{status:"found",rows:[{...before}]}:{status:"filtered",rows:[]} : {status:"missing",rows:[]};
       else if (op.kind === "scan") {
-        const rows = [...map.values()].filter(row => compareKeys(row.key,op.lower)>=0 && compareKeys(row.key,op.upper)<=0).sort((a,b)=>compareKeys(a.key,b.key));
+        const rows = [...map.values()].filter(row => compareKeys(row.key,op.lower)>=0 && compareKeys(row.key,op.upper)<=0&&predicateMatches(row,op.predicate)).sort((a,b)=>compareKeys(a.key,b.key));
         result = {status:"matched",rows};
       } else if (op.kind === "insert") {
         if (before) { result={status:"conflict",rows:[{...before}]};aborted=true; }
@@ -2013,7 +2289,7 @@
     }
     return {steps,aborted,statementSnapshots,statementVisibilityChecks,visibilityChecks,lastGlc:String(glcCursor)};
   }
-  const api = {clockInfo,progressTable,workerActivity,snapshot,physicalSnapshot,select,execute,compareKeys};
+  const api = {clockInfo,progressTable,workerActivity,snapshot,physicalSnapshot,select,execute,compareKeys,predicateMatches};
   scope.BatStoreSnapshot = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis);
@@ -2023,13 +2299,17 @@
   "use strict";
 
   let toastTimer = null;
-  function showToast(message, duration = 3200) {
+  function showToast(message, duration = 3200, action = null) {
     const region = document.getElementById("toastRegion");
     clearTimeout(toastTimer);
     region.replaceChildren();
     const toast = document.createElement("div");
     toast.className = "toast";
-    toast.textContent = String(message);
+    const copy=document.createElement("span");copy.textContent=String(message);toast.appendChild(copy);
+    if(action?.label&&typeof action.run==="function"){
+      const button=document.createElement("button");button.type="button";button.className="toast-action";button.textContent=action.label;
+      button.onclick=()=>{clearTimeout(toastTimer);toast.remove();action.run();};toast.appendChild(button);
+    }
     region.appendChild(toast);
     requestAnimationFrame(() => toast.classList.add("visible"));
     toastTimer = setTimeout(() => {
@@ -2049,6 +2329,9 @@
   let bundleFileName = "";
   let activeTableIndex = 0;
   let overviewPage = 0;
+  let overviewSortColumn = null;
+  let overviewSortDirection = 1;
+  let overviewCompact = localStorage.getItem("batstore-explorer-table-density") === "compact";
   let animationOps = [];
   let transactionCreated = false;
   let transactionTabs = [];
@@ -2451,7 +2734,8 @@
       const savedRootId = localStorage.getItem("batstore-viz-selected-root");
       const initial = dump.roots.find(r => r.node_id === savedRootId) || latestRoot();
       selectRoot(initial.node_id, initial);
-      switchWorkspace("dashboard");
+      const savedWorkspace=localStorage.getItem("batstore-explorer-workspace");
+      switchWorkspace(document.querySelector('.workspace-tab[data-workspace="'+savedWorkspace+'"]')?savedWorkspace:"dashboard");
       setTimeout(restoreDeepLink, 0);
     } else renderRootList();
   }
@@ -5816,12 +6100,12 @@
     const fillDistribution=dashboardAdvanced?(()=>{const colors=histogram.map((_,i)=>i<4?"#d89b4b":i<8?"#3aa876":i===8?"#ffbf5b":"#e5586a"),graph='<div class="health-histogram">'+histogram.map((count,i)=>'<div class="health-histogram-column"><span class="health-histogram-count">'+count+'</span><div class="health-histogram-track"><div class="health-histogram-bar" style="height:'+(count/histogramMax*100)+'%;background:'+colors[i]+'"></div></div><span class="health-histogram-label">'+(i*10)+'–'+((i+1)*10)+'</span></div>').join("")+'</div>',attention=dashboardHealthAttention.length?dashboardHealthAttention.map(p=>'<div class="health-page-row"><div><code>'+escapeHtml(p.id)+'</code><small>'+Math.round(p.fill*100)+'% fill · '+escapeHtml(p.reasons.join(" · "))+'</small></div><button class="btn" data-dashboard-health-node="'+escapeHtml(p.id)+'">Inspect</button></div>').join(""):'<div class="analysis-card validation-ok">No pages currently require fill or dead-space attention.</div>';return '<div class="dashboard-card fill-distribution-card"><h3>Detailed page health</h3><div class="metric-grid"><div class="metric"><b>'+Math.round(healthPercentile(.5)*100)+'%</b>Median fill</div><div class="metric"><b>'+Math.round(healthPercentile(.9)*100)+'%</b>90th percentile</div><div class="metric"><b>'+Math.round(dashboardTypeAverage("internal")*100)+'%</b>Internal average</div><div class="metric"><b>'+Math.round(dashboardTypeAverage("leaf")*100)+'%</b>Leaf average</div></div><div class="health-summary-grid"><div class="health-summary-card '+healthBandClass(healthUnder,"under")+'"><b>'+healthUnder+'</b><span>Underfilled · below 40%</span></div><div class="health-summary-card good"><b>'+healthTarget+'</b><span>Preferred · 40–80%</span></div><div class="health-summary-card '+healthBandClass(healthHigh,"high")+'"><b>'+healthHigh+'</b><span>High · 80–90%</span></div><div class="health-summary-card '+healthBandClass(healthCritical,"critical")+'"><b>'+healthCritical+'</b><span>Near capacity · 90–100%</span></div></div><h3>Latest-root page fill distribution</h3><div class="sub">Reachable pages grouped into 10-percentage-point utilization ranges.</div>'+graph+'<div class="health-band-legend"><span><i style="background:#d89b4b"></i>Underfilled</span><span><i style="background:#3aa876"></i>Preferred</span><span><i style="background:#ffbf5b"></i>High</span><span><i style="background:#e5586a"></i>Near capacity</span></div><h3>Pages worth inspecting</h3>'+attention+'<div class="sub">Includes only pages reachable through live routes from the latest root.</div></div>';})():'';
     const hotRecordsSection=dashboardAdvanced?'<div class="dashboard-section"><div class="dashboard-head"><div><h2>Hot records</h2><p>Keys with repeated updates or deletions, grouped by the root interval in which that activity occurred.</p></div><div class="hot-record-controls"><label class="hot-record-limit">Keys per root <input type="number" id="dashboardHotKeyLimit" min="1" max="1000" step="1" list="dashboardHotKeyPresets" value="'+dashboardHotKeyLimit+'"><datalist id="dashboardHotKeyPresets">'+[25,50,100,250,500,1000].map(limit=>'<option value="'+limit+'"></option>').join("")+'</datalist></label><button class="btn" id="dashboardHotRootsToggle">'+(dashboardShowAllHotRoots?'Show latest 3':'Show all roots horizontally')+'</button></div></div><div class="hot-record-group"><div class="evolution-group-head"><div><h3>Hot records</h3><p>Most active keys appear first. Counts represent logical events, with duplicate physical copies from page splits removed.</p></div></div><div class="hot-record-strip">'+hotRoots.map(root=>{const allRanked=[...(hotRecords.get(String(root.version))||new Map()).entries()].map(([key,counts])=>({key,...counts,total:counts.updates+counts.deletes})).sort((a,b)=>b.total-a.total||String(a.key).localeCompare(String(b.key),undefined,{numeric:true})),ranked=allRanked.slice(0,dashboardHotKeyLimit),rootUpdates=allRanked.reduce((sum,item)=>sum+item.updates,0),rootDeletes=allRanked.reduce((sum,item)=>sum+item.deletes,0);return '<div class="hot-record-card"><div class="hot-record-card-head"><h3>Root version '+escapeHtml(root.version)+'</h3><span>'+(root===latest?'<span class="latest-badge">latest</span> ':'')+'<small>'+ranked.length+' of '+allRanked.length+' keys</small></span></div><div class="hot-record-root-summary"><div class="updates"><b>'+rootUpdates+'</b>logical updates</div><div class="deletes"><b>'+rootDeletes+'</b>logical deletes</div></div><div class="hot-record-list">'+(ranked.map((item,index)=>'<button class="hot-record-row" data-hot-key="'+escapeHtml(item.key)+'" title="Open the complete lifecycle for key '+escapeHtml(item.key)+'"><span class="hot-record-rank">'+(index+1)+'</span><span class="hot-record-key">Key '+escapeHtml(item.key)+'</span><span class="hot-record-counts"><span class="hot-record-updates">↻ '+item.updates+'</span><span class="hot-record-deletes">× '+item.deletes+'</span></span></button>').join("")||'<div class="hot-record-empty">Quiet interval — no logical updates or deletions were recorded for this root.</div>')+'</div></div>';}).join("")+'</div><div class="sub">Select a key to open its full record lifecycle in the node details panel.</div></div></div>':'';
     dashboardBody.innerHTML=
-      '<div class="dashboard-head"><div><h1>BatStore: Dashboard</h1><p>'+escapeHtml(currentFileName)+' · latest version '+escapeHtml(latest.version)+'</p></div><div><span class="mode-switch"><button class="btn'+(!dashboardAdvanced?' active':'')+'" data-dashboard-mode="standard">Standard</button><button class="btn'+(dashboardAdvanced?' active':'')+'" data-dashboard-mode="advanced">Advanced</button></span> <button class="btn primary" data-dashboard-action="tree">Open current tree →</button></div></div>'+
-      dashboardClockSection+
+      '<div class="dashboard-head page-header"><div class="page-header-copy"><h1>Dashboard</h1><p>'+escapeHtml(currentFileName)+' · current version '+escapeHtml(latest.version)+'</p></div><div class="page-header-actions"><span class="mode-switch"><button class="btn'+(!dashboardAdvanced?' active':'')+'" data-dashboard-mode="standard">Overview</button><button class="btn'+(dashboardAdvanced?' active':'')+'" data-dashboard-mode="advanced">Deep analysis</button></span><button class="btn primary" data-dashboard-action="tree">Open tree →</button></div></div>'+
       '<div class="dashboard-section"><h2>Health at a glance</h2><div class="health-at-glance-group"><div class="dashboard-card-grid dashboard-health-grid'+(dashboardAdvanced?' advanced':'')+'">'+
         '<div class="dashboard-card"><h3>Page fill and debris</h3><div class="fill-stat-list"><div class="fill-stat-row '+nonRootFillStatus+'"><span>Latest reachable tree</span><b>'+averageDistributionFill+'% average</b></div><div class="fill-stat-row '+currentRootFillStatus+'"><span>Current root page</span><b>'+currentRootFill+'% filled</b></div><div class="fill-stat-row '+averageRootFillStatus+'"><span>All root pages</span><b>'+averageRootFill+'% average</b></div><div class="fill-stat-row '+debrisStatus+'"><span>Historical debris</span><b>'+deadPct+'% obsolete</b></div></div><div class="capacity-summary"><div><span>Internal-page fan-out</span><b>'+escapeHtml(dump.fan_out ?? "Unknown")+'</b></div><div><span>Leaf-page capacity</span><b>'+escapeHtml(dump.num_records ?? "Unknown")+' records</b></div></div><div class="sub">Green marks the preferred fill range. Debris is green below 20%, yellow below 40%, and red from 40%. The fill distribution includes only the latest live-reachable tree.</div>'+(dashboardAdvanced?'<div class="health-subsection"><h3>Root fill over time</h3>'+trendSvg+'</div>':'')+'</div>'+
         fillDistribution+
       '</div></div></div>'+
+      dashboardClockSection+
       workloadSummarySection+
       (dashboardAdvanced?indexSizeSection:"")+
       efficiencyAndKeyspaceSection+
@@ -5843,8 +6127,8 @@
     if(hotSection){const head=hotSection.querySelector(":scope > .dashboard-head"),controls=head?.querySelector(".hot-record-controls"),groupHead=hotSection.querySelector(".hot-record-group .evolution-group-head");if(controls&&groupHead)groupHead.appendChild(controls);head?.remove();}
     if(dashboardAdvanced&&healthSection){
       const isolateGroup=selector=>{const group=dashboardBody.querySelector(selector);if(!group)return null;const section=group.closest(".dashboard-section"),groups=section?[...section.children].filter(child=>child.classList.contains("evolution-group")):[];if(!section||groups.length<=1)return section;const own=document.createElement("div");own.className="dashboard-section";section.parentNode.insertBefore(own,section);own.appendChild(group);return own;};
-      const workloadSection=dashboardBody.querySelector(".evolution-group.workload")?.closest(".dashboard-section"),keyspaceSection=isolateGroup(".keyspace-activity-group"),rootsSection=isolateGroup(".evolution-group.roots"),inventorySection=isolateGroup(".evolution-group.inventory"),efficiencySection=isolateGroup(".efficiency-group"),indexSection=dashboardBody.querySelector(".index-size-group")?.closest(".dashboard-section");
-      const ordered=[workloadSection,hotSection,keyspaceSection,rootsSection,inventorySection,efficiencySection,indexSection].filter(Boolean);
+      const clockSection=dashboardBody.querySelector(".dashboard-clock-panel"),workloadSection=dashboardBody.querySelector(".evolution-group.workload")?.closest(".dashboard-section"),keyspaceSection=isolateGroup(".keyspace-activity-group"),rootsSection=isolateGroup(".evolution-group.roots"),inventorySection=isolateGroup(".evolution-group.inventory"),efficiencySection=isolateGroup(".efficiency-group"),indexSection=dashboardBody.querySelector(".index-size-group")?.closest(".dashboard-section");
+      const ordered=[clockSection,workloadSection,hotSection,keyspaceSection,rootsSection,inventorySection,efficiencySection,indexSection].filter(Boolean);
       healthSection.after(...ordered);
     }
     const recentSection=dashboardSectionByTitle("Recent root");
@@ -5949,31 +6233,56 @@
     });}));
     return [...starts].sort((a,b)=>{const x=tryBigInt(a),y=tryBigInt(b);return x===null||y===null?String(a).localeCompare(String(b)):x<y?-1:x>y?1:0;});
   }
-  function renderWorkerSnapshotCache(workerId) {
+  function populatedWorkerProgressEntries(progress) {
+    return progress.entries.filter(entry=>tryBigInt(entry.lcb)!==0n);
+  }
+  function renderWorkerSnapshotCache(workerId,limit=null) {
     const input=utilityBody.querySelector("#workerSnapshotTs"),body=utilityBody.querySelector("#workerSnapshotRows");if(!input||!body)return;
     const ts=tryBigInt(input.value.trim()),clock=transactionClock();
     if(ts===null||ts<0n||ts>clock.last+1n){alert("Choose a cache ts_start from 0 through "+(clock.last+1n)+".");return;}
     const progress=BatStoreSnapshot.progressTable(dump,ts,clock.maxWorker,simulationCommits);
-    body.innerHTML=progress.entries.map(entry=>'<tr'+(entry.worker===workerId?' class="own-worker"':'')+'><td>w'+entry.worker+(entry.worker===workerId?' · reader':'')+'</td><td>'+escapeHtml(progress.ts)+'</td><td>'+(entry.lcb===null?'Unknown':escapeHtml(entry.lcb))+(entry.worker===workerId?'<br><small>own-worker visibility is direct</small>':'')+'</td></tr>').join("");
+    const populated=populatedWorkerProgressEntries(progress),entries=limit===null?populated:populated.slice(0,limit);
+    body.innerHTML=entries.map(entry=>'<tr'+(entry.worker===workerId?' class="own-worker"':'')+'><td>w'+entry.worker+(entry.worker===workerId?' · reader':'')+'</td><td>'+escapeHtml(progress.ts)+'</td><td>'+(entry.lcb===null?'Unknown':escapeHtml(entry.lcb))+(entry.worker===workerId?'<br><small>own-worker visibility is direct</small>':'')+'</td></tr>').join("")||'<tr><td colspan="3">No populated worker-cache entries at this timestamp.</td></tr>';
     const note=utilityBody.querySelector("#workerSnapshotAccuracy");if(note)note.textContent=progress.exact?"Computed from the complete commit history in this dump.":"Best-effort projection: this dump does not contain complete historical commit logs.";
   }
-  function showWorkerInspector(workerId) {
+  function workerInspectorData(workerId) {
     const clock=transactionClock();let facts=dashboardWorkerFactsCache.get(dump);if(!facts){facts=BatStoreSnapshot.workerActivity(dump);dashboardWorkerFactsCache.set(dump,facts);}
     const fact=facts.workers[workerId]||{worker:workerId,commits:facts.exactCommits?0:null,writes:0,deletes:0},runs=simulationRuns.filter(run=>run.worker===workerId),starts=workerTransactionStarts(workerId),recordedCommits=(dump.commit_logs?.[workerId]||[]).map(String),persistedCount=Math.max(starts.length,recordedCommits.length);
-    const persisted=Array.from({length:persistedCount},(_,index)=>({start:starts[index]??"Unavailable",commit:recordedCommits[index]??"Unknown",source:"Dump"})),replayed=runs.filter(run=>run.writing&&!run.aborted).map(run=>({start:run.tsStart??"Unavailable",commit:run.commit??"Unknown",source:"Session replay"})),commits=[...persisted,...replayed],events=workerRecordActivity(workerId),shownEvents=events.slice(0,100),successfulRuns=runs.filter(run=>!run.aborted).length;
-    const commitRows=commits.map((entry,index)=>'<tr><td>'+(index+1)+'</td><td>'+escapeHtml(entry.start)+'</td><td>'+escapeHtml(entry.commit)+'</td><td>'+entry.source+'</td></tr>').join("");
-    const eventRows=shownEvents.map(event=>'<tr><td><span class="worker-event-kind '+event.kind+'">'+event.kind+'</span></td><td>'+escapeHtml(event.key)+'</td><td>'+escapeHtml(event.ts)+'</td></tr>').join("");
-    const runRows=runs.map((run,index)=>'<tr><td>'+(index+1)+'</td><td>'+(run.writing?'Write':'Read only')+'</td><td>'+run.operations+'</td><td>'+(run.aborted?'Aborted':'Completed')+'</td></tr>').join("");
-    showUtilityPanel("Worker w"+workerId,
-      '<div class="worker-inspector" data-worker-inspector="'+workerId+'"><div class="inspector-hero"><small>Worker activity</small><b>w'+workerId+'</b><div class="trace-intro">Commit visibility, reconstructed snapshot-cache values, retained index activity, and transaction replays for this worker.</div></div>'+
-      metricCards([["Transaction pairs",commits.length],["Index writes",fact.writes],["Index deletes",fact.deletes],["Session replays",runs.length]])+
-      '<section class="worker-panel-section"><h3>Commit log</h3><p>Each writing transaction is shown as its worker-local <code>ts_start → ts_commit</code> pair. Dump rows pair ordered retained transaction stamps with that worker’s ordered commit log.'+(facts.exactCommits?' Commit history is complete.':' Historical commit data is incomplete, so unmatched values are labeled explicitly.')+'</p><div class="worker-panel-table-wrap"><table class="progress-table"><thead><tr><th>#</th><th>ts_start</th><th>ts_commit</th><th>Source</th></tr></thead><tbody>'+(commitRows||'<tr><td colspan="4">No committed transactions recorded for this worker.</td></tr>')+'</tbody></table></div></section>'+
-      '<section class="worker-panel-section"><h3>Snapshot progress table</h3><p>The runtime thread-local cache is not serialized in a dump. This table reconstructs the values it would obtain from <code>LCB(worker, cache ts_start)</code> for reader w'+workerId+'.</p><div class="worker-snapshot-controls"><label>Cache ts_start<input id="workerSnapshotTs" inputmode="numeric" min="0" max="'+(clock.last+1n)+'" value="'+clock.last+'"></label><button class="btn primary" id="workerSnapshotRefresh">Refresh table</button></div><p id="workerSnapshotAccuracy"></p><div class="worker-panel-table-wrap"><table class="progress-table"><thead><tr><th>Worker ID</th><th>cache ts_start</th><th>ts_commit</th></tr></thead><tbody id="workerSnapshotRows"></tbody></table></div></section>'+
-      '<section class="worker-panel-section"><h3>Recent retained-index activity</h3><p>Logical record events are deduplicated across physical copies. Showing up to 100 newest events.</p><div class="worker-panel-table-wrap"><table class="progress-table"><thead><tr><th>Event</th><th>Key</th><th>ts_start</th></tr></thead><tbody>'+(eventRows||'<tr><td colspan="3">No retained record activity for this worker.</td></tr>')+'</tbody></table></div></section>'+
-      '<section class="worker-panel-section"><h3>Explorer session replays</h3><p>'+successfulRuns+' of '+runs.length+' replay'+(runs.length===1?'':'s')+' completed without aborting.</p><div class="worker-panel-table-wrap"><table class="progress-table"><thead><tr><th>#</th><th>Kind</th><th>Operations</th><th>Outcome</th></tr></thead><tbody>'+(runRows||'<tr><td colspan="4">No transaction replays for this worker in this session.</td></tr>')+'</tbody></table></div></section></div>');
+    const persisted=Array.from({length:persistedCount},(_,index)=>({start:starts[index]??"Unavailable",commit:recordedCommits[index]??"Unknown",source:"Dump"})),replayed=runs.filter(run=>run.writing&&!run.aborted).map(run=>({start:run.tsStart??"Unavailable",commit:run.commit??"Unknown",source:"Session replay"}));
+    return {clock,facts,fact,runs,commits:[...persisted,...replayed],events:workerRecordActivity(workerId)};
+  }
+  function workerCommitRows(commits) {
+    return commits.map((entry,index)=>'<tr><td>'+(index+1)+'</td><td>'+escapeHtml(entry.start)+'</td><td>'+escapeHtml(entry.commit)+'</td><td>'+escapeHtml(entry.source)+'</td></tr>').join("");
+  }
+  function showWorkerCommitLog(workerId) {
+    const {facts,commits}=workerInspectorData(workerId),rows=workerCommitRows(commits);
+    showUtilityPanel("Worker w"+workerId+" · Commit log",'<div class="worker-detail-view"><button class="worker-detail-back" type="button" data-worker-overview="'+workerId+'">← Worker overview</button><div class="inspector-hero"><small>Complete commit history</small><b>w'+workerId+' commit log</b><div class="trace-intro">Every available worker-local <code>ts_start → ts_commit</code> pair, including successful Explorer replays.</div></div><div class="worker-detail-summary"><strong>'+commits.length+'</strong><span>commit-log entr'+(commits.length===1?'y':'ies')+'</span></div><p class="worker-detail-note">'+(facts.exactCommits?'The dump contains a complete commit history.':'Historical commit data is incomplete; unmatched timestamps are shown as unavailable or unknown.')+'</p><table class="progress-table worker-full-table"><thead><tr><th>#</th><th>ts_start</th><th>ts_commit</th><th>Source</th></tr></thead><tbody>'+(rows||'<tr><td colspan="4">No committed transactions recorded for this worker.</td></tr>')+'</tbody></table></div>');
+    utilityBody.querySelector("[data-worker-overview]").onclick=()=>showWorkerInspector(workerId);
+  }
+  function showWorkerSnapshotProgress(workerId) {
+    const {clock}=workerInspectorData(workerId);
+    showUtilityPanel("Worker w"+workerId+" · Snapshot progress",'<div class="worker-detail-view" data-worker-progress="'+workerId+'"><button class="worker-detail-back" type="button" data-worker-overview="'+workerId+'">← Worker overview</button><div class="inspector-hero"><small>Complete progress table</small><b>Snapshot visibility</b><div class="trace-intro">Reconstructed thread-local cache values for reader w'+workerId+' at the selected timestamp.</div></div><div class="worker-snapshot-controls"><label>Cache ts_start<input id="workerSnapshotTs" inputmode="numeric" min="0" max="'+(clock.last+1n)+'" value="'+clock.last+'"></label><button class="btn primary" id="workerSnapshotRefresh">Refresh table</button></div><p id="workerSnapshotAccuracy" class="worker-detail-note"></p><table class="progress-table worker-full-table"><thead><tr><th>Worker ID</th><th>cache ts_start</th><th>ts_commit</th></tr></thead><tbody id="workerSnapshotRows"></tbody></table></div>');
+    utilityBody.querySelector("[data-worker-overview]").onclick=()=>showWorkerInspector(workerId);
     utilityBody.querySelector("#workerSnapshotRefresh").onclick=()=>renderWorkerSnapshotCache(workerId);
     utilityBody.querySelector("#workerSnapshotTs").onkeydown=event=>{if(event.key==="Enter")renderWorkerSnapshotCache(workerId);};
     renderWorkerSnapshotCache(workerId);
+  }
+  function showWorkerInspector(workerId) {
+    const {clock,facts,fact,runs,commits,events}=workerInspectorData(workerId),shownEvents=events.slice(0,6),shownRuns=runs.slice(-6).reverse(),successfulRuns=runs.filter(run=>!run.aborted).length;
+    const commitRows=workerCommitRows(commits.slice(0,4));
+    const progress=BatStoreSnapshot.progressTable(dump,clock.last,clock.maxWorker,simulationCommits),populatedProgress=populatedWorkerProgressEntries(progress),progressRows=populatedProgress.slice(0,5).map(entry=>'<tr'+(entry.worker===workerId?' class="own-worker"':'')+'><td>w'+entry.worker+(entry.worker===workerId?' · reader':'')+'</td><td>'+escapeHtml(progress.ts)+'</td><td>'+(entry.lcb===null?'Unknown':escapeHtml(entry.lcb))+'</td></tr>').join("");
+    const eventRows=shownEvents.map(event=>'<tr><td><span class="worker-event-kind '+event.kind+'">'+event.kind+'</span></td><td>'+escapeHtml(event.key)+'</td><td>'+escapeHtml(event.ts)+'</td></tr>').join("");
+    const runRows=shownRuns.map((run,index)=>'<tr><td>'+(runs.length-index)+'</td><td>'+(run.writing?'Write':'Read only')+'</td><td>'+run.operations+'</td><td>'+(run.aborted?'Aborted':'Completed')+'</td></tr>').join("");
+    showUtilityPanel("Worker w"+workerId,
+      '<div class="worker-inspector" data-worker-inspector="'+workerId+'"><div class="inspector-hero"><small>Worker overview</small><b>w'+workerId+'</b><div class="trace-intro">A compact view of commits, snapshot visibility, retained-index activity, and Explorer replays.</div></div>'+
+      metricCards([["Transaction pairs",commits.length],["Index writes",fact.writes],["Index deletes",fact.deletes],["Session replays",runs.length]])+
+      '<div class="worker-panel-launch-grid"><section class="worker-panel-section worker-panel-launch" data-open-worker-commits="'+workerId+'" tabindex="0" role="button"><div class="worker-panel-heading"><div><h3>Commit log</h3><p>'+commits.length+' available entr'+(commits.length===1?'y':'ies')+' · '+(facts.exactCommits?'complete history':'partial history')+'</p></div><span>Open full log →</span></div><table class="progress-table worker-preview-table"><thead><tr><th>#</th><th>ts_start</th><th>ts_commit</th><th>Source</th></tr></thead><tbody>'+(commitRows||'<tr><td colspan="4">No committed transactions.</td></tr>')+'</tbody></table>'+(commits.length>4?'<small class="worker-preview-more">Previewing 4 of '+commits.length+' entries</small>':'')+'</section>'+
+      '<section class="worker-panel-section worker-panel-launch" data-open-worker-progress="'+workerId+'" tabindex="0" role="button"><div class="worker-panel-heading"><div><h3>Snapshot progress</h3><p>Cache at ts_start '+clock.last+' · '+populatedProgress.length+' populated worker'+(populatedProgress.length===1?'':'s')+'</p></div><span>Open full table →</span></div><table class="progress-table worker-preview-table"><thead><tr><th>Worker</th><th>cache ts_start</th><th>ts_commit</th></tr></thead><tbody>'+(progressRows||'<tr><td colspan="3">No populated cache entries.</td></tr>')+'</tbody></table>'+(populatedProgress.length>5?'<small class="worker-preview-more">Previewing 5 of '+populatedProgress.length+' workers</small>':'')+'</section></div>'+
+      '<section class="worker-panel-section"><div class="worker-panel-heading"><div><h3>Recent index activity</h3><p>'+events.length+' logical event'+(events.length===1?'':'s')+' · newest first</p></div></div><table class="progress-table worker-preview-table"><thead><tr><th>Event</th><th>Key</th><th>ts_start</th></tr></thead><tbody>'+(eventRows||'<tr><td colspan="3">No retained record activity.</td></tr>')+'</tbody></table>'+(events.length>6?'<small class="worker-preview-more">Showing 6 newest events</small>':'')+'</section>'+
+      '<section class="worker-panel-section"><div class="worker-panel-heading"><div><h3>Session replays</h3><p>'+successfulRuns+' of '+runs.length+' completed</p></div></div><table class="progress-table worker-preview-table"><thead><tr><th>#</th><th>Kind</th><th>Ops</th><th>Outcome</th></tr></thead><tbody>'+(runRows||'<tr><td colspan="4">No Explorer replays in this session.</td></tr>')+'</tbody></table>'+(runs.length>6?'<small class="worker-preview-more">Showing 6 latest replays</small>':'')+'</section></div>');
+    const openCommits=utilityBody.querySelector("[data-open-worker-commits]"),openProgress=utilityBody.querySelector("[data-open-worker-progress]");
+    const activate=(element,run)=>{element.onclick=run;element.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();run();}};};
+    activate(openCommits,()=>showWorkerCommitLog(workerId));activate(openProgress,()=>showWorkerSnapshotProgress(workerId));
   }
   function refreshDashboardWorkerActivity(clock) {
     const target=dashboardBody.querySelector("#dashboardWorkerActivity");if(!target)return;
@@ -6009,9 +6318,13 @@
   function switchWorkspace(name) {
     if(name==="tree")name="snapshots";
     activeWorkspace=name;
+    localStorage.setItem("batstore-explorer-workspace",name);
     if(name!=="dashboard")currentDashboardSourceSection=null;
-    document.querySelectorAll(".workspace-tab").forEach(el=>el.classList.toggle("active",el.dataset.workspace===name));
+    document.querySelectorAll(".workspace-tab").forEach(el=>{const active=el.dataset.workspace===name;el.classList.toggle("active",active);if(active)el.setAttribute("aria-current","page");else el.removeAttribute("aria-current");});
+    document.querySelector('.workspace-tab[data-workspace="'+name+'"]')?.closest(".workspace-nav-group")?.setAttribute("open","");
     document.querySelectorAll(".workspace-tab-panel").forEach(el=>el.classList.toggle("active",el.dataset.panel===name));
+    const activeContextPanel=document.querySelector('.workspace-tab-panel[data-panel="'+name+'"]');
+    document.getElementById("sidebar").classList.toggle("rail-only",activeContextPanel?.dataset.context==="none");
     const dashboard=name==="dashboard";
     const dataPage=name==="overview"||name==="animation";
     document.body.classList.toggle("tree-workspace",!dashboard&&!dataPage);
@@ -6028,10 +6341,13 @@
     tracePanel.classList.add("hidden");keyTracerPanel.classList.add("hidden");utilityPanel.classList.add("hidden");map2dPanel.classList.add("hidden");currentInspectedNodeId=null;
     if(panel?.type==="utility"){
       document.getElementById("utilityTitle").textContent=panel.title||"Analysis";utilityBody.innerHTML=panel.html||"";utilityPanel.classList.remove("hidden");
+      utilityPanel.classList.toggle("worker-detail-open",!!utilityBody.querySelector(".worker-detail-view"));
       utilityBody.querySelectorAll("[data-keyspace-detail-key]").forEach(row=>row.onclick=()=>openKeyTracer(row.dataset.keyspaceDetailKey));
       utilityBody.querySelectorAll("[data-evolution-key]").forEach(row=>row.onclick=()=>openKeyTracer(row.dataset.evolutionKey));
       utilityBody.querySelectorAll("[data-structural-node]").forEach(button=>button.onclick=()=>inspectStructuralNode(button.dataset.structuralNode));
-      const workerInspector=utilityBody.querySelector("[data-worker-inspector]");if(workerInspector){const workerId=+workerInspector.dataset.workerInspector,refresh=utilityBody.querySelector("#workerSnapshotRefresh"),input=utilityBody.querySelector("#workerSnapshotTs");if(refresh)refresh.onclick=()=>renderWorkerSnapshotCache(workerId);if(input)input.onkeydown=event=>{if(event.key==="Enter")renderWorkerSnapshotCache(workerId);};}
+      const workerInspector=utilityBody.querySelector("[data-worker-inspector]");if(workerInspector){const workerId=+workerInspector.dataset.workerInspector,activate=(element,run)=>{if(!element)return;element.onclick=run;element.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();run();}};};activate(utilityBody.querySelector("[data-open-worker-commits]"),()=>showWorkerCommitLog(workerId));activate(utilityBody.querySelector("[data-open-worker-progress]"),()=>showWorkerSnapshotProgress(workerId));}
+      const workerBack=utilityBody.querySelector("[data-worker-overview]");if(workerBack)workerBack.onclick=()=>showWorkerInspector(+workerBack.dataset.workerOverview);
+      const workerProgress=utilityBody.querySelector("[data-worker-progress]");if(workerProgress){const workerId=+workerProgress.dataset.workerProgress,refresh=utilityBody.querySelector("#workerSnapshotRefresh"),input=utilityBody.querySelector("#workerSnapshotTs");if(refresh)refresh.onclick=()=>renderWorkerSnapshotCache(workerId);if(input)input.onkeydown=event=>{if(event.key==="Enter")renderWorkerSnapshotCache(workerId);};}
     }else if(panel?.type==="keyTracer"&&panel.key!==null){
       keyTracerReturnPanel="history";openKeyTracer(panel.key);document.getElementById("keyTracerBackBtn").classList.remove("hidden");
     }else if(panel?.type==="trace")tracePanel.classList.remove("hidden");
@@ -6042,8 +6358,10 @@
   }
   window.addEventListener("popstate",event=>{const state=event.state;if(!state?.batstoreExplorer)return;suppressBrowserHistory=true;lastBrowserStateKey=JSON.stringify(state);currentDashboardSourceSection=state.section||null;switchWorkspace(state.workspace||"dashboard");if(dump&&state.rootId){const root=dump.roots.find(item=>item.node_id===state.rootId&&String(item.version)===String(state.rootVersion))||dump.roots.find(item=>item.node_id===state.rootId);if(root)selectRoot(root.node_id,root);}requestAnimationFrame(()=>requestAnimationFrame(()=>{restoreBrowserPanel(state.panel);if((state.workspace||"dashboard")==="dashboard"&&Number.isFinite(state.dashboardScrollTop))dashboardView.scrollTo({top:state.dashboardScrollTop,behavior:"auto"});else if(state.section)document.getElementById(state.section)?.scrollIntoView({behavior:"auto",block:"start"});else if((state.workspace||"dashboard")==="dashboard")dashboardView.scrollTo({top:0,behavior:"auto"});suppressBrowserHistory=false;}));});
   if(!history.state?.batstoreExplorer){const initialBrowserState=currentBrowserState();history.replaceState(initialBrowserState,"",location.href);lastBrowserStateKey=JSON.stringify(initialBrowserState);}else lastBrowserStateKey=JSON.stringify(history.state);
-  const panelHistoryObserver=new MutationObserver(()=>scheduleBrowserState());
+  function updateInspectorFocus(){const open=[utilityPanel,keyTracerPanel,tracePanel,map2dPanel].some(panel=>!panel.classList.contains("hidden"));document.body.classList.toggle("inspector-open",open);}
+  const panelHistoryObserver=new MutationObserver(()=>{updateInspectorFocus();scheduleBrowserState();});
   [utilityPanel,keyTracerPanel,tracePanel,map2dPanel].forEach(panel=>panelHistoryObserver.observe(panel,{attributes:true,attributeFilter:["class"]}));
+  updateInspectorFocus();
   document.querySelectorAll(".workspace-tab").forEach(el=>el.addEventListener("click",()=>switchWorkspace(el.dataset.workspace)));
   const sidebarEl=document.getElementById("sidebar"), contextPanelToggle=document.getElementById("contextPanelToggle");
   const savedSidebarWidth=parseInt(localStorage.getItem("batstore-viz-sidebar-width"),10);
@@ -6059,7 +6377,7 @@
   document.querySelectorAll("[data-side-action]").forEach(el=>el.addEventListener("click",()=>runAdvanced(el.dataset.sideAction)));
   document.getElementById("appearancePanelHost").appendChild(document.getElementById("grpAppearance"));
   document.getElementById("playbackPanelHost").appendChild(document.getElementById("grpPlayback"));
-  document.getElementById("statusDataViewHost").appendChild(document.getElementById("grpDataView"));
+  document.querySelector(".status-more-menu").prepend(document.getElementById("grpDataView"));
   document.getElementById("queriesKeyOpsHost").appendChild(document.getElementById("grpKeyOperations"));
   document.getElementById("statusTreeActionsMenuHost").appendChild(document.getElementById("expandAllBtn").closest("details"));
   document.getElementById("replayLatestBtn").addEventListener("click",replayLatestStructuralChange);
@@ -6424,6 +6742,7 @@
     if (!preserveMap) map2dPanel.classList.add("hidden");
     document.getElementById("utilityTitle").textContent = title;
     utilityBody.innerHTML = html;
+    utilityPanel.classList.toggle("worker-detail-open",!!utilityBody.querySelector(".worker-detail-view"));
     const dashboardDetail=utilityBody.querySelector(".dashboard-info-detail");if(dashboardDetail){const calculation=document.createElement("div");calculation.className="dashboard-calculation";calculation.innerHTML="<b>How this is calculated</b>"+escapeHtml(dashboardMetricCalculation(title));dashboardDetail.appendChild(calculation);}
     utilityPanelRootRefresh = rootRefresh;
     utilityPanel.classList.remove("hidden");
@@ -6458,7 +6777,10 @@
   }
   function commandItems(){return [
     {icon:"⌂",name:"Open dashboard",hint:"Overview and health summary",run:()=>switchWorkspace("dashboard")},
+    {icon:"▤",name:"Open table overview",hint:"Filter, sort, and inspect snapshot rows",run:()=>switchWorkspace("overview")},
+    {icon:"▶",name:"Open transactions",hint:"Compose and replay database transactions",key:"Ctrl+T",run:()=>{switchWorkspace("animation");if(!activeTransactionTab())createTransactionTab();}},
     {icon:"⑂",name:"Open tree view",hint:"Explore the current tree",run:()=>switchWorkspace("tree")},
+    {icon:"♥",name:"Open health analysis",hint:"Capacity, page types, and dead space",run:()=>switchWorkspace("health")},
     {icon:"⌕",name:"Find a key",hint:"Focus the key search field",key:"/",run:()=>{switchWorkspace("queries");setTimeout(()=>document.getElementById("search").focus(),0);}},
     {icon:"↶",name:"Open record lifecycle",hint:"Trace insertions, copies, migrations, and deletion for a key",run:()=>{const key=prompt("Key to inspect:","");if(key!==null&&key.trim())openKeyTracer(key.trim());}},
     {icon:"◎",name:"Fit tree to view",hint:"Center all visible nodes",key:"F",run:fitToView},
@@ -6502,6 +6824,7 @@
       '<b>/</b> focuses key search.</div>' +
       '<div class="analysis-card"><h3>2D map</h3>' +
       '<b>Alt + Left</b> goes back.<br><b>Alt + Right</b> goes forward.</div>' +
+      '<div class="analysis-card"><h3>Transactions</h3><b>Ctrl/Cmd + T</b> opens a new transaction.<br><b>Ctrl/Cmd + W</b> closes the current transaction.<br><b>Ctrl/Cmd + Tab</b> switches transaction tabs.</div>'+
       '<div class="analysis-card"><h3>Commands and panels</h3><b>Ctrl/Cmd + K</b> opens the command palette.<br><b>F</b> fits the tree.<br><b>P</b> toggles presentation mode.<br><b>Escape</b> closes the open map or inspector.</div>');
   });
 
@@ -7029,12 +7352,15 @@
   document.addEventListener("keydown", e => {
     const editing = e.target.matches("input, textarea, select") || e.target.isContentEditable;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); commandPalette.classList.contains("hidden") ? openCommandPalette() : closeCommandPalette(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "t" && dump) { e.preventDefault(); switchWorkspace("animation"); createTransactionTab(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "w" && activeWorkspace==="animation" && activeTransactionTab()) { e.preventDefault(); closeTransactionTab(activeTransactionTabId); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key === "Tab" && activeWorkspace==="animation" && transactionTabs.length>1) { e.preventDefault(); const index=transactionTabs.findIndex(tab=>tab.id===activeTransactionTabId),next=(index+(e.shiftKey?-1:1)+transactionTabs.length)%transactionTabs.length;selectTransactionTab(transactionTabs[next].id);return; }
     if (e.key === "Escape") {
       closeCommandPalette();
       map2dPanel.classList.add("hidden"); tracePanel.classList.add("hidden");
       keyTracerPanel.classList.add("hidden"); utilityPanel.classList.add("hidden");
       currentInspectedNodeId=null; map2dSelectedDetailsEntry=null;
-      document.querySelectorAll("details[open]").forEach(d => d.removeAttribute("open"));
+      document.querySelectorAll("details[open]:not(.workspace-nav-group)").forEach(d => d.removeAttribute("open"));
       return;
     }
     if (e.altKey && e.key === "ArrowLeft" && !map2dPanel.classList.contains("hidden")) {
@@ -7169,6 +7495,9 @@
     return rows.length ? rows.map(row=>'<tr'+(row.status==="PHANTOM"?' class="phantom"':'')+'>'+columns.map(column=>'<td>'+(column.name==="status"&&row.status==="PHANTOM"?'<span class="phantom-badge">PHANTOM</span>':escapeHtml(cellText(row[column.name])))+'</td>').join("")+'</tr>').join("")
       : '<tr><td colspan="'+columns.length+'">'+escapeHtml(emptyMessage)+'</td></tr>';
   }
+  function transactionResultColumnLabel(name) {
+    return ({key:"Key",insert_worker:"Created by",insert_ts:"Created at",delete_worker:"Deleted by",delete_ts:"Deleted at",status:"Status"})[String(name).toLowerCase()]||String(name).replaceAll("_"," ");
+  }
   function typedOperationValue(table, column, raw) {
     const type=explorerColumns(table).find(c=>c.name===column)?.data_type?.toLowerCase()||"";
     if(/^(bool|boolean)/.test(type))return raw.toLowerCase()==="true";
@@ -7176,6 +7505,14 @@
       const number=Number(raw);if(Number.isFinite(number)&&(Number.isSafeInteger(number)||/^(float|double)/.test(type)))return number;
     }
     return raw;
+  }
+  function compareOverviewValues(a,b){
+    if(a==null&&b==null)return 0;if(a==null)return -1;if(b==null)return 1;
+    const an=Number(a),bn=Number(b);if(String(a).trim()!==""&&String(b).trim()!==""&&Number.isFinite(an)&&Number.isFinite(bn))return an-bn;
+    return String(a).localeCompare(String(b),undefined,{numeric:true,sensitivity:"base"});
+  }
+  function pageHeaderHtml(title,description,actions="",details=""){
+    return '<header class="page-header"><div class="page-header-copy"><h1>'+escapeHtml(title)+'</h1><p>'+escapeHtml(description)+'</p>'+(details?'<details class="page-help"><summary>Details</summary><div>'+escapeHtml(details)+'</div></details>':'')+'</div>'+(actions?'<div class="page-header-actions">'+actions+'</div>':'')+'</header>';
   }
   function renderTableOverview() {
     renderTableList();
@@ -7186,7 +7523,7 @@
       value:target.querySelector("#overviewValue")?.value,limit:target.querySelector("#overviewLimit")?.value,
       phantoms:target.querySelector("#overviewPhantoms")?.checked};
     const columnOptions=columns.map(c=>'<option value="'+escapeHtml(c.name)+'">'+escapeHtml(c.name)+'</option>').join("");
-    target.innerHTML='<div class="data-shell"><h1>Table overview</h1><p>Query keys at a snapshot from 0 through GLC '+clock.last+'. '+(clock.inferredClock?'This older dump has no stored GLC; the bound is inferred. ':"")+(clock.exact?'Worker commit history is included.':'Historical visibility is approximate for this dump.')+'</p>'+
+    target.innerHTML='<div class="data-shell">'+pageHeaderHtml("Table overview","Filter and inspect rows at a chosen snapshot.",'<button class="btn primary" id="overviewTree">View index</button>','Available snapshots run from 0 through GLC '+clock.last+'. '+(clock.inferredClock?'This older dump has no stored GLC; the bound is inferred. ':"")+(clock.exact?'Worker commit history is included.':'Historical visibility is approximate for this dump.'))+
       '<section class="data-card"><div class="table-library-head"><h2>Tables · '+tables.length+' loaded</h2><button class="btn" id="addTableOverview">+ Add table dumps</button></div><div class="table-card-list">'+tables.map((entry,index)=>'<button class="table-card '+(index===activeTableIndex?'selected':'')+'" data-main-table="'+index+'"><strong>'+escapeHtml(entry.name||('Table '+index))+'</strong><small>'+((entry.rows||[]).length)+' payload rows · '+(entry.tree?.roots?.length||0)+' root versions</small></button>').join("")+'</div></section>'+
       '<div class="data-controls"><label>Table<select id="overviewTable">'+tableOptions(activeTableIndex)+'</select></label>'+
       '<label>Snapshot ts_start<input id="overviewTime" inputmode="numeric" value="'+clock.last+'"></label>'+
@@ -7196,8 +7533,8 @@
       '<label>Value<input id="overviewValue" placeholder="All rows"></label>'+
       '<label>Rows per page<input id="overviewLimit" type="number" min="1" max="1000" value="10"></label>'+
       '<label><span>Aborted records</span><span><input id="overviewPhantoms" type="checkbox" checked> Show phantoms</span></label>'+
-      '<button class="btn primary" id="overviewRun">Select</button><button class="btn" id="overviewTree">View index</button></div>'+
-      '<div class="data-card"><div id="overviewSummary"></div><div class="data-scroll"><table class="data-table"><thead><tr>'+columns.map(c=>'<th>'+escapeHtml(c.name)+'<small>'+escapeHtml(c.data_type||"value")+'</small></th>').join("")+'</tr></thead><tbody id="overviewRows"></tbody></table></div>'+
+      '<button class="btn primary" id="overviewRun">Select</button><button class="btn" id="overviewReset">Reset filters</button></div>'+
+      '<div class="data-card"><div class="overview-toolbar"><div id="overviewSummary"></div><button class="btn" id="overviewDensity">'+(overviewCompact?'Comfortable rows':'Compact rows')+'</button></div><div class="data-scroll"><table class="data-table'+(overviewCompact?' compact':'')+'"><thead><tr>'+columns.map((c,index)=>'<th aria-sort="'+(overviewSortColumn===c.name?(overviewSortDirection>0?'ascending':'descending'):'none')+'"><button class="data-table-sort'+(overviewSortColumn===c.name?' active':'')+'" data-sort-column="'+index+'" data-direction="'+(overviewSortDirection>0?'↑':'↓')+'">'+escapeHtml(c.name)+'</button><small>'+escapeHtml(c.data_type||"value")+'</small></th>').join("")+'</tr></thead><tbody id="overviewRows"></tbody></table><div class="overview-empty hidden" id="overviewEmpty"><span>No records match the current filters.</span><button class="btn" id="overviewEmptyReset">Reset filters</button></div></div>'+
       '<div class="data-pager"><button class="btn" id="overviewPrev">← Previous</button><span id="overviewPageLabel"></span><button class="btn" id="overviewNext">Next →</button></div></div></div>';
     if(previous.time)target.querySelector("#overviewTime").value=previous.time;
     if(previous.worker)target.querySelector("#overviewWorker").value=previous.worker;
@@ -7211,6 +7548,11 @@
     target.querySelectorAll("[data-main-table]").forEach(button=>button.onclick=()=>{overviewPage=0;selectBundleTable(+button.dataset.mainTable,"overview");});
     target.querySelector("#overviewTree").onclick=()=>selectBundleTable(activeTableIndex,"snapshots");
     target.querySelector("#overviewRun").onclick=()=>{overviewPage=0;updateOverviewRows();};
+    const resetOverview=()=>{target.querySelector("#overviewValue").value="";target.querySelector("#overviewOperator").value="contains";target.querySelector("#overviewPhantoms").checked=true;overviewSortColumn=null;overviewPage=0;renderTableOverview();};
+    target.querySelector("#overviewReset").onclick=resetOverview;
+    target.querySelector("#overviewEmptyReset").onclick=resetOverview;
+    target.querySelector("#overviewDensity").onclick=()=>{overviewCompact=!overviewCompact;localStorage.setItem("batstore-explorer-table-density",overviewCompact?"compact":"comfortable");renderTableOverview();};
+    target.querySelectorAll("[data-sort-column]").forEach(button=>button.onclick=()=>{const column=columns[+button.dataset.sortColumn].name;if(overviewSortColumn===column)overviewSortDirection*=-1;else{overviewSortColumn=column;overviewSortDirection=1;}overviewPage=0;renderTableOverview();});
     target.querySelector("#overviewPhantoms").onchange=()=>{overviewPage=0;updateOverviewRows();};
     target.querySelector("#overviewPrev").onclick=()=>{overviewPage=Math.max(0,overviewPage-1);updateOverviewRows();};
     target.querySelector("#overviewNext").onclick=()=>{overviewPage++;updateOverviewRows();};
@@ -7227,25 +7569,35 @@
     const showPhantoms=target.querySelector("#overviewPhantoms").checked;
     const candidates=showPhantoms?result.rows.concat(result.phantoms||[]):result.rows;
     const matched=BatStoreSnapshot.select(candidates,{field,operator,value});
+    if(overviewSortColumn)matched.sort((a,b)=>compareOverviewValues(a[overviewSortColumn],b[overviewSortColumn])*overviewSortDirection);
     const limit=Math.min(1000,Math.max(1,Number(target.querySelector("#overviewLimit").value)||10));
     const pages=Math.max(1,Math.ceil(matched.length/limit));overviewPage=Math.min(overviewPage,pages-1);
     const rows=matched.slice(overviewPage*limit,(overviewPage+1)*limit),columns=explorerColumns(table);
     target.querySelector("#overviewSummary").textContent=matched.length+" matching records ("+matched.filter(row=>row.status==="PHANTOM").length+" phantoms) · root "+(result.root?.version??"none")+" · "+snapshotNotice(clock,result);
-    target.querySelector("#overviewRows").innerHTML=renderDataRows(rows,columns,"No matching records at this snapshot.");
+    target.querySelector("#overviewRows").innerHTML=rows.length?renderDataRows(rows,columns,""):"";
+    target.querySelector(".data-table").classList.toggle("hidden",!matched.length);
+    target.querySelector("#overviewEmpty").classList.toggle("hidden",!!matched.length);
+    target.querySelectorAll("#overviewRows tr").forEach(row=>{const select=()=>{target.querySelectorAll("#overviewRows tr").forEach(item=>item.classList.remove("selected"));row.classList.add("selected");};row.tabIndex=0;row.onclick=select;row.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();select();}};});
     target.querySelector("#overviewPageLabel").textContent='Page '+(overviewPage+1)+' of '+pages;
     target.querySelector("#overviewPrev").disabled=overviewPage===0;
     target.querySelector("#overviewNext").disabled=overviewPage>=pages-1;
   }
   function activeTransactionTab() { return transactionTabs.find(tab=>tab.id===activeTransactionTabId)||null; }
+  function setTransactionTabStatus(tab,status){if(!tab)return;tab.status=status;const button=document.querySelector('.txn-tab-wrap .txn-tab[data-transaction-tab="'+tab.id+'"]'),wrap=button?.closest(".txn-tab-wrap");if(wrap){wrap.classList.remove("status-draft","status-running","status-success","status-failed");wrap.classList.add("status-"+status);const state=wrap.querySelector(".txn-tab-state");if(state){state.textContent=({success:"✓",failed:"!",running:"…",draft:"•"}[status]);state.title=status;}button.setAttribute("aria-label",tab.name+", "+status);}}
   function syncActiveTransactionTab() {
     const tab=activeTransactionTab();if(!tab)return;
     tab.ops=animationOps;tab.mode=animationMode;
   }
-  function createTransactionTab() {
+  function transactionOperationTemplate(kind) {
+    return {kind,tableIndex:activeTableIndex,key:"",lower:"",upper:"",column:"",value:"",limit:10,predicateColumn:"",predicateOperator:"eq",predicateValue:""};
+  }
+  function createTransactionTab(initialMode="auto",initialOperation=null) {
     clearTimeout(animationTimer);
     syncActiveTransactionTab();
+    if(!["auto","explicit","rc","ru"].includes(initialMode))initialMode="auto";
+    const templateKinds=["read","scan","insert","update","delete"],ops=templateKinds.includes(initialOperation)?[transactionOperationTemplate(initialOperation)]:[];
     const clock=transactionClock(),number=nextTransactionTabId++;
-    const tab={id:number,name:"Transaction "+number,ops:[],mode:"auto",rcTupleRefresh:false,ended:false,worker:"",offset:"1",time:String(clock.last),resultHtml:""};
+    const tab={id:number,name:"Transaction "+number,ops,mode:initialMode,rcTupleRefresh:false,ended:false,worker:"",offset:"1",time:String(clock.last),resultHtml:"",status:"draft"};
     transactionTabs.push(tab);activeTransactionTabId=tab.id;transactionCreated=true;
     animationOps=tab.ops;animationMode=tab.mode;renderTransactionAnimation();
   }
@@ -7254,12 +7606,13 @@
     clearTimeout(animationTimer);syncActiveTransactionTab();
     activeTransactionTabId=id;renderTransactionAnimation();
   }
-  function closeTransactionTab(id) {
+  function closeTransactionTab(id,offerUndo=true) {
     clearTimeout(animationTimer);clearTimeout(transactionTabClickTimer);syncActiveTransactionTab();
     const index=transactionTabs.findIndex(tab=>tab.id===id);if(index<0)return;
-    transactionTabs.splice(index,1);
+    const [closed]=transactionTabs.splice(index,1);
     if(activeTransactionTabId===id)activeTransactionTabId=transactionTabs[Math.min(index,transactionTabs.length-1)]?.id??null;
     renderTransactionAnimation();
+    if(offerUndo)showToast(closed.name+" closed.",5000,{label:"Undo",run:()=>{transactionTabs.splice(Math.min(index,transactionTabs.length),0,closed);activeTransactionTabId=closed.id;animationOps=closed.ops;animationMode=closed.mode;renderTransactionAnimation();}});
   }
   function beginTransactionTabRename(tabButton,id) {
     const tab=transactionTabs.find(item=>item.id===id),wrap=tabButton.closest(".txn-tab-wrap");if(!tab||!wrap)return;
@@ -7280,6 +7633,7 @@
     if(["insert","update"].includes(op.kind)&&!op.column)return "choose a column";
     return null;
   }
+  function refreshOperationIssue(block,index){const issue=transactionOperationIssue(animationOps[index]);block.classList.toggle("has-issue",!!issue);block.querySelectorAll("[aria-invalid]").forEach(input=>input.removeAttribute("aria-invalid"));let note=block.querySelector(".txn-field-error");if(issue){if(!note){note=document.createElement("div");note.className="txn-field-error";note.setAttribute("role","alert");block.appendChild(note);}note.textContent=issue[0].toUpperCase()+issue.slice(1)+".";const fields=issue.includes("table")?["tableIndex"]:issue.includes("range")||issue.includes("from key")?["lower","upper"]:issue.includes("key")?["key"]:issue.includes("column")?["column"]:[];fields.forEach(field=>block.querySelector('[data-field="'+field+'"]')?.setAttribute("aria-invalid","true"));}else note?.remove();refreshTransactionEndAvailability();}
   function transactionValidationIssue() {
     if(!animationOps.length)return "Add at least one complete operation block.";
     for(let index=0;index<animationOps.length;index++){
@@ -7310,11 +7664,12 @@
     else if(tryBigInt(input.value)===null || tryBigInt(input.value)>clock.last) input.value=String(clock.last);
     input.readOnly=writing||animationMode==="rc"||animationMode==="ru";
     input.setAttribute("aria-readonly",String(input.readOnly));
-    const label=target.querySelector("#animationTimeLabel");if(label)label.textContent=animationMode==="rc"?"Current GLC":"ts_start";
+    const label=target.querySelector("#animationTimeLabel");if(label)label.textContent=animationMode==="rc"?"Statement timestamp":animationMode==="ru"?"Physical view timestamp":"Start timestamp · ts_start";
     target.querySelector("#animationClockNote").textContent=animationMode==="ru"
       ? "◉ Read Uncommitted treats every physically accessed tuple as visible."
       : animationMode==="rc" ? "↻ Reads and scans reuse the current GLC; insert, update, and delete statements take the next value."
       : writing?"🔒 Write ts_start is fixed at current GLC + 1. Commit uses one more tick.":"Pure reads can use any ts_start from 0 through "+clock.last+".";
+    target.querySelectorAll("[data-time-step],[data-time-value]").forEach(button=>button.disabled=input.readOnly);
     target.querySelector("#transactionClockDisplay").innerHTML=transactionClockHtml(clock);
     if(animationMode==="rc"){
       let statementClock=clock.last+1n;
@@ -7331,8 +7686,20 @@
     const tab=activeTransactionTab();
     transactionCreated=!!tab;
     if(!tab){
-      target.innerHTML='<div class="data-shell txn-shell"><div class="table-library-head"><div class="txn-header-copy"><h1>Transaction executor</h1><p>Compose and replay transactions against the loaded dump without changing database state.</p></div><div class="txn-header-actions"><button class="btn primary txn-new-button" id="newTransaction"><span class="plus">+</span>New Transaction</button><div class="txn-clock">'+transactionClockHtml(clock)+'</div></div></div><div class="data-card txn-empty"><h2>Create your first transaction</h2><p>Choose Auto-commit for one operation, SI for one shared snapshot, RC for statement-level visibility, or RU for physical tuple access.</p></div></div>';
-      target.querySelector("#newTransaction").onclick=createTransactionTab;
+      target.innerHTML='<div class="data-shell txn-shell">'+pageHeaderHtml("Transactions","Explore transaction behavior against the loaded snapshot.",'<div class="txn-clock">'+transactionClockHtml(clock)+'</div>','Replays are local to the Explorer and never change the dump.')+'<section class="data-card txn-empty"><span class="txn-empty-kicker">Start a replay</span><h2>Choose a transaction mode</h2><p>Pick the visibility model you want to explore. You can change it later, or use the <b>+</b> tab to open another transaction.</p><div class="txn-start-grid">'+
+        '<button class="txn-start-card auto" type="button" data-create-mode="auto"><span class="txn-start-icon" aria-hidden="true">⚡</span><strong>Auto-commit</strong><small>Run one operation as its own transaction.</small><span>Start auto-commit →</span></button>'+
+        '<button class="txn-start-card si" type="button" data-create-mode="explicit"><span class="txn-start-icon" aria-hidden="true">⇢</span><strong>Snapshot Isolation</strong><small>Run every operation against one shared snapshot.</small><span>Start SI transaction →</span></button>'+
+        '<button class="txn-start-card rc" type="button" data-create-mode="rc"><span class="txn-start-icon" aria-hidden="true">↻</span><strong>Read Committed</strong><small>Use the latest committed snapshot for each statement.</small><span>Start RC transaction →</span></button>'+
+        '<button class="txn-start-card ru" type="button" data-create-mode="ru"><span class="txn-start-icon" aria-hidden="true">◉</span><strong>Read Uncommitted</strong><small>Inspect tuples reached physically, including uncommitted state.</small><span>Start RU transaction →</span></button>'+
+        '</div><div class="txn-template-section"><div class="txn-template-heading"><div><span>Quick start</span><h3>Start with an operation</h3></div><p>Creates an auto-commit transaction with the selected block already in place.</p></div><div class="txn-template-grid">'+
+        '<button type="button" class="txn-template-card read" data-create-template="read"><span aria-hidden="true">⌕</span><b>Read</b><small>Look up one key</small></button>'+
+        '<button type="button" class="txn-template-card scan" data-create-template="scan"><span aria-hidden="true">↔</span><b>Scan</b><small>Read a key range</small></button>'+
+        '<button type="button" class="txn-template-card insert" data-create-template="insert"><span aria-hidden="true">＋</span><b>Insert</b><small>Add a new record</small></button>'+
+        '<button type="button" class="txn-template-card update" data-create-template="update"><span aria-hidden="true">✎</span><b>Update</b><small>Change one record</small></button>'+
+        '<button type="button" class="txn-template-card delete" data-create-template="delete"><span aria-hidden="true">×</span><b>Delete</b><small>Remove one record</small></button>'+
+        '</div></div></section></div>';
+      target.querySelectorAll("[data-create-mode]").forEach(button=>button.onclick=()=>createTransactionTab(button.dataset.createMode));
+      target.querySelectorAll("[data-create-template]").forEach(button=>button.onclick=()=>createTransactionTab("auto",button.dataset.createTemplate));
       return;
     }
     animationOps=tab.ops;animationMode=tab.mode;
@@ -7340,39 +7707,44 @@
     const endStage=transactional&&!tab.ended
       ? '<div class="txn-connector"></div><div class="txn-stage-label">3 · End</div><div class="txn-end-prompt"><div class="txn-end-prompt-copy"><span id="animationEndReadiness"></span><button class="btn hidden" id="animationAddEnd">+ End Transaction</button></div></div>'
       : '<div class="txn-connector"></div><div class="txn-stage-label">3 · End</div><div class="txn-node txn-end"><span class="txn-boundary-kicker">Transaction boundary</span><h2 id="transactionEndLabel">END '+modeLabel+' TRANSACTION</h2><p id="transactionEndHint"></p><button class="btn primary" id="animationRun">▶ Execute transaction</button>'+(transactional?'<button class="btn" id="animationEdit">Edit Transaction</button>':'')+'</div>';
-    target.innerHTML='<div class="data-shell txn-shell"><div class="table-library-head"><div class="txn-header-copy"><h1>Transaction executor</h1><p>Compose and replay transactions against the loaded dump.'+(clock.shared?'':' Separate table files have different clock bounds; cross-table timing is illustrative.')+'</p></div><div class="txn-header-actions"><button class="btn txn-new-button" id="newTransaction"><span class="plus">+</span>New Transaction</button><div class="txn-clock" id="transactionClockDisplay">'+transactionClockHtml(clock)+'</div></div></div>'+
-      '<div class="txn-tabs" role="tablist" aria-label="Open transactions">'+transactionTabs.map(item=>'<div class="txn-tab-wrap'+(item.id===tab.id?' active':'')+'"><button class="txn-tab" role="tab" aria-selected="'+(item.id===tab.id)+'" data-transaction-tab="'+item.id+'" title="Double-click to rename">'+escapeHtml(item.name)+'</button><button class="txn-tab-close" type="button" data-close-transaction-tab="'+item.id+'" title="Close '+escapeHtml(item.name)+'" aria-label="Close '+escapeHtml(item.name)+'">×</button></div>').join("")+'<button class="txn-tab-add" id="newTransactionTab" type="button" title="Open a new transaction" aria-label="Open a new transaction">+</button></div>'+
-      '<div class="txn-mode-bar"><button class="txn-mode-choice auto" id="animationAutoMode" type="button"><strong>⚡ Auto-commit</strong><small>Single-operation automatic transaction</small></button><button class="txn-mode-choice si" id="animationExplicitMode" type="button"><strong>⇢ SI Transaction</strong><small>Snapshot Isolation Transaction</small></button><button class="txn-mode-choice rc" id="animationRcMode" type="button"><strong>↻ RC Transaction</strong><small>Read Committed Transaction</small></button><button class="txn-mode-choice ru" id="animationRuMode" type="button"><strong>◉ RU Transaction</strong><small>Read Uncommitted Transaction</small></button><span class="mode-hint" id="animationModeHint"></span></div>'+
+    target.innerHTML='<div class="data-shell txn-shell">'+pageHeaderHtml("Transactions","Build and replay operations against the loaded snapshot.",'<div class="txn-clock" id="transactionClockDisplay">'+transactionClockHtml(clock)+'</div>',clock.shared?'The replay uses the shared bundle clock and never changes the dump. Use the + tab to start another transaction.':'Separate table files have different clock bounds, so cross-table timing is illustrative. Use the + tab to start another transaction.')+
+      '<div class="txn-sticky-controls"><div class="txn-tabs" role="tablist" aria-label="Open transactions">'+transactionTabs.map(item=>'<div class="txn-tab-wrap'+(item.id===tab.id?' active':'')+(item.ops.length?' has-ops':'')+' status-'+(item.status||'draft')+'">'+(item.ops.length?'<span class="txn-tab-state" aria-hidden="true" title="'+escapeHtml(item.status||'Draft')+'">'+({success:'✓',failed:'!',running:'…',draft:'•'}[item.status||'draft'])+'</span>':'')+'<button class="txn-tab" role="tab" aria-label="'+escapeHtml(item.name+', '+(item.status||'draft'))+'" aria-selected="'+(item.id===tab.id)+'" tabindex="'+(item.id===tab.id?'0':'-1')+'" data-transaction-tab="'+item.id+'" title="Double-click to rename">'+escapeHtml(item.name)+'</button><button class="txn-tab-close" type="button" data-close-transaction-tab="'+item.id+'" title="Close '+escapeHtml(item.name)+'" aria-label="Close '+escapeHtml(item.name)+'">×</button></div>').join("")+'<button class="txn-tab-add" id="newTransactionTab" type="button" title="Open a new transaction" aria-label="Open a new transaction">+</button></div>'+
+      '<div class="txn-mode-bar" role="group" aria-label="Transaction isolation mode"><button class="txn-mode-choice auto" id="animationAutoMode" type="button" title="Single-operation automatic transaction"><strong><span aria-hidden="true">⚡</span> Auto</strong></button><button class="txn-mode-choice si" id="animationExplicitMode" type="button" title="Snapshot Isolation transaction"><strong><span aria-hidden="true">⇢</span> SI</strong></button><button class="txn-mode-choice rc" id="animationRcMode" type="button" title="Read Committed transaction"><strong><span aria-hidden="true">↻</span> RC</strong></button><button class="txn-mode-choice ru" id="animationRuMode" type="button" title="Read Uncommitted transaction"><strong><span aria-hidden="true">◉</span> RU</strong></button><span class="mode-hint" id="animationModeHint"></span></div></div>'+
       (animationMode==="rc"?'<div class="txn-rc-option"><span><strong>Use the latest GLC for every tuple visibility check</strong><small>OFF fixes one latest GLC per block. ON reloads the latest GLC separately for every tuple.</small></span><button class="txn-rc-switch" id="animationRcTupleRefresh" type="button" role="switch" aria-checked="'+tab.rcTupleRefresh+'"><span class="txn-toggle-track" aria-hidden="true"></span><b>'+(tab.rcTupleRefresh?'ON':'OFF')+'</b></button></div>':'')+
-      '<div class="txn-canvas"><details class="txn-outline"><summary>Transaction outline · <span id="transactionOutlineCount">0 operations</span></summary><div class="txn-chain" id="transactionStory"></div></details>'+
-      '<div class="txn-stage-label">1 · Begin</div><div class="txn-node txn-begin"><span class="txn-boundary-kicker">Transaction boundary</span><h2 id="transactionBeginLabel">BEGIN SI TRANSACTION</h2><div class="data-controls"><label>Worker ID<select id="animationWorker"><option value="">Choose worker</option>'+Array.from({length:clock.maxWorker+1},(_,i)=>'<option value="'+i+'" '+(oldWorker===String(i)?'selected':'')+'>Worker '+i+'</option>').join("")+'<option value="new" '+(oldWorker==='new'?'selected':'')+'>New worker (last + x)</option></select></label>'+
-      '<label id="animationWorkerOffsetLabel" style="display:'+(oldWorker==='new'?'grid':'none')+'">Worker ID = '+clock.maxWorker+' + x<input id="animationWorkerOffset" type="number" min="1" step="1" value="'+escapeHtml(oldOffset)+'"></label>'+
-      '<label><span id="animationTimeLabel">ts_start</span>'+(animationMode==="ru"?'<output class="txn-fixed-value" id="animationTime">'+escapeHtml(oldTime)+'</output>':'<input id="animationTime" inputmode="numeric" value="'+escapeHtml(oldTime)+'">')+'</label><span id="animationClockNote"></span></div><div class="txn-begin-actions"><button class="btn" id="animationClear">Clear Operations</button></div></div>'+
-      '<div class="txn-connector"></div><div class="txn-stage-label">2 · Operation blocks</div><div class="txn-operation-zone"><div class="lego-palette txn-node" id="animationPalette">'+["read","scan","insert","update","delete"].map(kind=>'<button class="btn op-'+kind+'" data-add-kind="'+kind+'">+ '+kind[0].toUpperCase()+kind.slice(1)+'</button>').join("")+'</div><div class="lego-list" id="animationOperations"></div></div>'+
+      '<div class="txn-summary" aria-label="Transaction summary"><span id="txnSummaryMode">'+escapeHtml(animationMode==="auto"?'Auto-commit':modeLabel+' transaction')+'</span><span id="txnSummaryWorker">'+(oldWorker?escapeHtml(oldWorker==="new"?'New worker + '+oldOffset:'Worker '+oldWorker):'Worker not selected')+'</span><span id="txnSummaryOps">'+animationOps.length+' operation'+(animationOps.length===1?'':'s')+'</span><span id="txnSummaryWrites">'+animationOps.filter(op=>["insert","update","delete"].includes(op.kind)).length+' writes</span></div>'+
+      '<div class="txn-workspace-grid"><div class="txn-canvas"><details class="txn-outline"><summary>Transaction outline · <span id="transactionOutlineCount">0 operations</span></summary><div class="txn-chain" id="transactionStory"></div></details>'+
+      '<div class="txn-stage-label">1 · Begin</div><div class="txn-node txn-begin"><span class="txn-boundary-kicker">Transaction setup</span><h2 id="transactionBeginLabel">BEGIN SI TRANSACTION</h2><div class="txn-begin-setup">'+
+      '<div class="txn-setup-field txn-worker-picker"><span class="txn-setup-label">Worker</span><input id="animationWorker" type="hidden" value="'+escapeHtml(oldWorker)+'"><div class="txn-worker-grid" role="radiogroup" aria-label="Worker ID">'+Array.from({length:clock.maxWorker+1},(_,i)=>'<button type="button" class="txn-worker-choice '+(oldWorker===String(i)?'active':'')+'" data-worker-choice="'+i+'" role="radio" aria-checked="'+(oldWorker===String(i))+'"><span>W</span>'+i+'</button>').join("")+'<button type="button" class="txn-worker-choice new '+(oldWorker==='new'?'active':'')+'" data-worker-choice="new" role="radio" aria-checked="'+(oldWorker==='new')+'"><span>+</span> New worker</button></div><label class="txn-new-worker" id="animationWorkerOffsetLabel" style="display:'+(oldWorker==='new'?'grid':'none')+'"><span>Offset after worker '+clock.maxWorker+'</span><span class="txn-new-worker-row"><input id="animationWorkerOffset" type="number" min="1" step="1" value="'+escapeHtml(oldOffset)+'"><output id="animationNewWorkerPreview">Worker '+(clock.maxWorker+(Number(oldOffset)||1))+'</output></span></label></div>'+
+      '<div class="txn-setup-field txn-time-field"><span class="txn-setup-label" id="animationTimeLabel">Start timestamp</span><div class="txn-time-picker"><button type="button" data-time-step="-1" aria-label="Previous timestamp">−</button><input id="animationTime" inputmode="numeric" value="'+escapeHtml(oldTime)+'" aria-describedby="animationClockNote"><button type="button" data-time-step="1" aria-label="Next timestamp">+</button></div><div class="txn-time-presets"><button type="button" data-time-value="0">Earliest · 0</button><button type="button" data-time-value="'+clock.last+'">Latest · '+clock.last+'</button></div></div></div><p class="txn-clock-note" id="animationClockNote"></p><div class="txn-begin-actions"><button class="btn" id="animationClear">Clear operations</button></div></div>'+
+      '<div class="txn-connector"></div><div class="txn-stage-label">2 · Operation blocks</div><div class="txn-operation-zone"><details class="txn-add-menu" id="animationPalette"><summary>+ Add operation</summary><div class="lego-palette txn-node">'+["read","scan","insert","update","delete"].map(kind=>'<button class="btn op-'+kind+'" data-add-kind="'+kind+'">'+kind[0].toUpperCase()+kind.slice(1)+'</button>').join("")+'</div></details><div class="lego-list" id="animationOperations"></div></div>'+
       endStage+'</div>'+
-      '<div class="data-card txn-execution"><h2>Execution</h2><div id="animationResult">'+(tab.resultHtml||'Add operation blocks, then execute the transaction.')+'</div></div></div>';
-    target.querySelector("#newTransaction").onclick=createTransactionTab;
-    target.querySelector("#newTransactionTab").onclick=createTransactionTab;
-    target.querySelectorAll("[data-transaction-tab]").forEach(button=>{button.onclick=event=>{if(event.detail!==1)return;clearTimeout(transactionTabClickTimer);transactionTabClickTimer=setTimeout(()=>selectTransactionTab(+button.dataset.transactionTab),220);};button.ondblclick=event=>{event.preventDefault();clearTimeout(transactionTabClickTimer);beginTransactionTabRename(button,+button.dataset.transactionTab);};});
+      '<div class="data-card txn-execution"><h2>Execution</h2><div id="animationResult">'+(tab.resultHtml||'Add operation blocks, then execute the transaction.')+'</div></div></div></div>';
+    target.querySelector("#newTransactionTab").onclick=()=>createTransactionTab();
+    target.querySelectorAll("[data-transaction-tab]").forEach(button=>{button.onclick=event=>{if(event.detail!==1)return;clearTimeout(transactionTabClickTimer);transactionTabClickTimer=setTimeout(()=>selectTransactionTab(+button.dataset.transactionTab),220);};button.ondblclick=event=>{event.preventDefault();clearTimeout(transactionTabClickTimer);beginTransactionTabRename(button,+button.dataset.transactionTab);};button.onkeydown=event=>{if(event.key!=="ArrowLeft"&&event.key!=="ArrowRight")return;event.preventDefault();const index=transactionTabs.findIndex(item=>item.id===+button.dataset.transactionTab),next=(index+(event.key==="ArrowLeft"?-1:1)+transactionTabs.length)%transactionTabs.length;selectTransactionTab(transactionTabs[next].id);requestAnimationFrame(()=>target.querySelector('[data-transaction-tab="'+transactionTabs[next].id+'"]')?.focus());};});
+    target.querySelectorAll(".txn-tab-wrap").forEach(wrap=>{const id=+wrap.querySelector("[data-transaction-tab]").dataset.transactionTab;wrap.onmousedown=event=>{if(event.button===1)event.preventDefault();};wrap.onauxclick=event=>{if(event.button!==1)return;event.preventDefault();event.stopPropagation();clearTimeout(transactionTabClickTimer);closeTransactionTab(id);};});
     target.querySelectorAll("[data-close-transaction-tab]").forEach(button=>button.onclick=event=>{event.stopPropagation();closeTransactionTab(+button.dataset.closeTransactionTab);});
-    target.querySelector("#animationAutoMode").onclick=()=>{if(animationOps.length>1)return;animationMode="auto";tab.mode=animationMode;renderTransactionAnimation();};
-    target.querySelector("#animationExplicitMode").onclick=()=>{animationMode="explicit";tab.mode=animationMode;renderTransactionAnimation();};
-    target.querySelector("#animationRcMode").onclick=()=>{animationMode="rc";tab.mode=animationMode;renderTransactionAnimation();};
-    target.querySelector("#animationRuMode").onclick=()=>{animationMode="ru";tab.mode=animationMode;renderTransactionAnimation();};
-    const rcTupleRefresh=target.querySelector("#animationRcTupleRefresh");if(rcTupleRefresh)rcTupleRefresh.onclick=()=>{tab.rcTupleRefresh=!tab.rcTupleRefresh;renderTransactionAnimation();};
+    target.querySelector("#animationAutoMode").onclick=()=>{if(animationOps.length>1)return;animationMode="auto";tab.mode=animationMode;tab.status="draft";renderTransactionAnimation();};
+    target.querySelector("#animationExplicitMode").onclick=()=>{animationMode="explicit";tab.mode=animationMode;tab.status="draft";renderTransactionAnimation();};
+    target.querySelector("#animationRcMode").onclick=()=>{animationMode="rc";tab.mode=animationMode;tab.status="draft";renderTransactionAnimation();};
+    target.querySelector("#animationRuMode").onclick=()=>{animationMode="ru";tab.mode=animationMode;tab.status="draft";renderTransactionAnimation();};
+    const rcTupleRefresh=target.querySelector("#animationRcTupleRefresh");if(rcTupleRefresh)rcTupleRefresh.onclick=()=>{tab.rcTupleRefresh=!tab.rcTupleRefresh;tab.status="draft";renderTransactionAnimation();};
     target.querySelectorAll("[data-add-kind]").forEach(button=>button.onclick=()=>{
-      animationOps.push({kind:button.dataset.addKind,tableIndex:activeTableIndex,key:"",lower:"",upper:"",column:"",value:"",limit:10});
+      animationOps.push(transactionOperationTemplate(button.dataset.addKind));
+      tab.status="draft";
       if(animationOps.length>1&&animationMode==="auto")animationMode="explicit";
       syncActiveTransactionTab();
       renderTransactionAnimation();
     });
-    target.querySelector("#animationWorker").onchange=()=>{clearTimeout(animationTimer);tab.worker=target.querySelector("#animationWorker").value;target.querySelector("#animationWorkerOffsetLabel").style.display=tab.worker==='new'?'grid':'none';updateTransactionStory();};
-    target.querySelector("#animationWorkerOffset").oninput=()=>{clearTimeout(animationTimer);tab.offset=target.querySelector("#animationWorkerOffset").value;updateTransactionStory();};
-    target.querySelector("#animationTime").oninput=()=>{clearTimeout(animationTimer);tab.time=target.querySelector("#animationTime").value;updateTransactionStory();};
+    target.querySelectorAll("[data-worker-choice]").forEach(button=>button.onclick=()=>{clearTimeout(animationTimer);setTransactionTabStatus(tab,"draft");const value=button.dataset.workerChoice;target.querySelector("#animationWorker").value=value;tab.worker=value;target.querySelector("#animationWorkerOffsetLabel").style.display=value==='new'?'grid':'none';target.querySelectorAll("[data-worker-choice]").forEach(choice=>{const selected=choice===button;choice.classList.toggle("active",selected);choice.setAttribute("aria-checked",String(selected));});updateTransactionStory();});
+    target.querySelector("#animationWorkerOffset").oninput=()=>{clearTimeout(animationTimer);setTransactionTabStatus(tab,"draft");tab.offset=target.querySelector("#animationWorkerOffset").value;const offset=Number(tab.offset);target.querySelector("#animationNewWorkerPreview").value=Number.isSafeInteger(offset)&&offset>0?"Worker "+(clock.maxWorker+offset):"Enter a valid offset";updateTransactionStory();};
+    target.querySelector("#animationTime").oninput=()=>{clearTimeout(animationTimer);setTransactionTabStatus(tab,"draft");tab.time=target.querySelector("#animationTime").value;updateTransactionStory();};
+    const setStartTime=value=>{const input=target.querySelector("#animationTime");if(input.readOnly)return;let next=tryBigInt(String(value));if(next===null)return;if(next<0n)next=0n;if(next>clock.last)next=clock.last;input.value=String(next);input.dispatchEvent(new Event("input",{bubbles:true}));};
+    target.querySelectorAll("[data-time-step]").forEach(button=>button.onclick=()=>{const current=tryBigInt(target.querySelector("#animationTime").value)??clock.last;setStartTime(current+BigInt(button.dataset.timeStep));});
+    target.querySelectorAll("[data-time-value]").forEach(button=>button.onclick=()=>setStartTime(button.dataset.timeValue));
     const addEndButton=target.querySelector("#animationAddEnd");if(addEndButton)addEndButton.onclick=()=>{tab.ended=true;renderTransactionAnimation();};
     const editButton=target.querySelector("#animationEdit");if(editButton)editButton.onclick=()=>{tab.ended=false;renderTransactionAnimation();};
     const runButton=target.querySelector("#animationRun");if(runButton)runButton.onclick=runAnimation;
-    target.querySelector("#animationClear").onclick=()=>{clearTimeout(animationTimer);animationOps=[];tab.ops=animationOps;tab.resultHtml="";renderAnimationOps();updateTransactionClock();target.querySelector("#animationResult").textContent="Operations cleared.";};
+    target.querySelector("#animationClear").onclick=()=>{clearTimeout(animationTimer);animationOps=[];tab.ops=animationOps;tab.resultHtml="";tab.status="draft";renderTransactionAnimation();};
     renderAnimationOps();updateTransactionClock();
   }
   function updateTransactionStory(clockOverride) {
@@ -7388,9 +7760,10 @@
     let rcStoryClock=clock.last+1n;
     animationOps.forEach(op=>{
       const table=bundleTables()[op.tableIndex]?.name||"?";
+      const predicate=op.predicateColumn?', where '+op.predicateColumn+' '+({eq:'=',neq:'≠',gt:'>',gte:'≥',lt:'<',lte:'≤',contains:'contains'}[op.predicateOperator||'eq'])+' '+String(op.predicateValue??''):'';
       const args=op.kind==="scan"?'table='+table+', from='+String(op.lower||'?')+', through='+String(op.upper||'?')
         :'table='+table+', key='+String(op.key||'?')+(op.column?', '+op.column+'='+String(op.value||'?'):'');
-      parts.push(op.kind[0].toUpperCase()+op.kind.slice(1)+'('+args+(rcMode?', snapshot=GLC '+rcStoryClock:'')+')');
+      parts.push(op.kind[0].toUpperCase()+op.kind.slice(1)+'('+args+predicate+(rcMode?', snapshot=GLC '+rcStoryClock:'')+')');
       if(rcMode&&["insert","update","delete"].includes(op.kind))rcStoryClock+=1n;
     });
     if(auto)parts.push(transactionHasWrite()?'Auto-commit':'Complete read-only');
@@ -7400,6 +7773,10 @@
     const end=target.querySelector("#transactionEndLabel");if(end)end.textContent=autoMode?"RUN AUTO-COMMIT":rcMode?"END RC TRANSACTION":ruMode?"END RU TRANSACTION":"END SI TRANSACTION";
     const hint=target.querySelector("#transactionEndHint");if(hint)hint.textContent=autoMode?"Run one operation as a complete auto-commit.":rcMode?"Execute each statement against the GLC current at that statement.":ruMode?"Execute with every physically accessed tuple treated as visible.":transactionHasWrite()?"Execute and commit every block together against one SI snapshot.":"Execute every read against the same SI snapshot.";
     const count=target.querySelector("#transactionOutlineCount");if(count)count.textContent=animationOps.length+" operation"+(animationOps.length===1?"":"s");
+    const summaryWorker=target.querySelector("#txnSummaryWorker"),summaryOps=target.querySelector("#txnSummaryOps"),summaryWrites=target.querySelector("#txnSummaryWrites");
+    if(summaryWorker)summaryWorker.textContent=workerChoice?(workerChoice==="new"?"New worker + "+(Number.isSafeInteger(offset)&&offset>0?offset:"?"):"Worker "+workerChoice):"Worker not selected";
+    if(summaryOps)summaryOps.textContent=animationOps.length+" operation"+(animationOps.length===1?"":"s");
+    if(summaryWrites){const writes=animationOps.filter(op=>["insert","update","delete"].includes(op.kind)).length;summaryWrites.textContent=writes+" write"+(writes===1?"":"s");}
     const autoButton=target.querySelector("#animationAutoMode"),explicitButton=target.querySelector("#animationExplicitMode"),rcButton=target.querySelector("#animationRcMode"),ruButton=target.querySelector("#animationRuMode"),modeHint=target.querySelector("#animationModeHint");
     if(autoButton&&explicitButton&&rcButton&&ruButton&&modeHint){
       autoButton.disabled=locked||animationOps.length>1;
@@ -7408,6 +7785,7 @@
       explicitButton.classList.toggle("active",animationMode==="explicit");
       rcButton.classList.toggle("active",animationMode==="rc");
       ruButton.classList.toggle("active",animationMode==="ru");
+      autoButton.setAttribute("aria-pressed",String(animationMode==="auto"));explicitButton.setAttribute("aria-pressed",String(animationMode==="explicit"));rcButton.setAttribute("aria-pressed",String(animationMode==="rc"));ruButton.setAttribute("aria-pressed",String(animationMode==="ru"));
       autoButton.closest(".txn-mode-choice")?.classList.toggle("active",animationMode==="auto");
       explicitButton.closest(".txn-mode-choice")?.classList.toggle("active",animationMode==="explicit");
       rcButton.closest(".txn-mode-choice")?.classList.toggle("active",animationMode==="rc");
@@ -7445,32 +7823,38 @@
     target.innerHTML=animationOps.map((op,i)=>{
       const table=bundleTables()[op.tableIndex]||bundleTables()[0];
       const editable=explorerColumns(table).filter(c=>!["key","insert_ts","insert_worker","delete_ts","delete_worker","status"].includes(c.name));
+      const predicateColumns=explorerColumns(table).filter(c=>c.name!=="status");
       if(!editable.length)editable.push({name:"value",data_type:"text"});
       const isScan=op.kind==="scan",isWrite=["insert","update"].includes(op.kind),reader=op.kind==="read"||isScan;
       const kinds=["read","scan","insert","update","delete"];
+      const issue=transactionOperationIssue(op),executionClass=op.executionStatus==="success"?" completed":op.executionStatus==="failed"?" failed":"";
       const rcClockLabel=String(rcBlockClock);
       if(animationMode==="rc"&&["insert","update","delete"].includes(op.kind))rcBlockClock+=1n;
-      return (i?'<div class="txn-connector"></div>':'')+'<div class="lego-block txn-node op-'+op.kind+'" data-op-index="'+i+'"><div class="lego-head"><b>'+(i+1)+'.</b><select data-kind aria-label="Operation type">'+kinds.map(kind=>'<option value="'+kind+'" '+(kind===op.kind?'selected':'')+'>'+kind.toUpperCase()+'</option>').join("")+'</select><span class="lego-kind '+(reader?'reader':'writer')+'">'+(reader?'READ':'WRITE')+'</span>'+(animationMode==="rc"?'<span class="txn-statement-snapshot">GLC · latest for block · '+rcClockLabel+'</span>'+(activeTransactionTab()?.rcTupleRefresh?'<span class="txn-statement-snapshot">Visibility GLC · latest per tuple</span>':''):animationMode==="ru"?'<span class="txn-statement-snapshot">Physical visibility · true</span>':'')+'<span class="spacer"></span><button class="btn" data-move="up" '+(i===0?'disabled':'')+'>↑</button><button class="btn" data-move="down" '+(i===animationOps.length-1?'disabled':'')+'>↓</button><button class="btn" data-remove>Remove</button></div>'+
+      return (i?'<div class="txn-connector"></div>':'')+'<div class="lego-block txn-node op-'+op.kind+(issue?' has-issue':'')+(op.collapsed?' collapsed':'')+executionClass+'" data-op-index="'+i+'"><div class="lego-head"><b>'+(i+1)+'.</b><select data-kind aria-label="Operation type">'+kinds.map(kind=>'<option value="'+kind+'" '+(kind===op.kind?'selected':'')+'>'+kind.toUpperCase()+'</option>').join("")+'</select><span class="lego-kind '+(reader?'reader':'writer')+'">'+(reader?'READ':'WRITE')+'</span>'+(animationMode==="rc"?'<span class="txn-statement-snapshot">GLC · latest for block · '+rcClockLabel+'</span>'+(activeTransactionTab()?.rcTupleRefresh?'<span class="txn-statement-snapshot">Visibility GLC · latest per tuple</span>':''):animationMode==="ru"?'<span class="txn-statement-snapshot">Physical visibility · true</span>':'')+'<span class="spacer"></span><button class="btn" data-collapse aria-expanded="'+(!op.collapsed)+'">'+(op.collapsed?'Expand':'Collapse')+'</button><details class="txn-op-menu"><summary class="btn" aria-label="Operation actions">•••</summary><div><button class="btn" data-move="up" '+(i===0?'disabled':'')+'>Move up</button><button class="btn" data-move="down" '+(i===animationOps.length-1?'disabled':'')+'>Move down</button><button class="btn" data-remove>Remove</button></div></details></div>'+
         '<div class="data-controls"><label>Table<select data-field="tableIndex">'+tableOptions(op.tableIndex)+'</select></label>'+
         (isScan?'<label>From key<input data-field="lower" value="'+escapeHtml(op.lower||"")+'"></label><label>Through key<input data-field="upper" value="'+escapeHtml(op.upper||"")+'"></label><label>Max shown<input type="number" min="1" max="1000" data-field="limit" value="'+escapeHtml(op.limit||10)+'"></label>'
           :'<label>Key<input data-field="key" value="'+escapeHtml(op.key||"")+'"></label>')+
         (isWrite&&editable.length?'<label>Column<select data-field="column"><option value="">Choose column</option>'+editable.map(c=>'<option value="'+escapeHtml(c.name)+'" '+(op.column===c.name?'selected':'')+'>'+escapeHtml(c.name)+'</option>').join("")+'</select></label><label>Value<input data-field="value" value="'+escapeHtml(op.value||"")+'"></label>':'')+
-        '</div></div>';
-    }).join("")||'<p style="text-align:center">Choose an operation below to connect the first block.</p>';
+        '</div>'+(reader?'<details class="txn-predicate" '+(op.predicateColumn?'open':'')+'><summary><span>Predicate filter</span><small>Optional</small></summary><div class="data-controls"><label>Column<select data-field="predicateColumn"><option value="">No predicate</option>'+predicateColumns.map(c=>'<option value="'+escapeHtml(c.name)+'" '+(op.predicateColumn===c.name?'selected':'')+'>'+escapeHtml(c.name)+'</option>').join("")+'</select></label><label>Condition<select data-field="predicateOperator"><option value="eq" '+((op.predicateOperator||'eq')==='eq'?'selected':'')+'>equals</option><option value="neq" '+(op.predicateOperator==='neq'?'selected':'')+'>does not equal</option><option value="gt" '+(op.predicateOperator==='gt'?'selected':'')+'>greater than</option><option value="gte" '+(op.predicateOperator==='gte'?'selected':'')+'>at least</option><option value="lt" '+(op.predicateOperator==='lt'?'selected':'')+'>less than</option><option value="lte" '+(op.predicateOperator==='lte'?'selected':'')+'>at most</option><option value="contains" '+(op.predicateOperator==='contains'?'selected':'')+'>contains</option></select></label><label>Value<input data-field="predicateValue" value="'+escapeHtml(op.predicateValue||"")+'" placeholder="Filter value"></label></div></details>':'')+(issue?'<div class="txn-field-error" role="alert">'+escapeHtml(issue[0].toUpperCase()+issue.slice(1))+'.</div>':'')+'</div>';
+    }).join("")||'<p style="text-align:center">Use Add operation above to connect the first block.</p>';
     target.querySelectorAll(".lego-block").forEach(block=>{
       const index=+block.dataset.opIndex;
-      block.querySelector("[data-kind]").onchange=event=>{clearTimeout(animationTimer);animationOps[index].kind=event.target.value;renderAnimationOps();updateTransactionClock();};
+      block.querySelector("[data-collapse]").onclick=()=>{animationOps[index].collapsed=!animationOps[index].collapsed;renderAnimationOps();};
+      block.querySelector("[data-kind]").onchange=event=>{clearTimeout(animationTimer);setTransactionTabStatus(activeTransactionTab(),"draft");animationOps[index].executionStatus=null;animationOps[index].kind=event.target.value;renderAnimationOps();updateTransactionClock();};
       block.querySelectorAll("[data-field]").forEach(input=>input.oninput=()=>{
         clearTimeout(animationTimer);
+        setTransactionTabStatus(activeTransactionTab(),"draft");animationOps[index].executionStatus=null;
         animationOps[index][input.dataset.field]=input.dataset.field==="tableIndex"?Number(input.value):input.value;
-        if(input.dataset.field==="tableIndex"){animationOps[index].column="";renderAnimationOps();}
-        else updateTransactionStory();
+        if(input.dataset.field==="tableIndex"){animationOps[index].column="";animationOps[index].predicateColumn="";renderAnimationOps();}
+        else {updateTransactionStory();refreshOperationIssue(block,index);}
       });
-      block.querySelector("[data-remove]").onclick=()=>{animationOps.splice(index,1);syncActiveTransactionTab();renderAnimationOps();updateTransactionClock();};
+      block.querySelector("[data-remove]").onclick=()=>{animationOps.splice(index,1);setTransactionTabStatus(activeTransactionTab(),"draft");syncActiveTransactionTab();renderAnimationOps();updateTransactionClock();};
       block.querySelectorAll("[data-move]").forEach(button=>button.onclick=()=>{
         const other=index+(button.dataset.move==="up"?-1:1);
+        setTransactionTabStatus(activeTransactionTab(),"draft");
         [animationOps[index],animationOps[other]]=[animationOps[other],animationOps[index]];syncActiveTransactionTab();renderAnimationOps();
       });
+      refreshOperationIssue(block,index);
     });
     updateTransactionStory(clock);
   }
@@ -7494,8 +7878,10 @@
         if(op.lower===""||op.upper===""||BatStoreSnapshot.compareKeys(op.lower,op.upper)>0){alert("Each scan needs a valid from and through key.");return;}
       }else if(op.key===""){alert("Each "+op.kind+" block needs a key.");return;}
       const values=op.column?{[op.column]:typedOperationValue(tables[op.tableIndex],op.column,op.value)}:{};
-      operations.push({...op,values,limit:Math.min(1000,Math.max(1,Number(op.limit)||10))});
+      const predicate=op.predicateColumn?{field:op.predicateColumn,operator:op.predicateOperator||"eq",value:typedOperationValue(tables[op.tableIndex],op.predicateColumn,op.predicateValue||"")}:null;
+      operations.push({...op,values,predicate,limit:Math.min(1000,Math.max(1,Number(op.limit)||10))});
     }
+    animationOps.forEach(op=>{op.executionStatus=null;});setTransactionTabStatus(activeTab,"running");
     const execution=BatStoreSnapshot.execute(tables,operations,ts,worker,explorerBundle?.snapshot_version,{mode:rcMode?"rc":ruMode?"ru":"si",glcBase:clock.last,reloadGlcPerTuple:rcMode&&!!activeTab?.rcTupleRefresh}),statementSnapshots=execution.statementSnapshots||[],rcLast=rcMode?BigInt(execution.lastGlc):ts,commitTs=writing&&!execution.aborted?(rcMode?rcLast+1n:ts+1n):null;
     simulationRuns.push({worker,writing,mode:animationMode,tsStart:String(ts),commit:commitTs===null?null:String(commitTs),operations:execution.steps.length,aborted:execution.aborted});
     if(workerChoice==='new')simulatedMaxWorkerId=Math.max(simulatedMaxWorkerId??0,worker);
@@ -7508,22 +7894,30 @@
     result.innerHTML='<p><b>'+(animationMode==="auto"&&operations.length===1?'Auto-commit':rcMode?'RC Transaction':ruMode?'RU Transaction':'SI Transaction')+'</b> · Worker '+worker+' · '+(rcMode?'statement GLC begins at '+statementSnapshots[0]+(activeTab?.rcTupleRefresh?' · '+execution.visibilityChecks+' tuple visibility reloads (no clock increments)':''):ruMode?'physical tuple visibility · checks always true':'ts_start '+ts)+' · '+(ruMode?'uncommitted physical view':clock.exact?'commit-log visibility':'approximate historical visibility')+' · GLC '+simulationGlcLast+'</p><div id="animationSteps"></div>';
     if(activeTab)activeTab.resultHtml=result.innerHTML;
     let index=0;
+    const reducedMotion=window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const revealDelay=reducedMotion?0:Math.min(70,Math.max(12,Math.floor(240/Math.max(1,execution.steps.length))));
     const step=()=>{
       const item=execution.steps[index],op=item.operation,answer=item.result;
-      const rows=answer.rows||[],columns=explorerColumns(tables[op.tableIndex]);
+      const rows=answer.rows||[],columns=explorerColumns(tables[op.tableIndex]).filter(column=>String(column.name).toLowerCase()!=="status");
       if(rows.some(row=>Object.hasOwn(row,"value"))&&!columns.some(column=>column.name==="value"))columns.push({name:"value",data_type:"text"});
       const shown=rows.slice(0,op.kind==="scan"?op.limit:10);
       const content='<div class="animation-step active"><b>Step '+(index+1)+' · '+escapeHtml(op.kind.toUpperCase())+' · '+escapeHtml(tables[op.tableIndex].name)+' · '+escapeHtml(answer.status)+'</b>'+(rcMode?'<p><span class="txn-statement-snapshot">Block GLC · '+statementSnapshots[index]+'</span>'+(activeTab?.rcTupleRefresh?' <span class="txn-statement-snapshot">Latest GLC per tuple · '+(execution.statementVisibilityChecks?.[index]||0)+' reloads</span>':'')+'</p>':ruMode?'<p><span class="txn-statement-snapshot">Tuple visibility · physical access = true</span></p>':'')+
-        (rows.length?'<p>'+rows.length+' matched row'+(rows.length===1?'':'s')+'.</p><div class="data-scroll"><table class="data-table"><thead><tr>'+columns.map(c=>'<th>'+escapeHtml(c.name)+'</th>').join("")+'</tr></thead><tbody>'+renderDataRows(shown,columns,"")+'</tbody></table></div>'+(shown.length<rows.length?'<p>Showing '+shown.length+' of '+rows.length+'. Increase the scan limit to see more.</p>':''):'')+'</div>';
+        (rows.length?'<p>'+rows.length+' matched row'+(rows.length===1?'':'s')+'.</p><div class="data-scroll txn-result-scroll"><table class="data-table compact txn-result-table"><thead><tr>'+columns.map(c=>'<th title="'+escapeHtml(c.name)+'">'+escapeHtml(transactionResultColumnLabel(c.name))+'</th>').join("")+'</tr></thead><tbody>'+renderDataRows(shown,columns,"")+'</tbody></table></div>'+(shown.length<rows.length?'<p>Showing '+shown.length+' of '+rows.length+'. Increase the scan limit to see more.</p>':''):'')+'</div>';
       result.querySelector("#animationSteps").insertAdjacentHTML("beforeend",content);
-      if(activeTab)activeTab.resultHtml=result.innerHTML;
       const block=target.querySelector('.lego-block[data-op-index="'+index+'"]');
-      if(block){block.classList.add(execution.aborted && index===execution.steps.length-1?"failed":"completed");block.querySelector(".lego-head").insertAdjacentHTML("beforeend",'<small>'+escapeHtml(answer.status)+'</small>');}
+      const failed=execution.aborted && index===execution.steps.length-1;animationOps[index].executionStatus=failed?"failed":"success";
+      if(block){
+        block.classList.remove("failed","completed");block.classList.add(failed?"failed":"completed");
+        let status=block.querySelector(".txn-op-status");
+        if(!status){status=document.createElement("small");status.className="txn-op-status";block.querySelector(".lego-head").appendChild(status);}
+        status.textContent=answer.status;
+      }
       index++;
-      if(index<execution.steps.length)animationTimer=setTimeout(step,500);
+      if(index<execution.steps.length)animationTimer=setTimeout(step,revealDelay);
       else {
         result.insertAdjacentHTML("beforeend",'<p><b>'+(execution.aborted?'Transaction aborted in replay.':'Transaction replay complete.')+'</b>'+(writing&&!execution.aborted?' Simulated commit timestamp '+commitTs+'.':'')+' No database state was changed.</p>');
         if(activeTab)activeTab.resultHtml=result.innerHTML;
+        setTransactionTabStatus(activeTab,execution.aborted?"failed":"success");
         updateTransactionClock();
       }
     };
