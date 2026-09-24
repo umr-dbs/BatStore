@@ -32,6 +32,10 @@ use crate::bat_bench::tpcc_load::{
 };
 use crate::bat_bench::tpcc_random::now_millis;
 use crate::bat_bench::tpcc_schema::{TpccConfig, TpccDatabase, htap_query_date_bounds};
+#[cfg(feature = "gc-stats")]
+use crate::bat_bench::tpcc_schema::{BigTreeOp, Table, TpccKey, TpccRow};
+#[cfg(feature = "gc-stats")]
+use crate::bat_gc::tracker_handle::GcStats;
 use crate::bat_bench::tpcc_txn::{self, TxnOutcome};
 use crate::bat_root::index_root::RootIndexType;
 use crate::bat_tree::idle_compaction::{DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL};
@@ -414,6 +418,8 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
         cfg.tpcc.num_warehouses,
         wh_load_start.elapsed()
     );
+    #[cfg(feature = "gc-stats")]
+    write_gc_stats(&db, &cfg.output_dir, "gc_stats_after_load.csv");
 
     let baseline_tpm_c = cfg.htap_baseline.map(|baseline_duration| {
         println!("Running HTAP baseline (OLTP-only, no OLAP) for {baseline_duration:?}...");
@@ -529,6 +535,8 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
     }
 
     mem_sampler.stop();
+    #[cfg(feature = "gc-stats")]
+    write_gc_stats(&db, &cfg.output_dir, "gc_stats.csv");
 
     if crate::bat_test::SCAN_TRACE {
         crate::bat_test::dump_scan_trace();
@@ -598,6 +606,68 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
         baseline_tpm_c,
         &cfg.output_dir,
     )
+}
+
+#[cfg(feature = "gc-stats")]
+fn write_gc_stats(db: &TpccDatabase, out_dir: &Path, filename: &str) {
+    fn add_stats(totals: &mut Vec<[u64; 9]>, stats: Vec<GcStats>) {
+        if totals.len() < stats.len() {
+            totals.resize(stats.len(), [0; 9]);
+        }
+        for (total, stat) in totals.iter_mut().zip(stats) {
+            total[0] += stat.local_reuse;
+            total[1] += stat.steal;
+            total[2] += stat.fresh_alloc;
+            total[3] += stat.request_count;
+            total[4] += stat.latency_ns;
+            total[5] = total[5].max(stat.latency_max_ns);
+            total[6] += stat.scan_count;
+            total[7] += stat.lists_checked;
+            total[8] = total[8].max(stat.lists_checked_max);
+        }
+    }
+
+    struct ReadStats;
+    impl BigTreeOp for ReadStats {
+        type Output = Vec<GcStats>;
+
+        fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+            self,
+            tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+        ) -> Self::Output {
+            tree.tracker().gc_stats_per_shard()
+        }
+    }
+
+    let mut totals = Vec::new();
+    for table in Table::ALL {
+        match table {
+            Table::Warehouse | Table::District => {
+                add_stats(&mut totals, db.dispatch_big(table, ReadStats));
+            }
+            _ => add_stats(&mut totals, db.tree_for(table).tracker().gc_stats_per_shard()),
+        }
+    }
+
+    let path = out_dir.join(filename);
+    let _ = fs::remove_file(&path);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("gc_stats: failed to open {}: {e}", path.display()));
+    file.write_all(b"shard,local_reuse,steal,fresh_alloc,schema_version,request_count,latency_ns,latency_max_ns,scan_count,lists_checked,lists_checked_max\n").unwrap();
+    for (shard, stat) in totals.into_iter().enumerate() {
+        file.write_all(
+            format!(
+                "{shard},{},{},{},2,{},{},{},{},{},{}\n",
+                stat[0], stat[1], stat[2], stat[3], stat[4], stat[5], stat[6], stat[7],
+                stat[8]
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    }
 }
 
 fn num_olap_mode_summary(mode: &OlapMode) -> &'static str {
