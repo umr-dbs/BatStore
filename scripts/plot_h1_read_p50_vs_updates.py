@@ -13,13 +13,18 @@ import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter
 
 
 MODES = {
-    "atomic": ("Auto-commit", "#777777", "o"),
-    "transaction": ("SI", "#111111", "s"),
+    "atomic": ("Auto-commit", "#4C566A", "*"),
+    "transaction": ("SI", "#C62828", "+"),
 }
+LABEL_FONT_SIZE = 14
+TICK_FONT_SIZE = 13
+TITLE_FONT_SIZE = 14
+LEGEND_FONT_SIZE = 13
 UPDATE_COUNT = re.compile(r"^update\s+(\d+)\s*$", re.MULTILINE)
 
 
@@ -60,15 +65,31 @@ def plot(run_dir: Path, metric: str = "updates") -> list[Path]:
             raise ValueError(f"No YCSB A measurements for {label}")
         ordered = sorted(points[mode])
         ax.plot([p[0] for p in ordered], [p[1] for p in ordered],
-                color=color, marker=marker, markersize=6, linewidth=2,
-                markeredgecolor="white", markeredgewidth=0.7, label=label)
-    ax.set_xlabel("Achieved updates/s" if metric == "updates" else "Achieved total ops/s")
-    ax.set_ylabel("Read p50 latency (µs)")
+                color=color, marker=marker,
+                markersize=9 if mode == "atomic" else 10, linewidth=2,
+                markeredgecolor=color,
+                markeredgewidth=1.7, label=label)
+    ax.set_xlabel("Achieved updates/s" if metric == "updates" else "Achieved total ops/s",
+                  fontsize=LABEL_FONT_SIZE)
+    ax.set_ylabel("Read p50 latency (µs)", fontsize=LABEL_FONT_SIZE)
+    ax.tick_params(axis="both", which="both", labelsize=TICK_FONT_SIZE)
     ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value / 1_000_000:g}M"))
     subject = "update throughput" if metric == "updates" else "total throughput"
-    ax.set_title(f"H1 · YCSB A read latency vs. {subject}", pad=12)
+    ax.set_title(f"H1 · YCSB A read latency vs. {subject}", pad=12,
+                 fontsize=TITLE_FONT_SIZE)
     ax.grid(alpha=0.25)
-    ax.legend(frameon=False)
+    legend_handles = [
+        Line2D(
+            [], [], color=color, marker=marker, linestyle="None",
+            markersize=9 if mode == "atomic" else 10,
+            markeredgecolor=color, markeredgewidth=1.7, label=label,
+        )
+        for mode, (label, color, marker) in MODES.items()
+    ]
+    ax.legend(
+        handles=legend_handles, frameon=False, fontsize=LEGEND_FONT_SIZE,
+        handlelength=0.6, handletextpad=0.25,
+    )
     fig.tight_layout()
 
     out_dir = run_dir / "plots"
