@@ -1,6 +1,6 @@
 [package]
 name = "BatStore"
-version = "0.0.140"
+version = "0.0.141"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
 description = "BatStore Research Implementation"
@@ -44,6 +44,10 @@ mdbx-backend = ["dep:libmdbx"]
 # anything the benchmark/paper path needs, so its `serde`/`serde_json` deps
 # stay out of the default build.
 tree-viz = ["dep:serde", "dep:serde_json"]
+# Opt-in instrumentation for the TPC-C node-filling/weak-condition/SMO
+# experiment. Keeping this separate from tree-viz ensures normal release
+# binaries contain neither the SMO atomics nor the quiescent tree walker.
+tpcc-tree-stats = ["dep:serde", "dep:serde_json"]
 # Swaps the global allocator from jemalloc to mimalloc (see `main.rs`) - an
 # A/B experiment for the WAL writer's cross-thread alloc/free pattern (buffer
 # allocated on a worker thread, freed on the flush thread): mimalloc's

@@ -106,6 +106,9 @@ pub(crate) fn insert_on_tree_at<
     let leaf_deref_mut = leaf_guard.deref_mut();
     let leaf_page = leaf_deref_mut.as_leaf_page();
     let stamp = TxStamp::new(worker_id, ts_start);
+    // Every physical write must widen the leaf's zone map (see `dispatch.rs`), or
+    // zone-pruned scans skip leaves that hold the new value.
+    let zone_widen = tree.cold.zone_map_projection.get().and_then(|f| f(&payload));
 
     if let Some(position) = leaf_page.latest_position(key, true) {
         if leaf_page.version_at(position).is_live() {
@@ -135,6 +138,7 @@ pub(crate) fn insert_on_tree_at<
             tree.wal_log_write(stamp, |_| CRUDOperation::Insert(key, payload.clone()));
             leaf_page.version_mut_at(position).undelete();
             leaf_page.set_payload_at(position, payload);
+            leaf_page.widen_zone_map(zone_widen);
             leaf_page.commit_delta(1, -1);
             return (CRUDOperationResult::Inserted(stamp.ts_start()), false);
         }
@@ -148,6 +152,7 @@ pub(crate) fn insert_on_tree_at<
         RecordPoint::new(key, VersionInfo::new(stamp), payload),
         current_len,
     );
+    leaf_page.widen_zone_map(zone_widen);
 
     leaf_page.commit_delta(1, 0);
 
@@ -191,6 +196,7 @@ pub(crate) fn update_on_tree_at<
     let leaf_guard = tree.traversal_write_olc_registered(key);
     let leaf_deref_mut = leaf_guard.deref_mut();
     let leaf_page = leaf_deref_mut.as_leaf_page();
+    let zone_widen = tree.cold.zone_map_projection.get().and_then(|f| f(&payload));
 
     match leaf_page.latest_position(key, true) {
         Some(position) => {
@@ -213,6 +219,7 @@ pub(crate) fn update_on_tree_at<
                 // Self-overwrite fast path — see `insert_on_tree`'s doc.
                 if leaf_page.version_at(position).insertion_stamp() == stamp {
                     leaf_page.set_payload_at(position, payload);
+                    leaf_page.widen_zone_map(zone_widen);
                     return (CRUDOperationResult::Updated(stamp.ts_start()), false);
                 }
 
@@ -226,6 +233,7 @@ pub(crate) fn update_on_tree_at<
                     RecordPoint::new(key, VersionInfo::new(stamp), payload),
                     current_len,
                 );
+                leaf_page.widen_zone_map(zone_widen);
 
                 leaf_page.commit_delta(0, 1);
 

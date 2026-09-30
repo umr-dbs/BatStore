@@ -95,6 +95,8 @@ pub struct MVBTSt<
     /// `bat_sync::version_handle`'s WAL-logging methods for how this branches
     /// between the plain and table-tagged wire encodings.
     pub(crate) cold: Box<MVBTCold<Key, Payload>>,
+    #[cfg(feature = "tpcc-tree-stats")]
+    pub(crate) smo_stats: crate::bat_tree::stats::SmoStats,
 }
 
 unsafe impl<
@@ -358,6 +360,8 @@ impl<
                 table_id,
                 zone_map_projection: std::sync::OnceLock::new(),
             }),
+            #[cfg(feature = "tpcc-tree-stats")]
+            smo_stats: crate::bat_tree::stats::SmoStats::new(),
         }
     }
 
