@@ -13,6 +13,8 @@ pub mod tpcc_random;
 pub mod tpcc_schema;
 pub mod tpcc_txn;
 pub mod tpcc_wal_codec;
+#[cfg(feature = "tpcc-tree-stats")]
+pub mod tpcc_tree_stats;
 pub mod tpch_queries;
 
 pub mod ycsb_driver;

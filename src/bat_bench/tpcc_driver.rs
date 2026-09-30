@@ -265,7 +265,35 @@ fn terminal_thread(
     }
 }
 
-pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
+#[cfg(feature = "tpcc-tree-stats")]
+#[derive(Clone, Debug)]
+pub struct TreeStatsRunConfig {
+    pub warmup: Duration,
+}
+
+pub fn run_tpcc(cfg: DriverConfig) -> TpccRunSummary {
+    #[cfg(feature = "tpcc-tree-stats")]
+    {
+        return run_tpcc_impl(cfg, None);
+    }
+    #[cfg(not(feature = "tpcc-tree-stats"))]
+    {
+        run_tpcc_impl(cfg)
+    }
+}
+
+#[cfg(feature = "tpcc-tree-stats")]
+pub fn run_tpcc_with_tree_stats(
+    cfg: DriverConfig,
+    stats: TreeStatsRunConfig,
+) -> TpccRunSummary {
+    run_tpcc_impl(cfg, Some(stats))
+}
+
+fn run_tpcc_impl(
+    mut cfg: DriverConfig,
+    #[cfg(feature = "tpcc-tree-stats")] tree_stats: Option<TreeStatsRunConfig>,
+) -> TpccRunSummary {
     let historic = matches!(&cfg.olap_mode, OlapMode::RepeatedHistoricFullScan);
     if historic {
         cfg.gc = false;
@@ -290,7 +318,27 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
     }
     let num_olap = cfg.num_olap_threads;
 
-    let terminal_cost = if cfg.htap_baseline.is_some() { 2 } else { 1 };
+    #[cfg(feature = "tpcc-tree-stats")]
+    if tree_stats.is_some() {
+        assert!(
+            cfg.htap_baseline.is_none(),
+            "tpcc tree-stats run has its own warm-up; HTAP baseline must be disabled"
+        );
+    }
+
+    let terminal_sets = 1
+        + usize::from(cfg.htap_baseline.is_some())
+        + {
+            #[cfg(feature = "tpcc-tree-stats")]
+            {
+                usize::from(tree_stats.is_some())
+            }
+            #[cfg(not(feature = "tpcc-tree-stats"))]
+            {
+                0
+            }
+        };
+    let terminal_cost = terminal_sets;
 
     let olap_thread_cost = 1;
 
@@ -388,6 +436,19 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
 
     let history_seq = Arc::new(AtomicU64::new(0));
 
+    #[cfg(feature = "tpcc-tree-stats")]
+    if tree_stats.is_some() {
+        for filename in [
+            "node_filling.csv",
+            "tree_summary.csv",
+            "smo_counts.csv",
+            "run_metadata.json",
+            "experiment_summary.txt",
+        ] {
+            let _ = fs::remove_file(cfg.output_dir.join(filename));
+        }
+    }
+
     println!(
         "Loading CH-benCHmark dimension tables (5 regions, 25 nations, {} suppliers)...",
         cfg.tpcc.num_suppliers
@@ -418,6 +479,63 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
         cfg.tpcc.num_warehouses,
         wh_load_start.elapsed()
     );
+
+    #[cfg(feature = "tpcc-tree-stats")]
+    let stats_after_load = if tree_stats.is_some() {
+        crate::bat_bench::tpcc_tree_stats::write_checkpoint(&db, &cfg.output_dir, "after_load")
+            .expect("failed to write after-load TPC-C tree audit");
+        Some(crate::bat_bench::tpcc_tree_stats::snapshot_smos(&db))
+    } else {
+        None
+    };
+
+    #[cfg(feature = "tpcc-tree-stats")]
+    let (stats_after_warmup, warmup_committed) = if let Some(stats_cfg) = &tree_stats {
+        println!("Running tree-stats warm-up for {:?}...", stats_cfg.warmup);
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(num_terminals + 1));
+        let handles: Vec<_> = (0..num_terminals)
+            .map(|t| {
+                let db = db.clone();
+                let tpcc_cfg = cfg.tpcc;
+                let my_ws = assigned[t].clone();
+                let affinity = cfg.affinity;
+                let stop = stop.clone();
+                let barrier = barrier.clone();
+                let history_seq = history_seq.clone();
+                let duration = stats_cfg.warmup;
+                thread::spawn(move || {
+                    terminal_thread(
+                        db,
+                        tpcc_cfg,
+                        my_ws,
+                        affinity,
+                        duration,
+                        stop,
+                        barrier,
+                        history_seq,
+                    )
+                })
+            })
+            .collect();
+        barrier.wait();
+        thread::sleep(stats_cfg.warmup);
+        stop.store(true, Relaxed);
+        let warmup_stats: Vec<TerminalStats> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+        crate::bat_bench::tpcc_tree_stats::write_checkpoint(
+            &db,
+            &cfg.output_dir,
+            "after_warmup",
+        )
+        .expect("failed to write after-warmup TPC-C tree audit");
+        (
+            Some(crate::bat_bench::tpcc_tree_stats::snapshot_smos(&db)),
+            committed_transaction_units(&warmup_stats),
+        )
+    } else {
+        (None, 0)
+    };
     #[cfg(feature = "gc-stats")]
     write_gc_stats(&db, &cfg.output_dir, "gc_stats_after_load.csv");
 
@@ -534,9 +652,99 @@ pub fn run_tpcc(mut cfg: DriverConfig) -> TpccRunSummary {
         scan_results.push(r);
     }
 
+    if std::env::var_os("BATSTORE_VERIFY_Q1").is_some() {
+        let [fe, sq, cp] = crate::bat_bench::tpch_queries::verify_q1_read_paths(&db);
+        println!("VERIFY_Q1 for_each_ref={fe:?} sequential_next={sq:?} collect_parallel={cp:?}");
+    }
+
     mem_sampler.stop();
     #[cfg(feature = "gc-stats")]
     write_gc_stats(&db, &cfg.output_dir, "gc_stats.csv");
+
+    #[cfg(feature = "tpcc-tree-stats")]
+    if tree_stats.is_some() {
+        // The experiment command deliberately disables idle compaction; all
+        // terminal and OLAP workers have joined at this point, so raw page
+        // inspection is quiescent.
+        let final_audit = crate::bat_bench::tpcc_tree_stats::write_checkpoint(
+            &db,
+            &cfg.output_dir,
+            "after_run",
+        )
+        .expect("failed to write after-run TPC-C tree audit");
+        let stats_after_run = crate::bat_bench::tpcc_tree_stats::snapshot_smos(&db);
+        let after_load = stats_after_load.as_ref().unwrap();
+        let after_warmup = stats_after_warmup.as_ref().unwrap();
+        crate::bat_bench::tpcc_tree_stats::write_smo_phase(
+            &cfg.output_dir,
+            "load",
+            after_load,
+            0,
+        )
+        .expect("failed to write load SMO counts");
+        crate::bat_bench::tpcc_tree_stats::write_smo_phase(
+            &cfg.output_dir,
+            "warmup",
+            &after_warmup.phase_since(after_load),
+            warmup_committed,
+        )
+        .expect("failed to write warm-up SMO counts");
+        let measured_smos = stats_after_run.phase_since(after_warmup);
+        let measured_committed = committed_transaction_units(&terminal_stats);
+        crate::bat_bench::tpcc_tree_stats::write_smo_phase(
+            &cfg.output_dir,
+            "measured",
+            &measured_smos,
+            measured_committed,
+        )
+        .expect("failed to write measured SMO counts");
+        crate::bat_bench::tpcc_tree_stats::write_human_summary(
+            &cfg.output_dir,
+            &final_audit,
+            &measured_smos,
+            measured_committed,
+        )
+        .expect("failed to write human-readable tree-stats summary");
+        let (git_commit, git_dirty) = crate::bat_bench::tpcc_tree_stats::git_state();
+        crate::bat_bench::tpcc_tree_stats::write_metadata(
+            &cfg.output_dir,
+            &crate::bat_bench::tpcc_tree_stats::RunMetadata {
+                schema_version: 1,
+                command: "tpcc_tree_stats",
+                git_commit,
+                git_dirty,
+                build_profile: if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                },
+                allocator: if cfg!(feature = "mimalloc") {
+                    "mimalloc"
+                } else {
+                    "jemalloc"
+                },
+                logical_cpus: num_cpus::get(),
+                completed_unix_seconds: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                warehouses: cfg.tpcc.num_warehouses,
+                terminals: cfg.num_terminals,
+                warmup_seconds: tree_stats.as_ref().unwrap().warmup.as_secs(),
+                measured_seconds: cfg.duration.as_secs(),
+                gc: cfg.gc,
+                update_in_place: cfg.update_in_place,
+                idle_compaction: cfg.idle_compaction.is_some(),
+                root_star: cfg.root_star_index.to_string(),
+                big_tree_size: format!("{:?}", cfg.big_tree_size),
+                num_items: cfg.tpcc.num_items,
+                customers_per_district: cfg.tpcc.customers_per_district,
+                initial_orders_per_district: cfg.tpcc.initial_orders_per_district,
+                final_version: db.current_version(),
+            },
+        )
+        .expect("failed to write tree-stats metadata");
+    }
 
     if crate::bat_test::SCAN_TRACE {
         crate::bat_test::dump_scan_trace();
@@ -684,6 +892,20 @@ fn num_olap_mode_summary(mode: &OlapMode) -> &'static str {
     }
 }
 
+#[cfg(feature = "tpcc-tree-stats")]
+fn committed_transaction_units(stats: &[TerminalStats]) -> u64 {
+    stats
+        .iter()
+        .map(|s| {
+            s.totals[NO]
+                + s.totals[PAY]
+                + s.totals[OS]
+                + s.totals[SL]
+                + s.totals[DELIV_DISTRICTS]
+        })
+        .sum()
+}
+
 fn write_results(
     terminal_stats: &[TerminalStats],
     scan_results: &[ScanResult],
@@ -811,6 +1033,115 @@ fn write_results(
         scan_count: scan_results.len(),
         avg_scan_tuples_per_sec,
     }
+}
+
+#[cfg(feature = "tpcc-tree-stats")]
+pub fn main_tpcc_tree_stats(parms: Vec<String>) {
+    fn value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|arg| arg == name)
+            .and_then(|index| args.get(index + 1))
+            .map(String::as_str)
+    }
+    fn parsed<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> T {
+        value(args, name)
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(default)
+    }
+    fn enabled(args: &[String], name: &str, default: bool) -> bool {
+        value(args, name)
+            .map(|raw| matches!(raw, "1" | "true" | "on" | "yes"))
+            .unwrap_or(default)
+    }
+
+    if parms.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!(
+            "TPC-C current-node filling, weak-condition, and exact SMO experiment\n\
+             Usage: batstore tpcc_tree_stats [options]\n\
+             \n\
+             --warehouses N       default 16\n\
+             --terminals N        default 16\n\
+             --warmup SECONDS     default 30\n\
+             --duration SECONDS   default 180\n\
+             --gc on|off          default on\n\
+             --affinity on|off    default off\n\
+             --big-tree-size SIZE 1kib|2kib|4kib|8kib|16kib|32kib|64kib|512kib\n\
+             --items N            default 100000\n\
+             --customers N        customers per district, default 3000\n\
+             --orders N           initial orders per district, default 3000\n\
+             --suppliers N        default 10000\n\
+             --output-dir PATH    default experiments/tpcc_tree_stats_<unix-seconds>\n\
+             --quick              1 warehouse, 1 terminal, small cardinalities, 1s+2s\n\
+             \n\
+             Build with: cargo build --release --features tpcc-tree-stats"
+        );
+        return;
+    }
+
+    let quick = parms.iter().any(|arg| arg == "--quick");
+    let warehouses = parsed(&parms, "--warehouses", if quick { 1 } else { 16 });
+    let terminals = parsed(&parms, "--terminals", if quick { 1 } else { 16 });
+    let warmup_seconds = parsed(&parms, "--warmup", if quick { 1 } else { 30 });
+    let duration_seconds = parsed(&parms, "--duration", if quick { 2 } else { 180 });
+    let num_items = parsed(&parms, "--items", if quick { 1_000 } else { 100_000 });
+    let customers = parsed(&parms, "--customers", if quick { 100 } else { 3_000 });
+    let orders = parsed(&parms, "--orders", if quick { 100 } else { 3_000 });
+    let suppliers = parsed(&parms, "--suppliers", if quick { 100 } else { 10_000 });
+    let big_tree_size = match value(&parms, "--big-tree-size").unwrap_or("32kib") {
+        "1kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB1,
+        "2kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB2,
+        "4kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB4,
+        "8kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB8,
+        "16kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB16,
+        "64kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB64,
+        "512kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB512,
+        "32kib" => crate::bat_bench::tpcc_schema::BigTreeSize::KiB32,
+        other => panic!("unknown --big-tree-size '{other}'"),
+    };
+    let default_output = format!(
+        "experiments/tpcc_tree_stats_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    );
+    let output_dir = PathBuf::from(value(&parms, "--output-dir").unwrap_or(&default_output));
+
+    println!("Tree-stats output directory: {}", output_dir.display());
+    run_tpcc_with_tree_stats(
+        DriverConfig {
+            tpcc: TpccConfig {
+                num_warehouses: warehouses,
+                districts_per_warehouse: 10,
+                customers_per_district: customers,
+                num_items,
+                initial_orders_per_district: orders,
+                initial_new_orders: (orders * 3 / 10).max(1),
+                num_suppliers: suppliers,
+            },
+            num_terminals: terminals,
+            duration: Duration::from_secs(duration_seconds),
+            affinity: enabled(&parms, "--affinity", false),
+            gc: enabled(&parms, "--gc", true),
+            update_in_place: false,
+            root_star_index: RootIndexType::FrugalList,
+            big_tree_size,
+            olap_mode: OlapMode::RepeatedFreshFullScan,
+            num_olap_threads: 0,
+            wal: None,
+            wal_lockfree_batch_size: None,
+            htap_baseline: None,
+            // The raw-page audit must be quiescent. Existing vacuum threads
+            // are fire-and-forget, so this dedicated command intentionally
+            // measures the write-path experiment with vacuum disabled.
+            idle_compaction: None,
+            scan_pool_workers: None,
+            output_dir,
+        },
+        TreeStatsRunConfig {
+            warmup: Duration::from_secs(warmup_seconds),
+        },
+    );
 }
 
 pub fn main_tpcc(parms: Vec<String>) {

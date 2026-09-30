@@ -114,6 +114,49 @@ pub fn q1_benchbase(db: &TpccDatabase) -> (Vec<OrderLineSummary>, Version) {
     (out, ts_start)
 }
 
+/// Diagnostic: counts delivered `OrderLine` rows (`ol_delivery_d` > Q1's cutoff) through
+/// three read paths at one snapshot: the zero-copy `for_each_ref` scan Q1 uses, the
+/// sequential `Iterator::next` path, and `collect_parallel` (`TpccTxn::range`).
+/// Returns `[(rows_seen, delivered_count, delivered_amount_sum); 3]` in that order.
+pub fn verify_q1_read_paths(db: &TpccDatabase) -> [(u64, u64, f64); 3] {
+    let cutoff = BENCHBASE_Q1_DELIVERY_AFTER_MILLIS;
+    let tally = |acc: &mut (u64, u64, f64), ol: &OrderLine| {
+        acc.0 += 1;
+        if ol.ol_delivery_d.is_some_and(|d| d > cutoff) {
+            acc.1 += 1;
+            acc.2 += ol.ol_amount;
+        }
+    };
+
+    let mut tx = TpccTxn::begin(db);
+    let mut for_each = (0u64, 0u64, 0.0f64);
+    tx.range_for_each_zone_pruned(
+        Table::OrderLine,
+        order_line_table_range(),
+        0,
+        u64::MAX,
+        |_, row| tally(&mut for_each, row.as_order_line()),
+    );
+    // `for_each_ref` above skips rows with a NULL `ol_delivery_d`, so `rows_seen` only
+    // counts rows that were ever delivered; the other two paths count every visible row.
+    let mut sequential = (0u64, 0u64, 0.0f64);
+    for r in crate::bat_query::iter_query::RangeQueryIter::new(
+        &db.tree_for(Table::OrderLine),
+        tx.read_ts(),
+        order_line_table_range(),
+        false,
+        tx.worker_id(),
+    ) {
+        tally(&mut sequential, r.payload.as_order_line());
+    }
+    let mut collected = (0u64, 0u64, 0.0f64);
+    for r in many(tx.range(Table::OrderLine, order_line_table_range(), true)) {
+        tally(&mut collected, r.payload.as_order_line());
+    }
+    tx.commit();
+    [for_each, sequential, collected]
+}
+
 pub fn q6(db: &TpccDatabase, date_lo: i64, date_hi: i64, max_qty: u8) -> (f64, Version) {
     let mut tx = TpccTxn::begin(db);
     let ts_start = tx.ts_start();

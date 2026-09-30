@@ -206,11 +206,13 @@ impl<
 
         let current_len = leaf_page.len();
         let stamp = TxStamp::new(self.worker_id(), self.start_tx_commit());
+        let zone_widen = self.cold.zone_map_projection.get().and_then(|f| f(&payload));
 
         leaf_page.push_uncommitted(
             RecordPoint::new(key, VersionInfo::new(stamp), payload),
             current_len,
         );
+        leaf_page.widen_zone_map(zone_widen);
         leaf_page.commit_delta(1, 0);
         self.commit_tx(stamp.worker_id());
     }
@@ -222,11 +224,14 @@ impl<
         let current_len = leaf_page.len();
 
         let stamp = TxStamp::new(self.worker_id(), self.start_tx_commit());
+        let zone_widen = self.cold.zone_map_projection.get().and_then(|f| f(&payload));
 
         leaf_page.push_uncommitted(
             RecordPoint::new(key, VersionInfo::new(stamp), payload),
             current_len,
         );
+        // A superset is safe, so this also stays on the undo path below.
+        leaf_page.widen_zone_map(zone_widen);
         leaf_page.commit_delta(1, 0);
 
         match leaf_page.delete_after_update(key, stamp) {

@@ -283,7 +283,13 @@ impl<
         simba: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         child_index: usize,
     ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
+        #[cfg(feature = "tpcc-tree-stats")]
+        self.smo_stats
+            .record(crate::bat_tree::stats::SmoKind::OverflowAttempt);
         if mufasa.lacks_room_for_split_entries() {
+            #[cfg(feature = "tpcc-tree-stats")]
+            self.smo_stats
+                .record(crate::bat_tree::stats::SmoKind::OverflowFailed);
             return Err(());
         }
 
@@ -308,11 +314,29 @@ impl<
 
         let simba_cell = match simba.try_retire() {
             Ok(cell) => cell,
-            Err(..) => return Err(()),
+            Err(..) => {
+                #[cfg(feature = "tpcc-tree-stats")]
+                self.smo_stats
+                    .record(crate::bat_tree::stats::SmoKind::OverflowFailed);
+                return Err(());
+            }
         };
 
+        #[cfg(feature = "tpcc-tree-stats")]
+        let child_is_leaf = simba_cell.deref().is_leaf();
+
+        #[cfg(feature = "tpcc-tree-stats")]
+        let completed_kind;
         let version = match self.split(simba_cell.deref(), &fence) {
             BlockSplit::ByKey(left_fence, left, right_fence, right) => {
+                #[cfg(feature = "tpcc-tree-stats")]
+                {
+                    completed_kind = if child_is_leaf {
+                        crate::bat_tree::stats::SmoKind::LeafKeySplit
+                    } else {
+                        crate::bat_tree::stats::SmoKind::InternalKeySplit
+                    };
+                }
                 let version = self.start_tx_commit();
 
                 internal_page.push_uncommitted(left_fence, version, left, current_len);
@@ -335,6 +359,14 @@ impl<
                 version
             }
             BlockSplit::ByVersion(fresh) => {
+                #[cfg(feature = "tpcc-tree-stats")]
+                {
+                    completed_kind = if child_is_leaf {
+                        crate::bat_tree::stats::SmoKind::LeafVersionSplit
+                    } else {
+                        crate::bat_tree::stats::SmoKind::InternalVersionSplit
+                    };
+                }
                 let version = self.start_tx_commit();
 
                 internal_page.push_uncommitted(fence, version, fresh, current_len);
@@ -355,6 +387,8 @@ impl<
 
         self.block_manager
             .register_dead(self.worker_id(), version, simba_cell);
+        #[cfg(feature = "tpcc-tree-stats")]
+        self.smo_stats.record(completed_kind);
         Ok(mufasa)
     }
 
@@ -364,11 +398,17 @@ impl<
         simba: BlockGuard<'_, FAN_OUT, NUM_RECORDS, Key, Payload>,
         index_simba: usize,
     ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
+        #[cfg(feature = "tpcc-tree-stats")]
+        self.smo_stats
+            .record(crate::bat_tree::stats::SmoKind::UnderflowAttempt);
         if VERBOSE {
             println!("on_underflow_node");
         }
 
         if mufasa.lacks_room_for_split_entries() {
+            #[cfg(feature = "tpcc-tree-stats")]
+            self.smo_stats
+                .record(crate::bat_tree::stats::SmoKind::UnderflowFailed);
             return Err(());
         }
 
@@ -376,11 +416,29 @@ impl<
 
         let simba_cell = match simba.try_retire() {
             Ok(cell) => cell,
-            Err(..) => return Err(()),
+            Err(..) => {
+                #[cfg(feature = "tpcc-tree-stats")]
+                self.smo_stats
+                    .record(crate::bat_tree::stats::SmoKind::UnderflowFailed);
+                return Err(());
+            }
         };
+
+        #[cfg(feature = "tpcc-tree-stats")]
+        let child_is_leaf = simba_cell.deref().is_leaf();
+        #[cfg(feature = "tpcc-tree-stats")]
+        let completed_kind;
 
         match self.merge(mufasa_deref_mut, simba_cell.deref(), index_simba) {
             MergeResult::Merged(index_sibling, fence_sibling, merged_block, candidate_cell) => {
+                #[cfg(feature = "tpcc-tree-stats")]
+                {
+                    completed_kind = if child_is_leaf {
+                        crate::bat_tree::stats::SmoKind::LeafMerge
+                    } else {
+                        crate::bat_tree::stats::SmoKind::InternalMerge
+                    };
+                }
                 if VERBOSE {
                     println!(
                         "MergeResult::Merged: Simba-fence: {} - Sibling-fence: {}",
@@ -427,6 +485,14 @@ impl<
                 BlockSplit::ByKey(left_interval, left, right_interval, right),
                 candidate_cell,
             ) => {
+                #[cfg(feature = "tpcc-tree-stats")]
+                {
+                    completed_kind = if child_is_leaf {
+                        crate::bat_tree::stats::SmoKind::LeafMergeKeySplit
+                    } else {
+                        crate::bat_tree::stats::SmoKind::InternalMergeKeySplit
+                    };
+                }
                 if VERBOSE {
                     unsafe {
                         println!(
@@ -481,10 +547,15 @@ impl<
             }
             _ => {
                 simba_cell.clear_retired();
+                #[cfg(feature = "tpcc-tree-stats")]
+                self.smo_stats
+                    .record(crate::bat_tree::stats::SmoKind::UnderflowFailed);
                 return Err(());
             }
         }
 
+        #[cfg(feature = "tpcc-tree-stats")]
+        self.smo_stats.record(completed_kind);
         Ok(mufasa)
     }
 
@@ -1219,6 +1290,9 @@ impl<
         root_guard: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         height: Height,
     ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
+        #[cfg(feature = "tpcc-tree-stats")]
+        self.smo_stats
+            .record(crate::bat_tree::stats::SmoKind::RootMergeAttempt);
         if VERBOSE {
             println!("merge root");
         }
@@ -1231,7 +1305,19 @@ impl<
             println!("Old root height = {}, new height = {}", height, height - 1);
         }
 
-        let guard = self.split_root(master_guard, child_guard, height - 1)?;
+        let guard = match self.replace_root(master_guard, child_guard, height - 1, true) {
+            Ok(guard) => guard,
+            Err(()) => {
+                #[cfg(feature = "tpcc-tree-stats")]
+                self.smo_stats
+                    .record(crate::bat_tree::stats::SmoKind::RootMergeFailed);
+                return Err(());
+            }
+        };
+
+        #[cfg(feature = "tpcc-tree-stats")]
+        self.smo_stats
+            .record(crate::bat_tree::stats::SmoKind::RootMerge);
 
         if VERBOSE {
             let guard_deref = guard.deref_mut();
@@ -1247,9 +1333,30 @@ impl<
     #[inline]
     pub(crate) fn split_root<'a>(
         &self,
+        master_guard: RootIndexGuard<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        root_guard: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
+        height: Height,
+    ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
+        #[cfg(feature = "tpcc-tree-stats")]
+        self.smo_stats
+            .record(crate::bat_tree::stats::SmoKind::RootSplitAttempt);
+
+        let result = self.replace_root(master_guard, root_guard, height, false);
+        #[cfg(feature = "tpcc-tree-stats")]
+        if result.is_err() {
+            self.smo_stats
+                .record(crate::bat_tree::stats::SmoKind::RootSplitFailed);
+        }
+        result
+    }
+
+    #[inline]
+    fn replace_root<'a>(
+        &self,
         _master_guard: RootIndexGuard<FAN_OUT, NUM_RECORDS, Key, Payload>,
         root_guard: BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>,
         height: Height,
+        _is_root_merge: bool,
     ) -> Result<BlockGuard<'a, FAN_OUT, NUM_RECORDS, Key, Payload>, ()> {
         let root_cell = match root_guard.try_retire() {
             Ok(cell) => cell,
@@ -1289,6 +1396,12 @@ impl<
                 self.block_manager
                     .register_dead(self.worker_id(), version, root_cell);
 
+                #[cfg(feature = "tpcc-tree-stats")]
+                if !_is_root_merge {
+                    self.smo_stats
+                        .record(crate::bat_tree::stats::SmoKind::RootKeySplit);
+                }
+
                 Ok(new_root_latch)
             }
             BlockSplit::ByVersion(new_root_block) => {
@@ -1301,6 +1414,12 @@ impl<
 
                 self.block_manager
                     .register_dead(self.worker_id(), version, root_cell);
+
+                #[cfg(feature = "tpcc-tree-stats")]
+                if !_is_root_merge {
+                    self.smo_stats
+                        .record(crate::bat_tree::stats::SmoKind::RootVersionSplit);
+                }
 
                 Ok(new_root_latch)
             }

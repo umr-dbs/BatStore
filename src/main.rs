@@ -61,6 +61,8 @@ fn main() {
             "load" => main_load(parms),
             "load2" => main_load_ycsb(parms),
             "tpcc" => bat_bench::tpcc_driver::main_tpcc(parms),
+            #[cfg(feature = "tpcc-tree-stats")]
+            "tpcc_tree_stats" => bat_bench::tpcc_driver::main_tpcc_tree_stats(parms),
             "tpch" => bat_bench::tpcc_driver::main_tpch(parms),
             "htap" => bat_bench::tpcc_driver::main_htap(parms),
             "ycsb" => bat_bench::ycsb_driver::main_ycsb(parms),

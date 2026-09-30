@@ -316,7 +316,8 @@ def plot_workload_latency_per_engine(
         ):
             ax.plot(positions, esub[column], label=label, **latency_line_style(label))
         _set_olap_thread_axis(ax, thread_values)
-        ax.set_ylabel("Query latency (microseconds)")
+        ax.set_yscale("log")
+        ax.set_ylabel("Query latency (microseconds, log scale)")
         ax.set_title(
             f"{ENGINE_LABELS.get(engine, engine)} - "
             f"{HTAP_LABELS.get(workload, workload)} latency - GC {gc_choice}"
@@ -340,7 +341,8 @@ def plot_workload_latency_all_engines(
         return
 
     thread_values = _olap_thread_values(sub["olap_threads"])
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5), sharex=True)
+    # Share the y-axis so P50/P95/P99 panels are directly comparable.
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5), sharex=True, sharey=True)
     for ax, (column, percentile) in zip(
         axes,
         (("scan_p50_us", "p50"), ("scan_p95_us", "p95"), ("scan_p99_us", "p99")),
@@ -352,7 +354,8 @@ def plot_workload_latency_all_engines(
                 label=ENGINE_LABELS.get(engine, engine), **engine_line_style(engine),
             )
         _set_olap_thread_axis(ax, thread_values)
-        ax.set_ylabel("Query latency (microseconds)")
+        ax.set_yscale("log")
+        ax.set_ylabel("Query latency (microseconds, log scale)")
         ax.set_title(percentile.upper(), fontweight="bold")
         if ax is axes[0]:
             ax.legend(fontsize="small", frameon=True, framealpha=0.9)
@@ -388,7 +391,7 @@ def plot_latency_overviews(df: pd.DataFrame, out_dir: Path) -> None:
         fig, axes = plt.subplots(
             len(workloads), 3,
             figsize=(width, row_height * len(workloads)),
-            squeeze=False,
+            squeeze=False, sharey="row",
         )
 
         for row, workload in enumerate(workloads):
@@ -417,11 +420,11 @@ def plot_latency_overviews(df: pd.DataFrame, out_dir: Path) -> None:
                     ax.set_xlabel("OLAP threads" if row == len(workloads) - 1 else "")
                 else:
                     ax.set_title(f"{workload_title}\n{percentile} latency")
-                ax.set_ylim(bottom=0)
+                ax.set_yscale("log")
                 if row == 0 and column_index == 0:
                     ax.legend(fontsize="small", frameon=True, framealpha=0.9)
 
-        fig.supylabel("Query latency (microseconds)")
+        fig.supylabel("Query latency (microseconds, log scale)")
         fig.suptitle(f"HTAP Q1/Q6 latency overview - GC {gc_choice}")
         fig.tight_layout()
         _save(fig, out_dir, f"htap_analytical_latency_overview_gc_{gc_choice}")

@@ -322,7 +322,7 @@ def plot_latency_per_engine(
         skews = sorted(esub["skew"].unique(), key=skew_sort_key)
         fig, axes = plt.subplots(
             len(row_classes), 3, figsize=(15, 4.4 * len(row_classes)),
-            squeeze=False, sharex=True,
+            squeeze=False, sharex=True, sharey="row",
         )
         for operation_class, percentile, column in metrics:
             row = row_classes.index(operation_class)
@@ -337,7 +337,8 @@ def plot_latency_per_engine(
                 tsub = esub[esub["threads"] == threads].set_index("skew").reindex(skews)
                 ax.plot(skews, tsub[column], marker="o", label=f"{threads} threads")
             ax.set_xlabel("Skew factor")
-            ax.set_ylabel(f"{operation_class.title()} {percentile} latency (µs)")
+            ax.set_yscale("log")
+            ax.set_ylabel(f"{operation_class.title()} {percentile} latency (µs, log)")
             ax.set_title(percentile)
             ax.grid(True, alpha=0.3)
             if col == 0:
@@ -362,7 +363,7 @@ def plot_latency_all_engines(
     row_classes = ["read", "write"] if workload in YCSB_WORKLOADS else ["read"]
     fig, axes = plt.subplots(
         len(row_classes), 3, figsize=(15, 4.4 * len(row_classes)),
-        squeeze=False, sharex=True,
+        squeeze=False, sharex=True, sharey="row",
     )
     for operation_class, percentile, column in metrics:
         row = row_classes.index(operation_class)
@@ -382,7 +383,8 @@ def plot_latency_all_engines(
                 **engine_line_style(engine),
             )
         ax.set_xlabel("Skew factor")
-        ax.set_ylabel(f"{operation_class.title()} {percentile} latency (µs)")
+        ax.set_yscale("log")
+        ax.set_ylabel(f"{operation_class.title()} {percentile} latency (µs, log)")
         ax.set_title(percentile)
         ax.grid(True, alpha=0.3)
         if col == 0:
