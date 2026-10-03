@@ -22,10 +22,14 @@ import plot_hypotheses
 import plot_results
 import plot_skew_sweep
 import plot_suite
+import plot_tree_stats
 from plot_styles import set_compact
 
 
-KINDS = ("auto", "comparison", "htap", "skew", "suite", "hypothesis", "hypotheses", "raw")
+KINDS = (
+    "auto", "comparison", "htap", "skew", "suite", "hypothesis",
+    "hypotheses", "stats", "raw",
+)
 
 
 def _manifest_sample(manifest_path: Path) -> tuple[set[str], list[str]]:
@@ -54,6 +58,8 @@ def _run_config(run_dir: Path) -> dict:
 
 def detect_kind(run_dir: Path) -> str:
     """Return the plotting format used by *run_dir*."""
+    if plot_tree_stats.is_stats_input(run_dir):
+        return "stats"
     if plot_hypotheses.hypothesis_id(run_dir):
         return "hypothesis"
     if plot_hypotheses.find_runs(run_dir):
@@ -174,11 +180,16 @@ def main() -> None:
             print(f"Plotting {hypothesis.upper()} from {hypothesis_run}")
             plot_hypotheses.plot_run(hypothesis_run)
         plot_hypotheses.plot_overview(run_dir, runs)
+    elif kind == "stats":
+        plot_tree_stats.plot_all(run_dir)
     else:
         out_dir = run_dir / "plots"
         out_dir.mkdir(parents=True, exist_ok=True)
         plot_results.auto(run_dir, out_dir)
-    print(f"All applicable figures written to {run_dir / 'plots'}")
+    if kind == "stats" and not (run_dir / "tree_summary.csv").exists():
+        print("All applicable figures written to each discovered run's plots directory")
+    else:
+        print(f"All applicable figures written to {run_dir / 'plots'}")
 
 
 if __name__ == "__main__":
