@@ -1,16 +1,15 @@
 [package]
 name = "BatStore"
-version = "0.0.141"
+version = "0.0.142"
 edition = "2024"
 authors = ["Amir Tonta <amir.tonta@mathematik.uni-marburg.de>"]
 description = "BatStore Research Implementation"
 repository = "https://github.com/umr-dbs/BatStore"
-# `tests/` holds unit-test files pulled into the bin crate via `#[path]` mods
-# (this crate has no `[lib]` target, so they can't be real integration
-# tests) alongside genuine standalone integration tests. Autodiscovery would
+# `tests/` holds unit-test files pulled into the library crate via `#[path]`
+# mods alongside genuine standalone integration tests. Autodiscovery would
 # try to compile every one of those unit-test files as its own integration-
-# test crate too, which fails (they use `crate::...` internals that don't
-# exist outside the bin). Disabled in favor of explicit `[[test]]` entries
+# test crate too, which fails (they use `crate::...` internals). Disabled in
+# favor of explicit `[[test]]` entries
 # below for the files that really are standalone.
 autotests = false
 
@@ -77,10 +76,9 @@ gc-stats = []
 name = "batstore"
 path = "src/main.rs"
 
-#[lib]
-#name = "batstore"
-#path = "src/lib.rs"
-#crate-type = ["cdylib"]
+[lib]
+name = "batstore"
+path = "src/lib.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]

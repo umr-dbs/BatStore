@@ -1,38 +1,21 @@
-use crate::bat_block::block::Block;
-use crate::bat_test::{main_append, main_generate, main_load, main_load_ycsb};
+use batstore::bat_block::block::Block;
+use batstore::bat_test::{main_append, main_generate, main_load, main_load_ycsb};
 use chrono::{DateTime, Local};
 use itertools::Itertools;
 use std::{env, fs};
 
-use crate::bat_bench::tpcc_schema::TPCC_FAN_OUT;
-use crate::bat_bench::tpcc_schema::TPCC_NUM_RECORDS;
-use crate::bat_bench::ycsb_schema::{YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow};
-use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
-use crate::bat_crud_model::crud_operation::{CRUDOperation, TxAtomicOperation};
-use crate::bat_crud_model::crud_operation_result::{AtomicTxResult, CRUDOperationResult};
-use crate::bat_tree::mvbt::Key;
-use crate::bat_tree::mvbt::NUM_RECORDS;
-use crate::bat_tree::mvbt::Payload;
-use crate::bat_tree::mvbt::{FAN_OUT, MVBT};
+use batstore::bat_bench::tpcc_schema::TPCC_FAN_OUT;
+use batstore::bat_bench::tpcc_schema::TPCC_NUM_RECORDS;
+use batstore::bat_bench::ycsb_schema::{YCSB_FAN_OUT, YCSB_NUM_RECORDS, YcsbKey, YcsbRow};
+use batstore::bat_crud_model::crud_operation::TxAtomicOperation;
+use batstore::bat_crud_model::crud_operation_result::{AtomicTxResult, CRUDOperationResult};
+use batstore::bat_tree::mvbt::Key;
+use batstore::bat_tree::mvbt::NUM_RECORDS;
+use batstore::bat_tree::mvbt::Payload;
+use batstore::bat_tree::mvbt::{FAN_OUT, MVBT};
 
-mod bat_bench;
-mod bat_block;
-mod bat_crud_model;
-mod bat_db;
-mod bat_gc;
-mod bat_page_model;
-mod bat_query;
-mod bat_record_model;
-mod bat_root;
-mod bat_sync;
-mod bat_test;
-mod bat_tree;
-#[cfg(feature = "tree-viz")]
-mod bat_viz;
-mod bat_wal;
-
-use crate::bat_bench::tpcc_schema::{TpccKey, TpccRow};
-use crate::bat_sync::smart_cell::OptCell;
+use batstore::bat_bench::tpcc_schema::{TpccKey, TpccRow};
+use batstore::bat_sync::smart_cell::OptCell;
 #[cfg(all(not(miri), not(feature = "mimalloc")))]
 use jemallocator::Jemalloc;
 #[cfg(feature = "mimalloc")]
@@ -60,23 +43,23 @@ fn main() {
             "append" => main_append(parms),
             "load" => main_load(parms),
             "load2" => main_load_ycsb(parms),
-            "tpcc" => bat_bench::tpcc_driver::main_tpcc(parms),
+            "tpcc" => batstore::bat_bench::tpcc_driver::main_tpcc(parms),
             #[cfg(feature = "tpcc-tree-stats")]
-            "tpcc_tree_stats" => bat_bench::tpcc_driver::main_tpcc_tree_stats(parms),
-            "tpch" => bat_bench::tpcc_driver::main_tpch(parms),
-            "htap" => bat_bench::tpcc_driver::main_htap(parms),
-            "ycsb" => bat_bench::ycsb_driver::main_ycsb(parms),
-            "s_ycsb" => bat_bench::s_ycsb_driver::main_s_ycsb(parms),
+            "tpcc_tree_stats" => batstore::bat_bench::tpcc_driver::main_tpcc_tree_stats(parms),
+            "tpch" => batstore::bat_bench::tpcc_driver::main_tpch(parms),
+            "htap" => batstore::bat_bench::tpcc_driver::main_htap(parms),
+            "ycsb" => batstore::bat_bench::ycsb_driver::main_ycsb(parms),
+            "s_ycsb" => batstore::bat_bench::s_ycsb_driver::main_s_ycsb(parms),
             #[cfg(feature = "mdbx-backend")]
-            "mdbx_ycsb" => bat_bench::mdbx_ycsb::main_mdbx_ycsb(parms),
+            "mdbx_ycsb" => batstore::bat_bench::mdbx_ycsb::main_mdbx_ycsb(parms),
             #[cfg(feature = "mdbx-backend")]
-            "mdbx_tpcc" => bat_bench::mdbx_tpcc::main_mdbx_tpcc(parms),
+            "mdbx_tpcc" => batstore::bat_bench::mdbx_tpcc::main_mdbx_tpcc(parms),
             #[cfg(feature = "mdbx-backend")]
-            "mdbx_s_ycsb" => bat_bench::mdbx_s_ycsb::main_mdbx_s_ycsb(parms),
-            "benchmark" => bat_bench::suite::main_benchmark(parms),
-            "_bench_one" => bat_bench::suite::main_bench_one(parms),
+            "mdbx_s_ycsb" => batstore::bat_bench::mdbx_s_ycsb::main_mdbx_s_ycsb(parms),
+            "benchmark" => batstore::bat_bench::suite::main_benchmark(parms),
+            "_bench_one" => batstore::bat_bench::suite::main_bench_one(parms),
             #[cfg(feature = "tree-viz")]
-            "viz_demo" => bat_test::main_viz_demo(parms),
+            "viz_demo" => batstore::bat_test::main_viz_demo(parms),
             // "load_cc_new" => main_load_cc_new(parms),
             // "sorted_insert" => main_sorted_insert(parms),
             s => println!("Unknown Command '{s}'"),
@@ -84,14 +67,13 @@ fn main() {
     } else {
         println!("*********** Use a Command ***********")
     }
-
 }
 
 fn minimal_repro() {
-    use crate::bat_bench::tpcc_schema::{OrderLine, TpccRow, TpccTree};
-    use crate::bat_crud_model::crud_operation::TxAtomicOperation;
-    use crate::bat_crud_model::crud_operation_result::AtomicTxResult;
-    use crate::bat_query::interval::Interval;
+    use batstore::bat_bench::tpcc_schema::{OrderLine, TpccRow, TpccTree};
+    use batstore::bat_crud_model::crud_operation::TxAtomicOperation;
+    use batstore::bat_crud_model::crud_operation_result::AtomicTxResult;
+    use batstore::bat_query::interval::Interval;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
     use std::time::Duration;

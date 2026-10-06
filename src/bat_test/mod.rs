@@ -1005,7 +1005,7 @@ pub fn main_load_ycsb(parms: Vec<String>) {
     // println!("{}", NODES_REQUEST.load(SeqCst));
 }
 
-pub(crate) fn main_load(parms: Vec<String>) {
+pub fn main_load(parms: Vec<String>) {
     println!("###### Command: {} ######", parms.iter().skip(1).join(" "));
 
     let query_file_name = parms[2].to_string();
@@ -1343,7 +1343,7 @@ pub(crate) fn main_load_cc_new(parms: Vec<String>) {
         format_insertions(num)
     );
 }
-pub(crate) fn main_generate(parms: Vec<String>) {
+pub fn main_generate(parms: Vec<String>) {
     let query_file_name = parms[2].as_str();
     let init_population: usize = parms[3].parse().unwrap();
     let total_blocks: usize = parms[4].parse().unwrap();
@@ -1372,7 +1372,7 @@ pub(crate) fn main_generate(parms: Vec<String>) {
     );
     println!("Finished generate.")
 }
-pub(crate) fn main_append(parms: Vec<String>) {
+pub fn main_append(parms: Vec<String>) {
     let query_file_name = parms[2].as_str();
     let total_blocks: usize = parms[4].parse().unwrap();
     let block_inserts: usize = parms[5].parse().unwrap();
