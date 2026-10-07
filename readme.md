@@ -6,6 +6,14 @@
 
 BatStore is based on siMVBT, an extension of the [concurrent multiversion B-tree (cMVBT)](https://github.com/umr-dbs/cMVBT), and adds Ordered Snapshot Instant Commit.
 
+## Prebuilt BTW artifact binary
+
+A prebuilt Linux x86-64 executable is available under
+[`artifacts/btw/`](artifacts/btw/README.md) for artifact-review smoke tests.
+Its platform requirements, checksum, build provenance, and the distinction
+between functional validation and performance measurements are documented
+alongside the binary.
+
 ## Reproduce the complete paper
 
 Use a dedicated Debian/Ubuntu machine with `sudo` access and run all commands from the repository root. First prepare the benchmark environment:

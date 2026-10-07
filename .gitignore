@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 /scripts/.venv
 /comparison_results
 /skew_sweep_results
