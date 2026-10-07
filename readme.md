@@ -1,5 +1,9 @@
 # BatStore
 
+<p align="center">
+  <img src="docs/assets/batstore-logo-clean.png" alt="BatStore — Marburg, Germany" width="600">
+</p>
+
 BatStore is based on siMVBT, an extension of the [concurrent multiversion B-tree (cMVBT)](https://github.com/umr-dbs/cMVBT), and adds Ordered Snapshot Instant Commit.
 
 ## Reproduce the complete paper
