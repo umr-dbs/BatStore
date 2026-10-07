@@ -2,57 +2,51 @@
 
 BatStore is based on siMVBT, an extension of the [concurrent multiversion B-tree (cMVBT)](https://github.com/umr-dbs/cMVBT), and adds Ordered Snapshot Instant Commit.
 
-## Reproducing the experiments
+## Reproduce the complete paper
 
-Use a dedicated Debian/Ubuntu machine with `sudo` access. The setup script installs the required system packages, builds the benchmark engines, configures PostgreSQL, and creates a Python environment. Run all commands from the repository root.
+Use a dedicated Debian/Ubuntu machine with `sudo` access and run all commands from the repository root. First prepare the benchmark environment:
 
-### 1. Set up the environment
-
-```bash
+```console
 python3 scripts/setup_environment.py
 source scripts/.venv/bin/activate
 ```
 
-The default setup prepares BatStore, LeanStore, WiredTiger, PostgreSQL, and BatStore's libmdbx backend. It may prompt for the `sudo` password and package-installation confirmation. Re-running with `--reuse-checkouts` keeps the existing dependency checkouts instead of cloning them again.
+Then run every paper experiment (H1-H6). The script runs the suites in order, stops on the first failure, and regenerates all individual figures plus the combined paper overview only after the measurements finish:
 
-### 2. Run a quick check
-
-```bash
-python3 scripts/compare_engines.py \
-  --tiny \
-  --engines batstore,leanstore \
-  --workloads tpcc,ycsb_a \
-  --threads 2 \
-  --gc on \
-  --affinity off
+```console
+python3 scripts/run_paper_experiments.py
 ```
 
-This small run verifies that the environment works before starting the full experiments.
+Results are stored together under `paper_results/run_YYYYMMDD_HHMMSS/`. Each H1-H6 subdirectory contains its raw measurements, configuration, and plots. The collection's `paper_run.json` records the exact commands and completion status; the combined figures are in `plots/`.
 
-### 3. Run the main comparison
+## Optional validation and additional capabilities
 
-```bash
-python3 scripts/compare_engines.py \
-  --engines batstore,leanstore,wiredtiger,postgres,libmdbx
+The following commands are not required for the complete paper run.
+
+### Optional: short end-to-end validation
+
+Use the quick profile to verify every runner and plotting path before committing to the full run. These reduced settings are a smoke test and must not be reported as paper measurements.
+
+```console
+python3 scripts/run_paper_experiments.py --quick
 ```
 
-The runner executes TPC-C, YCSB A-F, CH-benCHmark Q1/Q6 with concurrent TPC-C, and S-YCSB. By default it sweeps 2, 4, 8, 16, 32, 64, and 128 threads and compares garbage collection where the engine supports it.
+Use `--only h1,h3,h6` to run selected suites, `--skip-build` to reuse binaries that were already built, or `--dry-run` to print the exact commands without creating results.
 
-Results are written to a timestamped directory under `comparison_results/`. Each run contains the normalized `manifest.csv`, its configuration, and the per-engine output.
+### Additional: broad cross-engine comparison
 
-### 4. Plot the results
+This broader matrix is useful for exploratory comparisons beyond the focused paper hypotheses:
 
-Use the run directory printed by the benchmark command:
-
-```bash
+```console
+python3 scripts/compare_engines.py
 python3 scripts/plot.py comparison_results/run_YYYYMMDD_HHMMSS
 ```
 
-Plots are written to the run's `plots/` directory.
+It covers TPC-C, YCSB A-F, CH-benCHmark Q1/Q6 with concurrent TPC-C, and S-YCSB across the configured engines, thread counts, and GC modes.
 
-## Additional experiment suites
+### Additional: specialized sweeps
 
-```bash
+```console
 # Fixed OLTP load while varying analytical threads
 python3 scripts/run_htap_analytical_sweep.py --oltp-terminals 4 --olap-threads 1,2,4,8,16
 
@@ -68,7 +62,7 @@ python3 scripts/run_gc_sweep.py
 
 Every runner supports `--help`. The comparison and skew runners also support `--tiny` for short validation runs.
 
-## References
+### Additional background
 
 - B. Becker et al., *An Asymptotically Optimal Multiversion B-Tree*, The VLDB Journal 5(4), 1996.
 - A. Tonta et al., *Multiversion Concurrency Control for Multiversion B-Trees*, [arXiv:2606.09133](https://arxiv.org/abs/2606.09133), 2026.
