@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::thread;
 use std::time::Duration;
 
@@ -128,6 +128,9 @@ pub struct Database<
     /// Immutable construction-time mapping from transactional workers to
     /// each table's page-reclamation queues.
     gc_shard_layout: GcShardLayout,
+    /// Zero keeps the construction-time/environment default. A positive
+    /// value is propagated to current and future tables.
+    gc_steal_scan_percent: AtomicUsize,
     /// Every table on this database, directly indexable by `TableId` (its
     /// position in this list) — see this struct's and `TableList`'s doc.
     /// Wrapped in a `sync::Arc` (on top of the `ArcSwap` itself) so the
@@ -235,6 +238,7 @@ impl<
             min_key,
             max_key,
             gc_shard_layout: GcShardLayout::PerWorker,
+            gc_steal_scan_percent: AtomicUsize::new(0),
             tables: sync::Arc::new(ArcSwap::from_pointee(TableList::new())),
             wal,
             meta_path,
@@ -374,6 +378,10 @@ impl<
             if let Some(config) = gc.as_ref() {
                 tree.configure_gc(config.mode, config.update_in_place);
             }
+            let steal_scan_percent = self.gc_steal_scan_percent.load(Relaxed);
+            if steal_scan_percent != 0 {
+                tree.set_gc_steal_scan_percent(steal_scan_percent);
+            }
 
             built = Some(tree.clone());
 
@@ -423,6 +431,35 @@ impl<
 
     pub fn enable_gc(&self, update_in_place: bool, vacuum: Option<(f64, Duration)>) {
         self.configure_gc(PageReclaimMode::ReuseSteal, update_in_place, vacuum);
+    }
+
+    /// Configures how much of the shard set `ReuseSteal` may inspect after a
+    /// local miss. Applies to current tables and tables created later.
+    pub fn set_gc_steal_scan_percent(&self, scan_percent: usize) {
+        assert!(
+            (1..=100).contains(&scan_percent),
+            "GC steal scan percentage must be from 1 to 100"
+        );
+        self.gc_steal_scan_percent
+            .store(scan_percent, Relaxed);
+        for entry in self.tables.load().iter() {
+            entry.tree.set_gc_steal_scan_percent(scan_percent);
+        }
+    }
+
+    pub fn gc_steal_scan_percent(&self) -> usize {
+        self.tables
+            .load()
+            .first()
+            .map(|entry| entry.tree.gc_steal_scan_percent())
+            .unwrap_or_else(|| {
+                let configured = self.gc_steal_scan_percent.load(Relaxed);
+                if configured == 0 {
+                    crate::bat_gc::SCAN_PERCENT
+                } else {
+                    configured
+                }
+            })
     }
 
     /// Applies one physical page-reclamation policy to current tables and to

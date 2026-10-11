@@ -49,6 +49,7 @@ pub struct DriverConfig {
     pub gc_mode: PageReclaimMode,
     /// Immutable mapping from transactional workers to reclamation shards.
     pub gc_shards: GcShardLayout,
+    pub gc_steal_scan_percent: Option<usize>,
     pub update_in_place: bool,
     pub root_star_index: RootIndexType,
     /// See `DriverConfig::wal` in `tpcc_driver` — same semantics here.
@@ -320,6 +321,9 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         )),
     };
     if cfg.gc {
+        if let Some(scan_percent) = cfg.gc_steal_scan_percent {
+            tree.set_gc_steal_scan_percent(scan_percent);
+        }
         tree.configure_gc(cfg.gc_mode, cfg.update_in_place);
     }
     let vacuum_stop = std::sync::Arc::new(AtomicBool::new(false));
@@ -352,7 +356,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
          - write_all_fields    = {}\n\
          - read_payload       = {}\n\
          - execution_mode    = {:?}\n\
-         - GC                  = {} (mode={}, shards={}, update_in_place={})\n\
+         - GC                  = {} (mode={}, shards={}, steal_scan={}%, update_in_place={})\n\
          - WAL                 = {}\n\
          - root*               = {}\n\
          - scan_pool           = {}",
@@ -369,6 +373,7 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
         cfg.gc,
         cfg.gc_mode,
         cfg.gc_shards,
+        tree.gc_steal_scan_percent(),
         cfg.update_in_place,
         match (&cfg.wal, cfg.wal_lockfree_batch_size) {
             (Some((path, interval)), None) =>
@@ -720,6 +725,17 @@ pub fn main_ycsb(parms: Vec<String>) {
         parms.get(24).map(String::as_str),
     )
     .unwrap_or_else(|error| panic!("ycsb: {error}"));
+    let gc_steal_scan_percent = parms.get(25).map(|value| {
+        value.parse::<usize>().unwrap_or_else(|_| {
+            panic!("ycsb: GC steal scan percentage must be from 1 to 100")
+        })
+    });
+    if let Some(percent) = gc_steal_scan_percent {
+        assert!(
+            (1..=100).contains(&percent),
+            "ycsb: GC steal scan percentage must be from 1 to 100"
+        );
+    }
 
     run_ycsb(DriverConfig {
         ycsb: YcsbConfig {
@@ -738,6 +754,7 @@ pub fn main_ycsb(parms: Vec<String>) {
         gc,
         gc_mode,
         gc_shards,
+        gc_steal_scan_percent,
         update_in_place,
         root_star_index,
         wal: wal_enabled.then(|| {

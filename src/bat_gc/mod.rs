@@ -1,6 +1,8 @@
 pub mod block_tracer;
 pub mod tracker_handle;
 
+pub use block_tracer::SCAN_PERCENT;
+
 use std::num::NonZeroUsize;
 
 /// Construction-time layout of the physical page-reclamation queues.

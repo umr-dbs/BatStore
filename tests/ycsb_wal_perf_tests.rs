@@ -44,6 +44,7 @@ fn config(num_threads: usize, wal_path: PathBuf, batch_size: Option<usize>) -> D
         gc: true,
         gc_mode: crate::bat_gc::PageReclaimMode::ReuseSteal,
         gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
+        gc_steal_scan_percent: None,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,
         wal: Some((wal_path, Duration::from_millis(5))),

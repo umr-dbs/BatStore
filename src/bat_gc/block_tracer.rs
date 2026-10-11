@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 /// Number of blocks obtained on an allocator miss, including the requested block.
 pub const ALLOC_BATCH_SIZE: usize = 4;
@@ -117,10 +118,12 @@ pub(crate) struct BlockTrace<
 > {
     shards: Box<[CachePadded<BlockTraceShard<P_F, P_N, Key, Payload>>]>,
     batch_size: usize,
-    scan_percent: usize,
+    scan_percent: AtomicUsize,
     /// Exact number of non-local shards to probe. When absent, retain the
     /// legacy percentage-based policy for backwards compatibility.
-    max_neighbors: Option<usize>,
+    // `usize::MAX` means percentage-based scanning. Any other value is the
+    // exact legacy BATSTORE_GC_MAX_NEIGHBORS override.
+    max_neighbors: AtomicUsize,
 }
 
 impl<
@@ -152,8 +155,8 @@ impl<
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             batch_size,
-            scan_percent,
-            max_neighbors,
+            scan_percent: AtomicUsize::new(scan_percent),
+            max_neighbors: AtomicUsize::new(max_neighbors.unwrap_or(usize::MAX)),
         }
     }
 
@@ -165,6 +168,28 @@ impl<
             100,
             Some(shard_count.saturating_sub(1)),
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_scan_percent(
+        shard_count: usize,
+        batch_size: usize,
+        scan_percent: usize,
+    ) -> Self {
+        Self::with_config(shard_count, batch_size, scan_percent, None)
+    }
+
+    pub(crate) fn set_steal_scan_percent(&self, scan_percent: usize) {
+        assert!(
+            (1..=100).contains(&scan_percent),
+            "GC steal scan percentage must be from 1 to 100"
+        );
+        self.scan_percent.store(scan_percent, Relaxed);
+        self.max_neighbors.store(usize::MAX, Relaxed);
+    }
+
+    pub(crate) fn steal_scan_percent(&self) -> usize {
+        self.scan_percent.load(Relaxed)
     }
 
     #[inline(always)]
@@ -339,16 +364,20 @@ impl<
             // `checked` includes the local shard. The explicit setting counts
             // only neighbours, which makes zero a useful local-only baseline.
             // If it is not set, preserve BATSTORE_GC_SCAN_PERCENT semantics.
-            let max_checked = self.max_neighbors.map_or_else(
-                || {
+            let max_neighbors = self.max_neighbors.load(Relaxed);
+            let max_checked = if max_neighbors == usize::MAX {
                     self.shards
                         .len()
-                        .saturating_mul(self.scan_percent)
+                        .saturating_mul(self.scan_percent.load(Relaxed))
                         .div_ceil(100)
-                        .max(1)
-                },
-                |neighbors| neighbors.saturating_add(1),
-            );
+                        // `checked` already contains the local shard. A
+                        // non-zero percentage in steal mode must therefore
+                        // permit at least one non-local probe.
+                        .max(2)
+                        .min(self.shards.len())
+            } else {
+                max_neighbors.saturating_add(1).min(self.shards.len())
+            };
             let start = fastrand::usize(..self.shards.len());
             for offset in 0..self.shards.len() {
                 if checked >= max_checked {

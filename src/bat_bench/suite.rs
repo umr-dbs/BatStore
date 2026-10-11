@@ -170,6 +170,7 @@ fn run_one(
                     crate::bat_gc::PageReclaimMode::Off
                 },
                 gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
+                gc_steal_scan_percent: None,
                 update_in_place: false,
                 root_star_index: RootIndexType::FrugalList,
                 big_tree_size: Default::default(),
@@ -203,6 +204,7 @@ fn run_one(
                     crate::bat_gc::PageReclaimMode::Off
                 },
                 gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
+                gc_steal_scan_percent: None,
                 update_in_place: false,
                 root_star_index: RootIndexType::FrugalList,
                 big_tree_size: Default::default(),
@@ -248,6 +250,7 @@ fn run_one(
                     crate::bat_gc::PageReclaimMode::Off
                 },
                 gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
+                gc_steal_scan_percent: None,
                 update_in_place: false,
                 root_star_index: RootIndexType::FrugalList,
                 wal: None,

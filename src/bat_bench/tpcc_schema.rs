@@ -976,6 +976,30 @@ impl TpccDatabase {
         self.configure_gc(PageReclaimMode::ReuseSteal, update_in_place, vacuum);
     }
 
+    pub fn set_gc_steal_scan_percent(&self, scan_percent: usize) {
+        self.db.set_gc_steal_scan_percent(scan_percent);
+        macro_rules! set_for_pair {
+            ($warehouse:expr, $district:expr) => {{
+                $warehouse.set_gc_steal_scan_percent(scan_percent);
+                $district.set_gc_steal_scan_percent(scan_percent);
+            }};
+        }
+        match &self.big_trees {
+            BigTrees::KiB1 { warehouse, district } => set_for_pair!(warehouse, district),
+            BigTrees::KiB2 { warehouse, district } => set_for_pair!(warehouse, district),
+            BigTrees::KiB4 { warehouse, district } => set_for_pair!(warehouse, district),
+            BigTrees::KiB8 { warehouse, district } => set_for_pair!(warehouse, district),
+            BigTrees::KiB16 { warehouse, district } => set_for_pair!(warehouse, district),
+            BigTrees::KiB32 { warehouse, district } => set_for_pair!(warehouse, district),
+            BigTrees::KiB64 { warehouse, district } => set_for_pair!(warehouse, district),
+            BigTrees::KiB512 { warehouse, district } => set_for_pair!(warehouse, district),
+        }
+    }
+
+    pub fn gc_steal_scan_percent(&self) -> usize {
+        self.db.gc_steal_scan_percent()
+    }
+
     pub fn configure_gc(
         &self,
         mode: PageReclaimMode,

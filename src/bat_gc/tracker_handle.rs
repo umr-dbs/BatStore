@@ -173,6 +173,18 @@ impl<
         )
     }
 
+    #[cfg(test)]
+    fn new_for_test_with_scan_percent(
+        shard_count: usize,
+        batch_size: usize,
+        scan_percent: usize,
+    ) -> Self {
+        Self::new_with_trace(
+            shard_count,
+            BlockTrace::new_for_test_with_scan_percent(shard_count, batch_size, scan_percent),
+        )
+    }
+
     #[cfg(feature = "gc-stats")]
     fn zero_counters(count: usize) -> Box<[CachePadded<AtomicU64>]> {
         (0..count)
@@ -195,6 +207,14 @@ impl<
 
     pub(crate) fn shard_count(&self) -> usize {
         self.reusable.len()
+    }
+
+    pub fn set_steal_scan_percent(&self, scan_percent: usize) {
+        self.dead_blocks.set_steal_scan_percent(scan_percent);
+    }
+
+    pub fn steal_scan_percent(&self) -> usize {
+        self.dead_blocks.steal_scan_percent()
     }
 
     #[cfg(feature = "gc-stats")]

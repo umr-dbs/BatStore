@@ -342,6 +342,19 @@ impl<
         self.block_manager.tracker().shard_count()
     }
 
+    /// Sets the percentage of reclamation shards that `ReuseSteal` may
+    /// inspect on a local miss. The local shard is included in the percentage,
+    /// but a non-zero percentage always permits at least one remote probe.
+    pub fn set_gc_steal_scan_percent(&self, scan_percent: usize) {
+        self.block_manager
+            .tracker()
+            .set_steal_scan_percent(scan_percent);
+    }
+
+    pub fn gc_steal_scan_percent(&self) -> usize {
+        self.block_manager.tracker().steal_scan_percent()
+    }
+
     pub fn allow_historic_query(&self, enabled: bool) {
         self.disable_gc();
         self.ctx.set_truncate_commit_log(!enabled);

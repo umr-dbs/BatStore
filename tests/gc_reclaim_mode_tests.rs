@@ -102,6 +102,35 @@ fn reuse_steal_takes_an_eligible_remote_retired_page() {
 }
 
 #[test]
+fn reuse_steal_checks_a_remote_shard_at_twenty_five_percent_with_two_shards() {
+    let tracker = TrackerHandleSt::<4, 4, u64, u64>::new_for_test_with_scan_percent(2, 4, 25);
+    let ctx = TxContext::new(2);
+    tracker.set_reclaim_mode(PageReclaimMode::ReuseSteal);
+    let remote = block();
+    tracker.register_died_page(1, 1, remote);
+
+    let got = tracker
+        .free_block(&ctx)
+        .expect("a non-zero steal percentage must inspect at least one remote shard");
+    assert_eq!(got.0, remote.0);
+    unsafe { got.destroy() };
+}
+
+#[test]
+fn steal_scan_percentage_is_runtime_configurable() {
+    let tracker = TrackerHandleSt::<4, 4, u64, u64>::new_for_test(4, 4);
+    tracker.set_steal_scan_percent(50);
+    assert_eq!(tracker.steal_scan_percent(), 50);
+}
+
+#[test]
+#[should_panic(expected = "must be from 1 to 100")]
+fn steal_scan_percentage_rejects_zero() {
+    let tracker = TrackerHandleSt::<4, 4, u64, u64>::new_for_test(2, 4);
+    tracker.set_steal_scan_percent(0);
+}
+
+#[test]
 fn reuse_no_steal_does_not_consume_a_stolen_page_cached_by_an_earlier_mode() {
     let tracker = TrackerHandleSt::<4, 4, u64, u64>::new_for_test(2, 4);
     let ctx = TxContext::new(2);
@@ -330,6 +359,25 @@ fn database_fixed_shard_layout_is_inherited_by_every_table() {
     assert_eq!(db.gc_shard_layout(), crate::bat_gc::GcShardLayout::fixed(3));
     assert_eq!(db.create_table("first").gc_shard_count(), 3);
     assert_eq!(db.create_table("second").gc_shard_count(), 3);
+}
+
+#[test]
+fn database_steal_scan_percentage_reaches_existing_and_future_tables() {
+    let db = Database::<8, 8, u64, u64>::new_with_max_workers(
+        RootIndexType::default(),
+        |key| key.saturating_add(1),
+        |key| key.saturating_sub(1),
+        u64::MIN,
+        u64::MAX,
+        4,
+    );
+    let existing = db.create_table("existing");
+    db.set_gc_steal_scan_percent(50);
+    let future = db.create_table("future");
+
+    assert_eq!(db.gc_steal_scan_percent(), 50);
+    assert_eq!(existing.gc_steal_scan_percent(), 50);
+    assert_eq!(future.gc_steal_scan_percent(), 50);
 }
 
 #[test]

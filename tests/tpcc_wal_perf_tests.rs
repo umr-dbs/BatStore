@@ -54,6 +54,7 @@ fn config(num_terminals: usize, wal_path: PathBuf, batch_size: Option<usize>) ->
         gc: true,
         gc_mode: crate::bat_gc::PageReclaimMode::ReuseSteal,
         gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
+        gc_steal_scan_percent: None,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,
         big_tree_size: Default::default(),

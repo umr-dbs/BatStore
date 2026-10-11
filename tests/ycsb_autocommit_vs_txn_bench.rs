@@ -45,6 +45,7 @@ fn config(field_length: usize, execution_mode: YcsbExecutionMode) -> DriverConfi
         gc: true,
         gc_mode: crate::bat_gc::PageReclaimMode::ReuseSteal,
         gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
+        gc_steal_scan_percent: None,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,
         wal: None,

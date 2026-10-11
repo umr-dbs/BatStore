@@ -54,6 +54,7 @@ pub struct DriverConfig {
     pub gc: bool,
     pub gc_mode: PageReclaimMode,
     pub gc_shards: GcShardLayout,
+    pub gc_steal_scan_percent: Option<usize>,
     pub update_in_place: bool,
     pub root_star_index: RootIndexType,
     /// `Table::Warehouse`/`Table::District`'s leaf capacity — see
@@ -388,6 +389,9 @@ fn run_tpcc_impl(
     if historic {
         db.allow_historic_query(true);
     } else if cfg.gc {
+        if let Some(scan_percent) = cfg.gc_steal_scan_percent {
+            db.set_gc_steal_scan_percent(scan_percent);
+        }
         db.configure_gc(cfg.gc_mode, cfg.update_in_place, None);
     }
 
@@ -398,7 +402,7 @@ fn run_tpcc_impl(
          - OLAP threads          = {num_olap} ({})\n\
          - mode                  = {}\n\
          - duration              = {:?}\n\
-         - GC                    = {} (mode={}, shards={}, update_in_place={})\n\
+         - GC                    = {} (mode={}, shards={}, steal_scan={}%, update_in_place={})\n\
          - WAL                   = {}\n\
          - root*                 = {}\n\
          - items/customers/orders per district = {}/{}/{}\n\
@@ -415,6 +419,7 @@ fn run_tpcc_impl(
         cfg.gc,
         cfg.gc_mode,
         cfg.gc_shards,
+        db.gc_steal_scan_percent(),
         cfg.update_in_place,
         match (&cfg.wal, cfg.wal_lockfree_batch_size) {
             (Some((path, interval)), None) =>
@@ -1132,6 +1137,7 @@ pub fn main_tpcc_tree_stats(parms: Vec<String>) {
             gc: enabled(&parms, "--gc", true),
             gc_mode: PageReclaimMode::ReuseSteal,
             gc_shards: GcShardLayout::PerWorker,
+            gc_steal_scan_percent: None,
             update_in_place: false,
             root_star_index: RootIndexType::FrugalList,
             big_tree_size,
@@ -1249,6 +1255,17 @@ pub fn main_tpcc(parms: Vec<String>) {
         parms.get(26).map(String::as_str),
     )
     .unwrap_or_else(|error| panic!("tpcc: {error}"));
+    let gc_steal_scan_percent = parms.get(27).map(|value| {
+        value.parse::<usize>().unwrap_or_else(|_| {
+            panic!("tpcc: GC steal scan percentage must be from 1 to 100")
+        })
+    });
+    if let Some(percent) = gc_steal_scan_percent {
+        assert!(
+            (1..=100).contains(&percent),
+            "tpcc: GC steal scan percentage must be from 1 to 100"
+        );
+    }
 
     let (q1_cutoff, q6_date_lo, q6_date_hi) = htap_query_date_bounds(now_millis());
     let (olap_mode, num_olap_threads) = match olap_mode_str.as_str() {
@@ -1315,6 +1332,7 @@ pub fn main_tpcc(parms: Vec<String>) {
         gc,
         gc_mode,
         gc_shards,
+        gc_steal_scan_percent,
         update_in_place,
         root_star_index,
         big_tree_size,
@@ -1352,6 +1370,7 @@ fn standard_driver_config(
         gc: true,
         gc_mode: PageReclaimMode::ReuseSteal,
         gc_shards: GcShardLayout::PerWorker,
+        gc_steal_scan_percent: None,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,
         big_tree_size: Default::default(),
