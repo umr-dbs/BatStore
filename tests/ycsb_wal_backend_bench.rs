@@ -52,6 +52,8 @@ fn config(
         read_payload: true,
         execution_mode: crate::bat_bench::ycsb_txn::YcsbExecutionMode::Atomic,
         gc: true,
+        gc_mode: crate::bat_gc::PageReclaimMode::ReuseSteal,
+        gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,
         wal: Some((wal_path, Duration::from_millis(5))),

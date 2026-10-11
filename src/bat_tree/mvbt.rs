@@ -1,4 +1,5 @@
 use crate::bat_block::block_handle::BlockAllocManager;
+use crate::bat_gc::{GcShardLayout, PageReclaimMode};
 use crate::bat_gc::tracker_handle::{TrackerHandle, TrackerHandleSt};
 use crate::bat_page_model::Height;
 use crate::bat_root::index_root::{RootIndex, RootIndexType};
@@ -147,6 +148,22 @@ impl<
         root_index_type: RootIndexType,
         max_workers: usize,
     ) -> Self {
+        Self::make_standard_with_max_workers_and_gc_shards(
+            root_index_type,
+            max_workers,
+            GcShardLayout::PerWorker,
+        )
+    }
+
+    /// Constructs a tree with an independently selected reclamation-shard
+    /// layout. `Fixed(n)` maps workers by `worker_id % n`; consequently,
+    /// `ReuseNoSteal` is shard-local rather than strictly worker-local when
+    /// `n < max_workers`.
+    pub fn make_standard_with_max_workers_and_gc_shards(
+        root_index_type: RootIndexType,
+        max_workers: usize,
+        gc_shards: GcShardLayout,
+    ) -> Self {
         fn inc_key(k: u64) -> u64 {
             k.checked_add(1).unwrap_or(u64::MAX)
         }
@@ -155,15 +172,17 @@ impl<
             k.checked_sub(1).unwrap_or(u64::MIN)
         }
 
-        Self::make_with_shared_ctx(
+        let max_workers = max_workers.max(1);
+        Self::make_with_shared_ctx_and_gc_shards(
             root_index_type,
             inc_key,
             dec_key,
             u64::MIN,
             u64::MAX,
-            Arc::new(TxContext::new(max_workers.max(1))),
+            Arc::new(TxContext::new(max_workers)),
             None,
             Arc::new(WalBackend::Off),
+            gc_shards,
         )
     }
 
@@ -172,21 +191,37 @@ impl<
         max_workers: usize,
         wal: Arc<WalBackend<u64, Payload>>,
     ) -> Self {
+        Self::make_standard_with_max_workers_and_wal_and_gc_shards(
+            root_index_type,
+            max_workers,
+            wal,
+            GcShardLayout::PerWorker,
+        )
+    }
+
+    pub fn make_standard_with_max_workers_and_wal_and_gc_shards(
+        root_index_type: RootIndexType,
+        max_workers: usize,
+        wal: Arc<WalBackend<u64, Payload>>,
+        gc_shards: GcShardLayout,
+    ) -> Self {
         fn inc_key(k: u64) -> u64 {
             k.saturating_add(1)
         }
         fn dec_key(k: u64) -> u64 {
             k.saturating_sub(1)
         }
-        Self::make_with_shared_ctx(
+        let max_workers = max_workers.max(1);
+        Self::make_with_shared_ctx_and_gc_shards(
             root_index_type,
             inc_key,
             dec_key,
             u64::MIN,
             u64::MAX,
-            Arc::new(TxContext::new(max_workers.max(1))),
+            Arc::new(TxContext::new(max_workers)),
             None,
             wal,
+            gc_shards,
         )
     }
 
@@ -278,17 +313,33 @@ impl<
 > MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>
 {
     pub fn enable_gc(&self, update_in_place: bool) {
-        self.block_manager.tracker().set_block_reclaim_enabled(true);
-        self.block_manager.set_update_in_place(update_in_place);
-        self.ctx.set_block_reclaim_enabled(true);
+        self.configure_gc(PageReclaimMode::ReuseSteal, update_in_place);
     }
 
     pub fn disable_gc(&self) {
+        self.configure_gc(PageReclaimMode::Off, false);
+    }
+
+    /// Configures physical page reclamation independently from record-level
+    /// update-in-place compaction. `enable_gc` remains a compatibility
+    /// shorthand for `ReuseSteal`; `disable_gc` selects `Off`.
+    ///
+    /// Change modes only while the tree is quiescent. Allocation reads the
+    /// policy atomically, but this method is not a stop-the-world barrier for
+    /// operations already traversing reclamation queues.
+    pub fn configure_gc(&self, mode: PageReclaimMode, update_in_place: bool) {
+        self.block_manager.tracker().set_reclaim_mode(mode);
         self.block_manager
-            .tracker()
-            .set_block_reclaim_enabled(false);
-        self.block_manager.set_update_in_place(false);
-        self.ctx.set_block_reclaim_enabled(false);
+            .set_update_in_place(update_in_place && mode.enabled());
+        self.ctx.set_block_reclaim_enabled(mode.enabled());
+    }
+
+    pub fn gc_mode(&self) -> PageReclaimMode {
+        self.block_manager.tracker().reclaim_mode()
+    }
+
+    pub fn gc_shard_count(&self) -> usize {
+        self.block_manager.tracker().shard_count()
     }
 
     pub fn allow_historic_query(&self, enabled: bool) {
@@ -346,7 +397,32 @@ impl<
         table_id: Option<crate::bat_wal::record::TableId>,
         wal: Arc<WalBackend<Key, Payload>>,
     ) -> Self {
-        let bm = BlockAllocManager::new();
+        Self::make_with_shared_ctx_and_gc_shards(
+            root_index_type,
+            inc_key,
+            dec_key,
+            min_key,
+            max_key,
+            ctx,
+            table_id,
+            wal,
+            GcShardLayout::PerWorker,
+        )
+    }
+
+    #[inline]
+    pub(crate) fn make_with_shared_ctx_and_gc_shards(
+        root_index_type: RootIndexType,
+        inc_key: fn(Key) -> Key,
+        dec_key: fn(Key) -> Key,
+        min_key: Key,
+        max_key: Key,
+        ctx: Arc<TxContext>,
+        table_id: Option<crate::bat_wal::record::TableId>,
+        wal: Arc<WalBackend<Key, Payload>>,
+        gc_shards: GcShardLayout,
+    ) -> Self {
+        let bm = BlockAllocManager::new_with_shard_count(gc_shards.shard_count(ctx.max_workers()));
         Self {
             root: RootIndex::new(root_index_type, &bm, &ctx),
             block_manager: bm,

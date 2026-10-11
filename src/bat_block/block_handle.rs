@@ -82,7 +82,9 @@ impl<
     fn clone(&self) -> Self {
         Self {
             // block_id_counter: AtomicBlockID::new(START_BLOCK_ID),
-            tracker: Arc::new(TrackerHandleSt::new()),
+            tracker: Arc::new(TrackerHandleSt::new_with_shard_count(
+                self.tracker.shard_count(),
+            )),
             update_in_place: Cell::new(false),
             // reuse_count: AtomicUsize::new(0),
             // alloc_count: AtomicUsize::new(0),
@@ -156,9 +158,13 @@ impl<
     /// Main Constructor requiring supplied BlockSettings.
     #[inline(always)]
     pub fn new() -> Self {
+        Self::new_with_shard_count(num_cpus::get().max(1))
+    }
+
+    pub(crate) fn new_with_shard_count(shard_count: usize) -> Self {
         Self {
             // block_id_counter: AtomicBlockID::new(START_BLOCK_ID),
-            tracker: Arc::new(TrackerHandleSt::new()),
+            tracker: Arc::new(TrackerHandleSt::new_with_shard_count(shard_count)),
             update_in_place: Cell::new(false),
             // reuse_count: AtomicUsize::new(0),
             // alloc_count: AtomicUsize::new(0),

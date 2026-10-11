@@ -1,4 +1,5 @@
-use crate::bat_gc::block_tracer::{BlockTrace, DeadPageValue};
+use crate::bat_gc::PageReclaimMode;
+use crate::bat_gc::block_tracer::{BlockTrace, DeadPageValue, PageSource, ReclaimedPage};
 use crate::bat_page_model::BlockRef;
 use crate::bat_page_model::time_matcher::TimeMatcher;
 use crate::bat_record_model::tx_stamp::WorkerId;
@@ -8,22 +9,20 @@ use crossbeam_utils::CachePadded;
 use parking_lot::Mutex;
 use std::fmt::Display;
 use std::hash::Hash;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
 #[cfg(feature = "gc-stats")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
 use triomphe::Arc;
 
-// Preserve the source of prefetched pages until they actually satisfy a request.
-// Normal builds retain the original cache layout and incur no tagging overhead.
-#[cfg(feature = "gc-stats")]
-type ReusableBlock<const F: usize, const N: usize, K, V> = (BlockRef<F, N, K, V>, bool, bool);
-#[cfg(not(feature = "gc-stats"))]
-type ReusableBlock<const F: usize, const N: usize, K, V> = BlockRef<F, N, K, V>;
+// Preserve the source of prefetched pages until they actually satisfy a
+// request. This is required for semantics, not just statistics: OS mode must
+// destroy cached retired pages while still being allowed to consume a fresh
+// batch reserve.
+type ReusableBlock<const F: usize, const N: usize, K, V> = ReclaimedPage<F, N, K, V>;
 
-/// Per-shard (see `BlockTrace`'s doc — same `num_cpus`-sized, `worker_id %
-/// shard_count`-indexed sharding) breakdown of where a reclaimed/allocated
-/// block came from, read back by `TrackerHandleSt::gc_stats_per_shard` for
+/// Per-worker-shard breakdown of where a reclaimed/allocated block came from,
+/// read back by `TrackerHandleSt::gc_stats_per_shard` for
 /// H6-style GC-cost benchmarking. `CachePadded` for the same false-sharing
 /// reason as `TxContext::live_tx` — see that field's doc.
 ///
@@ -41,6 +40,8 @@ pub struct GcStats {
     /// Requests served by a new block, including blocks reserved by a prior
     /// batch allocation and later handed out from a worker's GC list.
     pub fresh_alloc: u64,
+    /// Eligible retired pages whose backing allocation was destroyed in OS mode.
+    pub os_dealloc: u64,
     pub request_count: u64,
     pub latency_ns: u64,
     pub latency_max_ns: u64,
@@ -53,8 +54,8 @@ pub type TrackerHandle<const P_F: usize, const P_N: usize, Key, Payload> =
     Arc<TrackerHandleSt<P_F, P_N, Key, Payload>>;
 
 /// Always present on every tree, one per `BlockAllocManager` — page/block
-/// reclaim (`dead_blocks`/`register_died_page*`/`free_block`), gated by its
-/// own `block_reclaim_enabled` flag (`MVBTSt::enable_gc`/`disable_gc`).
+/// reclaim (`dead_blocks`/`register_died_page*`/`free_block`), governed by its
+/// own `PageReclaimMode` (`MVBTSt::configure_gc`).
 /// Genuinely per-table: dead pages are physically owned by this table's own
 /// `BlockAllocManager`, so reclaiming them is never a cross-table concern.
 ///
@@ -75,35 +76,35 @@ pub struct TrackerHandleSt<
     dead_blocks: BlockTrace<P_F, P_N, Key, Payload>,
     /// Pages already proven reclaimable, filled in batches so the liveness
     /// scan is amortized across several allocations.
-    reusable: Vec<CachePadded<Mutex<Vec<ReusableBlock<P_F, P_N, Key, Payload>>>>>,
-    /// Explicit opt-in for block reclaim (`MVBTSt::enable_gc`/`disable_gc`).
-    /// `false` by default: a fresh tree never reuses blocks until this is
-    /// turned on, matching the pre-existing behavior from when the whole
-    /// tracker was optional.
-    block_reclaim_enabled: AtomicBool,
-    /// See `GcStats`'s doc. One triple per shard, `worker_id % len()`-indexed
+    reusable: Box<[CachePadded<Mutex<Vec<ReusableBlock<P_F, P_N, Key, Payload>>>>]>,
+    /// Explicit physical page policy. Atomic so allocation remains lock-free
+    /// with respect to configuration reads.
+    reclaim_mode: AtomicU8,
+    /// See `GcStats`'s doc. One counter set per shard, `worker_id % len()`-indexed
     /// like `reusable`/`dead_blocks`, so recording these never introduces
     /// the cross-thread contention this benchmarking is meant to measure the
     /// absence of. Feature-gated (see `GcStats`'s doc) — doesn't exist in a
     /// plain build.
     #[cfg(feature = "gc-stats")]
-    local_reuse: Vec<CachePadded<AtomicU64>>,
+    local_reuse: Box<[CachePadded<AtomicU64>]>,
     #[cfg(feature = "gc-stats")]
-    steal: Vec<CachePadded<AtomicU64>>,
+    steal: Box<[CachePadded<AtomicU64>]>,
     #[cfg(feature = "gc-stats")]
-    fresh_alloc: Vec<CachePadded<AtomicU64>>,
+    fresh_alloc: Box<[CachePadded<AtomicU64>]>,
     #[cfg(feature = "gc-stats")]
-    request_count: Vec<CachePadded<AtomicU64>>,
+    os_dealloc: Box<[CachePadded<AtomicU64>]>,
     #[cfg(feature = "gc-stats")]
-    latency_ns: Vec<CachePadded<AtomicU64>>,
+    request_count: Box<[CachePadded<AtomicU64>]>,
     #[cfg(feature = "gc-stats")]
-    latency_max_ns: Vec<CachePadded<AtomicU64>>,
+    latency_ns: Box<[CachePadded<AtomicU64>]>,
     #[cfg(feature = "gc-stats")]
-    scan_count: Vec<CachePadded<AtomicU64>>,
+    latency_max_ns: Box<[CachePadded<AtomicU64>]>,
     #[cfg(feature = "gc-stats")]
-    lists_checked: Vec<CachePadded<AtomicU64>>,
+    scan_count: Box<[CachePadded<AtomicU64>]>,
     #[cfg(feature = "gc-stats")]
-    lists_checked_max: Vec<CachePadded<AtomicU64>>,
+    lists_checked: Box<[CachePadded<AtomicU64>]>,
+    #[cfg(feature = "gc-stats")]
+    lists_checked_max: Box<[CachePadded<AtomicU64>]>,
 }
 
 impl<
@@ -114,25 +115,41 @@ impl<
 > TrackerHandleSt<P_F, P_N, Key, Payload>
 {
     pub fn new() -> Self {
-        let shard_count = num_cpus::get().max(1);
+        Self::new_with_shard_count(num_cpus::get().max(1))
+    }
+
+    pub(crate) fn new_with_shard_count(shard_count: usize) -> Self {
+        Self::new_with_trace(
+            shard_count,
+            BlockTrace::new_with_shard_count(shard_count),
+        )
+    }
+
+    fn new_with_trace(shard_count: usize, dead_blocks: BlockTrace<P_F, P_N, Key, Payload>) -> Self {
         Self {
-            dead_blocks: BlockTrace::new(),
+            dead_blocks,
             reusable: (0..shard_count)
                 .map(|_| CachePadded::new(Mutex::new(Vec::new())))
-                .collect(),
-            block_reclaim_enabled: AtomicBool::new(false),
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            reclaim_mode: AtomicU8::new(PageReclaimMode::Off as u8),
             #[cfg(feature = "gc-stats")]
             local_reuse: (0..shard_count)
                 .map(|_| CachePadded::new(AtomicU64::new(0)))
-                .collect(),
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             #[cfg(feature = "gc-stats")]
             steal: (0..shard_count)
                 .map(|_| CachePadded::new(AtomicU64::new(0)))
-                .collect(),
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             #[cfg(feature = "gc-stats")]
             fresh_alloc: (0..shard_count)
                 .map(|_| CachePadded::new(AtomicU64::new(0)))
-                .collect(),
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            #[cfg(feature = "gc-stats")]
+            os_dealloc: Self::zero_counters(shard_count),
             #[cfg(feature = "gc-stats")]
             request_count: Self::zero_counters(shard_count),
             #[cfg(feature = "gc-stats")]
@@ -148,11 +165,20 @@ impl<
         }
     }
 
+    #[cfg(test)]
+    fn new_for_test(shard_count: usize, batch_size: usize) -> Self {
+        Self::new_with_trace(
+            shard_count,
+            BlockTrace::new_for_test(shard_count, batch_size),
+        )
+    }
+
     #[cfg(feature = "gc-stats")]
-    fn zero_counters(count: usize) -> Vec<CachePadded<AtomicU64>> {
+    fn zero_counters(count: usize) -> Box<[CachePadded<AtomicU64>]> {
         (0..count)
             .map(|_| CachePadded::new(AtomicU64::new(0)))
-            .collect()
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
     }
 
     pub(crate) fn queue_fresh_blocks(
@@ -165,6 +191,10 @@ impl<
 
     pub(crate) fn alloc_batch_size(&self) -> usize {
         self.dead_blocks.batch_size()
+    }
+
+    pub(crate) fn shard_count(&self) -> usize {
+        self.reusable.len()
     }
 
     #[cfg(feature = "gc-stats")]
@@ -201,6 +231,7 @@ impl<
                 local_reuse: self.local_reuse[i].load(Relaxed),
                 steal: self.steal[i].load(Relaxed),
                 fresh_alloc: self.fresh_alloc[i].load(Relaxed),
+                os_dealloc: self.os_dealloc[i].load(Relaxed),
                 request_count: self.request_count[i].load(Relaxed),
                 latency_ns: self.latency_ns[i].load(Relaxed),
                 latency_max_ns: self.latency_max_ns[i].load(Relaxed),
@@ -216,16 +247,27 @@ impl<
         Vec::new()
     }
 
-    /// See `block_reclaim_enabled`'s field doc.
+    /// Sets the physical page reclamation policy.
     #[inline]
-    pub fn set_block_reclaim_enabled(&self, enabled: bool) {
-        self.block_reclaim_enabled.store(enabled, Relaxed);
+    pub fn set_reclaim_mode(&self, mode: PageReclaimMode) {
+        self.reclaim_mode.store(mode as u8, Relaxed);
     }
 
-    /// See `block_reclaim_enabled`'s field doc.
+    /// Returns the current physical page reclamation policy.
+    #[inline]
+    pub fn reclaim_mode(&self) -> PageReclaimMode {
+        match self.reclaim_mode.load(Relaxed) {
+            0 => PageReclaimMode::Off,
+            1 => PageReclaimMode::ReuseNoSteal,
+            2 => PageReclaimMode::ReuseSteal,
+            3 => PageReclaimMode::Os,
+            _ => unreachable!("invalid PageReclaimMode discriminant"),
+        }
+    }
+
     #[inline]
     pub fn block_reclaim_enabled(&self) -> bool {
-        self.block_reclaim_enabled.load(Relaxed)
+        self.reclaim_mode().enabled()
     }
 
     #[inline]
@@ -237,7 +279,7 @@ impl<
     ) {
         page.mark_retired();
 
-        if self.block_reclaim_enabled.load(Relaxed) {
+        if self.reclaim_mode().enabled() {
             self.dead_blocks
                 .register_died_page(worker_id, page_version, page)
         }
@@ -251,7 +293,7 @@ impl<
     ) {
         dead_pages.iter().for_each(|(_, page)| page.mark_retired());
 
-        if self.block_reclaim_enabled.load(Relaxed) {
+        if self.reclaim_mode().enabled() {
             self.dead_blocks
                 .register_died_page_col(worker_id, dead_pages)
         }
@@ -259,40 +301,68 @@ impl<
 
     #[inline]
     pub fn free_block(&self, ctx: &TxContext) -> Option<BlockRef<P_F, P_N, Key, Payload>> {
-        if !self.block_reclaim_enabled.load(Relaxed) {
+        let mode = self.reclaim_mode();
+        if mode == PageReclaimMode::Off {
             return None;
         }
 
         let worker_id = ctx.worker_id();
         let cache_index = worker_id as usize % self.reusable.len();
-        if let Some(page) = self.reusable[cache_index].lock().pop() {
-            #[cfg(feature = "gc-stats")]
-            let page = {
-                let (page, stolen, fresh) = page;
-                let counter = if fresh {
-                    &self.fresh_alloc
-                } else if stolen {
-                    &self.steal
-                } else {
-                    &self.local_reuse
-                };
-                counter[cache_index].fetch_add(1, Relaxed);
-                page
-            };
-            return Some(page);
+        let mut deferred_stolen = Vec::new();
+        while let Some(reclaimed) = self.reusable[cache_index].lock().pop() {
+            if mode == PageReclaimMode::Os && reclaimed.source != PageSource::Fresh {
+                unsafe { reclaimed.page.destroy() };
+                self.record_os_dealloc(cache_index);
+                continue;
+            }
+            if mode == PageReclaimMode::ReuseNoSteal
+                && reclaimed.source == PageSource::StolenRetired
+            {
+                deferred_stolen.push(reclaimed);
+                continue;
+            }
+            if !deferred_stolen.is_empty() {
+                self.reusable[cache_index].lock().extend(deferred_stolen);
+            }
+            self.record_source(cache_index, reclaimed.source);
+            return Some(reclaimed.page);
+        }
+        if !deferred_stolen.is_empty() {
+            self.reusable[cache_index].lock().extend(deferred_stolen);
         }
 
         let live_min_snapshot = ctx.live_min_snapshot();
 
-        let (reclaimed_roots, _local_count, _steal_count, checked) = self
-            .dead_blocks
-            .reclaim_batch(worker_id, self.dead_blocks.batch_size(), |(dead_v, _)| {
-                match live_min_snapshot {
-                    _ if dead_v == 0 => true,
+        if mode == PageReclaimMode::Os {
+            let fresh = self.dead_blocks.take_local_fresh(worker_id);
+            let retired = self.dead_blocks.reclaim_retired_for_os(
+                worker_id,
+                self.dead_blocks.batch_size(),
+                |(dead_v, _)| match live_min_snapshot {
                     None => true,
                     Some(live_min_snapshot) => dead_v.lt_self_any(live_min_snapshot),
-                }
-            });
+                },
+            );
+            for reclaimed in retired {
+                unsafe { reclaimed.page.destroy() };
+                self.record_os_dealloc(cache_index);
+            }
+            if let Some(page) = fresh {
+                self.record_source(cache_index, PageSource::Fresh);
+                return Some(page);
+            }
+            return None;
+        }
+
+        let (mut reclaimed, checked) = self.dead_blocks.reclaim_batch(
+            worker_id,
+            self.dead_blocks.batch_size(),
+            mode == PageReclaimMode::ReuseSteal,
+            |(dead_v, _)| match live_min_snapshot {
+                None => true,
+                Some(live_min_snapshot) => dead_v.lt_self_any(live_min_snapshot),
+            },
+        );
         #[cfg(feature = "gc-stats")]
         {
             self.scan_count[cache_index].fetch_add(1, Relaxed);
@@ -301,31 +371,42 @@ impl<
         }
         #[cfg(not(feature = "gc-stats"))]
         let _ = checked;
-        // reclaim_batch orders own-shard pages first, then stolen pages.
-        #[cfg(feature = "gc-stats")]
-        let mut reclaimed: Vec<_> = reclaimed_roots
-            .into_iter()
-            .enumerate()
-            .map(|(index, (key, page))| (page, index >= _local_count, key.0 == 0))
-            .collect();
-        #[cfg(not(feature = "gc-stats"))]
-        let mut reclaimed: Vec<_> = reclaimed_roots.into_iter().map(|(_, page)| page).collect();
         let result = reclaimed.pop();
-        #[cfg(feature = "gc-stats")]
-        let result = result.map(|(page, stolen, fresh)| {
-            let counter = if fresh {
-                &self.fresh_alloc
-            } else if stolen {
-                &self.steal
-            } else {
-                &self.local_reuse
-            };
-            counter[cache_index].fetch_add(1, Relaxed);
-            page
-        });
         if !reclaimed.is_empty() {
             self.reusable[cache_index].lock().extend(reclaimed);
         }
-        result
+        result.map(|reclaimed| {
+            self.record_source(cache_index, reclaimed.source);
+            reclaimed.page
+        })
     }
+
+    #[cfg(feature = "gc-stats")]
+    #[inline]
+    fn record_source(&self, cache_index: usize, source: PageSource) {
+        let counter = match source {
+            PageSource::Fresh => &self.fresh_alloc,
+            PageSource::LocalRetired => &self.local_reuse,
+            PageSource::StolenRetired => &self.steal,
+        };
+        counter[cache_index].fetch_add(1, Relaxed);
+    }
+
+    #[cfg(not(feature = "gc-stats"))]
+    #[inline(always)]
+    fn record_source(&self, _cache_index: usize, _source: PageSource) {}
+
+    #[cfg(feature = "gc-stats")]
+    #[inline]
+    fn record_os_dealloc(&self, cache_index: usize) {
+        self.os_dealloc[cache_index].fetch_add(1, Relaxed);
+    }
+
+    #[cfg(not(feature = "gc-stats"))]
+    #[inline(always)]
+    fn record_os_dealloc(&self, _cache_index: usize) {}
 }
+
+#[cfg(test)]
+#[path = "../../tests/gc_reclaim_mode_tests.rs"]
+mod mode_tests;

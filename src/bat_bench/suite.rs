@@ -164,6 +164,12 @@ fn run_one(
                 duration: scale.tpcc_oltp_duration(),
                 affinity: true,
                 gc,
+                gc_mode: if gc {
+                    crate::bat_gc::PageReclaimMode::ReuseSteal
+                } else {
+                    crate::bat_gc::PageReclaimMode::Off
+                },
+                gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
                 update_in_place: false,
                 root_star_index: RootIndexType::FrugalList,
                 big_tree_size: Default::default(),
@@ -191,6 +197,12 @@ fn run_one(
                 duration: scale.ch_htap_duration(),
                 affinity: true,
                 gc,
+                gc_mode: if gc {
+                    crate::bat_gc::PageReclaimMode::ReuseSteal
+                } else {
+                    crate::bat_gc::PageReclaimMode::Off
+                },
+                gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
                 update_in_place: false,
                 root_star_index: RootIndexType::FrugalList,
                 big_tree_size: Default::default(),
@@ -230,6 +242,12 @@ fn run_one(
                 read_payload: true,
                 execution_mode: crate::bat_bench::ycsb_txn::YcsbExecutionMode::Atomic,
                 gc,
+                gc_mode: if gc {
+                    crate::bat_gc::PageReclaimMode::ReuseSteal
+                } else {
+                    crate::bat_gc::PageReclaimMode::Off
+                },
+                gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
                 update_in_place: false,
                 root_star_index: RootIndexType::FrugalList,
                 wal: None,

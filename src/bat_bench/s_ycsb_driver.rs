@@ -27,6 +27,7 @@ use crate::bat_bench::s_ycsb_txn;
 use crate::bat_bench::ycsb_load::populate;
 use crate::bat_bench::ycsb_schema::{YcsbConfig, YcsbScanPool, YcsbTree};
 use crate::bat_bench::ycsb_txn::{self, YcsbExecutionMode};
+use crate::bat_gc::{GcShardLayout, PageReclaimMode, parse_cli_gc_settings};
 use crate::bat_root::index_root::RootIndexType;
 
 pub struct DriverConfig {
@@ -56,6 +57,8 @@ pub struct DriverConfig {
     pub read_payload: bool,
     pub execution_mode: YcsbExecutionMode,
     pub gc: bool,
+    pub gc_mode: PageReclaimMode,
+    pub gc_shards: GcShardLayout,
     pub update_in_place: bool,
     pub root_star_index: RootIndexType,
     /// See `DriverConfig::wal` in `tpcc_driver` — same semantics here.
@@ -237,7 +240,11 @@ pub fn run_s_ycsb(cfg: DriverConfig) -> SYcsbRunSummary {
     let tree = match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);
-            let base = YcsbTree::make_standard_with_max_workers(cfg.root_star_index, total_workers);
+            let base = YcsbTree::make_standard_with_max_workers_and_gc_shards(
+                cfg.root_star_index,
+                total_workers,
+                cfg.gc_shards,
+            );
             Arc::new(
                 match cfg.wal_lockfree_batch_size {
                     Some(batch_size) => {
@@ -248,13 +255,14 @@ pub fn run_s_ycsb(cfg: DriverConfig) -> SYcsbRunSummary {
                 .expect("failed to configure WAL at tree construction"),
             )
         }
-        None => Arc::new(YcsbTree::make_standard_with_max_workers(
+        None => Arc::new(YcsbTree::make_standard_with_max_workers_and_gc_shards(
             cfg.root_star_index,
             total_workers,
+            cfg.gc_shards,
         )),
     };
     if cfg.gc {
-        tree.enable_gc(cfg.update_in_place);
+        tree.configure_gc(cfg.gc_mode, cfg.update_in_place);
     }
     let vacuum_stop = std::sync::Arc::new(AtomicBool::new(false));
     if let Some((dead_ratio_threshold, sweep_interval)) = cfg.idle_compaction.filter(|_| cfg.gc) {
@@ -286,7 +294,7 @@ pub fn run_s_ycsb(cfg: DriverConfig) -> SYcsbRunSummary {
          - write_all_fields    = {}\n\
          - read_payload        = {}\n\
          - execution_mode      = {:?}\n\
-         - GC                  = {} (update_in_place={})\n\
+         - GC                  = {} (mode={}, shards={}, update_in_place={})\n\
          - WAL                 = {}\n\
          - root*               = {}\n\
          - scan_pool           = {}",
@@ -305,6 +313,8 @@ pub fn run_s_ycsb(cfg: DriverConfig) -> SYcsbRunSummary {
         cfg.read_payload,
         cfg.execution_mode,
         cfg.gc,
+        cfg.gc_mode,
+        cfg.gc_shards,
         cfg.update_in_place,
         match (&cfg.wal, cfg.wal_lockfree_batch_size) {
             (Some((path, interval)), None) =>
@@ -646,6 +656,12 @@ pub fn main_s_ycsb(parms: Vec<String>) {
             Ok(n) => Some(n.max(2)),
         },
     };
+    let (gc_mode, gc_shards) = parse_cli_gc_settings(
+        gc,
+        parms.get(26).map(String::as_str),
+        parms.get(27).map(String::as_str),
+    )
+    .unwrap_or_else(|error| panic!("s_ycsb: {error}"));
 
     run_s_ycsb(DriverConfig {
         ycsb: YcsbConfig {
@@ -669,6 +685,8 @@ pub fn main_s_ycsb(parms: Vec<String>) {
         read_payload,
         execution_mode,
         gc,
+        gc_mode,
+        gc_shards,
         update_in_place,
         root_star_index,
         wal: wal_enabled.then(|| (PathBuf::from(wal_path), Duration::from_millis(wal_flush_ms))),

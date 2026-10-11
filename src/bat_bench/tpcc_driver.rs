@@ -36,6 +36,7 @@ use crate::bat_bench::tpcc_schema::{TpccConfig, TpccDatabase, htap_query_date_bo
 use crate::bat_bench::tpcc_schema::{BigTreeOp, Table, TpccKey, TpccRow};
 #[cfg(feature = "gc-stats")]
 use crate::bat_gc::tracker_handle::GcStats;
+use crate::bat_gc::{GcShardLayout, PageReclaimMode, parse_cli_gc_settings};
 use crate::bat_bench::tpcc_txn::{self, TxnOutcome};
 use crate::bat_root::index_root::RootIndexType;
 use crate::bat_tree::idle_compaction::{DEFAULT_VACUUM_DEAD_RATIO, DEFAULT_VACUUM_SWEEP_INTERVAL};
@@ -51,6 +52,8 @@ pub struct DriverConfig {
     /// apply — Fig. 11's "Cross Warehouse"/moderate contention case).
     pub affinity: bool,
     pub gc: bool,
+    pub gc_mode: PageReclaimMode,
+    pub gc_shards: GcShardLayout,
     pub update_in_place: bool,
     pub root_star_index: RootIndexType,
     /// `Table::Warehouse`/`Table::District`'s leaf capacity — see
@@ -364,26 +367,28 @@ fn run_tpcc_impl(
     let db = Arc::new(match &cfg.wal {
         Some((wal_path, flush_interval)) => {
             let _ = fs::remove_file(wal_path);
-            TpccDatabase::new_with_big_tree_size_and_max_workers_and_wal(
+            TpccDatabase::new_with_big_tree_size_and_max_workers_and_wal_and_gc_shards(
                 cfg.root_star_index,
                 cfg.big_tree_size,
                 worker_capacity,
                 wal_path,
                 *flush_interval,
                 cfg.wal_lockfree_batch_size,
+                cfg.gc_shards,
             )
             .expect("failed to configure WAL at database construction")
         }
-        None => TpccDatabase::new_with_big_tree_size_and_max_workers(
+        None => TpccDatabase::new_with_big_tree_size_and_max_workers_and_gc_shards(
             cfg.root_star_index,
             cfg.big_tree_size,
             worker_capacity,
+            cfg.gc_shards,
         ),
     });
     if historic {
         db.allow_historic_query(true);
     } else if cfg.gc {
-        db.enable_gc(cfg.update_in_place, None);
+        db.configure_gc(cfg.gc_mode, cfg.update_in_place, None);
     }
 
     println!(
@@ -393,7 +398,7 @@ fn run_tpcc_impl(
          - OLAP threads          = {num_olap} ({})\n\
          - mode                  = {}\n\
          - duration              = {:?}\n\
-         - GC                    = {} (update_in_place={})\n\
+         - GC                    = {} (mode={}, shards={}, update_in_place={})\n\
          - WAL                   = {}\n\
          - root*                 = {}\n\
          - items/customers/orders per district = {}/{}/{}\n\
@@ -408,6 +413,8 @@ fn run_tpcc_impl(
         },
         cfg.duration,
         cfg.gc,
+        cfg.gc_mode,
+        cfg.gc_shards,
         cfg.update_in_place,
         match (&cfg.wal, cfg.wal_lockfree_batch_size) {
             (Some((path, interval)), None) =>
@@ -1123,6 +1130,8 @@ pub fn main_tpcc_tree_stats(parms: Vec<String>) {
             duration: Duration::from_secs(duration_seconds),
             affinity: enabled(&parms, "--affinity", false),
             gc: enabled(&parms, "--gc", true),
+            gc_mode: PageReclaimMode::ReuseSteal,
+            gc_shards: GcShardLayout::PerWorker,
             update_in_place: false,
             root_star_index: RootIndexType::FrugalList,
             big_tree_size,
@@ -1234,6 +1243,12 @@ pub fn main_tpcc(parms: Vec<String>) {
             Duration::from_secs_f64(idle_compaction_sweep_secs),
         )
     });
+    let (gc_mode, gc_shards) = parse_cli_gc_settings(
+        gc,
+        parms.get(25).map(String::as_str),
+        parms.get(26).map(String::as_str),
+    )
+    .unwrap_or_else(|error| panic!("tpcc: {error}"));
 
     let (q1_cutoff, q6_date_lo, q6_date_hi) = htap_query_date_bounds(now_millis());
     let (olap_mode, num_olap_threads) = match olap_mode_str.as_str() {
@@ -1298,6 +1313,8 @@ pub fn main_tpcc(parms: Vec<String>) {
         duration: Duration::from_secs(duration_secs),
         affinity,
         gc,
+        gc_mode,
+        gc_shards,
         update_in_place,
         root_star_index,
         big_tree_size,
@@ -1333,6 +1350,8 @@ fn standard_driver_config(
         duration,
         affinity: true,
         gc: true,
+        gc_mode: PageReclaimMode::ReuseSteal,
+        gc_shards: GcShardLayout::PerWorker,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,
         big_tree_size: Default::default(),

@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::bat_crud_model::crud_operation::CRUDOperation;
+use crate::bat_gc::{GcShardLayout, PageReclaimMode};
 use crate::bat_record_model::tx_stamp::WorkerId;
 use crate::bat_record_model::version_info::Version;
 use crate::bat_root::index_root::RootIndexType;
@@ -51,6 +52,12 @@ pub(crate) fn lower_current_thread_priority() {
 /// legitimately needs more tables than this just pays one extra indirection
 /// rather than breaking.
 pub const INLINE_TABLE_CAPACITY: usize = 12;
+
+#[derive(Clone, Copy)]
+struct GcConfig {
+    mode: PageReclaimMode,
+    update_in_place: bool,
+}
 
 #[derive(Clone)]
 struct TableEntry<
@@ -118,6 +125,9 @@ pub struct Database<
     dec_key: fn(Key) -> Key,
     min_key: Key,
     max_key: Key,
+    /// Immutable construction-time mapping from transactional workers to
+    /// each table's page-reclamation queues.
+    gc_shard_layout: GcShardLayout,
     /// Every table on this database, directly indexable by `TableId` (its
     /// position in this list) — see this struct's and `TableList`'s doc.
     /// Wrapped in a `sync::Arc` (on top of the `ArcSwap` itself) so the
@@ -133,9 +143,9 @@ pub struct Database<
     /// been enabled at least once — there is nothing to persist a catalog
     /// *for* before then. `None` for a purely in-memory database.
     meta_path: Option<PathBuf>,
-    /// `Some(update_in_place)` once `enable_gc` was called (applied to any
-    /// table created afterwards); `None` (GC off) otherwise.
-    gc: ArcSwapOption<bool>,
+    /// Active page reclamation configuration, applied to tables created
+    /// after configuration as well as existing tables. `None` means `Off`.
+    gc: ArcSwapOption<GcConfig>,
     /// The currently-running vacuum (idle-compaction) sweep thread's stop
     /// flag (see `set_vacuum`), or `None` if it's off. Swapped to a fresh
     /// flag whenever `set_vacuum` (re)starts the thread and to `None` when
@@ -224,6 +234,7 @@ impl<
             dec_key,
             min_key,
             max_key,
+            gc_shard_layout: GcShardLayout::PerWorker,
             tables: sync::Arc::new(ArcSwap::from_pointee(TableList::new())),
             wal,
             meta_path,
@@ -321,6 +332,24 @@ impl<
         self.create_table_unpublished(name)
     }
 
+    /// Selects the reclamation-shard layout used by tables created by this
+    /// database. Call this immediately after construction, before creating
+    /// tables. A fixed layout maps workers by `worker_id % shard_count`.
+    /// Therefore `ReuseNoSteal` is shard-local when several workers share a
+    /// shard.
+    pub fn with_gc_shard_layout(mut self, layout: GcShardLayout) -> Self {
+        assert!(
+            self.tables.load().is_empty(),
+            "GC shard layout must be selected before creating tables"
+        );
+        self.gc_shard_layout = layout;
+        self
+    }
+
+    pub const fn gc_shard_layout(&self) -> GcShardLayout {
+        self.gc_shard_layout
+    }
+
     fn create_table_unpublished(
         &self,
         name: &str,
@@ -331,7 +360,7 @@ impl<
         self.tables.rcu(|current| {
             let id: TableId = current.len() as TableId;
 
-            let tree = Arc::new(MVBTSt::make_with_shared_ctx(
+            let tree = Arc::new(MVBTSt::make_with_shared_ctx_and_gc_shards(
                 self.root_index_type,
                 self.inc_key,
                 self.dec_key,
@@ -340,9 +369,10 @@ impl<
                 self.ctx.clone(),
                 Some(id),
                 self.wal.clone(),
+                self.gc_shard_layout,
             ));
-            if let Some(update_in_place) = gc.as_ref() {
-                tree.enable_gc(**update_in_place);
+            if let Some(config) = gc.as_ref() {
+                tree.configure_gc(config.mode, config.update_in_place);
             }
 
             built = Some(tree.clone());
@@ -392,20 +422,35 @@ impl<
     }
 
     pub fn enable_gc(&self, update_in_place: bool, vacuum: Option<(f64, Duration)>) {
-        for entry in self.tables.load().iter() {
-            entry.tree.enable_gc(update_in_place);
-        }
-        self.gc.store(Some(sync::Arc::new(update_in_place)));
+        self.configure_gc(PageReclaimMode::ReuseSteal, update_in_place, vacuum);
+    }
 
-        self.set_vacuum(vacuum);
+    /// Applies one physical page-reclamation policy to current tables and to
+    /// tables created later. Change it only while database activity is
+    /// quiescent; this call does not stop concurrent transactions.
+    pub fn configure_gc(
+        &self,
+        mode: PageReclaimMode,
+        update_in_place: bool,
+        vacuum: Option<(f64, Duration)>,
+    ) {
+        for entry in self.tables.load().iter() {
+            entry.tree.configure_gc(mode, update_in_place);
+        }
+        if mode.enabled() {
+            self.gc.store(Some(sync::Arc::new(GcConfig {
+                mode,
+                update_in_place,
+            })));
+        } else {
+            self.gc.store(None);
+        }
+
+        self.set_vacuum(mode.enabled().then_some(vacuum).flatten());
     }
 
     pub fn disable_gc(&self) {
-        for entry in self.tables.load().iter() {
-            entry.tree.disable_gc();
-        }
-        self.gc.store(None);
-        self.set_vacuum(None);
+        self.configure_gc(PageReclaimMode::Off, false, None);
     }
 
     pub fn set_vacuum(&self, vacuum: Option<(f64, Duration)>) {

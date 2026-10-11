@@ -434,6 +434,21 @@ impl<E: Default> Deref for SmartCell<E> {
 }
 
 impl<E: Default> SmartCell<E> {
+    /// Destroys the allocation behind a cell that has become permanently
+    /// unreachable.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own the sole reclamation right for this pointer and
+    /// must prove that no guard or copied `SmartCell` can access it again.
+    /// `TrackerHandleSt` establishes that with the same snapshot/reader
+    /// eligibility barrier used before resetting a block for reuse.
+    #[inline]
+    pub(crate) unsafe fn destroy(self) {
+        debug_assert!(!self.0.is_null());
+        unsafe { drop(Box::from_raw(self.0 as *mut OptCell<E>)) };
+    }
+
     #[inline(always)]
     pub fn unsafe_borrow(&self) -> &E {
         self.deref()

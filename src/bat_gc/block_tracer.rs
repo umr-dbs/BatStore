@@ -52,6 +52,22 @@ pub(crate) type DeadPageKey = (Version, usize);
 type DeadPageEntry<const F: usize, const N: usize, Key, Payload> =
     (DeadPageKey, DeadPageValue<F, N, Key, Payload>);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PageSource {
+    Fresh,
+    LocalRetired,
+    StolenRetired,
+}
+
+pub(crate) struct ReclaimedPage<const F: usize, const N: usize, Key, Payload>
+where
+    Key: Copy + Default + Hash + Ord + Display,
+    Payload: Clone + Default,
+{
+    pub(crate) page: DeadPageValue<F, N, Key, Payload>,
+    pub(crate) source: PageSource,
+}
+
 struct BlockTraceShard<
     const F: usize,
     const N: usize,
@@ -82,15 +98,15 @@ impl<
     }
 }
 
-/// Per-worker-sharded page-reuse queues. Always-eligible fresh pages use a
+/// Fixed page-reuse shards. Always-eligible fresh pages use a
 /// concurrent queue, while versioned retired pages remain ordered behind a
-/// mutex. Registration normally touches only the worker's own shard. An
-/// allocator may steal from another worker, so the ordered queue still needs
+/// mutex. Registration normally touches only the worker's assigned shard. An
+/// allocator may steal from another shard, so the ordered queue still needs
 /// synchronization, but fresh-page traffic never takes that lock.
 ///
-/// Workers can share a CPU-count shard and a thread may be delayed between
-/// drawing a version and registering its page, so append order alone is not
-/// sufficient. Registration keeps each deque ordered by `(death version,
+/// A thread may be delayed between drawing a version and registering its page,
+/// so append order alone is not sufficient. Registration keeps each deque
+/// ordered by `(death version,
 /// address)`; the overwhelmingly common monotonic case remains `push_back`,
 /// while a delayed entry takes one binary search and insertion.
 pub(crate) struct BlockTrace<
@@ -99,7 +115,7 @@ pub(crate) struct BlockTrace<
     Key: Copy + Default + Hash + Ord + Display + 'static,
     Payload: Clone + Default + 'static,
 > {
-    shards: Vec<CachePadded<BlockTraceShard<P_F, P_N, Key, Payload>>>,
+    shards: Box<[CachePadded<BlockTraceShard<P_F, P_N, Key, Payload>>]>,
     batch_size: usize,
     scan_percent: usize,
     /// Exact number of non-local shards to probe. When absent, retain the
@@ -114,24 +130,57 @@ impl<
     Payload: Clone + Default,
 > BlockTrace<P_F, P_N, Key, Payload>
 {
-    pub(crate) fn new() -> Self {
-        let shard_count = num_cpus::get().max(1);
+    pub(crate) fn new_with_shard_count(shard_count: usize) -> Self {
+        Self::with_config(
+            shard_count,
+            setting("BATSTORE_GC_BATCH_SIZE", ALLOC_BATCH_SIZE, 1024),
+            setting("BATSTORE_GC_SCAN_PERCENT", SCAN_PERCENT, 100),
+            optional_setting("BATSTORE_GC_MAX_NEIGHBORS", shard_count.saturating_sub(1)),
+        )
+    }
+
+    fn with_config(
+        shard_count: usize,
+        batch_size: usize,
+        scan_percent: usize,
+        max_neighbors: Option<usize>,
+    ) -> Self {
+        assert!(shard_count > 0);
         Self {
             shards: (0..shard_count)
                 .map(|_| CachePadded::new(BlockTraceShard::new()))
-                .collect(),
-            batch_size: setting("BATSTORE_GC_BATCH_SIZE", ALLOC_BATCH_SIZE, 1024),
-            scan_percent: setting("BATSTORE_GC_SCAN_PERCENT", SCAN_PERCENT, 100),
-            max_neighbors: optional_setting(
-                "BATSTORE_GC_MAX_NEIGHBORS",
-                shard_count.saturating_sub(1),
-            ),
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            batch_size,
+            scan_percent,
+            max_neighbors,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(shard_count: usize, batch_size: usize) -> Self {
+        Self::with_config(
+            shard_count,
+            batch_size,
+            100,
+            Some(shard_count.saturating_sub(1)),
+        )
     }
 
     #[inline(always)]
     pub(crate) fn batch_size(&self) -> usize {
         self.batch_size
+    }
+
+    #[inline(always)]
+    pub(crate) fn take_local_fresh(
+        &self,
+        worker_id: WorkerId,
+    ) -> Option<DeadPageValue<P_F, P_N, Key, Payload>> {
+        self.shards[self.shard_for(worker_id)]
+            .fresh_rx
+            .try_recv()
+            .ok()
     }
 
     #[inline(always)]
@@ -174,8 +223,7 @@ impl<
         worker_id: WorkerId,
         dead_pages: [(Version, BlockRef<P_F, P_N, Key, Payload>); 2],
     ) {
-        let mut shard
-            = self.shards[self.shard_for(worker_id)].retired.lock();
+        let mut shard = self.shards[self.shard_for(worker_id)].retired.lock();
         for (version, page) in dead_pages {
             Self::push_ordered(&mut shard, ((version, page.0 as usize), page));
         }
@@ -200,12 +248,12 @@ impl<
     }
 
     #[inline]
-    fn drain_eligible_from(
+    fn drain_local(
         &self,
         shard_index: usize,
         remaining: &mut usize,
         eligible: &mut impl FnMut(DeadPageKey) -> bool,
-        out: &mut Vec<DeadPageEntry<P_F, P_N, Key, Payload>>,
+        out: &mut Vec<ReclaimedPage<P_F, P_N, Key, Payload>>,
     ) {
         if *remaining == 0 {
             return;
@@ -219,7 +267,10 @@ impl<
             let Ok(page) = shard.fresh_rx.try_recv() else {
                 break;
             };
-            out.push(((0, page.0 as usize), page));
+            out.push(ReclaimedPage {
+                page,
+                source: PageSource::Fresh,
+            });
             *remaining -= 1;
         }
         if *remaining == 0 {
@@ -232,7 +283,38 @@ impl<
         while *remaining != 0 {
             match retired.front() {
                 Some((key, _)) if eligible(*key) => {
-                    out.push(retired.pop_front().expect("front was just observed"));
+                    let (_, page) = retired.pop_front().expect("front was just observed");
+                    out.push(ReclaimedPage {
+                        page,
+                        source: PageSource::LocalRetired,
+                    });
+                    *remaining -= 1;
+                }
+                _ => break,
+            }
+        }
+    }
+
+    #[inline]
+    fn drain_retired_from(
+        &self,
+        shard_index: usize,
+        remaining: &mut usize,
+        eligible: &mut impl FnMut(DeadPageKey) -> bool,
+        source: PageSource,
+        out: &mut Vec<ReclaimedPage<P_F, P_N, Key, Payload>>,
+    ) {
+        if *remaining == 0 {
+            return;
+        }
+        let Some(mut retired) = self.shards[shard_index].retired.try_lock() else {
+            return;
+        };
+        while *remaining != 0 {
+            match retired.front() {
+                Some((key, _)) if eligible(*key) => {
+                    let (_, page) = retired.pop_front().expect("front was just observed");
+                    out.push(ReclaimedPage { page, source });
                     *remaining -= 1;
                 }
                 _ => break,
@@ -245,20 +327,15 @@ impl<
         &self,
         worker_id: WorkerId,
         limit: usize,
+        allow_steal: bool,
         mut eligible: impl FnMut(DeadPageKey) -> bool,
-    ) -> (
-        Vec<DeadPageEntry<P_F, P_N, Key, Payload>>,
-        usize,
-        usize,
-        usize,
-    ) {
+    ) -> (Vec<ReclaimedPage<P_F, P_N, Key, Payload>>, usize) {
         let mut out = Vec::with_capacity(limit);
         let mut remaining = limit;
         let own = self.shard_for(worker_id);
-        self.drain_eligible_from(own, &mut remaining, &mut eligible, &mut out);
-        let local_count = out.len();
+        self.drain_local(own, &mut remaining, &mut eligible, &mut out);
         let mut checked = 1;
-        if out.is_empty() && self.shards.len() > 1 {
+        if allow_steal && out.is_empty() && self.shards.len() > 1 {
             // `checked` includes the local shard. The explicit setting counts
             // only neighbours, which makes zero a useful local-only baseline.
             // If it is not set, preserve BATSTORE_GC_SCAN_PERCENT semantics.
@@ -280,14 +357,57 @@ impl<
                 let shard = (start + offset) % self.shards.len();
                 if shard != own {
                     checked += 1;
-                    self.drain_eligible_from(shard, &mut remaining, &mut eligible, &mut out);
+                    // Fresh batch reserves belong to their allocating worker.
+                    // Stealing is only from another worker's retired-page list.
+                    self.drain_retired_from(
+                        shard,
+                        &mut remaining,
+                        &mut eligible,
+                        PageSource::StolenRetired,
+                        &mut out,
+                    );
                     if !out.is_empty() {
                         break;
                     }
                 }
             }
         }
-        let stolen_count = out.len() - local_count;
-        (out, local_count, stolen_count, checked)
+        (out, checked)
+    }
+
+    /// Removes eligible retired pages from every shard. Fresh batch reserves
+    /// are deliberately excluded: OS mode may use those for subsequent local
+    /// allocations, but never reuses a retired page.
+    pub(crate) fn reclaim_retired_for_os(
+        &self,
+        worker_id: WorkerId,
+        limit: usize,
+        mut eligible: impl FnMut(DeadPageKey) -> bool,
+    ) -> Vec<ReclaimedPage<P_F, P_N, Key, Payload>> {
+        let mut out = Vec::with_capacity(limit);
+        let mut remaining = limit;
+        let own = self.shard_for(worker_id);
+        self.drain_retired_from(
+            own,
+            &mut remaining,
+            &mut eligible,
+            PageSource::LocalRetired,
+            &mut out,
+        );
+        for shard in 0..self.shards.len() {
+            if remaining == 0 {
+                break;
+            }
+            if shard != own {
+                self.drain_retired_from(
+                    shard,
+                    &mut remaining,
+                    &mut eligible,
+                    PageSource::StolenRetired,
+                    &mut out,
+                );
+            }
+        }
+        out
     }
 }

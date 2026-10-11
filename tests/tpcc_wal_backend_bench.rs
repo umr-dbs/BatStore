@@ -64,6 +64,8 @@ fn config(
         duration: Duration::from_secs(if full { FULL_DURATION_SECS } else { 1 }),
         affinity: true,
         gc: true,
+        gc_mode: crate::bat_gc::PageReclaimMode::ReuseSteal,
+        gc_shards: crate::bat_gc::GcShardLayout::PerWorker,
         update_in_place: false,
         root_star_index: RootIndexType::FrugalList,
         big_tree_size: Default::default(),

@@ -43,6 +43,7 @@
 use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
 use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::bat_db::Database;
+use crate::bat_gc::{GcShardLayout, PageReclaimMode};
 use crate::bat_query::interval::Interval;
 use crate::bat_root::index_root::RootIndexType;
 use crate::bat_tree::mvbt::FAN_OUT;
@@ -705,6 +706,20 @@ impl TpccDatabase {
         big_tree_size: BigTreeSize,
         max_workers: usize,
     ) -> Self {
+        Self::new_with_big_tree_size_and_max_workers_and_gc_shards(
+            root_index_type,
+            big_tree_size,
+            max_workers,
+            GcShardLayout::PerWorker,
+        )
+    }
+
+    pub fn new_with_big_tree_size_and_max_workers_and_gc_shards(
+        root_index_type: RootIndexType,
+        big_tree_size: BigTreeSize,
+        max_workers: usize,
+        gc_shards: GcShardLayout,
+    ) -> Self {
         let db = Database::new_with_max_workers(
             root_index_type,
             inc_key,
@@ -712,7 +727,8 @@ impl TpccDatabase {
             TpccKey::MIN,
             TpccKey::MAX,
             max_workers,
-        );
+        )
+        .with_gc_shard_layout(gc_shards);
         let table_ids = Self::create_all_tables(&db);
         let big_trees = Self::make_big_trees(root_index_type, &db, big_tree_size, None);
         Self {
@@ -730,6 +746,26 @@ impl TpccDatabase {
         wal_path: &std::path::Path,
         flush_interval: std::time::Duration,
         lockfree_batch_size: Option<usize>,
+    ) -> std::io::Result<Self> {
+        Self::new_with_big_tree_size_and_max_workers_and_wal_and_gc_shards(
+            root_index_type,
+            big_tree_size,
+            max_workers,
+            wal_path,
+            flush_interval,
+            lockfree_batch_size,
+            GcShardLayout::PerWorker,
+        )
+    }
+
+    pub fn new_with_big_tree_size_and_max_workers_and_wal_and_gc_shards(
+        root_index_type: RootIndexType,
+        big_tree_size: BigTreeSize,
+        max_workers: usize,
+        wal_path: &std::path::Path,
+        flush_interval: std::time::Duration,
+        lockfree_batch_size: Option<usize>,
+        gc_shards: GcShardLayout,
     ) -> std::io::Result<Self> {
         let db = match lockfree_batch_size {
             Some(batch_size) => Database::new_with_max_workers_and_wal_lockfree(
@@ -753,7 +789,8 @@ impl TpccDatabase {
                 wal_path,
                 flush_interval,
             )?,
-        };
+        }
+        .with_gc_shard_layout(gc_shards);
         let table_ids = Self::create_all_tables(&db);
         let big_trees = Self::make_big_trees(root_index_type, &db, big_tree_size, None);
         Ok(Self {
@@ -790,10 +827,11 @@ impl TpccDatabase {
     ) -> BigTrees {
         let ctx = db.ctx.clone();
         let wal = wal_override.unwrap_or_else(|| db.wal_writer());
+        let gc_shards = db.gc_shard_layout();
         macro_rules! build {
             ($ty:ty) => {
                 (
-                    Arc::new(<$ty>::make_with_shared_ctx(
+                    Arc::new(<$ty>::make_with_shared_ctx_and_gc_shards(
                         root_index_type,
                         inc_key,
                         dec_key,
@@ -802,8 +840,9 @@ impl TpccDatabase {
                         ctx.clone(),
                         Some(WAREHOUSE_BIG_TABLE_ID),
                         wal.clone(),
+                        gc_shards,
                     )),
-                    Arc::new(<$ty>::make_with_shared_ctx(
+                    Arc::new(<$ty>::make_with_shared_ctx_and_gc_shards(
                         root_index_type,
                         inc_key,
                         dec_key,
@@ -812,6 +851,7 @@ impl TpccDatabase {
                         ctx,
                         Some(DISTRICT_BIG_TABLE_ID),
                         wal.clone(),
+                        gc_shards,
                     )),
                 )
             };
@@ -933,63 +973,72 @@ impl TpccDatabase {
     }
 
     pub fn enable_gc(&self, update_in_place: bool, vacuum: Option<(f64, Duration)>) {
-        self.db.enable_gc(update_in_place, None);
+        self.configure_gc(PageReclaimMode::ReuseSteal, update_in_place, vacuum);
+    }
+
+    pub fn configure_gc(
+        &self,
+        mode: PageReclaimMode,
+        update_in_place: bool,
+        vacuum: Option<(f64, Duration)>,
+    ) {
+        self.db.configure_gc(mode, update_in_place, None);
         match &self.big_trees {
             BigTrees::KiB1 {
                 warehouse,
                 district,
             } => {
-                warehouse.enable_gc(update_in_place);
-                district.enable_gc(update_in_place);
+                warehouse.configure_gc(mode, update_in_place);
+                district.configure_gc(mode, update_in_place);
             }
             BigTrees::KiB2 {
                 warehouse,
                 district,
             } => {
-                warehouse.enable_gc(update_in_place);
-                district.enable_gc(update_in_place);
+                warehouse.configure_gc(mode, update_in_place);
+                district.configure_gc(mode, update_in_place);
             }
             BigTrees::KiB4 {
                 warehouse,
                 district,
             } => {
-                warehouse.enable_gc(update_in_place);
-                district.enable_gc(update_in_place);
+                warehouse.configure_gc(mode, update_in_place);
+                district.configure_gc(mode, update_in_place);
             }
             BigTrees::KiB8 {
                 warehouse,
                 district,
             } => {
-                warehouse.enable_gc(update_in_place);
-                district.enable_gc(update_in_place);
+                warehouse.configure_gc(mode, update_in_place);
+                district.configure_gc(mode, update_in_place);
             }
             BigTrees::KiB16 {
                 warehouse,
                 district,
             } => {
-                warehouse.enable_gc(update_in_place);
-                district.enable_gc(update_in_place);
+                warehouse.configure_gc(mode, update_in_place);
+                district.configure_gc(mode, update_in_place);
             }
             BigTrees::KiB32 {
                 warehouse,
                 district,
             } => {
-                warehouse.enable_gc(update_in_place);
-                district.enable_gc(update_in_place);
+                warehouse.configure_gc(mode, update_in_place);
+                district.configure_gc(mode, update_in_place);
             }
             BigTrees::KiB64 {
                 warehouse,
                 district,
             } => {
-                warehouse.enable_gc(update_in_place);
-                district.enable_gc(update_in_place);
+                warehouse.configure_gc(mode, update_in_place);
+                district.configure_gc(mode, update_in_place);
             }
             BigTrees::KiB512 {
                 warehouse,
                 district,
             } => {
-                warehouse.enable_gc(update_in_place);
-                district.enable_gc(update_in_place);
+                warehouse.configure_gc(mode, update_in_place);
+                district.configure_gc(mode, update_in_place);
             }
         }
         self.set_vacuum(vacuum);

@@ -26,6 +26,7 @@ pub use bat_crud_model::crud_api::AtomicTxDispatcher;
 pub use bat_crud_model::crud_operation::{CRUDOperation, TxAtomicOperation};
 pub use bat_crud_model::crud_operation_result::{AtomicTxResult, CRUDOperationResult};
 pub use bat_db::{Database, DbTransaction, IsolationLevel, TableId, TransactionState};
+pub use bat_gc::{GcShardLayout, PageReclaimMode};
 pub use bat_query::interval::Interval;
 pub use bat_root::index_root::RootIndexType;
 pub use bat_tree::mvbt::{Key, MVBT, MVBTSt, Payload};
