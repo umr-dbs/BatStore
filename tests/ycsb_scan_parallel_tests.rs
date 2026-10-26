@@ -224,3 +224,68 @@ fn range_query_iter_parallel_methods_agree_with_their_sequential_counterparts() 
         cfg.record_count as usize
     );
 }
+
+/// Scan-pool threads never register a `WorkerId`: every job runs as
+/// `READ_ONLY_SCAN_WORKER_ID`. Checked on a tree whose registry has just
+/// two slots — the main (populating) thread takes one, and an 8-thread pool
+/// must leave the other free. Any pool thread that claimed a slot would
+/// panic in `WorkerRegistry::acquire` and its job would never report back.
+#[test]
+fn pool_threads_never_claim_worker_slots() {
+    let cfg = tiny_cfg();
+    let tree = Arc::new(YcsbTree::make_standard_with_max_workers(
+        RootIndexType::default(),
+        2,
+    ));
+    populate(&tree, &cfg);
+    assert_eq!(tree.worker_id(), 0);
+
+    let pool = YcsbScanPool::spawn(tree.clone(), 8, Some(1));
+    let range = Interval::new(1u64, 100_000u64);
+    let main_thread = std::thread::current().id();
+
+    for _ in 0..20 {
+        let ts = tree.begin_snapshot();
+        let sub_ranges = pool.evenly_split_ranges(range).expect("range is split-worthy");
+        assert!(sub_ranges.len() > 1);
+        let parts = pool.dispatch(sub_ranges, move |tree, sub_range| {
+            assert_ne!(std::thread::current().id(), main_thread);
+            RangeQueryIter::new(tree, ts, sub_range, false, READ_ONLY_SCAN_WORKER_ID).count_ref()
+        });
+        tree.on_release_reader_snapshot(ts);
+        assert_eq!(parts.into_iter().sum::<usize>(), cfg.record_count as usize);
+    }
+
+    // The second slot is still free for a real worker.
+    let other = tree.clone();
+    let id = std::thread::spawn(move || other.worker_id()).join().unwrap();
+    assert_eq!(id, 1);
+}
+
+/// A pool scan at an older snapshot must not see rows committed after it
+/// — exercises the commit-log (LCB) visibility path, since no real stamp
+/// can carry `READ_ONLY_SCAN_WORKER_ID` and take the same-worker shortcut.
+#[test]
+fn pool_scan_respects_snapshot_isolation() {
+    let cfg = tiny_cfg();
+    let tree = Arc::new(YcsbTree::make_standard_with_max_workers(
+        RootIndexType::default(),
+        1,
+    ));
+    populate(&tree, &cfg);
+    let pool = YcsbScanPool::spawn(tree.clone(), 4, Some(1));
+    let range = Interval::new(1u64, 100_000u64);
+
+    let old_ts = tree.begin_snapshot();
+    for key in cfg.record_count + 1..=cfg.record_count + 100 {
+        crate::bat_bench::ycsb_txn::insert(&tree, &cfg, key);
+    }
+
+    let old_count = RangeQueryIter::new(&tree, old_ts, range, false, READ_ONLY_SCAN_WORKER_ID)
+        .count_ref_parallel(Some(&pool));
+    tree.on_release_reader_snapshot(old_ts);
+    assert_eq!(old_count, cfg.record_count as usize);
+
+    let new_count = scan_parallel(Some(&pool), &tree, 1, 100_000, true);
+    assert_eq!(new_count, cfg.record_count as usize + 100);
+}

@@ -362,7 +362,7 @@ fn run_tpcc_impl(
 
     let worker_capacity = fixed_cost + num_terminals * terminal_cost + num_olap * olap_thread_cost;
     assert!(
-        worker_capacity <= u16::MAX as usize,
+        worker_capacity <= crate::bat_record_model::tx_stamp::TxStamp::MAX_WORKER_ID as usize + 1,
         "tpcc: requested concurrency exceeds WorkerId capacity"
     );
     let db = Arc::new(match &cfg.wal {

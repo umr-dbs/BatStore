@@ -12,25 +12,43 @@ pub type WorkerId = u16;
 /// Visibility is decided from this via `LCB(worker_id, reader_ts_start) >
 /// ts_start` — see `bat_sync::visibility::is_visible` for the actual check.
 ///
-/// Packed into a single `u64` — `worker_id` in the high 16 bits, `ts_start` in
-/// the low 47 bits — rather than a `{ worker_id: u16, ts_start: u64 }` struct.
-/// The latter costs a whole extra 8-byte word to alignment padding (`u64`
-/// demands 8-byte alignment, so the 10-byte payload rounds up to 16), which
-/// doubles `VersionInfo` (two stamps per record) and forces a much smaller
-/// leaf `NUM_RECORDS` to keep pages page-sized. Packing keeps `TxStamp` at
-/// `size_of::<u64>` (8 bytes), restoring `VersionInfo`/leaf fan-out to their
-/// pre-OSIC footprint. Bit 63 is deliberately left unused here — it's
-/// `DeletedTxStamp`'s own presence flag (see `version_info::DeletedTxStamp`).
+/// Packed into a single `u64` rather than a `{ worker_id: u16, ts_start: u64 }`
+/// struct. The latter costs a whole extra 8-byte word to alignment padding
+/// (`u64` demands 8-byte alignment, so the 10-byte payload rounds up to 16),
+/// which doubles `VersionInfo` (two stamps per record) and forces a much
+/// smaller leaf `NUM_RECORDS` to keep pages page-sized. Packing keeps
+/// `TxStamp` at `size_of::<u64>` (8 bytes), restoring `VersionInfo`/leaf
+/// fan-out to their pre-OSIC footprint.
+///
+/// Layout (identical for insertion and deletion stamps):
+///
+/// ```text
+///  63 | 62 ............ 48 | 47 .................... 0
+///  I  |  worker_id (15 b)  |      ts_start (48 b)
+/// ```
+///
+/// The high 16 bits form the worker field, whose top bit (63) is the
+/// invalidation flag (`INVALID_FLAG`) — leaving 15 bits (`MAX_WORKER_ID`)
+/// for the actual worker id. `DeletedTxStamp`/`VersionInfo` reuses that same
+/// bit 63 as its delete-presence flag (a delete stamp is never itself
+/// invalidated — an aborted delete is undone via `VersionInfo::undelete`).
 #[derive(Copy, Clone, Default, Eq, PartialEq, Debug)]
 pub struct TxStamp(u64);
 
 impl TxStamp {
-    const WORKER_ID_BITS: u32 = 16;
-    const TS_START_BITS: u32 = 63 - Self::WORKER_ID_BITS;
+    /// Width of the whole worker field, including the invalidation bit.
+    const WORKER_FIELD_BITS: u32 = 16;
+    /// Bits actually available to the worker id (one is the invalid flag).
+    const WORKER_ID_BITS: u32 = Self::WORKER_FIELD_BITS - 1;
+    pub const TS_START_BITS: u32 = 64 - Self::WORKER_FIELD_BITS;
     const TS_START_MASK: u64 = (1u64 << Self::TS_START_BITS) - 1;
     const WORKER_ID_MASK: u64 = ((1u64 << Self::WORKER_ID_BITS) - 1) << Self::TS_START_BITS;
-    /// Bit 63 — the one bit `worker_id`/`ts_start` never touch (see this
-    /// type's doc). Set on a record's `insert_stamp` when the transaction
+    /// Largest worker id a stamp can encode (`2^15 - 1`).
+    pub const MAX_WORKER_ID: WorkerId = ((1u32 << Self::WORKER_ID_BITS) - 1) as WorkerId;
+    /// Largest `ts_start` a stamp can encode (`2^48 - 1`).
+    pub const MAX_TS_START: Version = Self::TS_START_MASK;
+    /// Bit 63 — the top bit of the 16-bit worker field, which
+    /// `worker_id`/`ts_start` never touch (see this type's doc). Set on a record's `insert_stamp` when the transaction
     /// that wrote it aborts (dropped without `commit()`) instead of
     /// physically undoing the write: an invalidated stamp is unconditionally
     /// invisible to every reader (`bat_sync::visibility::is_visible`) and
@@ -43,7 +61,26 @@ impl TxStamp {
 
     #[inline(always)]
     pub const fn new(worker_id: WorkerId, ts_start: Version) -> Self {
-        Self(((worker_id as u64) << Self::TS_START_BITS) | (ts_start & Self::TS_START_MASK))
+        // Unchecked in release (hot path); a worker id past 15 bits would
+        // otherwise spill into `INVALID_FLAG`, hence the explicit masks.
+        debug_assert!(worker_id <= Self::MAX_WORKER_ID, "TxStamp: worker_id exceeds 15 bits");
+        debug_assert!(ts_start <= Self::MAX_TS_START, "TxStamp: ts_start exceeds 48 bits");
+        Self(
+            (((worker_id as u64) << Self::TS_START_BITS) & Self::WORKER_ID_MASK)
+                | (ts_start & Self::TS_START_MASK),
+        )
+    }
+
+    /// Checked `new`: `None` if either field doesn't fit its bit width.
+    /// For decoding untrusted bytes (e.g. the WAL), where masking would
+    /// silently turn a corrupt value into a different, valid-looking stamp.
+    #[inline(always)]
+    pub const fn try_new(worker_id: WorkerId, ts_start: Version) -> Option<Self> {
+        if worker_id > Self::MAX_WORKER_ID || ts_start > Self::MAX_TS_START {
+            None
+        } else {
+            Some(Self::new(worker_id, ts_start))
+        }
     }
 
     #[inline(always)]

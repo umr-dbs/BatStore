@@ -282,7 +282,9 @@ pub fn run_ycsb(cfg: DriverConfig) -> YcsbRunSummary {
     let fixed_cost = 1 + idle_compaction_cost;
     let worker_capacity = num_threads
         .checked_add(fixed_cost)
-        .filter(|&capacity| capacity <= u16::MAX as usize)
+        .filter(|&capacity| {
+            capacity <= crate::bat_record_model::tx_stamp::TxStamp::MAX_WORKER_ID as usize + 1
+        })
         .expect("ycsb: requested concurrency exceeds WorkerId capacity");
 
     fs::create_dir_all(&cfg.output_dir).unwrap_or_else(|e| {

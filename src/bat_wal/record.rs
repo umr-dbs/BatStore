@@ -114,7 +114,7 @@ pub fn decode<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayload>(
     let tag = bytes[0];
     let ts_start = Version::from_le_bytes(bytes[1..9].try_into().ok()?);
     let worker_id = WorkerId::from_le_bytes(bytes[9..11].try_into().ok()?);
-    let stamp = TxStamp::new(worker_id, ts_start);
+    let stamp = TxStamp::try_new(worker_id, ts_start)?;
 
     let key_bytes = &bytes[header_sz..header_sz + key_sz];
     let key: Key = unsafe { read_raw(key_bytes) };
@@ -202,7 +202,7 @@ pub fn decode_entry<Key: Ord + Copy + Hash + Display, Payload: Clone + WalPayloa
         let worker_id = WorkerId::from_le_bytes(bytes[9..11].try_into().ok()?);
         let ts_commit = Version::from_le_bytes(bytes[header_sz..header_sz + 8].try_into().ok()?);
         return Some(WalEntry::Commit {
-            stamp: TxStamp::new(worker_id, ts_start),
+            stamp: TxStamp::try_new(worker_id, ts_start)?,
             ts_commit,
         });
     }

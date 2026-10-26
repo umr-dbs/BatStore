@@ -1857,6 +1857,9 @@ mod wal_lockfree_writer_tests;
 #[path = "../../tests/wal_record_tests.rs"]
 mod wal_record_tests;
 #[cfg(test)]
+#[path = "../../tests/tx_stamp_tests.rs"]
+mod tx_stamp_tests;
+#[cfg(test)]
 #[path = "../../tests/wal_recovery_tests.rs"]
 mod wal_recovery_tests;
 #[cfg(test)]

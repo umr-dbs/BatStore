@@ -1,4 +1,4 @@
-use crate::bat_record_model::tx_stamp::WorkerId;
+use crate::bat_record_model::tx_stamp::{TxStamp, WorkerId};
 use crate::bat_sync::safe_cell::SafeCell;
 use crate::bat_sync::visibility::SnapshotCache;
 use std::cell::Cell;
@@ -20,9 +20,9 @@ pub struct WorkerRegistry {
 }
 
 /// A reserved `WorkerId` that `acquire` can never hand out (it only ever
-/// returns values `< max_workers`, and this crate's every real deployment
-/// keeps `max_workers` far below `u16::MAX` — bounded by `num_cpus`-scale
-/// thread budgets, see `bat_tree::mvbt::default_max_workers`). Safe for a
+/// returns values `< max_workers`, and `WorkerRegistry::new` caps
+/// `max_workers` at `TxStamp::MAX_WORKER_ID + 1` = 2^15, so this 16-bit
+/// value lies outside the 15-bit worker field a `TxStamp` can even encode). Safe for a
 /// thread to pass as its own `reader_worker` to `visibility::is_visible`/
 /// `RangeQueryIter::new` *without ever calling `worker_id_for`* — i.e.
 /// without permanently claiming a real registry slot — as long as that
@@ -57,6 +57,13 @@ static NEXT_DB_UID: AtomicU64 = AtomicU64::new(0);
 
 impl WorkerRegistry {
     pub fn new(max_workers: usize) -> Self {
+        // Worker ids are `0..max_workers` and must fit `TxStamp`'s 15-bit
+        // worker field (the 16th bit is the invalidation flag).
+        assert!(
+            max_workers <= TxStamp::MAX_WORKER_ID as usize + 1,
+            "WorkerRegistry: max_workers ({max_workers}) exceeds TxStamp worker capacity ({})",
+            TxStamp::MAX_WORKER_ID as usize + 1
+        );
         Self {
             db_uid: NEXT_DB_UID.fetch_add(1, Relaxed),
             max_workers,
