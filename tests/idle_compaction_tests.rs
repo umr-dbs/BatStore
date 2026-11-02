@@ -201,3 +201,117 @@ fn compact_idle_pass_on_a_multi_leaf_tree_touches_only_the_garbage_heavy_leaf() 
         }
     }
 }
+
+/// Fewest live entries that the strong version condition allows in a new
+/// leaf (`Block::strong_min_units`): half the key-split threshold of 99.
+const STRONG_MIN: u32 = 49;
+
+/// Builds a multi-leaf tree, then deletes keys from the leaf around the
+/// middle key until it holds only `keep` live entries (between the weak
+/// minimum of 25 and the strong minimum of 49). Returns the tree, the
+/// middle key, and the keys that are still live.
+fn sparse_leaf_tree(keep: usize, payload_counter: &AtomicU64) -> (MVBT, u64, Vec<u64>) {
+    let tree = MVBT::make_standard(RootIndexType::default());
+    let keys: Vec<u64> = (0..300u64).map(|i| i * 1000).collect();
+    for &k in &keys {
+        match tree.dispatch_crud(CRUDOperation::Insert(k, payload_counter.fetch_add(1, SeqCst))) {
+            CRUDOperationResult::Inserted(_) => {}
+            _ => panic!("expected Inserted"),
+        }
+    }
+    let hot_key = keys[150];
+    let (fence, ..) = leaf_active_dead_counts(&tree)
+        .into_iter()
+        .find(|(fence, ..)| fence.contains(hot_key))
+        .expect("hot_key must be covered by some leaf");
+    let in_leaf: Vec<u64> = keys.iter().copied().filter(|&k| fence.contains(k)).collect();
+    assert!(in_leaf.len() > keep, "the leaf must hold more than {keep} keys");
+    let (kept, deleted): (Vec<u64>, Vec<u64>) = {
+        let start = in_leaf.iter().position(|&k| k == hot_key).unwrap().saturating_sub(keep / 2);
+        let start = start.min(in_leaf.len() - keep);
+        let kept = in_leaf[start..start + keep].to_vec();
+        let deleted = in_leaf.iter().copied().filter(|k| !kept.contains(k)).collect();
+        (kept, deleted)
+    };
+    for &k in &deleted {
+        match tree.dispatch_crud(CRUDOperation::Delete(k)) {
+            CRUDOperationResult::Deleted(_) => {}
+            other => panic!("expected Deleted for {k}, got {other}"),
+        }
+    }
+    let live: Vec<u64> = keys.iter().copied().filter(|k| !deleted.contains(k)).collect();
+    let _ = kept;
+    (tree, hot_key, live)
+}
+
+fn live_in_leaf_of(tree: &MVBT, key: u64) -> u32 {
+    leaf_active_dead_counts(tree)
+        .into_iter()
+        .find(|(fence, ..)| fence.contains(key))
+        .map(|(_, active, _)| active)
+        .expect("key must be covered by some leaf")
+}
+
+fn assert_all_live_keys_readable(tree: &MVBT, live: &[u64]) {
+    for &k in live {
+        match tree.dispatch_crud(CRUDOperation::PointSi(k)) {
+            CRUDOperationResult::MatchedRecords(records) => assert_eq!(records.len(), 1, "key {k}"),
+            _ => panic!("expected MatchedRecords for key {k}"),
+        }
+    }
+}
+
+/// A leaf that overflows with fewer live entries than the strong version
+/// condition allows is merged with a sibling, not split by version: a
+/// version split would create a new leaf below the strong minimum.
+#[test]
+fn full_leaf_below_strong_minimum_is_merged_not_version_split() {
+    let payload_counter = AtomicU64::new(0);
+    let (tree, hot_key, live) = sparse_leaf_tree(35, &payload_counter);
+    assert_eq!(live_in_leaf_of(&tree, hot_key), 35);
+
+    // Updates add dead versions until the leaf overflows and is restructured.
+    for _ in 0..150 {
+        match tree.dispatch_crud(CRUDOperation::Update(hot_key, payload_counter.fetch_add(1, SeqCst))) {
+            CRUDOperationResult::Updated(_) => {}
+            _ => panic!("expected Updated"),
+        }
+    }
+
+    let after = live_in_leaf_of(&tree, hot_key);
+    assert!(
+        after >= STRONG_MIN,
+        "the restructured leaf holds {after} live entries, below the strong minimum {STRONG_MIN}"
+    );
+    let (active, _) = total_active_dead(&tree);
+    assert_eq!(active, live.len() as u64, "no live record lost");
+    assert_all_live_keys_readable(&tree, &live);
+}
+
+/// The compactor follows the same rule: a candidate with fewer live entries
+/// than the strong minimum is merged with a sibling.
+#[test]
+fn compactor_merges_a_candidate_below_strong_minimum() {
+    let payload_counter = AtomicU64::new(0);
+    let (tree, hot_key, live) = sparse_leaf_tree(35, &payload_counter);
+
+    // Enough updates for a dead share above one half, but too few to overflow.
+    for _ in 0..40 {
+        match tree.dispatch_crud(CRUDOperation::Update(hot_key, payload_counter.fetch_add(1, SeqCst))) {
+            CRUDOperationResult::Updated(_) => {}
+            _ => panic!("expected Updated"),
+        }
+    }
+    assert_eq!(live_in_leaf_of(&tree, hot_key), 35, "not yet restructured");
+
+    assert!(tree.compact_idle_pass(0.5) >= 1, "the garbage-heavy leaf is a candidate");
+
+    let after = live_in_leaf_of(&tree, hot_key);
+    assert!(
+        after >= STRONG_MIN,
+        "the compacted leaf holds {after} live entries, below the strong minimum {STRONG_MIN}"
+    );
+    let (active, _) = total_active_dead(&tree);
+    assert_eq!(active, live.len() as u64, "no live record lost");
+    assert_all_live_keys_readable(&tree, &live);
+}

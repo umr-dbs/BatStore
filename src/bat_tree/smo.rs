@@ -130,7 +130,15 @@ impl<
 
         if self.is_leaf() {
             return if active + dead >= self.overflow_units_count() {
-                BlockUnsafeDegree::Overflow
+                // A full leaf must be restructured either way. With fewer
+                // live entries than the strong version condition allows, a
+                // version split would create a leaf below its minimum, so
+                // merge it with a sibling instead, as internal nodes do below.
+                if active < self.strong_min_units() {
+                    BlockUnsafeDegree::ActiveUnderflow
+                } else {
+                    BlockUnsafeDegree::Overflow
+                }
             } else if active + dead <= self.filling_20_percent() {
                 BlockUnsafeDegree::ActiveUnderflow
             } else if active <= self.filling_20_percent() && !self.has_protected_garbage(ctx) {
@@ -190,6 +198,14 @@ impl<
     pub fn filling_40_percent(&self) -> usize {
         // 40%
         (2 * self.max_units() + 4) / 5
+    }
+
+    /// Fewest live entries that the strong version condition allows in a
+    /// new leaf: half the key-split threshold (about 40%), so that both
+    /// halves of a key split meet it.
+    #[inline(always)]
+    pub fn strong_min_units(&self) -> usize {
+        self.filling_80_percent() / 2
     }
 
     #[inline(always)]

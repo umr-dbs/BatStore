@@ -425,7 +425,16 @@ impl<
                         BlockUnsafeDegree::Ok
                             if needs_compaction && curr_guard.upgrade_write_lock() =>
                         {
-                            match self.on_overflow_node(curr_guard, next_curr_guard, index) {
+                            // A version split would leave a leaf with too few
+                            // live entries below the strong version
+                            // condition's minimum; merge it with a sibling.
+                            let (active, _) = next_curr_guard.active_dead_count();
+                            let result = if (active as usize) < next_curr_guard.strong_min_units() {
+                                self.on_underflow_node(curr_guard, next_curr_guard, index)
+                            } else {
+                                self.on_overflow_node(curr_guard, next_curr_guard, index)
+                            };
+                            match result {
                                 Ok(guard) => {
                                     curr_guard = guard;
                                     compacted = true;
