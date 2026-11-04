@@ -73,7 +73,8 @@ use triomphe::Arc;
 
 use super::database::Database;
 use super::own_writes::{
-    OwnKeys, overlay_min, overlay_records, own_keys_in, try_visit_range, visit_range,
+    OwnWrites, overlay_min, overlay_records, own_point_read, record_write, try_visit_range,
+    visit_range,
 };
 
 pub enum TransactionState {
@@ -426,6 +427,9 @@ pub struct DbTransaction<
     /// revert). Walked by `Drop` to abort every one of them if `commit()`
     /// was never called.
     written: SmallVec<[(usize, Key); 16]>,
+    /// Every key this transaction has changed, keyed by table-cache slot,
+    /// and whether it deleted the key; see `bat_db::own_writes`.
+    own: OwnWrites<usize, Key>,
     /// Trees touched by this transaction and roots resolved for its current
     /// statement snapshot. Cleared when a read committed operation starts.
     /// Eight inline entries cover the common multi-table OLTP transaction without
@@ -460,6 +464,7 @@ impl<
             isolation,
             committed: TransactionState::InFlight,
             written: SmallVec::new(),
+            own: OwnWrites::new(),
             tables: SmallVec::new(),
         }
     }
@@ -531,33 +536,18 @@ impl<
             .count()
     }
 
-    /// The keys of `range` in table cache slot `slot` that this transaction
-    /// has changed; see `bat_db::own_writes` for why reads treat them apart.
-    fn own_keys(&self, slot: usize, range: &Interval<Key>) -> OwnKeys<Key> {
-        own_keys_in(
-            self.written
-                .iter()
-                .filter(|(written_slot, _)| *written_slot == slot)
-                .map(|(_, key)| *key),
-            range,
-        )
-    }
-
-    fn has_written(&self, slot: usize, key: Key) -> bool {
-        self.written.iter().any(|&written| written == (slot, key))
-    }
-
     pub fn point(
         &mut self,
         table: TableId,
         key: Key,
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         self.refresh_read_snapshot();
-        let (tree, root) = self.read_tree_and_root(table);
         let slot = self.table_slot(table);
-        if self.has_written(slot, key) {
-            return tree.own_key_point_read(key, self.worker_id, self.read_ts);
+        if let Some(deleted) = self.own.get(slot, key) {
+            let tree = &self.tables[slot].tree;
+            return own_point_read(tree, self.worker_id, self.read_ts, key, deleted);
         }
+        let (tree, root) = self.read_tree_and_root(table);
         tree.key_point_read_from_root(root, key, self.worker_id, self.read_ts)
     }
 
@@ -571,17 +561,11 @@ impl<
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
         let slot = self.table_slot(table);
-        let own = self.own_keys(slot, &range);
+        let own = self.own.in_range(slot, &range);
         let records =
             RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
                 .collect();
-        CRUDOperationResult::MatchedRecords(overlay_records(
-            records,
-            &tree,
-            self.worker_id,
-            self.read_ts,
-            &own,
-        ))
+        CRUDOperationResult::MatchedRecords(overlay_records(records, &tree, self.worker_id, self.read_ts, own))
     }
 
     pub fn range_min(
@@ -592,13 +576,13 @@ impl<
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
         let slot = self.table_slot(table);
-        let own = self.own_keys(slot, &range);
+        let own = self.own.in_range(slot, &range);
         overlay_min(
             RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root),
             &tree,
             self.worker_id,
             self.read_ts,
-            &own,
+            own,
         )
     }
 
@@ -613,13 +597,13 @@ impl<
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
         let slot = self.table_slot(table);
-        let own = self.own_keys(slot, &range);
+        let own = self.own.in_range(slot, &range);
         try_visit_range(
             RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root),
             &tree,
             self.worker_id,
             self.read_ts,
-            &own,
+            own,
             None,
             visit,
         )
@@ -635,13 +619,13 @@ impl<
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
         let slot = self.table_slot(table);
-        let own = self.own_keys(slot, &range);
+        let own = self.own.in_range(slot, &range);
         visit_range(
             RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root),
             &tree,
             self.worker_id,
             self.read_ts,
-            &own,
+            own,
             None,
             visit,
         )
@@ -667,17 +651,19 @@ impl<
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
         let slot = self.table_slot(table);
-        let own = self.own_keys(slot, &range);
+        let own = self.own.in_range(slot, &range);
         let scan =
             RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root);
         if own.is_empty() {
             return scan.count_ref();
         }
         let mut count = 0;
-        visit_range(scan, &tree, self.worker_id, self.read_ts, &own, None, |_, _| count += 1);
+        visit_range(scan, &tree, self.worker_id, self.read_ts, own, None, |_, _| count += 1);
         count
     }
 
+    /// Insert of `key`. Fails without touching the tree if this transaction
+    /// holds `key` already (see `bat_db::own_writes`).
     pub fn insert(
         &mut self,
         table: TableId,
@@ -686,6 +672,9 @@ impl<
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         self.refresh_read_snapshot();
         let slot = self.table_slot(table);
+        if let Some(false) = self.own.get(slot, key) {
+            return CRUDOperationResult::ZeroAffected(KeyAlreadyExists);
+        }
         let tree = self.tables[slot].tree.clone();
         let (result, track) = insert_on_tree_at(
             &tree,
@@ -695,12 +684,12 @@ impl<
             key,
             payload,
         );
-        if track {
-            self.written.push((slot, key));
-        }
+        self.note_write(slot, key, &result, track);
         result
     }
 
+    /// Update of `key`. Fails without touching the tree if this transaction
+    /// deleted `key` (see `bat_db::own_writes`).
     pub fn update(
         &mut self,
         table: TableId,
@@ -709,6 +698,9 @@ impl<
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         self.refresh_read_snapshot();
         let slot = self.table_slot(table);
+        if let Some(true) = self.own.get(slot, key) {
+            return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted);
+        }
         let tree = self.tables[slot].tree.clone();
         let (result, track) = update_on_tree_at(
             &tree,
@@ -718,12 +710,12 @@ impl<
             key,
             payload,
         );
-        if track {
-            self.written.push((slot, key));
-        }
+        self.note_write(slot, key, &result, track);
         result
     }
 
+    /// Delete of `key`. Fails without touching the tree if this transaction
+    /// deleted `key` already (see `bat_db::own_writes`).
     pub fn delete(
         &mut self,
         table: TableId,
@@ -731,13 +723,30 @@ impl<
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         self.refresh_read_snapshot();
         let slot = self.table_slot(table);
+        if let Some(true) = self.own.get(slot, key) {
+            return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted);
+        }
         let tree = self.tables[slot].tree.clone();
         let (result, track) =
             delete_on_tree_at(&tree, self.worker_id, self.ts_start, self.read_ts, key);
+        self.note_write(slot, key, &result, track);
+        result
+    }
+
+    /// Bookkeeping after a write of `key` in slot `slot`: `track` (from the
+    /// `*_on_tree_at` helper) says whether it added a version that abort has
+    /// to revert; any applied write updates the key's own state.
+    fn note_write(
+        &mut self,
+        slot: usize,
+        key: Key,
+        result: &CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload>,
+        track: bool,
+    ) {
         if track {
             self.written.push((slot, key));
         }
-        result
+        record_write(&mut self.own, slot, key, result);
     }
 
     pub const fn is_committed(&self) -> bool {

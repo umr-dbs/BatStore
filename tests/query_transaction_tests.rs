@@ -920,3 +920,126 @@ fn snapshot_reads_of_other_keys_keep_the_snapshot_route() {
     assert_eq!(tx.range_count(t, Interval::new(0, 99)), 5);
     tx.commit();
 }
+
+/// Repeated writes of one key in one transaction: each read and each write
+/// that the key's own state decides is answered from the write set, and the
+/// tree ends up in the state those answers promised, after commit as well
+/// as after abort.
+#[test]
+fn repeated_own_writes_of_a_key_match_the_tree_after_commit_and_abort() {
+    use crate::bat_crud_model::crud_operation_result::CRUDOperationInnerReason::{
+        KeyAlreadyDeleted, KeyAlreadyExists,
+    };
+    use crate::bat_query::interval::Interval;
+    let db = new_db();
+    let t = db.create_table("t").table_id().unwrap();
+    for k in 0..4u64 {
+        db.dispatch_crud(t, CRUDOperation::Insert(k, k));
+    }
+
+    let mut tx = DbTransaction::begin(&db);
+    // Insert, delete, re-insert of a new key.
+    assert!(matches!(tx.insert(t, 10, 100), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(
+        tx.insert(t, 10, 101),
+        CRUDOperationResult::ZeroAffected(KeyAlreadyExists)
+    ));
+    assert!(matches!(tx.delete(t, 10), CRUDOperationResult::Deleted(_)));
+    assert_eq!(point_payload(&mut tx, t, 10), None);
+    assert!(matches!(
+        tx.update(t, 10, 102),
+        CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
+    ));
+    assert!(matches!(
+        tx.delete(t, 10),
+        CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
+    ));
+    split_after_begin(&db, t);
+    assert!(matches!(tx.insert(t, 10, 103), CRUDOperationResult::Inserted(_)));
+    assert_eq!(point_payload(&mut tx, t, 10), Some(103));
+    // Update, delete, re-insert of a committed key.
+    assert!(matches!(tx.update(t, 1, 11), CRUDOperationResult::Updated(_)));
+    assert!(matches!(tx.delete(t, 1), CRUDOperationResult::Deleted(_)));
+    assert!(matches!(tx.insert(t, 1, 12), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(tx.update(t, 1, 13), CRUDOperationResult::Updated(_)));
+    assert_eq!(point_payload(&mut tx, t, 1), Some(13));
+    // Delete of a committed key.
+    assert!(matches!(tx.delete(t, 2), CRUDOperationResult::Deleted(_)));
+    assert!(matches!(
+        tx.update(t, 2, 22),
+        CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted)
+    ));
+
+    let expected = vec![(0, 0), (1, 13), (3, 3), (10, 103)];
+    assert_eq!(range_pairs(&mut tx, t, 0, 99), expected);
+    assert_eq!(tx.range_count(t, Interval::new(0, 99)), 4);
+    assert_eq!(tx.range_min(t, Interval::new(1, 99)).map(|r| r.key), Some(1));
+    assert_eq!(tx.range_min(t, Interval::new(2, 99)).map(|r| r.key), Some(3));
+    tx.commit();
+
+    let mut after = DbTransaction::begin(&db);
+    assert_eq!(range_pairs(&mut after, t, 0, 99), expected);
+    assert_eq!(point_payload(&mut after, t, 2), None);
+    after.commit();
+
+    // The same kind of sequence, aborted, leaves the committed state.
+    let mut aborted = DbTransaction::begin(&db);
+    assert!(matches!(aborted.update(t, 0, 50), CRUDOperationResult::Updated(_)));
+    assert!(matches!(aborted.delete(t, 0), CRUDOperationResult::Deleted(_)));
+    assert!(matches!(aborted.insert(t, 0, 51), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(aborted.insert(t, 2, 52), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(aborted.delete(t, 3), CRUDOperationResult::Deleted(_)));
+    assert_eq!(
+        range_pairs(&mut aborted, t, 0, 99),
+        vec![(0, 51), (1, 13), (2, 52), (10, 103)]
+    );
+    assert!(aborted.abort());
+
+    let mut last = DbTransaction::begin(&db);
+    assert_eq!(range_pairs(&mut last, t, 0, 99), expected);
+    last.commit();
+}
+
+/// `range_min` with own keys stops at the first leaf that holds a visible
+/// key the transaction has not changed; leaves holding only own keys have
+/// to be skipped, and an own version may still undercut that leaf's
+/// minimum. Checked against the minimum of the full range result.
+#[test]
+fn range_min_skips_leaves_of_own_keys() {
+    use crate::bat_query::interval::Interval;
+    let db = new_db();
+    let t = db.create_table("t").table_id().unwrap();
+    for k in 0..64u64 {
+        db.dispatch_crud(t, CRUDOperation::Insert(k, k));
+    }
+    let mut tx = DbTransaction::begin(&db);
+    let min_of = |tx: &mut DbTransaction<'_, FAN, FAN, u64, u64>, lo, hi| {
+        (
+            tx.range_min(t, Interval::new(lo, hi)).map(|r| (r.key, *r.payload)),
+            range_pairs(tx, t, lo, hi).first().copied(),
+        )
+    };
+    // The first leaves hold only keys this transaction deleted.
+    for k in 0..20u64 {
+        assert!(matches!(tx.delete(t, k), CRUDOperationResult::Deleted(_)));
+    }
+    let (min, expected) = min_of(&mut tx, 0, 99);
+    assert_eq!(min, Some((20, 20)));
+    assert_eq!(min, expected);
+    // An own update of the smallest remaining key, after a split.
+    split_after_begin(&db, t);
+    assert!(matches!(tx.update(t, 20, 2000), CRUDOperationResult::Updated(_)));
+    let (min, expected) = min_of(&mut tx, 0, 99);
+    assert_eq!(min, Some((20, 2000)));
+    assert_eq!(min, expected);
+    // An own insert below every other key.
+    assert!(matches!(tx.insert(t, 5, 500), CRUDOperationResult::Inserted(_)));
+    let (min, expected) = min_of(&mut tx, 0, 99);
+    assert_eq!(min, Some((5, 500)));
+    assert_eq!(min, expected);
+    // A range of own keys only, and an empty one.
+    assert_eq!(min_of(&mut tx, 6, 19), (None, None));
+    assert!(matches!(tx.delete(t, 5), CRUDOperationResult::Deleted(_)));
+    assert_eq!(min_of(&mut tx, 0, 20), (Some((20, 2000)), Some((20, 2000))));
+    tx.commit();
+}

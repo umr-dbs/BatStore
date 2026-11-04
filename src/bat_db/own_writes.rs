@@ -1,4 +1,4 @@
-//! Reads of keys that the reading transaction has changed itself.
+//! The transaction's own changes, and how its reads see them.
 //!
 //! A transaction reads at its snapshot `t`: at every internal node it takes
 //! the newest entry whose version is not newer than `t`. Its own writes,
@@ -9,17 +9,28 @@
 //! see its own change (a point read misses an own insert, or returns the
 //! value an own update replaced).
 //!
-//! While the transaction runs, first-writer-wins keeps every other
-//! transaction off a key it has changed, so the newest valid version of
-//! that key in the current tree is the transaction's own. Hence:
-//! - a point read of such a key routes like a writer
-//!   (`MVBTSt::own_key_point_read`);
-//! - a scan skips such keys on its snapshot route and visits, for each of
-//!   them in its range, what the writer-style route finds instead.
+//! So next to its writes in the tree, a transaction keeps [`OwnWrites`]:
+//! every key it has changed, and whether its last change deleted the key.
+//! - A deleted own key is answered from there: a point read finds nothing,
+//!   and a scan leaves the key out.
+//! - For an own key that still exists, first-writer-wins keeps every other
+//!   transaction off it while the transaction runs, so the newest valid
+//!   version of the key in the current tree is the transaction's own. A
+//!   point read of it therefore routes like a writer
+//!   (`MVBTSt::own_key_point_read`), and a scan skips own keys on its
+//!   snapshot route and visits, for each of them, what the writer-style
+//!   route finds instead (see [`try_visit_range`]).
 //!
-//! Both only apply to keys in the transaction's own write set; every other
-//! read keeps the snapshot route, and a transaction that has not written
-//! the table it reads pays one scan of its (small) write set.
+//! The payloads themselves are not kept: copying every written row costs
+//! more than the occasional writer-routed read of one.
+//!
+//! Writes still go to the tree, which is where they live until commit; only
+//! a write that the key's own state already decides is answered from it
+//! (insert of a key the transaction holds, update or delete of a key it
+//! deleted).
+//!
+//! Every other key keeps the snapshot route, and a transaction that has not
+//! written the table it reads pays one binary search of its write set.
 use std::convert::Infallible;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -34,26 +45,130 @@ use crate::bat_record_model::tx_stamp::WorkerId;
 use crate::bat_record_model::version_info::Version;
 use crate::bat_tree::mvbt::MVBTSt;
 
-/// The keys of one table and range that a transaction has changed, sorted
-/// and without duplicates.
-pub(crate) type OwnKeys<Key> = SmallVec<[Key; 8]>;
-
-pub(crate) fn own_keys_in<Key: Ord + Copy + Hash + Display>(
-    written: impl IntoIterator<Item = Key>,
-    range: &Interval<Key>,
-) -> OwnKeys<Key> {
-    let mut keys: OwnKeys<Key> = written
-        .into_iter()
-        .filter(|key| range.contains(*key))
-        .collect();
-    keys.sort_unstable();
-    keys.dedup();
-    keys
+/// One key that a transaction has changed.
+#[derive(Clone, Copy)]
+pub(crate) struct OwnWrite<Table, Key> {
+    pub(crate) table: Table,
+    pub(crate) key: Key,
+    /// Whether the transaction's last change deleted the key.
+    pub(crate) deleted: bool,
 }
 
-/// The transaction's own version of `key`, or `None` if its change deleted
-/// the key.
-pub(crate) fn own_point<
+/// The keys a transaction has changed, one entry per `(table, key)` with
+/// its latest state, sorted by `(table, key)`. `Table` identifies the tree
+/// (a table-cache slot, or a TPC-C `Table`).
+///
+/// Unlike a transaction's abort list (one entry per physical write, in
+/// order), this only answers reads. Like that list, it keeps a typical OLTP
+/// transaction's keys inline: allocating and growing a heap vector per
+/// transaction costs measurable TPC-C throughput.
+pub(crate) struct OwnWrites<Table, Key> {
+    entries: SmallVec<[OwnWrite<Table, Key>; 16]>,
+}
+
+impl<Table: Ord + Copy, Key: Ord + Copy + Hash + Display> OwnWrites<Table, Key> {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: SmallVec::new(),
+        }
+    }
+
+    fn search(&self, table: Table, key: Key) -> Result<usize, usize> {
+        self.entries
+            .binary_search_by(|w| (w.table, w.key).cmp(&(table, key)))
+    }
+
+    /// `None` if the transaction has not changed `key` in `table`;
+    /// otherwise whether its last change deleted the key.
+    #[inline]
+    pub(crate) fn get(&self, table: Table, key: Key) -> Option<bool> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        self.search(table, key).ok().map(|i| self.entries[i].deleted)
+    }
+
+    /// Records a write the transaction has applied; `deleted` says whether
+    /// it was a delete.
+    pub(crate) fn record(&mut self, table: Table, key: Key, deleted: bool) {
+        match self.search(table, key) {
+            Ok(i) => self.entries[i].deleted = deleted,
+            Err(i) => self.entries.insert(
+                i,
+                OwnWrite {
+                    table,
+                    key,
+                    deleted,
+                },
+            ),
+        }
+    }
+
+    /// The changed keys of `table` within `range`, in key order.
+    #[inline]
+    pub(crate) fn in_range(&self, table: Table, range: &Interval<Key>) -> &[OwnWrite<Table, Key>] {
+        if self.entries.is_empty() {
+            return &[];
+        }
+        let lo = self
+            .entries
+            .partition_point(|w| (w.table, w.key) < (table, range.lower));
+        let hi = self
+            .entries
+            .partition_point(|w| (w.table, w.key) <= (table, range.upper));
+        &self.entries[lo..hi.max(lo)]
+    }
+}
+
+/// Records `result`, the outcome of a write of `key` in `table`, in `own`
+/// if the write was applied.
+pub(crate) fn record_write<
+    'r,
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Table: Ord + Copy,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static,
+>(
+    own: &mut OwnWrites<Table, Key>,
+    table: Table,
+    key: Key,
+    result: &CRUDOperationResult<'r, FAN_OUT, NUM_RECORDS, Key, Payload>,
+) {
+    match result {
+        CRUDOperationResult::Inserted(_) | CRUDOperationResult::Updated(_) => {
+            own.record(table, key, false)
+        }
+        CRUDOperationResult::Deleted(_) => own.record(table, key, true),
+        _ => {}
+    }
+}
+
+/// Point read of `key`, an own key of `tree` whose last change was a delete
+/// if `deleted`.
+pub(crate) fn own_point_read<
+    'r,
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static,
+>(
+    tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    read_ts: Version,
+    key: Key,
+    deleted: bool,
+) -> CRUDOperationResult<'r, FAN_OUT, NUM_RECORDS, Key, Payload> {
+    if deleted {
+        CRUDOperationResult::MatchedRecords(Vec::new())
+    } else {
+        tree.own_key_point_read(key, worker_id, read_ts)
+    }
+}
+
+/// The transaction's own version of `key`, an own key that it has not
+/// deleted.
+fn own_point<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
@@ -68,6 +183,32 @@ pub(crate) fn own_point<
         CRUDOperationResult::MatchedRecords(mut records) => records.pop(),
         other => panic!("bat_db::own_writes::own_point: expected MatchedRecords, got {other}"),
     }
+}
+
+/// The own versions of the keys in `own` that the transaction has not
+/// deleted, in key order.
+fn own_records<
+    'o,
+    const FAN_OUT: usize,
+    const NUM_RECORDS: usize,
+    Table,
+    Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
+    Payload: Display + Clone + Default + Sync + 'static,
+>(
+    tree: &'o MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+    worker_id: WorkerId,
+    read_ts: Version,
+    own: &'o [OwnWrite<Table, Key>],
+) -> impl Iterator<Item = RecordPointResult<Key, Payload>> + 'o {
+    own.iter()
+        .filter(|write| !write.deleted)
+        .filter_map(move |write| own_point(tree, worker_id, read_ts, write.key))
+}
+
+/// Whether `key` is one of `own`, the sorted own keys of one table.
+#[inline]
+fn is_own<Table, Key: Ord + Copy>(own: &[OwnWrite<Table, Key>], key: Key) -> bool {
+    own.binary_search_by(|w| w.key.cmp(&key)).is_ok()
 }
 
 /// Whether an own record passes the scan's zone predicate, applied the same
@@ -89,13 +230,17 @@ fn passes_zone<
 }
 
 /// Visits the records of `scan`, a snapshot scan of the transaction, with
-/// the versions of the keys in `own` taken from the transaction's own
-/// changes. `zone` must be the zone predicate set on `scan`, if any.
-/// Own records are visited after the others, in key order.
+/// the keys in `own` (the transaction's own keys of the scanned table and
+/// range, see [`OwnWrites::in_range`]) taken from its own changes. Visiting
+/// only the scan's records would not do: for an own key the scan may return
+/// the replaced value, nothing, or a row the transaction deleted. `zone`
+/// must be the zone predicate set on `scan`, if any. Own records are
+/// visited after the others, in key order.
 pub(crate) fn try_visit_range<
     E,
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
+    Table,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
     Payload: Display + Clone + Default + Sync + 'static,
 >(
@@ -103,7 +248,7 @@ pub(crate) fn try_visit_range<
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     read_ts: Version,
-    own: &[Key],
+    own: &[OwnWrite<Table, Key>],
     zone: Option<(u64, u64)>,
     mut visit: impl FnMut(Key, &Payload) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -111,17 +256,15 @@ pub(crate) fn try_visit_range<
         return scan.try_for_each_ref(visit);
     }
     scan.try_for_each_ref(|key, payload| {
-        if own.binary_search(&key).is_ok() {
+        if is_own(own, key) {
             Ok(())
         } else {
             visit(key, payload)
         }
     })?;
-    for &key in own {
-        if let Some(record) = own_point(tree, worker_id, read_ts, key) {
-            if passes_zone(tree, zone, &record.payload) {
-                visit(key, &record.payload)?;
-            }
+    for record in own_records(tree, worker_id, read_ts, own) {
+        if passes_zone(tree, zone, &record.payload) {
+            visit(record.key, &record.payload)?;
         }
     }
     Ok(())
@@ -131,6 +274,7 @@ pub(crate) fn try_visit_range<
 pub(crate) fn visit_range<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
+    Table,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
     Payload: Display + Clone + Default + Sync + 'static,
 >(
@@ -138,7 +282,7 @@ pub(crate) fn visit_range<
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     read_ts: Version,
-    own: &[Key],
+    own: &[OwnWrite<Table, Key>],
     zone: Option<(u64, u64)>,
     mut visit: impl FnMut(Key, &Payload),
 ) {
@@ -154,11 +298,13 @@ pub(crate) fn visit_range<
 }
 
 /// Replaces, in the materialized result of a snapshot scan, the records of
-/// the keys in `own` by the transaction's own versions. With own keys
-/// present, the result is returned sorted by key.
+/// the keys in `own` by the transaction's own versions (see
+/// [`try_visit_range`]). Like the scan's result, it is not sorted: the own
+/// records follow the others, in key order.
 pub(crate) fn overlay_records<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
+    Table,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
     Payload: Display + Clone + Default + Sync + 'static,
 >(
@@ -166,25 +312,22 @@ pub(crate) fn overlay_records<
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     read_ts: Version,
-    own: &[Key],
+    own: &[OwnWrite<Table, Key>],
 ) -> Vec<RecordPointResult<Key, Payload>> {
     if own.is_empty() {
         return records;
     }
-    records.retain(|record| own.binary_search(&record.key).is_err());
-    records.extend(
-        own.iter()
-            .filter_map(|&key| own_point(tree, worker_id, read_ts, key)),
-    );
-    records.sort_unstable_by_key(|record| record.key);
+    records.retain(|record| !is_own(own, record.key));
+    records.extend(own_records(tree, worker_id, read_ts, own));
     records
 }
 
 /// The record with the smallest key that the transaction sees in the range
-/// of `scan`, its own changes included.
+/// of `scan`, its own changes (`own`, see [`try_visit_range`]) included.
 pub(crate) fn overlay_min<
     const FAN_OUT: usize,
     const NUM_RECORDS: usize,
+    Table,
     Key: Default + Ord + Copy + Hash + Display + Sync + 'static,
     Payload: Display + Clone + Default + Sync + 'static,
 >(
@@ -192,23 +335,14 @@ pub(crate) fn overlay_min<
     tree: &MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
     worker_id: WorkerId,
     read_ts: Version,
-    own: &[Key],
+    own: &[OwnWrite<Table, Key>],
 ) -> Option<RecordPointResult<Key, Payload>> {
     if own.is_empty() {
         return scan.min_by_key();
     }
-    // Rare path: only a transaction that has changed a key of this range
-    // takes it, so a full pass over the range is acceptable here.
-    let mut best: Option<RecordPointResult<Key, Payload>> = None;
-    scan.for_each_ref(|key, payload| {
-        if own.binary_search(&key).is_err() && best.as_ref().is_none_or(|b| key < b.key) {
-            best = Some(RecordPointResult::new(key, payload.clone()));
-        }
-    });
+    let best = scan.min_by_key_where(|key| !is_own(own, key));
     // `own` is sorted, so its first key with an own version is its minimum.
-    let own_best = own
-        .iter()
-        .find_map(|&key| own_point(tree, worker_id, read_ts, key));
+    let own_best = own_records(tree, worker_id, read_ts, own).next();
     match (best, own_best) {
         (Some(b), Some(o)) => Some(if o.key < b.key { o } else { b }),
         (b, o) => b.or(o),

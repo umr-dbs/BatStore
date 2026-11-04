@@ -499,6 +499,34 @@ impl<
         self.buff.remove(min_index)
     }
 
+    /// The visible record with the smallest key among those whose key
+    /// `keep` accepts. `refill` loads one leaf at a time, in key order, so
+    /// the first leaf that holds an accepted record holds the minimum: the
+    /// scan stops there, and only moves on past leaves whose visible
+    /// records `keep` all rejects.
+    pub fn min_by_key_where(
+        mut self,
+        mut keep: impl FnMut(Key) -> bool,
+    ) -> Option<RecordPointResult<Key, Payload>> {
+        loop {
+            self.refill();
+            if self.buff.is_empty() {
+                return None;
+            }
+            let min_index = self
+                .buff
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| keep(r.key))
+                .min_by_key(|(_, r)| r.key)
+                .map(|(index, _)| index);
+            if let Some(index) = min_index {
+                return self.buff.remove(index);
+            }
+            self.buff.clear();
+        }
+    }
+
     fn finish_after_dispatch(&mut self) {
         if self.register_reader_si {
             self.bat_tree().on_release_reader_snapshot(self.snapshot());

@@ -16,13 +16,16 @@ use std::fmt::Display;
 
 use crate::bat_bench::tpcc_random::*;
 use crate::bat_bench::tpcc_schema::*;
+use crate::bat_crud_model::crud_operation_result::CRUDOperationInnerReason::{
+    KeyAlreadyDeleted, KeyAlreadyExists,
+};
 use crate::bat_crud_model::crud_operation_result::CRUDOperationResult;
 use crate::bat_db::transaction::{
     delete_on_tree_at, insert_on_tree_at, point_on_tree, range_min_on_tree, range_on_tree,
     update_on_tree_at,
 };
 use crate::bat_db::own_writes::{
-    OwnKeys, overlay_min, overlay_records, own_keys_in, visit_range,
+    OwnWrite, OwnWrites, overlay_min, overlay_records, own_point_read, record_write, visit_range,
 };
 use crate::bat_db::{IsolationLevel, TransactionState};
 use crate::bat_query::interval::Interval;
@@ -71,7 +74,13 @@ pub struct TpccTxn<'a> {
     isolation: IsolationLevel,
     committed: TransactionState,
     written: SmallVec<[(Table, TpccKey); 24]>,
+    /// Every key this transaction has changed, and whether it deleted the
+    /// key; see `bat_db::own_writes`.
+    own: OwnWrites<Table, TpccKey>,
 }
+
+/// The own keys of one table and range, see `OwnWrites::in_range`.
+type Own<'a> = &'a [OwnWrite<Table, TpccKey>];
 
 /// `BigTreeOp` implementors for each `TpccTxn` operation — see
 /// `tpcc_schema::BigTreeOp`'s doc for why these exist (one static dispatch
@@ -102,6 +111,7 @@ struct OwnPointOp {
     worker_id: WorkerId,
     read_ts: Version,
     key: TpccKey,
+    deleted: bool,
 }
 impl BigTreeOp for OwnPointOp {
     type Output = Res<'static>;
@@ -109,20 +119,26 @@ impl BigTreeOp for OwnPointOp {
         self,
         tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) -> Res<'static> {
-        normalize(tree.own_key_point_read(self.key, self.worker_id, self.read_ts))
+        normalize(own_point_read(
+            tree,
+            self.worker_id,
+            self.read_ts,
+            self.key,
+            self.deleted,
+        ))
     }
 }
 
 /// The range ops below carry `own`, the keys of their range this
 /// transaction has changed (see `bat_db::own_writes`); it is empty, and
 /// costs nothing, unless the transaction has written the table it scans.
-struct RangeOp {
+struct RangeOp<'a> {
     worker_id: WorkerId,
     ts_start: Version,
     range: Interval<TpccKey>,
-    own: OwnKeys<TpccKey>,
+    own: Own<'a>,
 }
-impl BigTreeOp for RangeOp {
+impl BigTreeOp for RangeOp<'_> {
     type Output = Res<'static>;
     fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
         self,
@@ -147,18 +163,18 @@ impl BigTreeOp for RangeOp {
             tree,
             self.worker_id,
             self.ts_start,
-            &self.own,
+            self.own,
         ))
     }
 }
 
-struct RangeMinOp {
+struct RangeMinOp<'a> {
     worker_id: WorkerId,
     ts_start: Version,
     range: Interval<TpccKey>,
-    own: OwnKeys<TpccKey>,
+    own: Own<'a>,
 }
-impl BigTreeOp for RangeMinOp {
+impl BigTreeOp for RangeMinOp<'_> {
     type Output = Option<RecordPointResult<TpccKey, TpccRow>>;
     fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
         self,
@@ -169,7 +185,7 @@ impl BigTreeOp for RangeMinOp {
             tree,
             self.worker_id,
             self.ts_start,
-            &self.own,
+            self.own,
         )
     }
 }
@@ -178,7 +194,7 @@ struct RangeVisitOp<'a> {
     worker_id: WorkerId,
     ts_start: Version,
     range: Interval<TpccKey>,
-    own: OwnKeys<TpccKey>,
+    own: Own<'a>,
     visit: &'a mut dyn FnMut(TpccKey, &TpccRow),
 }
 impl BigTreeOp for RangeVisitOp<'_> {
@@ -192,7 +208,7 @@ impl BigTreeOp for RangeVisitOp<'_> {
             tree,
             self.worker_id,
             self.ts_start,
-            &self.own,
+            self.own,
             None,
             self.visit,
         );
@@ -312,6 +328,7 @@ impl<'a> TpccTxn<'a> {
             isolation,
             committed: TransactionState::InFlight,
             written: SmallVec::new(),
+            own: OwnWrites::new(),
         }
     }
 
@@ -336,34 +353,25 @@ impl<'a> TpccTxn<'a> {
         self.worker_id
     }
 
-    /// The keys of `range` in `table` that this transaction has changed;
-    /// see `bat_db::own_writes` for why reads treat them apart.
-    fn own_keys(&self, table: Table, range: &Interval<TpccKey>) -> OwnKeys<TpccKey> {
-        own_keys_in(
-            self.written
-                .iter()
-                .filter(|(written_table, _)| *written_table == table)
-                .map(|(_, key)| *key),
-            range,
-        )
-    }
-
     /// Point read against this operation's snapshot, on `table`.
     pub fn point(&mut self, table: Table, key: TpccKey) -> Res<'static> {
         self.refresh_read_snapshot();
-        if self.written.contains(&(table, key)) {
+        if let Some(deleted) = self.own.get(table, key) {
             return match table.class() {
-                TreeClass::Standard => {
-                    self.db
-                        .tree_for(table)
-                        .own_key_point_read(key, self.worker_id, self.read_ts)
-                }
+                TreeClass::Standard => own_point_read(
+                    &self.db.tree_for(table),
+                    self.worker_id,
+                    self.read_ts,
+                    key,
+                    deleted,
+                ),
                 TreeClass::Big => self.db.dispatch_big(
                     table,
                     OwnPointOp {
                         worker_id: self.worker_id,
                         read_ts: self.read_ts,
                         key,
+                        deleted,
                     },
                 ),
             };
@@ -390,7 +398,7 @@ impl<'a> TpccTxn<'a> {
         _force_read_all: bool,
     ) -> Res<'static> {
         self.refresh_read_snapshot();
-        let own = self.own_keys(table, &range);
+        let own = self.own.in_range(table, &range);
         match table.class() {
             TreeClass::Standard if own.is_empty() => range_on_tree(
                 &self.db.tree_for(table),
@@ -404,13 +412,7 @@ impl<'a> TpccTxn<'a> {
                 let records =
                     RangeQueryIter::new(&tree, self.read_ts, range, false, self.worker_id)
                         .collect();
-                CRUDOperationResult::MatchedRecords(overlay_records(
-                    records,
-                    &tree,
-                    self.worker_id,
-                    self.read_ts,
-                    &own,
-                ))
+                CRUDOperationResult::MatchedRecords(overlay_records(records, &tree, self.worker_id, self.read_ts, own))
             }
             TreeClass::Big => self.db.dispatch_big(
                 table,
@@ -430,7 +432,7 @@ impl<'a> TpccTxn<'a> {
         range: Interval<TpccKey>,
     ) -> Option<RecordPointResult<TpccKey, TpccRow>> {
         self.refresh_read_snapshot();
-        let own = self.own_keys(table, &range);
+        let own = self.own.in_range(table, &range);
         match table.class() {
             TreeClass::Standard if own.is_empty() => range_min_on_tree(
                 &self.db.tree_for(table),
@@ -445,7 +447,7 @@ impl<'a> TpccTxn<'a> {
                     &tree,
                     self.worker_id,
                     self.read_ts,
-                    &own,
+                    own,
                 )
             }
             TreeClass::Big => self.db.dispatch_big(
@@ -469,17 +471,17 @@ impl<'a> TpccTxn<'a> {
         mut visit: impl FnMut(TpccKey, &TpccRow),
     ) {
         self.refresh_read_snapshot();
-        let own = self.own_keys(table, &range);
+        let own = self.own.in_range(table, &range);
         match table.class() {
             TreeClass::Standard => {
                 let tree = self.db.tree_for(table);
                 visit_range(
                     RangeQueryIter::new(&tree, self.read_ts, range, false, self.worker_id),
                     &tree,
-                    self.worker_id,
-                    self.read_ts,
-                    &own,
-                    None,
+            self.worker_id,
+            self.read_ts,
+            own,
+            None,
                     &mut visit,
                 )
             }
@@ -510,7 +512,7 @@ impl<'a> TpccTxn<'a> {
             TreeClass::Standard,
             "TpccTxn::range_for_each_zone_pruned: {table:?} is a TreeClass::Big table"
         );
-        let own = self.own_keys(table, &range);
+        let own = self.own.in_range(table, &range);
         let tree = self.db.tree_for(table);
         visit_range(
             RangeQueryIter::new(&tree, self.read_ts, range, false, self.worker_id)
@@ -518,7 +520,7 @@ impl<'a> TpccTxn<'a> {
             &tree,
             self.worker_id,
             self.read_ts,
-            &own,
+            own,
             Some((zone_lo, zone_hi)),
             &mut visit,
         )
@@ -541,7 +543,7 @@ impl<'a> TpccTxn<'a> {
 
     pub fn range_count(&mut self, table: Table, range: Interval<TpccKey>) -> usize {
         self.refresh_read_snapshot();
-        let own = self.own_keys(table, &range);
+        let own = self.own.in_range(table, &range);
         match table.class() {
             TreeClass::Standard if own.is_empty() => RangeQueryIter::new(
                 &self.db.tree_for(table),
@@ -567,7 +569,7 @@ impl<'a> TpccTxn<'a> {
         &self,
         table: Table,
         range: Interval<TpccKey>,
-        own: OwnKeys<TpccKey>,
+        own: Own<'_>,
         visit: &mut dyn FnMut(TpccKey, &TpccRow),
     ) {
         match table.class() {
@@ -576,10 +578,10 @@ impl<'a> TpccTxn<'a> {
                 visit_range(
                     RangeQueryIter::new(&tree, self.read_ts, range, false, self.worker_id),
                     &tree,
-                    self.worker_id,
-                    self.read_ts,
-                    &own,
-                    None,
+            self.worker_id,
+            self.read_ts,
+            own,
+            None,
                     visit,
                 )
             }
@@ -596,8 +598,13 @@ impl<'a> TpccTxn<'a> {
         }
     }
 
+    /// Insert of `key`. Fails without touching the tree if this transaction
+    /// holds `key` already (see `bat_db::own_writes`).
     pub fn insert(&mut self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'static> {
         self.refresh_read_snapshot();
+        if let Some(false) = self.own.get(table, key) {
+            return CRUDOperationResult::ZeroAffected(KeyAlreadyExists);
+        }
         let (result, track) = match table.class() {
             TreeClass::Standard => insert_on_tree_at(
                 &self.db.tree_for(table),
@@ -618,14 +625,17 @@ impl<'a> TpccTxn<'a> {
                 },
             ),
         };
-        if track {
-            self.written.push((table, key));
-        }
+        self.note_write(table, key, &result, track);
         result
     }
 
+    /// Update of `key`. Fails without touching the tree if this transaction
+    /// deleted `key` (see `bat_db::own_writes`).
     pub fn update(&mut self, table: Table, key: TpccKey, payload: TpccRow) -> Res<'static> {
         self.refresh_read_snapshot();
+        if let Some(true) = self.own.get(table, key) {
+            return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted);
+        }
         let (result, track) = match table.class() {
             TreeClass::Standard => update_on_tree_at(
                 &self.db.tree_for(table),
@@ -646,14 +656,17 @@ impl<'a> TpccTxn<'a> {
                 },
             ),
         };
-        if track {
-            self.written.push((table, key));
-        }
+        self.note_write(table, key, &result, track);
         result
     }
 
+    /// Delete of `key`. Fails without touching the tree if this transaction
+    /// deleted `key` already (see `bat_db::own_writes`).
     pub fn delete(&mut self, table: Table, key: TpccKey) -> Res<'static> {
         self.refresh_read_snapshot();
+        if let Some(true) = self.own.get(table, key) {
+            return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted);
+        }
         let (result, track) = match table.class() {
             TreeClass::Standard => delete_on_tree_at(
                 &self.db.tree_for(table),
@@ -672,10 +685,18 @@ impl<'a> TpccTxn<'a> {
                 },
             ),
         };
+        self.note_write(table, key, &result, track);
+        result
+    }
+
+    /// Bookkeeping after a write of `key` in `table`: `track` (from the
+    /// `*_on_tree_at` helper) says whether it added a version that abort has
+    /// to revert; any applied write updates the key's own state.
+    fn note_write(&mut self, table: Table, key: TpccKey, result: &Res<'static>, track: bool) {
         if track {
             self.written.push((table, key));
         }
-        result
+        record_write(&mut self.own, table, key, result);
     }
 
     fn finish_snapshots(&self) {

@@ -560,7 +560,7 @@ mod htap_date_tests {
 }
 
 /// Selects one of `TpccDatabase`'s 14 tables/trees.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Table {
     Warehouse,
     District,
