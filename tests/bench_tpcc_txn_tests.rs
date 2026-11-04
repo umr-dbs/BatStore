@@ -280,3 +280,68 @@ fn dropped_tpcc_txn_reverts_writes_across_tables_on_conflict() {
     );
     tx3.commit();
 }
+
+/// A `TpccTxn` sees its own writes into leaves that a structure
+/// modification created after it began, on both tree classes (see
+/// `bat_db::own_writes`): `Item` uses standard leaves, `District` the big
+/// leaves of `TreeClass::Big`.
+#[test]
+fn tpcc_txn_sees_own_writes_after_concurrent_splits() {
+    use crate::bat_query::interval::Interval;
+    let db = TpccDatabase::new(RootIndexType::default());
+    let mut setup = TpccTxn::begin(&db);
+    for i in 1..=3u32 {
+        setup.insert(Table::Item, k_item(i), sample_item(i as f64));
+        setup.insert(Table::District, k_district(1, i as u8), sample_district());
+    }
+    setup.commit();
+
+    let mut tx = TpccTxn::begin(&db);
+    // Another worker splits the leaves of both tables after tx began.
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut other = TpccTxn::begin(&db);
+                for i in 1000..6000u32 {
+                    other.insert(Table::Item, k_item(i), sample_item(1.0));
+                }
+                for w in 2..800u32 {
+                    for d in 1..=10u8 {
+                        other.insert(Table::District, k_district(w, d), sample_district());
+                    }
+                }
+                other.commit();
+            })
+            .join()
+            .unwrap();
+    });
+
+    let item = k_item(500);
+    let district = k_district(1, 9);
+    assert!(matches!(tx.insert(Table::Item, item, sample_item(5.0)), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(tx.insert(Table::District, district, sample_district()), CRUDOperationResult::Inserted(_)));
+    assert!(matches!(tx.update(Table::Item, k_item(2), sample_item(20.0)), CRUDOperationResult::Updated(_)));
+
+    for (table, key) in [(Table::Item, item), (Table::District, district)] {
+        assert!(
+            matches!(tx.point(table, key), CRUDOperationResult::MatchedRecords(r) if r.len() == 1),
+            "{table:?}: own insert must be visible"
+        );
+    }
+    let price = |r: &TpccRow| match r {
+        TpccRow::Item(i) => i.i_price,
+        other => panic!("not an item: {other:?}"),
+    };
+    assert!(matches!(
+        tx.point(Table::Item, k_item(2)),
+        CRUDOperationResult::MatchedRecords(r) if r.len() == 1 && price(&r[0].payload) == 20.0
+    ));
+    let items = Interval::new(k_item(1), k_item(999));
+    assert_eq!(tx.range_count(Table::Item, items), 4);
+    assert_eq!(tx.range_fold(Table::Item, items, 0.0, |s, _, r| s + price(r)), 1.0 + 20.0 + 3.0 + 5.0);
+    assert!(matches!(tx.range(Table::Item, items, false), CRUDOperationResult::MatchedRecords(r) if r.len() == 4));
+    assert_eq!(tx.range_min(Table::Item, Interval::new(k_item(4), k_item(999))).map(|r| r.key), Some(item));
+    let districts = Interval::new(k_district(1, 0), k_district(1, 15));
+    assert_eq!(tx.range_count(Table::District, districts), 4);
+    tx.commit();
+}

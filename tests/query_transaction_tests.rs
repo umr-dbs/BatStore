@@ -769,3 +769,154 @@ fn aborted_transaction_write_does_not_resurface_after_recovery() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&meta_path);
 }
+
+// ---------------------------------------------------------------------------
+// Own writes into leaves that a structure modification created after the
+// transaction began (see `bat_db::own_writes`). A transaction reads at its
+// start snapshot and routes past entries newer than it, so without the
+// write-set overlay it would read the retired leaf and miss its own change.
+
+/// Begins `tx`, then lets another worker insert enough keys to split every
+/// leaf of `t` several times, so that the leaves the transaction writes to
+/// afterwards were all created after its snapshot.
+fn split_after_begin(db: &TestDb, t: crate::bat_db::TableId) {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                for k in 100..400u64 {
+                    assert!(matches!(
+                        db.dispatch_crud(t, CRUDOperation::Insert(k, k)),
+                        CRUDOperationResult::Inserted(_)
+                    ));
+                }
+            })
+            .join()
+            .unwrap();
+    });
+}
+
+fn point_payload(tx: &mut DbTransaction<'_, FAN, FAN, u64, u64>, t: crate::bat_db::TableId, key: u64) -> Option<u64> {
+    match tx.point(t, key) {
+        CRUDOperationResult::MatchedRecords(r) => {
+            assert!(r.len() <= 1, "a point read returned {} records", r.len());
+            r.first().map(|r| *r.payload)
+        }
+        other => panic!("unexpected {other}"),
+    }
+}
+
+fn range_pairs(tx: &mut DbTransaction<'_, FAN, FAN, u64, u64>, t: crate::bat_db::TableId, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+    use crate::bat_query::interval::Interval;
+    match tx.range(t, Interval::new(lo, hi)) {
+        CRUDOperationResult::MatchedRecords(r) => {
+            let mut pairs: Vec<_> = r.iter().map(|r| (r.key, *r.payload)).collect();
+            pairs.sort_unstable();
+            pairs
+        }
+        other => panic!("unexpected {other}"),
+    }
+}
+
+#[test]
+fn own_insert_into_leaf_split_after_begin_is_visible() {
+    use crate::bat_query::interval::Interval;
+    let db = new_db();
+    let t = db.create_table("t").table_id().unwrap();
+    for k in 0..4u64 {
+        db.dispatch_crud(t, CRUDOperation::Insert(k, k));
+    }
+    let mut tx = DbTransaction::begin(&db);
+    split_after_begin(&db, t);
+    assert!(matches!(tx.insert(t, 50, 5000), CRUDOperationResult::Inserted(_)));
+
+    assert_eq!(point_payload(&mut tx, t, 50), Some(5000));
+    assert_eq!(tx.range_count(t, Interval::new(0, 99)), 5);
+    assert_eq!(
+        range_pairs(&mut tx, t, 0, 99),
+        vec![(0, 0), (1, 1), (2, 2), (3, 3), (50, 5000)]
+    );
+    assert_eq!(tx.range_fold(t, Interval::new(0, 99), 0, |s, _, p| s + p), 5006);
+    assert_eq!(tx.range_min(t, Interval::new(4, 99)).map(|r| r.key), Some(50));
+    // The keys inserted by the other worker committed after the snapshot.
+    assert_eq!(tx.range_count(t, Interval::new(0, 1000)), 5);
+    tx.commit();
+}
+
+#[test]
+fn own_update_and_delete_after_split_are_visible_exactly_once() {
+    use crate::bat_query::interval::Interval;
+    let db = new_db();
+    let t = db.create_table("t").table_id().unwrap();
+    for k in 0..4u64 {
+        db.dispatch_crud(t, CRUDOperation::Insert(k, k));
+    }
+    let mut tx = DbTransaction::begin(&db);
+    // A first update before the split, a second one after it: the second
+    // overwrites the transaction's version in place, in the new leaf only.
+    assert!(matches!(tx.update(t, 1, 10), CRUDOperationResult::Updated(_)));
+    split_after_begin(&db, t);
+    assert!(matches!(tx.update(t, 1, 11), CRUDOperationResult::Updated(_)));
+    assert!(matches!(tx.update(t, 2, 20), CRUDOperationResult::Updated(_)));
+    assert!(matches!(tx.delete(t, 3), CRUDOperationResult::Deleted(_)));
+
+    assert_eq!(point_payload(&mut tx, t, 1), Some(11));
+    assert_eq!(point_payload(&mut tx, t, 2), Some(20));
+    assert_eq!(point_payload(&mut tx, t, 3), None);
+    assert_eq!(range_pairs(&mut tx, t, 0, 99), vec![(0, 0), (1, 11), (2, 20)]);
+    assert_eq!(tx.range_count(t, Interval::new(0, 99)), 3);
+    let mut seen = Vec::new();
+    tx.range_for_each(t, Interval::new(0, 99), |k, p| seen.push((k, *p)));
+    seen.sort_unstable();
+    assert_eq!(seen, vec![(0, 0), (1, 11), (2, 20)]);
+    tx.commit();
+
+    let mut after = DbTransaction::begin(&db);
+    assert_eq!(range_pairs(&mut after, t, 0, 3), vec![(0, 0), (1, 11), (2, 20)]);
+    after.commit();
+}
+
+/// Why only the transaction's own keys may be read through the newest
+/// nodes: a split drops versions whose deletion has committed, although an
+/// older snapshot still sees them, and only the retired leaf on the
+/// snapshot route keeps them.
+#[test]
+fn snapshot_reads_of_other_keys_keep_the_snapshot_route() {
+    use crate::bat_query::interval::Interval;
+    let db = new_db();
+    let t = db.create_table("t").table_id().unwrap();
+    for k in 0..4u64 {
+        db.dispatch_crud(t, CRUDOperation::Insert(k, k));
+    }
+    let mut tx = DbTransaction::begin(&db);
+    let db_ref = &db;
+    // Another worker deletes key 2 and commits after tx's snapshot ...
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                assert!(matches!(
+                    db_ref.dispatch_crud(t, CRUDOperation::Delete(2)),
+                    CRUDOperationResult::Deleted(_)
+                ));
+            })
+            .join()
+            .unwrap();
+    });
+    // ... and the leaf is split afterwards, which drops key 2's version.
+    split_after_begin(&db, t);
+    assert!(matches!(tx.insert(t, 50, 5000), CRUDOperationResult::Inserted(_)));
+
+    // Key 2 is still in tx's snapshot.
+    assert_eq!(point_payload(&mut tx, t, 2), Some(2));
+    assert_eq!(
+        range_pairs(&mut tx, t, 0, 99),
+        vec![(0, 0), (1, 1), (2, 2), (3, 3), (50, 5000)]
+    );
+    // Routing key 2 like a write would have missed it.
+    let tree = db.table(t).unwrap();
+    assert!(matches!(
+        tree.own_key_point_read(2, tx.worker_id(), tx.ts_start()),
+        CRUDOperationResult::MatchedRecords(r) if r.is_empty()
+    ));
+    assert_eq!(tx.range_count(t, Interval::new(0, 99)), 5);
+    tx.commit();
+}

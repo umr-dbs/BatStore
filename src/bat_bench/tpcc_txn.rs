@@ -21,6 +21,9 @@ use crate::bat_db::transaction::{
     delete_on_tree_at, insert_on_tree_at, point_on_tree, range_min_on_tree, range_on_tree,
     update_on_tree_at,
 };
+use crate::bat_db::own_writes::{
+    OwnKeys, overlay_min, overlay_records, own_keys_in, visit_range,
+};
 use crate::bat_db::{IsolationLevel, TransactionState};
 use crate::bat_query::interval::Interval;
 use crate::bat_query::iter_query::RangeQueryIter;
@@ -93,10 +96,31 @@ impl BigTreeOp for PointOp {
     }
 }
 
+/// Point read of a key this transaction has changed itself — see
+/// `bat_db::own_writes`.
+struct OwnPointOp {
+    worker_id: WorkerId,
+    read_ts: Version,
+    key: TpccKey,
+}
+impl BigTreeOp for OwnPointOp {
+    type Output = Res<'static>;
+    fn run<const FAN_OUT: usize, const NUM_RECORDS: usize>(
+        self,
+        tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
+    ) -> Res<'static> {
+        normalize(tree.own_key_point_read(self.key, self.worker_id, self.read_ts))
+    }
+}
+
+/// The range ops below carry `own`, the keys of their range this
+/// transaction has changed (see `bat_db::own_writes`); it is empty, and
+/// costs nothing, unless the transaction has written the table it scans.
 struct RangeOp {
     worker_id: WorkerId,
     ts_start: Version,
     range: Interval<TpccKey>,
+    own: OwnKeys<TpccKey>,
 }
 impl BigTreeOp for RangeOp {
     type Output = Res<'static>;
@@ -107,12 +131,23 @@ impl BigTreeOp for RangeOp {
         // `Big`-class tables (`Table::Warehouse`/`Table::District`) can never
         // have a scan pool assigned — see `TpccDatabase::enable_scan_pool`'s
         // doc — so there is never a pool to look up here.
-        normalize(range_on_tree(
+        if self.own.is_empty() {
+            return normalize(range_on_tree(
+                tree,
+                self.worker_id,
+                self.ts_start,
+                self.range,
+                None,
+            ));
+        }
+        let records = RangeQueryIter::new(tree, self.ts_start, self.range, false, self.worker_id)
+            .collect();
+        CRUDOperationResult::MatchedRecords(overlay_records(
+            records,
             tree,
             self.worker_id,
             self.ts_start,
-            self.range,
-            None,
+            &self.own,
         ))
     }
 }
@@ -121,6 +156,7 @@ struct RangeMinOp {
     worker_id: WorkerId,
     ts_start: Version,
     range: Interval<TpccKey>,
+    own: OwnKeys<TpccKey>,
 }
 impl BigTreeOp for RangeMinOp {
     type Output = Option<RecordPointResult<TpccKey, TpccRow>>;
@@ -128,7 +164,13 @@ impl BigTreeOp for RangeMinOp {
         self,
         tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) -> Self::Output {
-        range_min_on_tree(tree, self.worker_id, self.ts_start, self.range)
+        overlay_min(
+            RangeQueryIter::new(tree, self.ts_start, self.range, false, self.worker_id),
+            tree,
+            self.worker_id,
+            self.ts_start,
+            &self.own,
+        )
     }
 }
 
@@ -136,6 +178,7 @@ struct RangeVisitOp<'a> {
     worker_id: WorkerId,
     ts_start: Version,
     range: Interval<TpccKey>,
+    own: OwnKeys<TpccKey>,
     visit: &'a mut dyn FnMut(TpccKey, &TpccRow),
 }
 impl BigTreeOp for RangeVisitOp<'_> {
@@ -144,8 +187,15 @@ impl BigTreeOp for RangeVisitOp<'_> {
         self,
         tree: &crate::bat_tree::mvbt::MVBTSt<FAN_OUT, NUM_RECORDS, TpccKey, TpccRow>,
     ) {
-        RangeQueryIter::new(tree, self.ts_start, self.range, false, self.worker_id)
-            .for_each_ref(self.visit);
+        visit_range(
+            RangeQueryIter::new(tree, self.ts_start, self.range, false, self.worker_id),
+            tree,
+            self.worker_id,
+            self.ts_start,
+            &self.own,
+            None,
+            self.visit,
+        );
     }
 }
 
@@ -286,9 +336,38 @@ impl<'a> TpccTxn<'a> {
         self.worker_id
     }
 
+    /// The keys of `range` in `table` that this transaction has changed;
+    /// see `bat_db::own_writes` for why reads treat them apart.
+    fn own_keys(&self, table: Table, range: &Interval<TpccKey>) -> OwnKeys<TpccKey> {
+        own_keys_in(
+            self.written
+                .iter()
+                .filter(|(written_table, _)| *written_table == table)
+                .map(|(_, key)| *key),
+            range,
+        )
+    }
+
     /// Point read against this operation's snapshot, on `table`.
     pub fn point(&mut self, table: Table, key: TpccKey) -> Res<'static> {
         self.refresh_read_snapshot();
+        if self.written.contains(&(table, key)) {
+            return match table.class() {
+                TreeClass::Standard => {
+                    self.db
+                        .tree_for(table)
+                        .own_key_point_read(key, self.worker_id, self.read_ts)
+                }
+                TreeClass::Big => self.db.dispatch_big(
+                    table,
+                    OwnPointOp {
+                        worker_id: self.worker_id,
+                        read_ts: self.read_ts,
+                        key,
+                    },
+                ),
+            };
+        }
         match table.class() {
             TreeClass::Standard => {
                 point_on_tree(&self.db.tree_for(table), self.worker_id, self.read_ts, key)
@@ -311,20 +390,35 @@ impl<'a> TpccTxn<'a> {
         _force_read_all: bool,
     ) -> Res<'static> {
         self.refresh_read_snapshot();
+        let own = self.own_keys(table, &range);
         match table.class() {
-            TreeClass::Standard => range_on_tree(
+            TreeClass::Standard if own.is_empty() => range_on_tree(
                 &self.db.tree_for(table),
                 self.worker_id,
                 self.read_ts,
                 range,
                 self.db.scan_pool(table).as_deref(),
             ),
+            TreeClass::Standard => {
+                let tree = self.db.tree_for(table);
+                let records =
+                    RangeQueryIter::new(&tree, self.read_ts, range, false, self.worker_id)
+                        .collect();
+                CRUDOperationResult::MatchedRecords(overlay_records(
+                    records,
+                    &tree,
+                    self.worker_id,
+                    self.read_ts,
+                    &own,
+                ))
+            }
             TreeClass::Big => self.db.dispatch_big(
                 table,
                 RangeOp {
                     worker_id: self.worker_id,
                     ts_start: self.read_ts,
                     range,
+                    own,
                 },
             ),
         }
@@ -336,19 +430,31 @@ impl<'a> TpccTxn<'a> {
         range: Interval<TpccKey>,
     ) -> Option<RecordPointResult<TpccKey, TpccRow>> {
         self.refresh_read_snapshot();
+        let own = self.own_keys(table, &range);
         match table.class() {
-            TreeClass::Standard => range_min_on_tree(
+            TreeClass::Standard if own.is_empty() => range_min_on_tree(
                 &self.db.tree_for(table),
                 self.worker_id,
                 self.read_ts,
                 range,
             ),
+            TreeClass::Standard => {
+                let tree = self.db.tree_for(table);
+                overlay_min(
+                    RangeQueryIter::new(&tree, self.read_ts, range, false, self.worker_id),
+                    &tree,
+                    self.worker_id,
+                    self.read_ts,
+                    &own,
+                )
+            }
             TreeClass::Big => self.db.dispatch_big(
                 table,
                 RangeMinOp {
                     worker_id: self.worker_id,
                     ts_start: self.read_ts,
                     range,
+                    own,
                 },
             ),
         }
@@ -363,21 +469,27 @@ impl<'a> TpccTxn<'a> {
         mut visit: impl FnMut(TpccKey, &TpccRow),
     ) {
         self.refresh_read_snapshot();
+        let own = self.own_keys(table, &range);
         match table.class() {
-            TreeClass::Standard => RangeQueryIter::new(
-                &self.db.tree_for(table),
-                self.read_ts,
-                range,
-                false,
-                self.worker_id,
-            )
-            .for_each_ref(&mut visit),
+            TreeClass::Standard => {
+                let tree = self.db.tree_for(table);
+                visit_range(
+                    RangeQueryIter::new(&tree, self.read_ts, range, false, self.worker_id),
+                    &tree,
+                    self.worker_id,
+                    self.read_ts,
+                    &own,
+                    None,
+                    &mut visit,
+                )
+            }
             TreeClass::Big => self.db.dispatch_big(
                 table,
                 RangeVisitOp {
                     worker_id: self.worker_id,
                     ts_start: self.read_ts,
                     range,
+                    own,
                     visit: &mut visit,
                 },
             ),
@@ -398,15 +510,18 @@ impl<'a> TpccTxn<'a> {
             TreeClass::Standard,
             "TpccTxn::range_for_each_zone_pruned: {table:?} is a TreeClass::Big table"
         );
-        RangeQueryIter::new(
-            &self.db.tree_for(table),
-            self.read_ts,
-            range,
-            false,
+        let own = self.own_keys(table, &range);
+        let tree = self.db.tree_for(table);
+        visit_range(
+            RangeQueryIter::new(&tree, self.read_ts, range, false, self.worker_id)
+                .with_zone_predicate(zone_lo, zone_hi),
+            &tree,
             self.worker_id,
+            self.read_ts,
+            &own,
+            Some((zone_lo, zone_hi)),
+            &mut visit,
         )
-        .with_zone_predicate(zone_lo, zone_hi)
-        .for_each_ref(&mut visit)
     }
 
     /// Zero-copy left fold over a snapshot-consistent table range.
@@ -417,38 +532,18 @@ impl<'a> TpccTxn<'a> {
         initial: Acc,
         mut fold: impl FnMut(Acc, TpccKey, &TpccRow) -> Acc,
     ) -> Acc {
-        self.refresh_read_snapshot();
         let mut acc = Some(initial);
-        match table.class() {
-            TreeClass::Standard => RangeQueryIter::new(
-                &self.db.tree_for(table),
-                self.read_ts,
-                range,
-                false,
-                self.worker_id,
-            )
-            .for_each_ref(|key, row| {
-                acc = Some(fold(acc.take().unwrap(), key, row));
-            }),
-            TreeClass::Big => self.db.dispatch_big(
-                table,
-                RangeVisitOp {
-                    worker_id: self.worker_id,
-                    ts_start: self.read_ts,
-                    range,
-                    visit: &mut |key, row| {
-                        acc = Some(fold(acc.take().unwrap(), key, row));
-                    },
-                },
-            ),
-        }
+        self.range_for_each(table, range, |key, row| {
+            acc = Some(fold(acc.take().unwrap(), key, row));
+        });
         acc.unwrap()
     }
 
     pub fn range_count(&mut self, table: Table, range: Interval<TpccKey>) -> usize {
         self.refresh_read_snapshot();
+        let own = self.own_keys(table, &range);
         match table.class() {
-            TreeClass::Standard => RangeQueryIter::new(
+            TreeClass::Standard if own.is_empty() => RangeQueryIter::new(
                 &self.db.tree_for(table),
                 self.read_ts,
                 range,
@@ -456,19 +551,48 @@ impl<'a> TpccTxn<'a> {
                 self.worker_id,
             )
             .count_ref_parallel(self.db.scan_pool(table).as_deref()),
-            TreeClass::Big => {
+            _ => {
+                // `range_for_each` would refresh the statement snapshot a
+                // second time under read committed; count through the same
+                // visitor path with this statement's snapshot instead.
                 let mut count = 0;
-                self.db.dispatch_big(
-                    table,
-                    RangeVisitOp {
-                        worker_id: self.worker_id,
-                        ts_start: self.read_ts,
-                        range,
-                        visit: &mut |_, _| count += 1,
-                    },
-                );
+                self.visit_at_current_snapshot(table, range, own, &mut |_, _| count += 1);
                 count
             }
+        }
+    }
+
+    /// `range_for_each` without refreshing the statement snapshot.
+    fn visit_at_current_snapshot(
+        &self,
+        table: Table,
+        range: Interval<TpccKey>,
+        own: OwnKeys<TpccKey>,
+        visit: &mut dyn FnMut(TpccKey, &TpccRow),
+    ) {
+        match table.class() {
+            TreeClass::Standard => {
+                let tree = self.db.tree_for(table);
+                visit_range(
+                    RangeQueryIter::new(&tree, self.read_ts, range, false, self.worker_id),
+                    &tree,
+                    self.worker_id,
+                    self.read_ts,
+                    &own,
+                    None,
+                    visit,
+                )
+            }
+            TreeClass::Big => self.db.dispatch_big(
+                table,
+                RangeVisitOp {
+                    worker_id: self.worker_id,
+                    ts_start: self.read_ts,
+                    range,
+                    own,
+                    visit,
+                },
+            ),
         }
     }
 

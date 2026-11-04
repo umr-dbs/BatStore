@@ -27,6 +27,7 @@
 //! `Database<FAN_OUT, NUM_RECORDS, Key, Payload>` is one monomorphized type;
 //! there is no per-table type erasure.
 pub mod database;
+pub(crate) mod own_writes;
 pub mod transaction;
 
 pub use crate::bat_wal::record::TableId;

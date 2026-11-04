@@ -72,6 +72,9 @@ use std::ops::DerefMut;
 use triomphe::Arc;
 
 use super::database::Database;
+use super::own_writes::{
+    OwnKeys, overlay_min, overlay_records, own_keys_in, try_visit_range, visit_range,
+};
 
 pub enum TransactionState {
     InFlight,
@@ -528,6 +531,22 @@ impl<
             .count()
     }
 
+    /// The keys of `range` in table cache slot `slot` that this transaction
+    /// has changed; see `bat_db::own_writes` for why reads treat them apart.
+    fn own_keys(&self, slot: usize, range: &Interval<Key>) -> OwnKeys<Key> {
+        own_keys_in(
+            self.written
+                .iter()
+                .filter(|(written_slot, _)| *written_slot == slot)
+                .map(|(_, key)| *key),
+            range,
+        )
+    }
+
+    fn has_written(&self, slot: usize, key: Key) -> bool {
+        self.written.iter().any(|&written| written == (slot, key))
+    }
+
     pub fn point(
         &mut self,
         table: TableId,
@@ -535,6 +554,10 @@ impl<
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
+        let slot = self.table_slot(table);
+        if self.has_written(slot, key) {
+            return tree.own_key_point_read(key, self.worker_id, self.read_ts);
+        }
         tree.key_point_read_from_root(root, key, self.worker_id, self.read_ts)
     }
 
@@ -547,10 +570,18 @@ impl<
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
-        CRUDOperationResult::MatchedRecords(
+        let slot = self.table_slot(table);
+        let own = self.own_keys(slot, &range);
+        let records =
             RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
-                .collect(),
-        )
+                .collect();
+        CRUDOperationResult::MatchedRecords(overlay_records(
+            records,
+            &tree,
+            self.worker_id,
+            self.read_ts,
+            &own,
+        ))
     }
 
     pub fn range_min(
@@ -560,8 +591,15 @@ impl<
     ) -> Option<RecordPointResult<Key, Payload>> {
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
-        RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
-            .min_by_key()
+        let slot = self.table_slot(table);
+        let own = self.own_keys(slot, &range);
+        overlay_min(
+            RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root),
+            &tree,
+            self.worker_id,
+            self.read_ts,
+            &own,
+        )
     }
 
     /// Fallible zero-copy range visitor against this statement's
@@ -574,8 +612,17 @@ impl<
     ) -> Result<(), E> {
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
-        RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
-            .try_for_each_ref(visit)
+        let slot = self.table_slot(table);
+        let own = self.own_keys(slot, &range);
+        try_visit_range(
+            RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root),
+            &tree,
+            self.worker_id,
+            self.read_ts,
+            &own,
+            None,
+            visit,
+        )
     }
 
     /// Infallible zero-copy range visitor.
@@ -587,8 +634,17 @@ impl<
     ) {
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
-        RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
-            .for_each_ref(visit)
+        let slot = self.table_slot(table);
+        let own = self.own_keys(slot, &range);
+        visit_range(
+            RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root),
+            &tree,
+            self.worker_id,
+            self.read_ts,
+            &own,
+            None,
+            visit,
+        )
     }
 
     /// Zero-copy left fold over a range.
@@ -597,20 +653,29 @@ impl<
         table: TableId,
         range: Interval<Key>,
         initial: Acc,
-        fold: impl FnMut(Acc, Key, &Payload) -> Acc,
+        mut fold: impl FnMut(Acc, Key, &Payload) -> Acc,
     ) -> Acc {
-        self.refresh_read_snapshot();
-        let (tree, root) = self.read_tree_and_root(table);
-        RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
-            .fold_ref(initial, fold)
+        let mut acc = Some(initial);
+        self.range_for_each(table, range, |key, payload| {
+            acc = Some(fold(acc.take().unwrap(), key, payload));
+        });
+        acc.unwrap()
     }
 
     /// Counts visible range records without constructing result objects.
     pub fn range_count(&mut self, table: TableId, range: Interval<Key>) -> usize {
         self.refresh_read_snapshot();
         let (tree, root) = self.read_tree_and_root(table);
-        RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root)
-            .count_ref()
+        let slot = self.table_slot(table);
+        let own = self.own_keys(slot, &range);
+        let scan =
+            RangeQueryIter::new_with_root(&tree, self.read_ts, range, false, self.worker_id, root);
+        if own.is_empty() {
+            return scan.count_ref();
+        }
+        let mut count = 0;
+        visit_range(scan, &tree, self.worker_id, self.read_ts, &own, None, |_, _| count += 1);
+        count
     }
 
     pub fn insert(

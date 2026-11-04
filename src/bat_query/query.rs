@@ -163,7 +163,47 @@ impl<
         reader_worker: WorkerId,
         reader_ts_start: Version,
     ) -> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
-        let records = Self::traverse_read_key(&root, key, reader_ts_start);
+        self.key_point_read_routed(root, key, reader_ts_start, reader_worker, reader_ts_start)
+    }
+
+    /// Point read of a key that the reading transaction has changed itself.
+    ///
+    /// A snapshot read routes through the entries whose version is not newer
+    /// than the snapshot. A transaction's own write, however, lands in the
+    /// key's *current* leaf, and if a structure modification replaced that
+    /// leaf after the snapshot was drawn, the snapshot route ends in the
+    /// retired leaf, which never received the write. While the transaction
+    /// runs, first-writer-wins keeps every other transaction off this key,
+    /// so the newest valid version in the current tree is the transaction's
+    /// own (or carries its deletion). This read therefore routes like a
+    /// writer — current root, newest entry containing `key` — and applies
+    /// the reader's usual visibility rule there. See
+    /// `bat_db::own_writes` for the scan counterpart.
+    #[inline]
+    pub(crate) fn own_key_point_read<'a>(
+        &self,
+        key: Key,
+        reader_worker: WorkerId,
+        reader_ts: Version,
+    ) -> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let root = self.root.current_root().block;
+        // `Version::MAX` matches every entry, so routing takes the newest
+        // entry containing `key` at every level, exactly as a write does.
+        self.key_point_read_routed(root, key, Version::MAX, reader_worker, reader_ts)
+    }
+
+    /// Point read that routes at `route_version` and decides visibility at
+    /// `reader_ts`; the two differ only for `own_key_point_read`.
+    #[inline]
+    fn key_point_read_routed<'a>(
+        &self,
+        root: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        key: Key,
+        route_version: Version,
+        reader_worker: WorkerId,
+        reader_ts_start: Version,
+    ) -> CRUDOperationResult<'a, FAN_OUT, NUM_RECORDS, Key, Payload> {
+        let records = Self::traverse_read_key(&root, key, route_version);
 
         let leaf = records.as_leaf_page_ref();
         let keys = leaf.keys();
