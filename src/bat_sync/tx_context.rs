@@ -451,18 +451,13 @@ impl TxContext {
             .any(|slot| slot.load(Acquire) != NOT_IN_FLIGHT)
     }
 
+    /// `LCB(worker, ts)`: the last commit of `worker` before `ts`, or `0`.
+    /// Used by `RetentionHorizon`, which asks it at most once per worker and
+    /// structure modification. Pruning keeps the answer for every live or
+    /// registering snapshot.
     #[inline]
-    pub(crate) fn is_snapshot_live(&self, ts_start: Version) -> bool {
-        self.live_tx
-            .iter()
-            .any(|slot| slot.load(Acquire) == ts_start)
-    }
-
-    /// Collect all currently-live transaction snapshot IDs into a HashSet for
-    /// efficient batch membership checking (e.g., in `record_survives_gc`).
-    #[inline]
-    pub(crate) fn live_snapshots_set(&self) -> std::collections::HashSet<u64> {
-        self.live_snapshots().collect()
+    pub(crate) fn lcb(&self, worker: WorkerId, ts: Version) -> Version {
+        self.commit_logs[worker as usize].lcb(ts)
     }
 
     #[inline]

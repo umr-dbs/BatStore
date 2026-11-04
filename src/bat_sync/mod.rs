@@ -1,6 +1,7 @@
 pub mod block_sync;
 pub mod clock;
 pub mod commit_log;
+pub(crate) mod retention;
 pub mod safe_cell;
 pub mod smart_cell;
 pub mod tx_context;

@@ -6,6 +6,7 @@ use crate::bat_page_model::{BlockRef, Height};
 use crate::bat_query::interval::Interval;
 use crate::bat_root::index_root::RootIndexGuard;
 use crate::bat_root::root::Root;
+use crate::bat_sync::retention::RetentionHorizon;
 use crate::bat_sync::tx_context::TxContext;
 use crate::bat_test::{record_version_split, DIAG, VERBOSE};
 use crate::bat_tree::mvbt::MVBTSt;
@@ -14,10 +15,6 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::Deref;
 
-#[cfg(not(feature = "lightweight-gc"))]
-type LiveSnapshots = std::collections::HashSet<u64>;
-#[cfg(feature = "lightweight-gc")]
-type LiveSnapshots = Option<u64>;
 
 pub(crate) const TRACE_KEY_DEBUG: bool = false;
 
@@ -112,13 +109,12 @@ impl<
 
     #[inline]
     fn has_protected_garbage(&self, ctx: &TxContext) -> bool {
-        self.as_records().iter().any(|r| {
+        let mut horizon = RetentionHorizon::new(ctx);
+        let leaf = self.as_leaf_page_ref();
+        self.as_records().iter().enumerate().any(|(i, r)| {
             let version = r.version();
             !version.is_live()
-                && !version.insertion_stamp().is_invalid()
-                && version
-                    .deletion_stamp()
-                    .is_some_and(|del| ctx.is_snapshot_live(del.ts_start()))
+                && horizon.keeps(version, || leaf.latest_position(r.key(), true) == Some(i))
         })
     }
 
@@ -575,97 +571,6 @@ impl<
         Ok(mufasa)
     }
 
-    /// Whether a record must be carried forward by a version-split/merge's
-    /// GC compaction — `is_live()` plus one more case: a record that's
-    /// *deleted* (not invalidated) by a transaction whose `ts_start` is
-    /// still registered as in-flight (`TxContext::is_snapshot_live`) is not
-    /// safe to discard yet, even though `is_live()` already reports it
-    /// dead. `is_deleted()`/`is_live()` are pure local bookkeeping with no
-    /// notion of commit status — OSIC's "instant commit" model means
-    /// `delete()` marks a record dead the moment `DbTransaction::update`/
-    /// `delete` calls it, well before (and regardless of whether) that
-    /// transaction ever actually commits. If it aborts instead (dropped
-    /// without `commit()` — e.g. New-Order's own ~1%-of-transactions
-    /// business-logic rollback, `bat_bench::tpcc_txn::new_order`, which can
-    /// abort *after* having already updated `District`), reversing that
-    /// delete (`LeafPage::apply_invalidate`/`apply_undelete`) requires the
-    /// predecessor record to still be physically present to undelete. A
-    /// version-split/merge racing in between — reading `is_deleted()` as
-    /// `true` and discarding the record, exactly as it should for a
-    /// *committed* delete — makes that reversal silently impossible
-    /// instead, permanently losing the key: confirmed empirically as the
-    /// root cause of `bat_bench::tpcc_txn`'s District
-    /// `ZeroAffected(KeyDoesNotExist)` panic under `gc=on` at high thread
-    /// counts.
-    ///
-    /// Deliberately does *not* extend the same protection to an invalidated
-    /// `insert_stamp` (an aborted `Insert`/the new half of an `Update`):
-    /// invalidation only ever happens as part of that same abort-reversal
-    /// (never speculatively ahead of it, unlike a plain `delete()`), so by
-    /// the time a record is invalid its owning transaction has already
-    /// fully resolved — there's no future "undo" that still needs it kept
-    /// around.
-    ///
-    /// Other readers do not require their visible predecessor to be copied
-    /// into a replacement page. A reader older than the split/merge routes
-    /// through the retained source block, whose replacement birth version
-    /// is also its death version; `live_min_snapshot` prevents that block's
-    /// reuse until the reader finishes. If the deleting transaction is
-    /// still unresolved when the SMO runs, the check below copies the
-    /// predecessor for abort safety and for readers born against that new
-    /// structural version. Once deletion commits, future readers see it.
-    #[inline]
-    #[cfg(not(feature = "lightweight-gc"))]
-    /// Precise GC: keep record if its deletion's snapshot ID is one of the
-    /// currently-active snapshots. Uses pre-computed HashSet for O(1) lookups.
-    /// Avoids keeping unnecessarily old deletions.
-    pub(crate) fn record_survives_gc(
-        &self,
-        version: &crate::bat_record_model::version_info::VersionInfo,
-        live_snapshots: &LiveSnapshots,
-    ) -> bool {
-        if version.is_live() {
-            return true;
-        }
-
-        !version.insertion_stamp().is_invalid()
-            && version
-                .deletion_stamp()
-                .is_some_and(|del| live_snapshots.contains(&del.ts_start()))
-    }
-
-    #[cfg(feature = "lightweight-gc")]
-    /// Lightweight GC: keep record if its deletion happened at or after the
-    /// oldest live snapshot (conservative but O(1): just compares against min).
-    /// May keep some dead records but avoids HashSet collection overhead.
-    pub(crate) fn record_survives_gc(
-        &self,
-        version: &crate::bat_record_model::version_info::VersionInfo,
-        live_min_snapshot: &LiveSnapshots,
-    ) -> bool {
-        if version.is_live() {
-            return true;
-        }
-
-        !version.insertion_stamp().is_invalid()
-            && version
-                .deletion_stamp()
-                .is_some_and(|del| live_min_snapshot.is_some_and(|min| del.ts_start() >= min))
-    }
-
-    /// Collect all currently-live transaction snapshot IDs for efficient GC filtering.
-    #[cfg(not(feature = "lightweight-gc"))]
-    fn live_snapshots(&self) -> LiveSnapshots {
-        self.ctx.live_snapshots_set()
-    }
-
-    /// Lightweight GC only needs the oldest snapshot, computed once per SMO
-    /// batch rather than once for every record in that batch.
-    #[cfg(feature = "lightweight-gc")]
-    fn live_snapshots(&self) -> LiveSnapshots {
-        self.ctx.live_min_snapshot()
-    }
-
     /// Returns borrowed views of all records retained from this leaf
     /// generation, in physical order. The replacement page clones each view
     /// directly into its final slot; no owned record staging buffer is built.
@@ -673,8 +578,8 @@ impl<
         &self,
         block: &'a Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
     ) -> Vec<LeafRecordRef<'a, Key, Payload>> {
-        let live_snapshots = self.live_snapshots();
-        self.retained_leaf_history_with(block, &live_snapshots)
+        let mut horizon = RetentionHorizon::new(&self.ctx);
+        self.retained_leaf_history_with(block, &mut horizon)
     }
 
     /// As `retained_leaf_history`, using a snapshot view already
@@ -682,11 +587,14 @@ impl<
     fn retained_leaf_history_with<'a>(
         &self,
         block: &'a Block<FAN_OUT, NUM_RECORDS, Key, Payload>,
-        live_snapshots: &LiveSnapshots,
+        horizon: &mut RetentionHorizon<'_>,
     ) -> Vec<LeafRecordRef<'a, Key, Payload>> {
         let mut history = Vec::with_capacity(block.as_records().len());
-        for record in block.as_records().iter() {
-            if self.record_survives_gc(record.version(), live_snapshots) {
+        let leaf = block.as_leaf_page_ref();
+        for (i, record) in block.as_records().iter().enumerate() {
+            if horizon.keeps(record.version(), || {
+                leaf.latest_position(record.key(), true) == Some(i)
+            }) {
                 history.push(record);
             }
         }
@@ -795,10 +703,10 @@ impl<
         let candidate_active_count = candidate_active_count as usize;
 
         let retained_leaf_histories = is_simba_leaf.then(|| {
-            let live_snapshots = self.live_snapshots();
-            let mut records = self.retained_leaf_history_with(simba, &live_snapshots);
+            let mut horizon = RetentionHorizon::new(&self.ctx);
+            let mut records = self.retained_leaf_history_with(simba, &mut horizon);
             records
-                .extend(self.retained_leaf_history_with(candidate_cell.deref(), &live_snapshots));
+                .extend(self.retained_leaf_history_with(candidate_cell.deref(), &mut horizon));
             records
         });
         let leaf_merge_would_overflow = retained_leaf_histories

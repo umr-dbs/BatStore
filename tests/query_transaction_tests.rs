@@ -889,19 +889,22 @@ fn snapshot_reads_of_other_keys_keep_the_snapshot_route() {
     }
     let mut tx = DbTransaction::begin(&db);
     let db_ref = &db;
-    // Another worker deletes key 2 and commits after tx's snapshot ...
+    // Another worker updates key 2 and commits after tx's snapshot ...
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
                 assert!(matches!(
-                    db_ref.dispatch_crud(t, CRUDOperation::Delete(2)),
-                    CRUDOperationResult::Deleted(_)
+                    db_ref.dispatch_crud(t, CRUDOperation::Update(2, 20)),
+                    CRUDOperationResult::Updated(_)
                 ));
             })
             .join()
             .unwrap();
     });
-    // ... and the leaf is split afterwards, which drops key 2's version.
+    // ... and the leaf is split afterwards, which drops key 2's old version:
+    // the update has committed, and its new version follows it. (The last
+    // version of a *deleted* key would stay while tx runs; see
+    // `bat_sync::retention`.)
     split_after_begin(&db, t);
     assert!(matches!(tx.insert(t, 50, 5000), CRUDOperationResult::Inserted(_)));
 
@@ -911,7 +914,8 @@ fn snapshot_reads_of_other_keys_keep_the_snapshot_route() {
         range_pairs(&mut tx, t, 0, 99),
         vec![(0, 0), (1, 1), (2, 2), (3, 3), (50, 5000)]
     );
-    // Routing key 2 like a write would have missed it.
+    // Routing key 2 like a write finds only the new version, which tx does
+    // not see.
     let tree = db.table(t).unwrap();
     assert!(matches!(
         tree.own_key_point_read(2, tx.worker_id(), tx.ts_start()),
