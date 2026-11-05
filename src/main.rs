@@ -46,6 +46,8 @@ fn main() {
             "tpcc" => batstore::bat_bench::tpcc_driver::main_tpcc(parms),
             #[cfg(feature = "tpcc-tree-stats")]
             "tpcc_tree_stats" => batstore::bat_bench::tpcc_driver::main_tpcc_tree_stats(parms),
+            #[cfg(feature = "tpcc-tree-stats")]
+            "smo_waves" => batstore::bat_bench::smo_waves::main_smo_waves(parms),
             "tpch" => batstore::bat_bench::tpcc_driver::main_tpch(parms),
             "htap" => batstore::bat_bench::tpcc_driver::main_htap(parms),
             "ycsb" => batstore::bat_bench::ycsb_driver::main_ycsb(parms),

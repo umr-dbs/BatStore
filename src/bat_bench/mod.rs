@@ -15,6 +15,8 @@ pub mod tpcc_txn;
 pub mod tpcc_wal_codec;
 #[cfg(feature = "tpcc-tree-stats")]
 pub mod tpcc_tree_stats;
+#[cfg(feature = "tpcc-tree-stats")]
+pub mod smo_waves;
 pub mod tpch_queries;
 
 pub mod ycsb_driver;
