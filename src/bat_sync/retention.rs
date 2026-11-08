@@ -8,8 +8,8 @@
 //! * The last version of a deleted key, while some active transaction cannot
 //!   see the deletion. A writer reaches a key only on the newest route, so
 //!   this version is the only trace of the delete that such a transaction can
-//!   meet. If the transaction inserts the key, first-committer-wins requires
-//!   it to meet the deletion stamp and abort.
+//!   meet. If the transaction inserts the key, first-writer-wins requires it
+//!   to meet the deletion stamp and abort.
 //!
 //! Every other deleted version is dropped once its deleter has committed. A
 //! version ended by an update needs no such protection: the new version
