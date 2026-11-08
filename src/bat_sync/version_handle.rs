@@ -187,6 +187,11 @@ impl<
 
     #[inline]
     pub(crate) fn abort_writes(&self, key: Key, stamp: TxStamp, count: usize) {
+        // Rollback happens only when the whole transaction aborts. Record
+        // it, so that the worker's own later reads treat this transaction's
+        // stamps as those of an ended one (`visibility::is_visible`), also
+        // in older leaves that this rollback does not reach.
+        self.ctx.note_abort(stamp);
         let mut remaining = count;
         while remaining != 0 {
             let leaf_guard = self.traversal_write_olc_registered(key);

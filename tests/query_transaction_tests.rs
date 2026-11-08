@@ -505,6 +505,87 @@ fn transitive_commit_invariant_worked_example() {
 }
 
 #[test]
+fn own_worker_historical_snapshot_hides_later_commit() {
+    // Worker A changes a key in a transaction that starts at s, worker B
+    // draws snapshot t, and A commits after t. Read as of t, A must not see
+    // its write, exactly like B: it committed after t.
+    let glc = GlobalClock::new();
+    let logs = [CommitLog::new(), CommitLog::new()];
+    const A: WorkerId = 0;
+    const B: WorkerId = 1;
+
+    let stamp = TxStamp::new(A, glc.next_timestamp()); // s
+    let t = glc.next_timestamp(); // B's snapshot, s < t
+
+    let mut cache_a = SnapshotCache::new(2);
+    assert!(
+        is_visible(&logs, &mut cache_a, A, t, stamp),
+        "A's still running transaction must see its own write"
+    );
+
+    logs[A as usize].commit(&glc); // c > t
+
+    let mut cache_b = SnapshotCache::new(2);
+    assert!(
+        !is_visible(&logs, &mut cache_b, B, t, stamp),
+        "B at t must not see A's write: it committed after t"
+    );
+    assert!(
+        !is_visible(&logs, &mut cache_a, A, t, stamp),
+        "A reading as of t must agree with B"
+    );
+    assert!(
+        !is_visible(&logs, &mut SnapshotCache::new(2), A, t, stamp),
+        "also with a fresh cache"
+    );
+
+    let now = glc.next_timestamp();
+    assert!(
+        is_visible(&logs, &mut cache_a, A, now, stamp),
+        "after the commit, A's write is visible to A's later snapshots"
+    );
+
+    // A's next transaction sees its own writes at its start, but a
+    // historical snapshot older than that transaction does not.
+    let own = TxStamp::new(A, glc.next_timestamp());
+    assert!(is_visible(&logs, &mut cache_a, A, own.ts_start(), own));
+    assert!(!is_visible(&logs, &mut cache_a, A, t, own));
+}
+
+#[test]
+fn own_worker_historical_snapshot_hides_aborted_transaction() {
+    // Worker A writes in a transaction that starts at s, B draws snapshot
+    // t, and A aborts. An older leaf, replaced after t, may still hold the
+    // write with a valid stamp, since rollback works in the current leaf
+    // only. A historical read by A's next transaction must not accept it.
+    let glc = GlobalClock::new();
+    let logs = [CommitLog::new(), CommitLog::new()];
+    const A: WorkerId = 0;
+    const B: WorkerId = 1;
+
+    let aborted = TxStamp::new(A, glc.next_timestamp()); // s
+    let t = glc.next_timestamp(); // B's snapshot
+
+    assert!(
+        is_visible(&logs, &mut SnapshotCache::new(2), A, t, aborted),
+        "while it runs, A's transaction sees its own write"
+    );
+    logs[A as usize].note_abort(aborted.ts_start());
+
+    let current = TxStamp::new(A, glc.next_timestamp()); // A's next transaction
+    let mut cache_a = SnapshotCache::new(2);
+    assert!(
+        !is_visible(&logs, &mut cache_a, A, t, aborted),
+        "A's historical read must not accept the aborted write"
+    );
+    assert!(!is_visible(&logs, &mut SnapshotCache::new(2), B, t, aborted));
+    assert!(
+        is_visible(&logs, &mut cache_a, A, current.ts_start(), current),
+        "A's next transaction still sees its own writes"
+    );
+}
+
+#[test]
 fn multi_op_transaction_sees_own_writes_and_isolates_others() {
     let db = new_db();
     let t = db.create_table("t").table_id().unwrap();

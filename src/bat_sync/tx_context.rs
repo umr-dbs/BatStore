@@ -423,6 +423,15 @@ impl TxContext {
         })
     }
 
+    /// Records that the transaction with `stamp` aborts; see
+    /// `CommitLog::note_abort`.
+    #[inline]
+    pub(crate) fn note_abort(&self, stamp: TxStamp) {
+        if let Some(log) = self.commit_logs.get(stamp.worker_id() as usize) {
+            log.note_abort(stamp.ts_start());
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn commit_tx(&self, worker_id: WorkerId) -> Version {
         if self.block_reclaim_enabled.load(Relaxed)

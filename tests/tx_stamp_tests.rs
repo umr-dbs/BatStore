@@ -294,8 +294,10 @@ fn version_info_invalidate_preserves_insert_fields() {
     }
 }
 
-/// Same-worker fast path of `is_visible` exercised at the top of the
-/// 15-bit worker range — it never touches commit logs / snapshot cache.
+/// Same-worker path of `is_visible` exercised at the top of the 15-bit
+/// worker range. With no commit log for the worker, it has never committed,
+/// so every stamp of it belongs to its current transaction and is decided by
+/// `ts_start <= reader_ts` alone, without the snapshot cache.
 #[test]
 fn visibility_same_worker_and_invalid_at_max_worker() {
     let mut cache = SnapshotCache::new(0);

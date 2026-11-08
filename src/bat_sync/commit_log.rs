@@ -1,6 +1,7 @@
 use crate::bat_record_model::version_info::Version;
 use crate::bat_sync::clock::GlobalClock;
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Release}};
 
 /// Per-worker OSIC Commit Log (§3.1): a small, ascending list of a single
 /// worker's commit timestamps, guarded by one mutex, matching the paper
@@ -23,6 +24,14 @@ use parking_lot::Mutex;
 /// `MVBTSt::wal_hardened_version` for that side.
 pub struct CommitLog {
     state: Mutex<CommitLogState>,
+    /// A timestamp at least as large as the start of every transaction of
+    /// this worker that has ended: its newest commit timestamp, or the start
+    /// of its latest aborted transaction if that is larger (`0` before
+    /// either). The worker's current transaction started after it. Its only
+    /// reader is the owning worker's own visibility check
+    /// (`visibility::is_visible`), which uses it to tell the stamps of its
+    /// current transaction from those of its earlier ones.
+    last_ended: AtomicU64,
 }
 
 struct CommitLogState {
@@ -55,6 +64,7 @@ impl CommitLog {
                 #[cfg(test)]
                 prune_count: 0,
             }),
+            last_ended: AtomicU64::new(0),
         }
     }
 
@@ -62,6 +72,7 @@ impl CommitLog {
         let mut state = self.state.lock();
         let ts_commit = glc.next_timestamp();
         state.entries.push(ts_commit);
+        self.last_ended.store(ts_commit, Release);
         #[cfg(feature = "tree-viz")]
         state.history.push(ts_commit);
         // If callers later switch back to `commit_pruned`, make its first
@@ -80,6 +91,7 @@ impl CommitLog {
         let mut state = self.state.lock();
         let ts_commit = glc.next_timestamp();
         state.entries.push(ts_commit);
+        self.last_ended.store(ts_commit, Release);
         #[cfg(feature = "tree-viz")]
         state.history.push(ts_commit);
 
@@ -164,6 +176,21 @@ impl CommitLog {
         Self::lcb_index(&state.entries, ts)
             .map(|i| state.entries[i])
             .unwrap_or(0)
+    }
+
+    /// Records that the transaction of this worker that started at
+    /// `ts_start` aborts. Called by every rollback (`abort_writes`).
+    #[inline]
+    pub fn note_abort(&self, ts_start: Version) {
+        self.last_ended.fetch_max(ts_start, Release);
+    }
+
+    /// See `last_ended`: every stamp of this worker with a start no larger
+    /// than this belongs to a transaction that has ended. Lock-free; the
+    /// worker's own commits and rollbacks are the only writers.
+    #[inline(always)]
+    pub fn last_ended(&self) -> Version {
+        self.last_ended.load(Acquire)
     }
 
     #[cfg(feature = "tree-viz")]

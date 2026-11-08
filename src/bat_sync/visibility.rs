@@ -41,11 +41,30 @@ pub fn is_visible(
         return false;
     }
 
-    if stamp.worker_id() == reader_worker {
-        return stamp.ts_start() <= reader_ts_start;
-    }
-
     let index = stamp.worker_id() as usize;
+
+    if stamp.worker_id() == reader_worker {
+        // A stamp of the reader's own worker. Nothing started after the
+        // snapshot is visible (this also hides the reader's own writes from
+        // a historical snapshot older than its transaction).
+        if stamp.ts_start() > reader_ts_start {
+            return false;
+        }
+        // A worker runs one transaction at a time. If none of its
+        // transactions has ended since the stamp's start (no commit, no
+        // rollback), the stamp belongs to its current transaction, which
+        // sees its own writes. Otherwise it belongs to an earlier
+        // transaction of this worker, which committed or aborted: like a
+        // stamp of any other worker, it is visible only if that transaction
+        // committed before the snapshot, which the LCB check below decides.
+        // A historical snapshot that lies between the start and the commit
+        // of such a transaction must not see it; comparing
+        // `ts_start <= reader_ts_start` alone would accept it.
+        match commit_logs.get(index) {
+            Some(log) if log.last_ended() >= stamp.ts_start() => {}
+            _ => return true,
+        }
+    }
 
     if cache.snapshot_versions[index] > reader_ts_start {
         cache.lcb[index] = commit_logs[index].lcb(reader_ts_start);
