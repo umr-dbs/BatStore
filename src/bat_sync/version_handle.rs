@@ -156,6 +156,7 @@ impl<
         stamp: TxStamp,
         build: impl FnOnce(Version) -> CRUDOperation<Key, Payload>,
     ) {
+        self.ctx.note_transactional_write(stamp);
         match self.cold.table_id {
             Some(table_id) => {
                 self.cold

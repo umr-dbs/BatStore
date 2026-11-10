@@ -1797,6 +1797,9 @@ mod db_integration_tests;
 #[path = "../../tests/db_transaction_abort_tests.rs"]
 mod db_transaction_abort_tests;
 #[cfg(test)]
+#[path = "../../tests/autocommit_tx_mix_tests.rs"]
+mod autocommit_tx_mix_tests;
+#[cfg(test)]
 #[path = "../../tests/si_tombstone_retention_tests.rs"]
 mod si_tombstone_retention_tests;
 #[cfg(test)]

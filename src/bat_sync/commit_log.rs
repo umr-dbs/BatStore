@@ -27,10 +27,12 @@ pub struct CommitLog {
     /// A timestamp at least as large as the start of every transaction of
     /// this worker that has ended: its newest commit timestamp, or the start
     /// of its latest aborted transaction if that is larger (`0` before
-    /// either). The worker's current transaction started after it. Its only
-    /// reader is the owning worker's own visibility check
-    /// (`visibility::is_visible`), which uses it to tell the stamps of its
-    /// current transaction from those of its earlier ones.
+    /// either). The worker's current transaction started after it. Two
+    /// readers use it: the owning worker's own visibility check
+    /// (`visibility::is_visible`), to tell the stamps of its current
+    /// transaction from those of its earlier ones, and auto-committed writes
+    /// of every worker (`TxContext::writer_committed`), which read it under
+    /// the latch of the leaf that holds the stamp.
     last_ended: AtomicU64,
 }
 

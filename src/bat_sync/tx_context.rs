@@ -133,6 +133,18 @@ pub(crate) struct TxContext {
     ///
     /// `CachePadded` for the same reason as `live_tx` — see that field's doc.
     live_tx_depth: Box<[CachePadded<AtomicU32>]>,
+    /// Debug-only check of "a worker runs one transaction at a time": the
+    /// start of the transaction of each worker that has written and not yet
+    /// ended, or `NOT_IN_FLIGHT`. Set by every transactional write
+    /// (`MVBTSt::wal_log_write`), cleared by a commit, by a rollback, and
+    /// when the worker's outermost snapshot registration ends. An
+    /// auto-committed write asserts that its worker has no such transaction
+    /// (`assert_no_open_writes`): its commit would raise the worker's
+    /// `last_ended` marker above the open transaction's start and make that
+    /// transaction's uncommitted writes look committed to every other worker
+    /// (`writer_committed`). Only the owning worker touches its slot.
+    #[cfg(debug_assertions)]
+    open_writes: Box<[CachePadded<AtomicVersion>]>,
     /// One slot per worker (`WorkerId`-indexed, sized to `max_workers` like
     /// `commit_logs`): each worker publishes its own conservative lower bound
     /// here — `global_clock.current_version()` read just *before* drawing
@@ -207,6 +219,10 @@ impl TxContext {
                 .map(|_| CachePadded::new(AtomicU32::new(0)))
                 .collect(),
             in_flight_bound: (0..max_workers)
+                .map(|_| CachePadded::new(AtomicVersion::new(NOT_IN_FLIGHT)))
+                .collect(),
+            #[cfg(debug_assertions)]
+            open_writes: (0..max_workers)
                 .map(|_| CachePadded::new(AtomicVersion::new(NOT_IN_FLIGHT)))
                 .collect(),
             block_reclaim_enabled: AtomicBool::new(false),
@@ -324,6 +340,7 @@ impl TxContext {
              must be paired (unbalanced caller bug)"
         );
         if depth_before == 1 {
+            self.clear_open_writes(worker_id);
             let previous = self.live_tx[worker_id as usize].swap(NOT_IN_FLIGHT, Release);
             debug_assert_eq!(
                 previous, snapshot,
@@ -430,10 +447,53 @@ impl TxContext {
         if let Some(log) = self.commit_logs.get(stamp.worker_id() as usize) {
             log.note_abort(stamp.ts_start());
         }
+        self.clear_open_writes(stamp.worker_id());
+    }
+
+    /// Records that the current transaction of `stamp`'s worker has written
+    /// (debug builds only; see `open_writes`).
+    #[inline(always)]
+    pub(crate) fn note_transactional_write(&self, stamp: TxStamp) {
+        #[cfg(debug_assertions)]
+        if let Some(slot) = self.open_writes.get(stamp.worker_id() as usize) {
+            slot.store(stamp.ts_start(), Relaxed);
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = stamp;
+    }
+
+    #[inline(always)]
+    fn clear_open_writes(&self, worker_id: WorkerId) {
+        #[cfg(debug_assertions)]
+        if let Some(slot) = self.open_writes.get(worker_id as usize) {
+            slot.store(NOT_IN_FLIGHT, Relaxed);
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = worker_id;
+    }
+
+    /// Panics in debug builds if `worker_id` has a transaction that has
+    /// written and not ended. Called by every auto-committed write before it
+    /// changes anything; see `open_writes`.
+    #[inline(always)]
+    pub(crate) fn assert_no_open_writes(&self, worker_id: WorkerId) {
+        #[cfg(debug_assertions)]
+        if let Some(slot) = self.open_writes.get(worker_id as usize) {
+            let open = slot.load(Relaxed);
+            assert!(
+                open == NOT_IN_FLIGHT,
+                "auto-committed write on worker {worker_id} while its transaction started at \
+                 {open} has uncommitted writes: a worker runs one transaction at a time, and \
+                 an auto-committed write counts as one. Commit or abort the transaction first."
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = worker_id;
     }
 
     #[inline(always)]
     pub(crate) fn commit_tx(&self, worker_id: WorkerId) -> Version {
+        self.clear_open_writes(worker_id);
         if self.block_reclaim_enabled.load(Relaxed)
             || self.freshest_si_truncate_commit_log.load(Relaxed)
         {
@@ -446,6 +506,24 @@ impl TxContext {
         } else {
             self.commit_logs[worker_id as usize].commit(&self.global_clock)
         }
+    }
+
+    /// Whether the transaction that wrote `stamp` has committed, decided
+    /// for an auto-committed write that holds the latch of the leaf where it
+    /// found `stamp`. Lock-free and independent of any snapshot: it reads
+    /// only the worker's `last_ended` marker, which no pruning removes.
+    ///
+    /// The comparison is strict. While the transaction runs, the marker is
+    /// below its start (a worker runs one transaction at a time); a commit
+    /// raises it to the commit timestamp, above the start; a rollback raises
+    /// it to the start itself, before it restores any key, so the stamps of
+    /// an aborting transaction stay "not committed". The marker passes the
+    /// start of an aborted transaction only once a later transaction of the
+    /// worker ends, and by then the rollback has restored every key.
+    #[inline(always)]
+    pub(crate) fn writer_committed(&self, stamp: TxStamp) -> bool {
+        !stamp.is_invalid()
+            && self.commit_logs[stamp.worker_id() as usize].last_ended() > stamp.ts_start()
     }
 
     #[inline]

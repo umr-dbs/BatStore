@@ -40,6 +40,42 @@ impl<
             None => !version.insertion_stamp().is_invalid(),
         }
     }
+
+    /// First writer wins (rule (W)) for an auto-committed write: classifies
+    /// the newest valid version of a key under the leaf latch. A stamp of a
+    /// transaction that has not committed, on the insertion or on the
+    /// deletion side, is a conflict. The check asks whether the writer has
+    /// committed by now, not whether it committed before some snapshot: an auto-commit holds the
+    /// latch until it commits, so it acts at a single moment, and it needs
+    /// no registered snapshot that commit-log pruning would have to respect.
+    #[inline]
+    pub(crate) fn autocommit_newest(&self, version: Option<&VersionInfo>) -> Newest {
+        self.ctx.assert_no_open_writes(self.worker_id());
+        let Some(version) = version else {
+            return Newest::Absent;
+        };
+        if !self.ctx.writer_committed(version.insertion_stamp()) {
+            return Newest::Conflict;
+        }
+        match version.deletion_stamp() {
+            None => Newest::Live,
+            Some(del) if self.ctx.writer_committed(del) => Newest::Deleted,
+            Some(_) => Newest::Conflict,
+        }
+    }
+}
+
+/// What an auto-committed write finds as the newest valid version of its key.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Newest {
+    /// No version of the key in its leaf.
+    Absent,
+    /// A committed version, not deleted.
+    Live,
+    /// A committed version whose deletion has committed as well.
+    Deleted,
+    /// A stamp of a transaction that has not committed: first writer wins.
+    Conflict,
 }
 
 impl<
@@ -59,12 +95,13 @@ impl<
     ) -> CRUDOperationResult<'static, FAN_OUT, NUM_RECORDS, Key, Payload> {
         let leaf_guard = self.traversal_write_olc(key);
         let leaf_page = leaf_guard.deref_mut().as_leaf_page();
-        let Some(position) = leaf_page.latest_position(key, false) else {
-            return CRUDOperationResult::ZeroAffected(KeyDoesNotExist);
+        let latest = leaf_page.latest_position(key, true);
+        let position = match self.autocommit_newest(latest.map(|p| leaf_page.version_at(p))) {
+            Newest::Conflict => return CRUDOperationResult::Conflict,
+            Newest::Absent => return CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
+            Newest::Deleted => return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted),
+            Newest::Live => latest.unwrap(),
         };
-        if !leaf_page.version_at(position).is_live() {
-            return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted);
-        }
 
         let payload = make_payload(leaf_page.payload_at(position));
         let zone_widen = self
@@ -133,24 +170,16 @@ impl<
                     .get()
                     .and_then(|f| f(&payload));
 
-                let mut existing_dead_position = None;
-                if let Some(position) = leaf_page.latest_position(key, true) {
-                    let version = leaf_page.version_at(position);
-                    if version.is_live() {
-                        let reader_worker = self.worker_id();
-                        let now = self.current_version();
-                        return if self.is_visible_stamp(
-                            reader_worker,
-                            now,
-                            version.insertion_stamp(),
-                        ) {
-                            CRUDOperationResult::ZeroAffected(KeyAlreadyExists)
-                        } else {
-                            CRUDOperationResult::Conflict
-                        };
-                    }
-                    existing_dead_position = Some(position);
-                }
+                let latest = leaf_page.latest_position(key, true);
+                let existing_dead_position =
+                    match self.autocommit_newest(latest.map(|p| leaf_page.version_at(p))) {
+                        Newest::Conflict => return CRUDOperationResult::Conflict,
+                        Newest::Live => {
+                            return CRUDOperationResult::ZeroAffected(KeyAlreadyExists);
+                        }
+                        Newest::Deleted => latest,
+                        Newest::Absent => None,
+                    };
 
                 if let Some(position) = existing_dead_position {
                     if self.decide_update_in_place_record(leaf_page.version_at(position)) {
@@ -220,7 +249,12 @@ impl<
 
                 let current_len = leaf_page.len();
 
-                let latest_position = leaf_page.latest_position(key, false);
+                let latest_position = leaf_page.latest_position(key, true);
+                match self.autocommit_newest(latest_position.map(|p| leaf_page.version_at(p))) {
+                    Newest::Conflict => return CRUDOperationResult::Conflict,
+                    Newest::Absent => return CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
+                    Newest::Live | Newest::Deleted => {}
+                }
                 if let Some(position) = latest_position {
                     if self.decide_update_in_place_record(leaf_page.version_at(position)) {
                         if matches!(self.cold.wal.as_ref(), WalBackend::Off) {
@@ -252,15 +286,6 @@ impl<
 
                 match latest_position {
                     Some(position) if leaf_page.version_at(position).is_live() => {
-                        let reader_worker = self.worker_id();
-                        let now = self.current_version();
-                        if !self.is_visible_stamp(
-                            reader_worker,
-                            now,
-                            leaf_page.version_at(position).insertion_stamp(),
-                        ) {
-                            return CRUDOperationResult::Conflict;
-                        }
                         let stamp =
                             self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
 
@@ -311,16 +336,10 @@ impl<
                 }
 
                 let position = leaf_page.latest_position(key, true);
-                if let Some(position) = position {
-                    let reader_worker = self.worker_id();
-                    let now = self.current_version();
-                    if !self.is_visible_stamp(
-                        reader_worker,
-                        now,
-                        leaf_page.version_at(position).insertion_stamp(),
-                    ) {
-                        return CRUDOperationResult::Conflict;
-                    }
+                if self.autocommit_newest(position.map(|p| leaf_page.version_at(p)))
+                    == Newest::Conflict
+                {
+                    return CRUDOperationResult::Conflict;
                 }
 
                 let stamp = self.wal_start_commit(|_| CRUDOperation::Delete(key));
