@@ -253,17 +253,14 @@ impl<
                 match self.autocommit_newest(latest_position.map(|p| leaf_page.version_at(p))) {
                     Newest::Conflict => return CRUDOperationResult::Conflict,
                     Newest::Absent => return CRUDOperationResult::ZeroAffected(KeyDoesNotExist),
-                    Newest::Live | Newest::Deleted => {}
+                    Newest::Deleted => return CRUDOperationResult::ZeroAffected(KeyAlreadyDeleted),
+                    Newest::Live => {}
                 }
                 if let Some(position) = latest_position {
                     if self.decide_update_in_place_record(leaf_page.version_at(position)) {
                         if matches!(self.cold.wal.as_ref(), WalBackend::Off) {
                             leaf_page.set_payload_at(position, payload);
                             leaf_page.widen_zone_map(zone_widen);
-                            if leaf_page.version_at(position).is_deleted() {
-                                leaf_page.version_mut_at(position).undelete();
-                                leaf_page.commit_delta(1, -1);
-                            }
 
                             return CRUDOperationResult::Updated(self.current_version());
                         }
@@ -272,10 +269,6 @@ impl<
                             self.wal_start_commit(|_| CRUDOperation::Update(key, payload.clone()));
                         leaf_page.set_payload_at(position, payload);
                         leaf_page.widen_zone_map(zone_widen);
-                        if leaf_page.version_at(position).is_deleted() {
-                            leaf_page.version_mut_at(position).undelete();
-                            leaf_page.commit_delta(1, -1);
-                        }
                         let ts_commit = self.commit_tx(stamp.worker_id());
                         drop(leaf_guard);
                         self.wal_log_commit(stamp, ts_commit);

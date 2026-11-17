@@ -62,6 +62,7 @@ fn prefetch_next_leaf<
     }
 }
 
+/// Snapshot registrations belong to the creating thread.
 pub struct RangeQueryIter<
     'a,
     const FAN_OUT: usize,
@@ -76,6 +77,7 @@ pub struct RangeQueryIter<
     is_completed: bool,
     register_reader_si: bool,
     worker_id: WorkerId,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
     /// Optional `[lo, hi]` bound, in the same caller-encoded `u64` space as
     /// `bat_tree::mvbt::MVBTSt::set_zone_map_projection`'s projection, over
     /// the column that projection tracks. When set, `try_for_each_ref` both
@@ -115,14 +117,26 @@ impl<
     Payload: Display + Clone + Default + Sync + 'static,
 > RangeQueryIter<'a, FAN_OUT, NUM_RECORDS, Key, Payload>
 {
+    /// Draws and registers a fresh snapshot before resolving its root.
+    pub fn new_snapshot(
+        tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
+        range: Interval<Key>,
+    ) -> Self {
+        let worker = tree.worker_id();
+        tree.draw_snapshot_version_with(|version| Self::new(tree, version, range, true, worker))
+    }
+
     #[inline(always)]
-    pub fn new(
+    pub(crate) fn new(
         tree: &'a MVBTSt<FAN_OUT, NUM_RECORDS, Key, Payload>,
         version: Version,
         range: Interval<Key>,
         register_reader_si: bool,
         worker_id: WorkerId,
     ) -> Self {
+        if register_reader_si {
+            tree.on_acquire_reader_snapshot(version);
+        }
         let root = tree.retrieve_root_for(version);
         Self::new_with_root(tree, version, range, register_reader_si, worker_id, root)
     }
@@ -139,10 +153,6 @@ impl<
         worker_id: WorkerId,
         root: BlockRef<FAN_OUT, NUM_RECORDS, Key, Payload>,
     ) -> Self {
-        if register_reader_si {
-            tree.on_acquire_reader_snapshot(version);
-        }
-
         Self {
             isolated_snapshot: ReaderIsolatedSnapShot(version, tree),
             range,
@@ -151,6 +161,7 @@ impl<
             is_completed: false,
             register_reader_si,
             worker_id,
+            _thread_bound: std::marker::PhantomData,
             zone_predicate: None,
         }
     }

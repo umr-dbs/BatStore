@@ -10,6 +10,19 @@ pub type TxAtomicOperation<Key, Payload> = CRUDOperation<Key, Payload>;
 
 /// Transactions definitions.
 /// Empty variant indicates an initiation error and/or a default stack allocation.
+/// Operations inherit their key and payload's thread-safety requirements.
+///
+/// ```compile_fail
+/// use batstore::CRUDOperation;
+/// fn require_send<T: Send>() {}
+/// require_send::<CRUDOperation<u64, std::rc::Rc<u64>>>();
+/// ```
+///
+/// ```compile_fail
+/// use batstore::CRUDOperation;
+/// fn require_sync<T: Sync>() {}
+/// require_sync::<CRUDOperation<u64, std::cell::Cell<u64>>>();
+/// ```
 #[derive(Copy, Clone, Default)]
 pub enum CRUDOperation<Key: Ord + Copy + Hash + Display, Payload: Clone> {
     #[default]
@@ -35,9 +48,6 @@ pub enum CRUDOperation<Key: Ord + Copy + Hash + Display, Payload: Clone> {
     InsertRand,
 }
 
-/// Explicitly support move-semantics for Transaction.
-unsafe impl<Key: Ord + Copy + Hash + Display, Payload: Clone> Send for CRUDOperation<Key, Payload> {}
-unsafe impl<Key: Ord + Copy + Hash + Display, Payload: Clone> Sync for CRUDOperation<Key, Payload> {}
 /// Implements Display for Transaction, i.e. pretty printers.
 impl<Key: Display + Ord + Copy + Hash, Payload: Clone> Display for CRUDOperation<Key, Payload> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

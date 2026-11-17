@@ -1717,7 +1717,7 @@ pub fn format_insertions(mut i: usize) -> String {
 }
 
 #[cfg(feature = "tree-viz")]
-pub(crate) fn main_viz_demo(parms: Vec<String>) {
+pub fn main_viz_demo(parms: Vec<String>) {
     use crate::bat_crud_model::crud_api::AtomicTxDispatcher;
     use crate::bat_crud_model::crud_operation::TxAtomicOperation;
     use crate::bat_crud_model::crud_operation_result::AtomicTxResult;
